@@ -1,39 +1,43 @@
 #!/bin/sh
 #
-# save_settings.sh
-#
-# 1. Read vlanmgr_* keys from /jffs/addons/custom_settings.txt
-# 2. Build sorted JSON
-# 3. Write:
-#    - persistent copy in JFFS
-#    - public copy alongside the web UI so the iframe JS can fetch it
-#
+# ──────────────────────────────────────────────────────────────────────────── #
+#                                                                              #
+#   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
+#  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
+#  | $$$$  /$$$$  /$$$$$$   /$$$$$$ | $$   | $$| $$      | $$  \ $$| $$$$| $$  #
+#  | $$ $$/$$ $$ /$$__  $$ /$$__  $$|  $$ / $$/| $$      | $$$$$$$$| $$ $$ $$  #
+#  | $$  $$$| $$| $$$$$$$$| $$  \__/ \  $$ $$/ | $$      | $$__  $$| $$  $$$$  #
+#  | $$\  $ | $$| $$_____/| $$        \  $$$/  | $$      | $$  | $$| $$\  $$$  #
+#  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
+#  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
+#                                                                              #
+# ──────────────────────────────────────────────────────────────────────────── #
+# - file: save_settings.sh
+# ──────────────────────────────────────────────────────────────────────────── #
+# - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into
+#               settings.json (persistent storage) and public settings.json.
+#               Also ensures custom_settings.txt has correct header line.
+# ──────────────────────────────────────────────────────────────────────────── #
 
-###############################################################################
-# CONFIG
-###############################################################################
+# ===================== MerVLAN environment setup ============================ #
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
+   { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+fi
+[ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
+[ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+# ===================== End of MerVLAN environment setup ===================== #
 
-ADDON_BASE="/jffs/addons/mervlan"
-CUSTOM_SETTINGS_FILE="/jffs/addons/custom_settings.txt"
 
-# persistent (always exists on JFFS)
-SETTINGS_DIR="${ADDON_BASE}/settings"
-SETTINGS_JSON="${SETTINGS_DIR}/settings.json"
 
-# where the UI is served from (first existing wins)
-PUBLIC_CANDIDATES="
-/www/user/mervlan
-/tmp/var/wwwext/mervlan
-"
-
-RESULT_DIR="/tmp/mervlan/results"
 
 ###############################################################################
 # HELPERS
 ###############################################################################
 
 ensure_custom_settings_header() {
-    HEADER_LINE="$(sed -n 's/^Addon:[[:space:]]*//p;q' "${ADDON_BASE}/changelog.txt")"
+    HEADER_LINE="$(sed -n 's/^Addon:[[:space:]]*//p;q' "${MERV_BASE}/changelog.txt")"
 
     # Fallback if changelog didn't parse
     [ -z "${HEADER_LINE}" ] && HEADER_LINE="mervlan v.unknown"
@@ -69,36 +73,25 @@ ensure_custom_settings_header() {
 }
 
 
-pick_public_base() {
-    for CAND in ${PUBLIC_CANDIDATES}; do
-        [ -z "$CAND" ] && continue
-        if [ -d "$CAND" ] || mkdir -p "$CAND" 2>/dev/null; then
-            echo "$CAND"
-            return 0
-        fi
-    done
-    return 1
-}
-
 ###############################################################################
 # PREP
 ###############################################################################
 
-logger -t "VLANMgr" "save_settings.sh: start"
+info -c vlan "save_settings.sh: start"
 
-mkdir -p "${SETTINGS_DIR}" || {
-    logger -t "VLANMgr" "save_settings.sh: ERROR can't mkdir ${SETTINGS_DIR}"
+mkdir -p "${SETTINGSDIR}" || {
+    error -c vlan "save_settings.sh: ERROR can't mkdir ${SETTINGSDIR}"
     exit 1
 }
 
-mkdir -p "${RESULT_DIR}" || {
-    logger -t "VLANMgr" "save_settings.sh: ERROR can't mkdir ${RESULT_DIR}"
+mkdir -p "${RESULTDIR}" || {
+    error -c vlan "save_settings.sh: ERROR can't mkdir ${RESULTDIR}"
     exit 1
 }
 
-TMP_KV="${RESULT_DIR}/vlanmgr_kv.$$"
-TMP_SORTED="${RESULT_DIR}/vlanmgr_sorted.$$"
-TMP_JSON="${RESULT_DIR}/vlanmgr_json.$$"
+TMP_KV="${RESULTDIR}/vlanmgr_kv.$$"
+TMP_SORTED="${RESULTDIR}/vlanmgr_sorted.$$"
+TMP_JSON="${RESULTDIR}/vlanmgr_json.$$"
 
 > "${TMP_KV}"
 > "${TMP_SORTED}"
@@ -107,7 +100,7 @@ TMP_JSON="${RESULT_DIR}/vlanmgr_json.$$"
 ensure_custom_settings_header
 
 if [ ! -f "${CUSTOM_SETTINGS_FILE}" ]; then
-    logger -t "VLANMgr" "save_settings.sh: ${CUSTOM_SETTINGS_FILE} not found even after ensure_custom_settings_header, abort"
+    error -c vlan "save_settings.sh: ${CUSTOM_SETTINGS_FILE} not found even after ensure_custom_settings_header, abort"
     exit 1
 fi
 
@@ -166,30 +159,26 @@ echo "}" >> "${TMP_JSON}"
 
 cp "${TMP_JSON}" "${SETTINGS_JSON}"
 chmod 600 "${SETTINGS_JSON}"
-logger -t "VLANMgr" "save_settings.sh: wrote ${SETTINGS_JSON}"
+info -c vlan "save_settings.sh: wrote ${SETTINGS_JSON}"
 
 ###############################################################################
 # STEP 5: install public (UI-fetchable) copy
 #
 # We want:
-#   <PUBLIC_BASE>/settings/settings.json
+#   <PUBLIC_MERV_BASE>/settings/settings.json
 # so the iframe can fetch "settings/settings.json".
 ###############################################################################
 
-PUBLIC_BASE="$(pick_public_base)"
-if [ -n "${PUBLIC_BASE}" ]; then
-    PUBLIC_SETTINGS_DIR="${PUBLIC_BASE}/settings"
-    PUBLIC_JSON="${PUBLIC_SETTINGS_DIR}/settings.json"
-
-    if mkdir -p "${PUBLIC_SETTINGS_DIR}" 2>/dev/null; then
-        cp "${TMP_JSON}" "${PUBLIC_JSON}"
-        chmod 644 "${PUBLIC_JSON}"
-        logger -t "VLANMgr" "save_settings.sh: mirrored to ${PUBLIC_JSON}"
+if [ -n "${PUBLIC_MERV_BASE}" ]; then
+    if mkdir -p "${PUBLIC_SETTINGSDIR}" 2>/dev/null; then
+        cp "${TMP_JSON}" "${PUBLIC_SETTINGS_FILE}"
+        chmod 644 "${PUBLIC_SETTINGS_FILE}"
+        info -c vlan,cli "Settings saved!"
     else
-        logger -t "VLANMgr" "save_settings.sh: WARN can't mkdir ${PUBLIC_SETTINGS_DIR}"
+        warn -c vlan "save_settings.sh: WARN can't mkdir ${PUBLIC_SETTINGSDIR}"
     fi
 else
-    logger -t "VLANMgr" "save_settings.sh: WARN no public base dir available, skipping web copy"
+    error -c vlan "save_settings.sh: WARN no public base dir available, skipping web copy"
 fi
 
 ###############################################################################
