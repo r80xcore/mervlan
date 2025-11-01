@@ -12,14 +12,14 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: save_settings.sh
+#               - File: save_settings.sh || version: 0.45                      #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into
-#               settings.json (persistent storage) and public settings.json.
-#               Also ensures custom_settings.txt has correct header line.
+# - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
+#               settings.json (persistent storage) and public settings.json.   #
+#               Also ensures custom_settings.txt has correct header line.      #
 # ──────────────────────────────────────────────────────────────────────────── #
-
-# ===================== MerVLAN environment setup ============================ #
+#                                                                              #
+# ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -27,7 +27,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-# ===================== End of MerVLAN environment setup ===================== #
+# =========================================== End of MerVLAN environment setup #
 
 
 

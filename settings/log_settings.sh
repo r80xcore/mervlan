@@ -10,30 +10,30 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: log_settings.sh
+#               - File: log_settings.sh || version: 0.45                       #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Define logging settings and environment variables used
-#               throughout the MerVLAN addon. Enables colored output,
-#               per-channel log files, and syslog integration.
+# - Purpose:    Define logging settings and environment variables used         #
+#               throughout the MerVLAN addon. Enables colored output,          #
+#               per-channel log files, and syslog integration.                 #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-# ===================== Central settings setup =============================== #
+# ===================================================== Central settings setup #
 : "${LOGROOT:=/tmp/mervlan/logs}"   # default dir for logs
 : "${LOG_TAG:=mervlan}"             # syslog tag
 : "${LOG_SYSLOG:=1}"                # 1 = send marked logs to syslog
 : "${COLOR:=auto}"                  # auto | always | never
 
-# ===================== Log channel settings ================================= #
+# ======================================================= Log channel settings #
 # Default command names
 : "${LOG_CMD_LOG:=log}"
 : "${LOG_CMD_INFO:=info}"
 : "${LOG_CMD_WARN:=warn}"
 : "${LOG_CMD_ERROR:=error}" # auto-sends ERROR messages to syslog if used 
 #                             with channel "vlan" and LOG_SYSLOG=1
-# ===================== Override settings ==================================== #
+# ========================================================== Override settings #
 LOG_chan_cli="$LOGROOT/cli_output.log"
 LOG_chan_vlan="$LOGROOT/mervlan.log"
-# ===================== End of Central settings setup ======================== #
+# ============================================== End of Central settings setup #
 
 
 # =========================== internals (do not edit) ======================== #

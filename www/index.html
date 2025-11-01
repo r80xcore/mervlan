@@ -1,0 +1,1567 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Merlin VLAN Manager</title>
+  <link rel="stylesheet" href="vlan_index_style.css" />
+  <link rel="stylesheet" href="vlan_form_style.css" />
+</head>
+<body>
+  <div class="container">
+    <!-- LEFT: Forms -->
+  <div class="form-box form-box--main">
+      <!-- <div class="table-align"><div class="main-title"><img src="vlan_logo.png" alt="VLAN Manager" class="main-logo"></div></div> -->
+      <form id="settingsForm" action="#" onsubmit="return false;">
+        <!-- SSIDs -->
+        <!-- SSIDs -->
+        <table id="ssidTable" class="FormTable_table vlan-table">
+          <tr><th>SSID</th><th>VLAN ID</th><th>AP Isolation</th><th>Status</th></tr>
+        </table>
+
+  <!-- LAN Ports -->
+  <!-- <div class="table-align-nogap"><h2>LAN Port VLANs</h2></div> -->
+        <table id="lanTable" class="FormTable_table vlan-table">
+          <tr><th>Ethernet Port</th><th>VLAN ID</th><th>Status</th></tr>
+        </table>
+      
+        
+
+  <!-- Nodes -->
+  <div class="node-section">
+    <h2 class="node-section__header">Node Configuration</h2>
+    <div class="node-row node-row--primary">
+      <label for="node1Field">Node 1</label>
+      <div class="node-input-wrap">
+        <input id="node1Field" class="input_15_table vlan-input" name="NODE1" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE1')" title="Enter node IP (format: 192.168.x.x)">
+        <span id="statusNODE1" class="status node-status" title="❌ Missing/invalid value">❌</span>
+      </div>
+      <button type="button" class="node-row__toggle" id="nodeToggle" aria-expanded="false" aria-controls="nodeAdditional">
+        <span class="node-row__toggle-icon">+</span>
+        <span class="sr-only">Show additional nodes</span>
+      </button>
+    </div>
+    <div id="nodeAdditional" class="node-additional" hidden>
+      <div class="node-row">
+        <label for="node2Field">Node 2</label>
+        <div class="node-input-wrap">
+          <input id="node2Field" class="input_15_table vlan-input" name="NODE2" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE2')" title="Enter node IP (format: 192.168.x.x)">
+          <span id="statusNODE2" class="status node-status" title="❌ Missing/invalid value">❌</span>
+        </div>
+      </div>
+      <div class="node-row">
+        <label for="node3Field">Node 3</label>
+        <div class="node-input-wrap">
+          <input id="node3Field" class="input_15_table vlan-input" name="NODE3" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE3')" title="Enter node IP (format: 192.168.x.x)">
+          <span id="statusNODE3" class="status node-status" title="❌ Missing/invalid value">❌</span>
+        </div>
+      </div>
+      <div class="node-row">
+        <label for="node4Field">Node 4</label>
+        <div class="node-input-wrap">
+          <input id="node4Field" class="input_15_table vlan-input" name="NODE4" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE4')" title="Enter node IP (format: 192.168.x.x)">
+          <span id="statusNODE4" class="status node-status" title="❌ Missing/invalid value">❌</span>
+        </div>
+      </div>
+      <div class="node-row">
+        <label for="node5Field">Node 5</label>
+        <div class="node-input-wrap">
+          <input id="node5Field" class="input_15_table vlan-input" name="NODE5" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE5')" title="Enter node IP (format: 192.168.x.x)">
+          <span id="statusNODE5" class="status node-status" title="❌ Missing/invalid value">❌</span>
+        </div>
+      </div>
+    </div>
+  </div>
+      </form>
+
+      <!-- General Settings Panel -->
+      <div class="form-box controls-panel">
+        <h2>General Settings</h2>
+        <div class="button-row button-row-toggles">
+          <span id="statusPERSISTENT" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+          <select id="persistentToggle" name="PERSISTENT" class="input_option" onchange="markEdited('PERSISTENT')" title="Persistent mode: yes=commit nvram changes">
+            <option value="no">Persistent: Off</option>
+            <option value="yes">Persistent: On</option>
+          </select>
+          <select id="dryRunToggle" name="DRY_RUN" class="input_option" onchange="markEdited('DRY_RUN')" title="Dry run: yes=simulate only, no changes">
+            <option value="no">Dry Run: Off</option>
+            <option value="yes">Dry Run: On</option>
+          </select>
+          <span id="statusDRY_RUN" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+        </div>
+        <div class="button-row button-row-actions">
+          <button type="button" class="button_gen" onclick="uploadSettingsAndSave()" title="Upload settings.json and save (no CGI)">Save</button>
+          <button type="button" class="button_gen" onclick="loadSettings()" title="Load current values">Load</button>
+          <button type="button" class="button_gen danger" onclick="clearFields()" title="Clear all fields (unsaved)">Clear</button>
+        </div>
+      </div>
+
+        <!-- VLAN Controls -->
+        <div class="form-box controls-panel">
+          <h2>Controls</h2>
+      <div class="button-row button-row-main">
+        <button class="button_gen" onclick="handleApplyClick(this)" title="Run vlan_manager locally">Apply VLAN</button>
+        <button class="button_gen" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
+        <button class="button_gen" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
+      <div class="button-row button-row-service">
+        <button class="button_gen" onclick="triggerAction('enableservice_vlanmgr', this, 'Enable Service')" title="Enable auto-start on boot">Enable Service</button>
+        <button class="button_gen" onclick="triggerAction('disableservice_vlanmgr', this, 'Disable Service')" title="Disable auto-start on boot">Disable Service</button>
+        <button class="button_gen" onclick="triggerAction('checkservice_vlanmgr', this, 'Service Status')" title="Service enabled on boot?">Service Status</button>
+          </div>
+        </div>
+
+      <!-- Legend -->
+      <div class="form-box form-box--legend">
+        <div class="legend">
+          <div class="legend__row">
+            <span class="legend__item"><span class="legend__icon">✅</span><span class="legend__label">Valid</span></span>
+            <span class="legend__item"><span class="legend__icon">❎</span><span class="legend__label">Unconfigured</span></span>
+            <span class="legend__item"><span class="legend__icon">🟩</span><span class="legend__label">Pending</span></span>
+            <span class="legend__item"><span class="legend__icon">❌</span><span class="legend__label">Missing</span></span>
+            <span class="legend__item"><span class="legend__icon">🟡</span><span class="legend__label">Duplicate</span></span>
+          </div>
+        </div>
+      </div>
+          <div id="leftPanelOverlay" class="overlay"></div>
+          <div class="cli-container collapsed" id="cliPanel">
+            <div class="cli-shell" aria-hidden="true">
+              <div class="cli-header">VLAN Manager Command Output</div>
+
+              <div class="cli-scroll-wrap">
+                <div class="cli-box" id="cliOutput"></div>
+              </div>
+
+              <div class="cli-footer">
+                <button class="button_gen" onclick="openHelpPopup()" title="Open help in popup window">Help</button>
+                <button class="button_gen" onclick="openLogsPopup()" title="Open logs in popup window">View Logs</button>
+                <button class="button_gen danger"
+                  onclick="clearDebug()"
+                  title="Clear Command Output">
+                  Clear
+                </button>
+              </div>
+
+              <!-- Clients Overview Panel -->
+              <div class="clients-panel">
+                <div class="clients-header">
+                  <span>Active VLAN Clients</span>
+                  <button id="refreshClientsBtn" class="button_gen" title="Collect and refresh client list" onclick="refreshClients(this)">Refresh</button>
+                </div>
+                <div id="vlanOverview" class="clients-body"></div>
+              </div>
+            </div>
+            <div class="cli-latch" id="cliLatch" title="Expand CLI panel" role="button" tabindex="0" aria-expanded="false" aria-controls="cliPanel">
+              <span class="chev top">&lt;&lt;</span>
+              <span class="label">INFO</span>
+              <span class="chev bottom">&lt;&lt;</span>
+            </div>
+          </div>
+    </div>
+                <!-- SSH Key Modal -->
+        <div id="sshKeyModal" class="modal">
+          <div class="modal__header">
+            <h3 class="modal__title">SSH Key Installation</h3>
+            <button class="modal__close" onclick="closeSSHKeyModal()">×</button>
+          </div>
+
+          <div class="modal__body">
+            <div class="modal__section">
+              <h4>Install via Merlin GUI</h4>
+              <ol class="modal__list">
+                <li><strong>Generate the SSH keys</strong></li>
+                <li>Log into the web interface</li>
+                <li>Navigate to: Administration → System</li>
+                <li>Scroll to "Authorized Keys" section</li>
+                <li>Paste the key below into the text area</li>
+                <li>Click "Apply" then reboot all nodes</li>
+              </ol>
+              <div class="ssh-key-wrapper">
+                <textarea id="sshKeyContent" class="ssh-key-textarea" readonly></textarea>
+                <button id="copyKey" class="copy-key-btn" title="Copy key">📋</button>
+                <span id="copyTooltip" class="copy-key-tooltip">Copied!</span>
+              </div>
+            </div>
+
+            <div class="modal__section">
+              <p>The keys are stored in:</p>
+              <div class="ssh-folder-path">
+                <code id="sshFolderPath">/jffs/addons/Merlin_VLAN_Manager/.ssh</code>
+              </div>
+            </div>
+
+            <div class="modal__section">
+              <h4>How to Sync Nodes</h4>
+              <ol class="modal__list">
+                <li>Press "Save" to save your settings</li>
+                <li>Press "Sync Nodes" to synchronize files</li>
+                <li>Press "Run VLAN" to apply your settings</li>
+              </ol>
+              <p>If new settings are saved, sync nodes <strong>before</strong> you apply VLAN.</p>
+            </div>
+          </div>
+
+          <div class="modal__actions">
+            <button class="button_gen" onclick="triggerAction('genkey_vlanmgr', this, 'Generate SSH keys')" title="Generate a pair of SSH keys">Generate Keys</button>
+            <button class="button_gen" onclick="fetchSSHKey()" title="Load the generated key">Load</button>
+          </div>
+        </div>
+
+  <!-- VLAN Manager Options Modal -->
+  <div id="vlanManagerModal" class="modal modal--compact">
+    <div class="modal__header">
+      <h3 class="modal__title">Nodes Detected!</h3>
+      <button class="modal__close" onclick="document.getElementById('vlanManagerModal').style.display='none'">×</button>
+    </div>
+
+    <div class="modal__body">
+      <p class="modal__intro">Choose how to run the VLAN Manager:</p>
+      <div class="modal__section vlan-options">
+        <button class="button_gen" onclick="runVlanManagerLocal()">
+          <div class="vlan-option__title">Run VLAN Manager (Local Only)</div>
+          <div class="vlan-option__subtitle">Apply VLAN configuration to this router only</div>
+        </button>
+
+        <button class="button_gen" onclick="runVlanManagerWithNodes()">
+          <div class="vlan-option__title">Run VLAN Manager + Nodes</div>
+          <div class="vlan-option__subtitle">Apply VLAN configuration to this router and all configured nodes</div>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== Status & validation (SSID/VLAN/NODE ticks) ======== -->
+
+<script>
+        /* ================== HW SETTINGS + TABLE GENERATION ================== */
+        let HW_SETTINGS = {
+          MAX_SSIDS: 12,
+          MAX_ETH_PORTS: 3
+        };
+
+        // Load hardware configuration from settings/hw_settings.json
+        async function loadHwSettings() {
+          try {
+            const response = await fetch("settings/hw_settings.json?_=" + Date.now());
+
+            if (!response.ok) {
+              // If 404 or server error, use defaults
+              console.warn(`⚠️ hw_settings.json not found (HTTP ${response.status}) — using default values.`);
+              
+              // ✅ Changed from 3 → 4 here so you can see it working when file missing
+              HW_SETTINGS = { MAX_SSIDS: 12, MAX_ETH_PORTS: 4 };
+              generateDynamicTables();
+              return;
+            }
+
+            // Try to parse JSON
+            const json = await response.json();
+            HW_SETTINGS = {
+              MAX_SSIDS: json.MAX_SSIDS ?? 12,
+              MAX_ETH_PORTS: json.MAX_ETH_PORTS ?? 3
+            };
+            console.log(`✅ Loaded HW config: ${HW_SETTINGS.MAX_SSIDS} SSIDs, ${HW_SETTINGS.MAX_ETH_PORTS} LAN ports`);            generateDynamicTables();
+
+          } catch (e) {
+            // Handle missing file, parse errors, or local file:// load errors
+            console.warn("⚠️ Failed to load hw_settings.json, using defaults.", e);
+            
+            // ✅ Add this explicit fallback here as well
+            HW_SETTINGS = { MAX_SSIDS: 12, MAX_ETH_PORTS: 4 };
+
+            generateDynamicTables();
+          }
+        }
+
+
+        function generateDynamicTables() {
+          const ssidTable = document.getElementById("ssidTable");
+          const lanTable  = document.getElementById("lanTable");
+          if (!ssidTable || !lanTable) return;
+
+          // clear existing dynamic rows
+          ssidTable.querySelectorAll("tr:not(:first-child)").forEach(tr => tr.remove());
+          lanTable.querySelectorAll("tr:not(:first-child)").forEach(tr => tr.remove());
+
+          // build SSID rows
+          for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
+            const idx = String(i).padStart(2, "0");
+            ssidTable.insertAdjacentHTML("beforeend", `
+              <tr>
+                <td><input class="input_25_table vlan-input" name="SSID_${idx}" size="25" type="text" onchange="markEdited(${i})" title="${TOOLTIP.SSID}"></td>
+                <td><input class="input_6_table vlan-input" name="VLAN_${idx}" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited(${i})" title="${TOOLTIP.VLAN}"></td>
+                <td><select class="input_option" name="APISO_${idx}" onchange="markEdited(${i})" title="${TOOLTIP.APISO}">
+                      <option value="0">Off</option>
+                      <option value="1">On</option>
+                    </select></td>
+                <td><span id="status${i}" class="status">❌</span></td>
+              </tr>
+            `);
+          }
+
+          // build LAN port rows
+          for (let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++) {
+            lanTable.insertAdjacentHTML("beforeend", `
+              <tr>
+                <td>LAN ${i}</td>
+                <td><input class="input_6_table vlan-input" name="ETH${i}_VLAN" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited('LAN${i}')" title="${TOOLTIP.VLAN}"></td>
+                <td><span id="statusLAN${i}" class="status">❌</span></td>
+              </tr>
+            `);
+          }
+
+          scheduleFormPaneWidthUpdate();
+        }
+        </script>
+
+<script>
+const textarea = document.getElementById('sshKeyContent');
+const copyBtn   = document.getElementById('copyKey');
+const tooltip   = document.getElementById('copyTooltip');
+
+// Copy to clipboard with tooltip (without selecting text)
+copyBtn.addEventListener('click', (e) => {
+  e.preventDefault();
+  
+  // Create temporary element to copy from
+  const tempTextArea = document.createElement('textarea');
+  tempTextArea.value = textarea.value;
+  tempTextArea.style.position = 'fixed';
+  tempTextArea.style.opacity = '0';
+  document.body.appendChild(tempTextArea);
+  tempTextArea.select();
+  
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(textarea.value)
+      .then(() => showTooltip())
+      .catch(() => fallbackCopy());
+  } else {
+    fallbackCopy();
+  }
+
+  function fallbackCopy() {
+    try {
+      const success = document.execCommand('copy');
+      if (success) showTooltip();
+    } catch (e) {
+      alert("Copy not supported in this browser");
+    }
+  }
+  
+  // Clean up
+  document.body.removeChild(tempTextArea);
+});
+
+// Show + auto-hide tooltip
+function showTooltip() {
+  if(!tooltip) return;
+  tooltip.classList.add("is-visible");
+  setTimeout(() => {
+    tooltip.classList.remove("is-visible");
+  }, 1200);
+}
+</script>
+
+<script>
+    const TOOLTIP = {
+      SSID: "Enter a valid SSID (1–32 characters, must exist in ASUS Merlin GUI)",
+      VLAN: "Enter VLAN ID (2–4096).",
+      NODE: "Enter node IP (format: 192.168.x.x)",
+      APISO: "Enable/disable AP isolation for this SSID",
+      STATUS_OK: "✅ Configured and saved",
+      STATUS_NOT: "❎ Not configured",
+      STATUS_EDIT: "🟩 Edited but not saved",
+      STATUS_ERR: "❌ Missing/invalid value",
+      STATUS_DUP: "🟡 Duplicate VLAN ID detected"
+    };
+    const statusTooltips = {"✅":TOOLTIP.STATUS_OK,"❎":TOOLTIP.STATUS_NOT,"🟩":TOOLTIP.STATUS_EDIT,"❌":TOOLTIP.STATUS_ERR,"🟡":TOOLTIP.STATUS_DUP};
+    function updateStatusTooltips(){ document.querySelectorAll(".status").forEach(el=>{ const i=el.textContent.trim(); if(statusTooltips[i]) el.title=statusTooltips[i]; else el.removeAttribute("title"); }); }
+    function markEdited(index){ const el=document.getElementById("status"+index); if(el){ el.textContent="🟩"; updateStatusTooltips(); } }
+
+    function toInt(s){ const n=parseInt(String(s).trim(),10); return Number.isFinite(n)?n:null; }
+
+    function validateSSIDField(input){
+      const raw=input.value, cleaned=raw.replace(/\s+/g,"");
+      if(raw!==cleaned){ const d=raw.length-cleaned.length; const st=(input.selectionStart||cleaned.length)-d; const en=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(st,en);}catch(_){} }
+      const v=cleaned; input.classList.remove("valid","invalid"); if(v==="") return; if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
+    }
+    function validateNodeField(input){
+      const raw=input.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned){ const d=raw.length-cleaned.length; const s=(input.selectionStart||cleaned.length)-d; const e=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(s,e);}catch{} }
+      const v=cleaned.trim(); input.classList.remove("valid","invalid"); if(v==="") return;
+      const ip=/^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
+      if(ip.test(v)) input.classList.add("valid"); else input.classList.add("invalid");
+    }
+    function validateAllVlans(){
+      const fields=document.querySelectorAll('input[name^="VLAN_"], input[name^="ETH"][name$="_VLAN"]');
+      fields.forEach(f=>{ const raw=f.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned) f.value=cleaned; });
+      fields.forEach(f=>f.classList.remove("valid","invalid","duplicate"));
+      const groups=new Map();
+      fields.forEach(f=>{ const raw=f.value.trim().toLowerCase(); if(raw===""||raw==="none") return; const num=toInt(raw); if(!Number.isFinite(num)||num<2||num>4096){ f.classList.add("invalid"); return; } if(!groups.has(num)) groups.set(num,[]); groups.get(num).push(f); });
+      groups.forEach(list=>{ if(list.length>1) list.forEach(f=>{ f.classList.remove("valid"); f.classList.add("duplicate"); }); else list[0].classList.add("valid"); });
+    }
+    function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); }
+
+    const FORM_PANE_MIN_WIDTH = 440;
+    const FORM_PANE_MAX_WIDTH = 720;
+    const FORM_PANE_PADDING_ALLOWANCE = 32;
+    let pendingFormWidthUpdate = null;
+  let lastFormPaneWidth = FORM_PANE_MIN_WIDTH;
+
+    function updateCliOverlayPosition(){
+      const cliPanel = document.getElementById("cliPanel");
+      const formBox = document.querySelector(".form-box--main");
+      const ssidTable = document.getElementById("ssidTable");
+      if(!cliPanel || !formBox || !ssidTable) return;
+      cliPanel.style.setProperty("--cli-panel-top", "0px");
+    }
+
+    function updateFormPaneWidth(){
+      const ssidTable = document.getElementById("ssidTable");
+      if(!ssidTable) return;
+
+      const root = document.documentElement;
+  const previousInlineWidth = root.style.getPropertyValue("--form-pane-width");
+  const previousWidth = Number.isFinite(lastFormPaneWidth) ? lastFormPaneWidth : FORM_PANE_MIN_WIDTH;
+      root.style.setProperty("--form-pane-width", "max-content");
+
+      let requiredWidth = 0;
+      const tableWidth = ssidTable.scrollWidth || ssidTable.offsetWidth || 0;
+      if(tableWidth){
+        requiredWidth = Math.max(requiredWidth, tableWidth + FORM_PANE_PADDING_ALLOWANCE);
+      }
+
+      const nodeSection = document.querySelector(".node-section");
+      if(nodeSection){
+        const nodeWidth = nodeSection.scrollWidth || nodeSection.offsetWidth || 0;
+        requiredWidth = Math.max(requiredWidth, nodeWidth + FORM_PANE_PADDING_ALLOWANCE);
+      }
+
+      document.querySelectorAll(".form-box.controls-panel").forEach(panel => {
+        const panelWidth = panel.scrollWidth || panel.offsetWidth || 0;
+        requiredWidth = Math.max(requiredWidth, panelWidth);
+      });
+
+      if(!requiredWidth){
+        if(previousInlineWidth){
+          root.style.setProperty("--form-pane-width", previousInlineWidth);
+        } else {
+          root.style.removeProperty("--form-pane-width");
+        }
+        lastFormPaneWidth = previousWidth;
+        updateCliOverlayPosition();
+        return;
+      }
+
+      const clamped = Math.min(
+        FORM_PANE_MAX_WIDTH,
+        Math.max(FORM_PANE_MIN_WIDTH, Math.ceil(requiredWidth))
+      );
+      const finalWidth = Math.min(FORM_PANE_MAX_WIDTH, Math.max(previousWidth, clamped));
+      lastFormPaneWidth = finalWidth;
+      root.style.setProperty("--form-pane-width", `${finalWidth}px`);
+      updateCliOverlayPosition();
+    }
+
+    function scheduleFormPaneWidthUpdate(){
+      if(pendingFormWidthUpdate !== null) return;
+      pendingFormWidthUpdate = requestAnimationFrame(() => {
+        pendingFormWidthUpdate = null;
+        updateFormPaneWidth();
+      });
+    }
+
+    function setNodeCollapse(expanded){
+      const toggle = document.getElementById("nodeToggle");
+      const panel = document.getElementById("nodeAdditional");
+      if(!toggle || !panel) return;
+      const icon = toggle.querySelector(".node-row__toggle-icon");
+      const srLabel = toggle.querySelector(".sr-only");
+      toggle.setAttribute("aria-expanded", String(expanded));
+      toggle.classList.toggle("is-expanded", expanded);
+      panel.hidden = !expanded;
+      if(icon) icon.textContent = expanded ? "−" : "+";
+      if(srLabel) srLabel.textContent = expanded ? "Hide additional nodes" : "Show additional nodes";
+      setTimeout(() => {
+        try { adjustClientsPanelHeight(); } catch(_){}
+        scheduleFormPaneWidthUpdate();
+      }, 40);
+    }
+
+    function setupNodeCollapse(){
+      const toggle = document.getElementById("nodeToggle");
+      const panel = document.getElementById("nodeAdditional");
+      if(!toggle || !panel) return;
+      setNodeCollapse(toggle.getAttribute("aria-expanded") === "true");
+      toggle.addEventListener("click", () => {
+        const expanded = toggle.getAttribute("aria-expanded") === "true";
+        setNodeCollapse(!expanded);
+      });
+    }
+
+    function syncNodeCollapseWithValues(){
+      const panel = document.getElementById("nodeAdditional");
+      if(!panel) return;
+      const shouldExpand = Array.from(panel.querySelectorAll('input[name^="NODE"]'))
+        .some(input => input.value.trim() !== "");
+      if(shouldExpand) setNodeCollapse(true);
+    }
+
+    function clearFields(){
+      document.querySelectorAll("input[type=text]").forEach(el=>{ el.value=""; el.classList.remove("valid","invalid","duplicate"); });
+      document.querySelectorAll("select").forEach(el=>{ el.selectedIndex=0; });
+      document.querySelectorAll(".status").forEach(el=>{ el.textContent="❌"; });
+      updateStatusTooltips();
+      setNodeCollapse(false);
+      scheduleFormPaneWidthUpdate();
+    }
+
+    const CLI_WELCOME_HTML = `
+      <div class="cli-welcome">
+        <div class="cli-welcome-title">Welcome to the XT8 VLAN Manager</div>
+        <div>Use the controls on the left and view the output here.</div>
+        <div>Click the "Help" button below for usage instructions.</div>
+      </div>
+    `;
+
+    window.addEventListener("DOMContentLoaded", async () => {
+      // ⬅️ NEW: build tables dynamically first
+      await loadHwSettings(); 
+      scheduleFormPaneWidthUpdate();
+
+      // bind listeners AFTER tables exist
+      document.querySelectorAll('input[name^="SSID_"]').forEach(el =>
+        el.addEventListener("input", () => validateSSIDField(el))
+      );
+      document.querySelectorAll('input[name^="VLAN_"], input[name^="ETH"][name$="_VLAN"]').forEach(el =>
+        el.addEventListener("input", validateAllVlans)
+      );
+      document.querySelectorAll('input[name^="NODE"]').forEach(el =>
+        el.addEventListener("input", () => validateNodeField(el))
+      );
+
+      // Show welcome screen only once on first load
+      const cliBox = document.getElementById("cliOutput");
+      if (cliBox && !cliBox.dataset.welcomeShown) {
+        cliBox.innerHTML = CLI_WELCOME_HTML;
+        cliBox.dataset.welcomeShown = "true";
+      }
+
+      // run same initial validation as before
+      validateAllVlans();
+      document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
+      document.querySelectorAll('input[name^="NODE"]').forEach(el => validateNodeField(el));
+      updateStatusTooltips();
+  syncNodeCollapseWithValues();
+      startClientsPolling();
+
+      /* === CLI collapse/expand === */
+      const cliPanel = document.getElementById('cliPanel');
+      const cliLatch = document.getElementById('cliLatch');
+    updateCliOverlayPosition();
+
+      // Latch intro blink helpers (run only on first page load)
+      let latchBlinkTimers = [];
+      function cancelLatchBlink(){
+        if(latchBlinkTimers.length){ latchBlinkTimers.forEach(id=>clearTimeout(id)); latchBlinkTimers = []; }
+        if(cliLatch) cliLatch.classList.remove('is-blinking');
+      }
+      function latchBlinkBurst(){
+        // Only blink if latch is visible (panel collapsed)
+        if(!(cliPanel && cliPanel.classList.contains('collapsed'))) return;
+        if(!cliLatch) return;
+        cliLatch.classList.add('is-blinking');
+        // Remove the class after burst ends to reset
+        const t = setTimeout(()=>{ if(cliLatch) cliLatch.classList.remove('is-blinking'); }, 1000);
+        latchBlinkTimers.push(t);
+      }
+      function scheduleLatchIntroBlink(){
+        // 2 blink, pause, 2 blink, pause - repeated 3 times
+        let cycleCount = 0;
+        const scheduleNextCycle = () => {
+          if (cycleCount >= 3) return; // Stop after 3 cycles
+          cycleCount++;
+          latchBlinkBurst(); // Do 2 blinks
+          // Schedule next cycle after 2 second pause
+          const nextTimer = setTimeout(scheduleNextCycle, 2000);
+          latchBlinkTimers.push(nextTimer);
+        };
+        // Start first cycle after initial 2s delay
+        const startTimer = setTimeout(scheduleNextCycle, 2000);
+        latchBlinkTimers.push(startTimer);
+      }
+      function setLatchVisual(collapsed){
+        if(!cliLatch) return;
+        const tops = cliLatch.querySelector('.chev.top');
+        const bots = cliLatch.querySelector('.chev.bottom');
+        const label = cliLatch.querySelector('.label');
+        if(collapsed){
+          // Point inward (>>) when collapsed; tooltip to expand
+          if(tops) tops.textContent = '>>';
+          if(bots) bots.textContent = '>>';
+          cliLatch.title = 'Expand CLI panel';
+          cliLatch.setAttribute('aria-label', 'Expand CLI panel');
+          if(label) label.textContent = 'INFO';
+        } else {
+          // Point outward (<<) when expanded; tooltip to collapse
+          if(tops) tops.textContent = '<<';
+          if(bots) bots.textContent = '<<';
+          cliLatch.title = 'Collapse CLI panel';
+          cliLatch.setAttribute('aria-label', 'Collapse CLI panel');
+          if(label) label.textContent = 'CLOSE';
+        }
+      }
+      function setCliState(expand){
+        if(!cliPanel) return;
+        updateCliOverlayPosition();
+        if(expand){
+          cliPanel.classList.remove('collapsed');
+          cliPanel.classList.add('expanded');
+          // Resume polling when panel visible
+          startPolling();
+          // Stop any intro blinking once opened
+          cancelLatchBlink();
+          const overlay = document.getElementById('leftPanelOverlay');
+          if(overlay){
+            overlay.classList.add('is-active');
+            overlay.style.display = 'block';
+            overlay.style.pointerEvents = 'auto';
+          }
+        } else {
+          cliPanel.classList.remove('expanded');
+          cliPanel.classList.add('collapsed');
+          // Pause polling when hidden
+          stopPolling();
+          const overlay = document.getElementById('leftPanelOverlay');
+          if(overlay){
+            overlay.classList.remove('is-active');
+            overlay.style.display = 'none';
+            overlay.style.pointerEvents = 'none';
+          }
+        }
+        if(cliLatch) cliLatch.setAttribute('aria-expanded', expand ? 'true' : 'false');
+        const cliShell = cliPanel.querySelector('.cli-shell');
+        if(cliShell) cliShell.setAttribute('aria-hidden', expand ? 'false' : 'true');
+        setLatchVisual(!expand);
+        adjustClientsPanelHeight();
+      }
+      function toggleCli(){
+        const isCollapsed = cliPanel && cliPanel.classList.contains('collapsed');
+        setCliState(isCollapsed);
+      }
+      if(cliLatch){
+        cliLatch.addEventListener('click', toggleCli);
+        // Cancel blink on any user attention
+        cliLatch.addEventListener('mouseenter', cancelLatchBlink);
+        cliLatch.addEventListener('mousedown', cancelLatchBlink);
+        cliLatch.addEventListener('touchstart', cancelLatchBlink, {passive:true});
+        cliLatch.addEventListener('keydown', (event) => {
+          if(event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar'){
+            event.preventDefault();
+            toggleCli();
+          }
+        });
+      }
+      // Ensure default collapsed visual
+      setCliState(false);
+      // Schedule one-time intro blink on first load
+      scheduleLatchIntroBlink();
+
+      // After layout, adjust clients panel height to align with left column
+      setTimeout(() => {
+        adjustClientsPanelHeight();
+        scheduleFormPaneWidthUpdate();
+        updateCliOverlayPosition();
+      }, 50);
+      window.addEventListener('resize', () => {
+        updateCliOverlayPosition();
+        setTimeout(adjustClientsPanelHeight, 50);
+        scheduleFormPaneWidthUpdate();
+      });
+      setupNodeCollapse();
+
+      // Auto-load settings once the UI has initialized
+      setTimeout(() => {
+        loadSettings().catch(err => {
+          appendCliText("Auto-load error: " + err + "\n", { scroll: 'force' });
+        });
+      }, 200);
+    });
+  </script>
+
+<script>
+        // PATHS
+        const PATHS = { 
+          HELP_DOC: "readme.txt", 
+          // CLI output is written to /tmp and exposed via symlink at $VLAN_BASE/tmp
+          CLI_LOG: "logs/cli_output.json",
+          // settings.json is stored under the settings/ directory
+          SETTINGS: "settings/settings.json",
+          // clients overview JSON
+          CLIENTS_JSON: "results/vlan_clients.json"
+        };
+
+    function isAtBottom(el){ return el.scrollTop + el.clientHeight >= el.scrollHeight - 10; }
+    function scrollToBottom(el){ el.scrollTop = el.scrollHeight; }
+  // Remove welcome HTML if present before writing real content
+  function clearWelcomeIfPresent(){
+    const el = document.getElementById("cliOutput");
+    if(!el) return;
+    if(el.dataset && el.dataset.welcomeShown === "true"){
+      // If the welcome was injected, clear it and unset the flag
+      el.innerHTML = "";
+      delete el.dataset.welcomeShown;
+    }
+  }
+
+  function setCliText(txt, opts={}){ 
+    const el = document.getElementById("cliOutput"); 
+    const s = opts.scroll === 'force' || (opts.scroll !== 'none' && isAtBottom(el));
+    clearWelcomeIfPresent();
+    el.textContent = txt; 
+    if(s) scrollToBottom(el); 
+  }
+  function appendCliText(txt, opts={}){ 
+    const el = document.getElementById("cliOutput"); 
+    const s = opts.scroll === 'force' || (opts.scroll !== 'none' && isAtBottom(el));
+    clearWelcomeIfPresent();
+    el.textContent += txt; 
+    if(s) scrollToBottom(el); 
+  } 
+
+function clearDebug() {
+  const cli = document.getElementById("cliOutput");
+  cli.innerHTML = "";        // remove HTML, not only text
+  lastLogText = "";
+  currentView = "normal";
+  savedNormalHTML = "";
+}
+
+    // View state management
+    let currentView = 'normal'; // 'normal', 'help', 'logs'
+    let savedNormalHTML = '';
+    let savedHelpHTML = '';
+    
+    let activePolling = false;
+    let pollingTimeout = null;
+    let pollTimer = null;
+    let lastLogText = '';
+
+/* === BEGIN: temporarily disable toggleHelp ===
+        function toggleHelp(){
+                const cli = document.getElementById("cliOutput");
+                const leftPanel = document.querySelector('.form-box');
+                const overlay = document.getElementById('leftPanelOverlay');
+                const helpButton = document.querySelector('button[onclick="toggleHelp()"]');
+                const otherButtons = document.querySelectorAll('.cli-footer button:not([onclick="toggleHelp()"])');
+
+                if(currentView === 'help') {
+                        // Return to previous view
+                        if(savedNormalHTML) {
+                                cli.innerHTML = savedNormalHTML;
+                        } else {
+                                cli.innerHTML = '';
+                        }
+                        currentView = 'normal';
+
+                        // Re-enable left panel
+                        if (overlay) overlay.style.display = 'none';
+                        if (leftPanel) leftPanel.classList.remove('buttons-disabled');
+
+                        // Update button states
+                        if (helpButton) helpButton.classList.remove('logs-active');
+                        otherButtons.forEach(btn => btn.style.opacity = '');
+
+                        startPolling(); // Resume polling when returning to normal view
+                } else {
+                        // Save current state and show help
+                        if(currentView === 'normal') {
+                                savedNormalHTML = cli.innerHTML;
+                        }
+                        stopPolling(); // Stop polling when viewing help
+
+                        // Disable left panel
+                        if (leftPanel) leftPanel.classList.add('buttons-disabled');
+                        if (overlay) overlay.style.display = 'block';
+
+                        // Update button states
+                        if (helpButton) helpButton.classList.add('logs-active');
+                        otherButtons.forEach(btn => btn.style.opacity = '0.6');
+
+                        fetch(PATHS.HELP_DOC+"?_="+Date.now())
+                                .then(r=>r.text())
+                                .then(t=>{ 
+                                        setCliText(t, {scroll:'none'}); 
+                                        currentView = 'help';
+                                })
+                                .catch(e=>setCliText("Error loading help: "+e, {scroll:'none'}));
+                }
+        }
+=== END: temporarily disable toggleHelp === */
+
+
+        function openLogsPopup() {
+                const width = 1000;
+                const height = 700;
+                const left = (screen.width - width) / 2;
+                const top = (screen.height - height) / 2;
+
+                const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,toolbar=no,menubar=no,location=no`;
+                window.open('view_logs.html', 'VLANManagerLogs', features);
+        }
+
+        function openHelpPopup() {
+                const width = 1000;
+                const height = 700;
+                const left = (screen.width - width) / 2;
+                const top = (screen.height - height) / 2;
+
+                const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,toolbar=no,menubar=no,location=no`;
+                window.open('help.html', 'VLANManagerHelp', features);
+        }
+
+  function pollOnce(){
+        if(currentView !== 'normal') return Promise.resolve(); // Only poll in normal view
+        
+        return fetch(PATHS.CLI_LOG+"?_="+Date.now())
+            .then(r=> {
+                if(!r.ok) return ''; // If log doesn't exist yet, return empty
+                return r.text();
+            })
+            .then(t=>{
+                const cli = document.getElementById("cliOutput");
+        const shouldAutoScroll = isAtBottom(cli);
+        if (lastLogText && t.startsWith(lastLogText)){
+          const delta = t.slice(lastLogText.length);
+          if(delta) {
+            clearWelcomeIfPresent();
+            cli.textContent += delta;
+            savedNormalHTML = cli.innerHTML; // Update saved normal view
+            if (shouldAutoScroll) scrollToBottom(cli);
+          }
+        } else if(t) {
+          // Only update if we have new content and we're in normal view
+          if(currentView === 'normal') {
+            clearWelcomeIfPresent();
+            cli.textContent = t;
+            savedNormalHTML = cli.innerHTML;
+            if (shouldAutoScroll) scrollToBottom(cli);
+          }
+        }
+        lastLogText = t;
+            })
+            .catch(()=>{});
+    }
+
+  function startPolling(){ 
+    if (currentView !== 'normal') return;
+
+    // Always reset/extend the auto-stop timer for each (re)start request
+    clearTimeout(pollingTimeout);
+    pollingTimeout = setTimeout(() => {
+      if (activePolling) {
+        stopPolling();
+        if(currentView === 'normal') {
+          appendCliText("\n[No recent activity - CLI output paused]\n", {scroll: 'force'});
+        }
+      }
+    }, 600000);
+
+    // If already polling, just extend the timer and optionally do a quick poll tick
+    if (activePolling) {
+      // Keep the existing interval; do a one-off poll to refresh quickly
+      pollOnce();
+      return;
+    }
+
+    activePolling = true;
+    pollOnce(); 
+    if(pollTimer) clearInterval(pollTimer); 
+    pollTimer = setInterval(pollOnce, 2000);
+  }
+
+    function stopPolling() {
+        activePolling = false;
+        clearTimeout(pollingTimeout);
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+/* ===== Clients Overview (manual refresh) ===== */
+function formatDate(ts){
+  if(!ts) return '';
+  return String(ts).replace('T',' ');
+}
+
+async function fetchClientsJSON(){
+  try{
+    const r = await fetch(PATHS.CLIENTS_JSON + "?_=" + Date.now(), { cache:"no-store" });
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return await r.json();
+  }catch(_){ return null; }
+}
+
+function renderClientsOverview(data){
+  const el = document.getElementById('vlanOverview');
+  if(!el) return;
+  if(!data || !Array.isArray(data.nodes) || data.nodes.length===0){
+    el.innerHTML = `<div class="muted">No client data available yet. Configure the VLAN Manager to generate this data.</div>`;
+    return;
+  }
+  let html = '';
+  data.nodes.forEach(node=>{
+    const right = node.error ? `<span class=\"err\">${node.error}</span>` : `<span class=\"node-meta\">${formatDate(node.generated)}</span>`;
+    html += `<div class=\"client-node\">`+
+            `  <h3><span>${node.router || 'Node'}</span>${right}</h3>`;
+    const vlans = Array.isArray(node.vlans) ? node.vlans.slice().sort((a,b)=>(a.id||0)-(b.id||0)) : [];
+    if(vlans.length===0){
+      html += `<div class=\"muted\" style=\"margin-bottom:6px;\">No VLAN clients reported.</div>`;
+    } else {
+      html += `<div class=\"vlan-grid\">`;
+      vlans.forEach(v=>{
+        const clients = Array.isArray(v.clients) ? v.clients : [];
+        html += `<div class=\"vlan-card\">`+
+                `  <div class=\"vlan-title\"><span>VLAN ${v.id ?? '?'}</span><span class=\"chip\">${clients.length} clients</span></div>`+
+                `  <div class=\"client-list\">`;
+        clients.forEach(c=>{
+          const mac = c.mac || '';
+          html += `<div class=\"client-row\"><span class=\"muted\">${mac}</span></div>`;
+        });
+        html += `  </div>`+
+                `</div>`;
+      });
+      html += `</div>`;
+    }
+    html += `</div>`;
+  });
+  el.innerHTML = html;
+  // Recompute clients panel height after content changes
+  try { adjustClientsPanelHeight(); } catch(_){}
+}
+
+// Lightweight periodic clients refresh (separate from action burst refresh)
+let clientsAutoTimer = null;
+function startClientsPolling(){
+  if (clientsAutoTimer) return;
+  const tick = async () => {
+    const data = await fetchClientsJSON();
+    renderClientsOverview(data);
+  };
+  // Initial fetch immediately, then on interval
+  tick();
+  clientsAutoTimer = setInterval(tick, 7000);
+}
+
+function stopClientsPolling(){
+  if (clientsAutoTimer){
+    clearInterval(clientsAutoTimer);
+    clientsAutoTimer = null;
+  }
+}
+
+let clientsRefreshInterval = null;
+async function refreshClients(btn){
+  return queueServiceAction('collectclients_vlanmgr', {
+    button: btn,
+    description: 'Collect VLAN clients',
+    cooldownMs: 8000,
+    afterSubmit: () => {
+      if (clientsRefreshInterval) {
+        clearInterval(clientsRefreshInterval);
+        clientsRefreshInterval = null;
+      }
+
+      let ticks = 0;
+      const pollOnce = async () => {
+        const data = await fetchClientsJSON();
+        renderClientsOverview(data);
+        ticks++;
+        if (ticks >= 10) {
+          clearInterval(clientsRefreshInterval);
+          clientsRefreshInterval = null;
+        }
+      };
+
+      setTimeout(pollOnce, 800);
+      clientsRefreshInterval = setInterval(pollOnce, 1000);
+    }
+  });
+}
+
+/* ===== Per-action lock + optional button disable ===== */
+const actionLocks = new Map();
+
+function withActionLock(name, fn, cooldownMs = 8000) {
+    const now = Date.now();
+    const last = actionLocks.get(name) || 0;
+    if (now - last < cooldownMs) {
+        appendCliText(`[Action skipped] ${name} - too recent\n`, { scroll: 'force' });
+        return Promise.resolve();
+    }
+    actionLocks.set(name, now);
+    const release = () => setTimeout(() => actionLocks.delete(name), cooldownMs);
+    try {
+        const p = Promise.resolve(fn());
+        return p.finally(release);
+    } catch (e) {
+        release();
+        throw e;
+    }
+}
+
+function disableBtnTemporarily(btn, ms=5000) {
+    if (!btn) return;
+    btn.disabled = true;
+    btn.style.opacity = 0.6;
+    setTimeout(() => { btn.disabled = false; btn.style.opacity = ""; }, ms);
+}
+
+function queueServiceAction(actionScriptName, opts = {}) {
+    const {
+        button = null,
+        description = actionScriptName,
+        cooldownMs = 8000,
+        afterSubmit
+    } = opts;
+
+    const handler = async () => {
+        stopPolling();
+        disableBtnTemporarily(button, cooldownMs);
+
+        const timestamp = new Date().toLocaleString();
+        appendCliText(`\n[${timestamp}] Queued action: ${description}\n`, { scroll: 'force' });
+        lastLogText = "";
+
+    if (window.parent) {
+      if (typeof window.parent.MVM_trigger === "function") {
+        window.parent.MVM_trigger(actionScriptName);
+      } else if (typeof window.parent.MVM_exec === "function") {
+        window.parent.MVM_exec(actionScriptName, null);
+      } else {
+        appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
+        return;
+      }
+            if (typeof afterSubmit === "function") {
+                try { afterSubmit(); } catch (err) { console.error(err); }
+            }
+            startPolling();
+        } else {
+      appendCliText(`[${new Date().toLocaleString()}] Parent window unavailable for ${description}.\n`, { scroll: 'force' });
+        }
+    };
+
+    return withActionLock(actionScriptName, handler, cooldownMs);
+}
+
+function triggerAction(actionScriptName, button, description) {
+    return queueServiceAction(actionScriptName, {
+        button,
+        description,
+        cooldownMs: 8000
+    });
+}
+
+async function handleApplyClick(button) {
+    const hasNodes = await checkForConfiguredNodes();
+    if (hasNodes) {
+        showVlanManagerModal();
+        return;
+    }
+    triggerAction('apply_vlanmgr', button, 'Apply VLAN');
+}
+
+// Check if any nodes are configured in settings.json
+async function checkForConfiguredNodes() {
+    try {
+        const response = await fetch(PATHS.SETTINGS + "?_=" + Date.now());
+        if (!response.ok) return false;
+        
+        const settings = await response.json();
+        
+        // Check NODE1 through NODE5 for valid IP addresses (not "none")
+        for (let i = 1; i <= 5; i++) {
+            const nodeValue = settings[`NODE${i}`];
+            if (nodeValue && nodeValue !== "none" && nodeValue.trim() !== "") {
+                // Basic IP validation
+                const ipRegex = /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
+                if (ipRegex.test(nodeValue.trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    } catch (error) {
+        console.error("Error checking for configured nodes:", error);
+        return false;
+    }
+}
+
+// Run VLAN Manager locally only
+async function runVlanManagerLocal() {
+  document.getElementById('vlanManagerModal').style.display = 'none';
+  return queueServiceAction('apply_vlanmgr', {
+    description: 'Run VLAN Manager (Local Only)',
+    cooldownMs: 8000
+  });
+}
+
+// Run VLAN Manager with nodes
+async function runVlanManagerWithNodes() {
+  document.getElementById('vlanManagerModal').style.display = 'none';
+  return queueServiceAction('sync_vlanmgr', {
+    description: 'Run VLAN Manager + Nodes',
+    cooldownMs: 8000
+  });
+}
+
+    // Ensures dynamic tables exist before filling form (for early Load clicks)
+    function ensureTablesReady() {
+      // If SSID rows aren’t there yet (e.g., user clicked Load very early), build them
+      if (!document.querySelector('input[name="SSID_01"]')) {
+        generateDynamicTables();
+      }
+    }
+
+    /* --- Fills the form from flat settings.json --- */
+    function fillFormFromSettings(flat){
+      // Ensure dynamic rows exist (if Load pressed early)
+      ensureTablesReady();
+      const f = document.getElementById("settingsForm");
+
+    // Nodes
+    for (let i = 1; i <= 5; i++) {
+      const k = "NODE" + i;
+      const raw = flat[k] ?? "";
+      const v = (String(raw).toLowerCase() === "none") ? "" : String(raw);
+      if (f[k]) f[k].value = v;
+      const s = document.getElementById("statusNODE" + i);
+      if (s) s.textContent = v ? "✅" : "❎";
+    }
+
+    // LAN ports (dynamic)
+    for (let i = 1; i <= (HW_SETTINGS?.MAX_ETH_PORTS || 3); i++) {
+      const vVlanRaw = flat[`ETH${i}_VLAN`] ?? "";
+      const vVlan = (String(vVlanRaw).toLowerCase() === "none") ? "" : String(vVlanRaw);
+      if (f[`ETH${i}_VLAN`])   f[`ETH${i}_VLAN`].value   = vVlan;
+      const s = document.getElementById("statusLAN" + i);
+      if (s) s.textContent = vVlan ? "✅" : "❎";
+    }
+
+    // SSIDs (dynamic)
+    for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
+      const idx = String(i).padStart(2, "0");
+      const ssidRaw = flat[`SSID_${idx}`] ?? "";
+      const vlanRaw = flat[`VLAN_${idx}`] ?? "";
+      const apiso   = String(flat[`APISO_${idx}`] ?? "0");
+
+      const ssid = (ssidRaw === "unused-placeholder") ? "" : String(ssidRaw);
+      const vlan = (String(vlanRaw).toLowerCase() === "none") ? "" : String(vlanRaw);
+
+      if (f[`SSID_${idx}`])  f[`SSID_${idx}`].value  = ssid;
+      if (f[`VLAN_${idx}`])  f[`VLAN_${idx}`].value  = vlan;
+      if (f[`APISO_${idx}`]) f[`APISO_${idx}`].value = apiso;
+
+      const s = document.getElementById("status" + i);
+      if (s) s.textContent = (ssid || vlan) ? "✅" : "❎";
+    }
+
+    // General settings
+    document.getElementById("persistentToggle").value = flat["PERSISTENT"] || "no";
+    document.getElementById("dryRunToggle").value = flat["DRY_RUN"] || "yes";
+
+    // Update general settings status icons to show loaded
+    const persistentStatus = document.getElementById("statusPERSISTENT");
+    const dryRunStatus = document.getElementById("statusDRY_RUN");
+    if (persistentStatus) persistentStatus.textContent = "✅";
+    if (dryRunStatus) dryRunStatus.textContent = "✅";
+
+    // Re-apply input ticks/validation and tooltips
+    validateAllVlans();
+  document.querySelectorAll('input[name^="NODE"]').forEach(el => validateNodeField(el));
+  document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
+  updateStatusTooltips();
+  syncNodeCollapseWithValues();
+  scheduleFormPaneWidthUpdate();
+  }
+
+    function deepEqualObjects(a, b) {
+      const keys1 = Object.keys(a);
+      const keys2 = Object.keys(b);
+      if (keys1.length !== keys2.length) return false;
+
+      for (let k of keys1) {
+        const v1 = a[k];
+        const v2 = b[k];
+        const bothObjects =
+          v1 && typeof v1 === 'object' &&
+          v2 && typeof v2 === 'object';
+
+        if (bothObjects) {
+          if (!deepEqualObjects(v1, v2)) return false;
+        } else {
+          if (v1 !== v2) return false;
+        }
+      }
+      return true;
+    }
+
+    function buildSettingsObjectForMerlin() {
+      const f = document.getElementById("settingsForm");
+      const out = {};
+
+      for (let i = 1; i <= 5; i++) {
+        const raw = f["NODE" + i] ? f["NODE" + i].value.trim() : "";
+        out["vlanmgr_NODE" + i] = raw === "" ? "none" : raw;
+      }
+
+      for (let i = 1; i <= (HW_SETTINGS?.MAX_ETH_PORTS || 3); i++) {
+        const key = "ETH" + i + "_VLAN";
+        const raw = f[key] ? f[key].value.trim() : "";
+        out["vlanmgr_" + key] = raw === "" ? "none" : raw;
+      }
+
+      for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
+        const idx = String(i).padStart(2, "0");
+
+        const ssidRaw = f["SSID_" + idx] ? f["SSID_" + idx].value.trim() : "";
+        const vlanRaw = f["VLAN_" + idx] ? f["VLAN_" + idx].value.trim() : "";
+        const apisoRaw = f["APISO_" + idx] ? f["APISO_" + idx].value : "0";
+
+        out["vlanmgr_SSID_" + idx] = ssidRaw === "" ? "unused-placeholder" : ssidRaw;
+        out["vlanmgr_VLAN_" + idx] = vlanRaw === "" ? "none" : vlanRaw;
+        out["vlanmgr_APISO_" + idx] = apisoRaw;
+      }
+
+      out["vlanmgr_PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
+      out["vlanmgr_DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
+
+      return out;
+    }
+
+    async function loadSettings(){
+    try{
+      appendCliText("Loading settings.json...\n",{scroll:'force'});
+      const r = await fetch(PATHS.SETTINGS+"?_="+Date.now(),{headers:{Accept:"application/json"}});
+      const t = await r.text();
+      if(!r.ok){ 
+        appendCliText(`Error: cannot load settings.json (${r.status})\n${t}\n`,{scroll:'force'}); 
+        return; 
+      }
+      let data; 
+      try{ 
+        data = JSON.parse(t); 
+      } catch(e){ 
+        appendCliText("settings.json is not valid JSON:\n\n"+t+"\n",{scroll:'force'}); 
+        return; 
+      }
+      // Ensure tables are ready before filling (handles early Load clicks)
+      ensureTablesReady();
+      fillFormFromSettings(data);
+      appendCliText("Loaded settings.json into the form.\n",{scroll:'force'});
+    } catch(err){ 
+      appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
+    }
+  }
+
+    function toNone(s){ const v=String(s||"").trim(); return v===""?"none":v; }
+    function toSSIDPlaceholder(s){ const v=String(s||"").trim(); return v===""?"unused-placeholder":v; }
+    function formToSettingsJSON(){
+    const f = document.getElementById("settingsForm"); 
+    const out = {};
+    for(let i=1;i<=5;i++){ out["NODE"+i] = toNone(f["NODE"+i]?.value||""); }
+    // LAN ports (dynamic)
+    for(let i=1;i<=(HW_SETTINGS?.MAX_ETH_PORTS||3);i++){
+      out[`ETH${i}_VLAN`] = toNone(f[`ETH${i}_VLAN`]?.value||""); 
+    }
+    // SSIDs (dynamic)
+    for(let i=1;i<=(HW_SETTINGS?.MAX_SSIDS||12);i++){
+      const idx = String(i).padStart(2,"0"); 
+      out[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||""); 
+      out[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||""); 
+      out[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0"); 
+    }
+    out["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
+    out["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
+    return JSON.stringify(out);
+  }
+
+const MODAL_SAFE_MARGIN = 24;
+let activeCenteredModal = null;
+let anchoredModal = null;
+
+function centerModalOverForm(modal) {
+  if (!modal) return;
+  const form = document.querySelector('.form-box--main');
+  if (!form) return;
+
+  const formRect = form.getBoundingClientRect();
+  if (!formRect.width) return;
+
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const modalHeight = modal.offsetHeight || modal.getBoundingClientRect().height || 0;
+  let preferredTop = formRect.top;
+
+  if (viewportHeight && modalHeight) {
+    const maxTop = Math.max(0, viewportHeight - MODAL_SAFE_MARGIN - modalHeight);
+    preferredTop = Math.min(preferredTop, maxTop);
+    preferredTop = Math.max(0, preferredTop);
+  }
+
+  const visualTop = preferredTop + (modalHeight ? modalHeight / 2 : 0);
+  modal.style.left = `${formRect.left + formRect.width / 2}px`;
+  modal.style.top = `${visualTop}px`;
+}
+
+function attachModalCentering(modal) {
+  if (!modal) return;
+  activeCenteredModal = modal;
+  requestAnimationFrame(() => {
+    if (activeCenteredModal === modal) {
+      centerModalOverForm(modal);
+    }
+  });
+}
+
+function releaseModalCentering(modal) {
+  if (activeCenteredModal === modal) {
+    activeCenteredModal = null;
+  }
+  if (modal) {
+    modal.style.left = '';
+    modal.style.top = '';
+  }
+}
+
+function anchorModalToForm(modal) {
+  if (!modal) return;
+  const form = document.querySelector('.form-box--main');
+  if (!form) return;
+
+  anchoredModal = modal;
+
+  requestAnimationFrame(() => {
+    if (anchoredModal !== modal) return;
+
+    const formRect = form.getBoundingClientRect();
+    const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+
+    modal.classList.add('modal--anchored');
+    modal.style.left = `${scrollX + formRect.left + formRect.width / 2}px`;
+    modal.style.top = `${scrollY + formRect.top}px`;
+  });
+}
+
+function releaseAnchoredModal(modal) {
+  if (anchoredModal === modal) {
+    anchoredModal = null;
+  }
+  if (!modal) return;
+  modal.classList.remove('modal--anchored');
+  modal.style.left = '';
+  modal.style.top = '';
+  modal.style.transform = '';
+  modal.style.position = '';
+}
+
+window.addEventListener('resize', () => {
+  if (activeCenteredModal) {
+    requestAnimationFrame(() => centerModalOverForm(activeCenteredModal));
+  }
+  if (anchoredModal) {
+    anchorModalToForm(anchoredModal);
+  }
+});
+
+window.addEventListener('scroll', () => {
+  if (activeCenteredModal) {
+    requestAnimationFrame(() => centerModalOverForm(activeCenteredModal));
+  }
+}, { passive: true });
+
+function closeSSHKeyModal() {
+  const modal = document.getElementById('sshKeyModal');
+  if (modal) {
+    modal.style.display = 'none';
+    releaseModalCentering(modal);
+    releaseAnchoredModal(modal);
+  }
+  const overlay = document.getElementById('leftPanelOverlay');
+  if (overlay) {
+    overlay.classList.remove('is-active');
+    overlay.style.display = 'none';
+    overlay.style.pointerEvents = 'none';
+  }
+  const cliLatch = document.getElementById('cliLatch');
+  if (cliLatch) {
+    const previous = cliLatch.dataset.prevDisplay;
+    cliLatch.style.display = previous !== undefined ? previous : '';
+    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
+  }
+}
+
+// Update the showSSHKeyModal function
+function showSSHKeyModal() {
+  // Ensure VLAN modal is closed before opening SSH modal
+  const vlanModal = document.getElementById('vlanManagerModal');
+  if (vlanModal) vlanModal.style.display = 'none';
+  const modal = document.getElementById('sshKeyModal');
+  if (!modal) return;
+
+  const overlay = document.getElementById('leftPanelOverlay');
+  const cliLatch = document.getElementById('cliLatch');
+  const showModal = () => {
+  modal.style.display = 'block';
+  anchorModalToForm(modal);
+  if (overlay) {
+    overlay.classList.add('is-active');
+    overlay.style.display = 'block';
+    overlay.style.pointerEvents = 'auto';
+  }
+  if (cliLatch) {
+    if (cliLatch.dataset.prevDisplay === undefined) {
+      cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
+    }
+    cliLatch.style.display = 'none';
+  }
+  };
+
+  fetch('.ssh/vlan_manager.json?' + Date.now())
+  .then(response => {
+    if (!response.ok) throw new Error('Key not found');
+    return response.text();
+  })
+  .then(key => {
+    document.getElementById('sshKeyContent').value = key;
+    showModal();
+  })
+  .catch(() => {
+    document.getElementById('sshKeyContent').value = 'SSH key not available. Run "Generate Keys" first.';
+    showModal();
+  });
+}
+
+// Open VLAN Manager modal in top-level body to avoid being hidden by any parent
+function showVlanManagerModal() {
+  // Close SSH modal if open
+  closeSSHKeyModal();
+
+  const modal = document.getElementById('vlanManagerModal');
+  if (!modal) return;
+
+  // If modal is not a direct child of <body>, move it to body to avoid hidden ancestors
+  if (modal.parentElement !== document.body) {
+    try { document.body.appendChild(modal); } catch (e) { /* ignore */ }
+  }
+
+  modal.style.display = 'block';
+  // Ensure height alignment after modal changes layout
+  setTimeout(adjustClientsPanelHeight, 50);
+}
+
+
+function fetchSSHKey() {
+    fetch('.ssh/vlan_manager.json?' + Date.now())
+        .then(response => {
+            if (!response.ok) throw new Error('Key not found');
+            return response.text();
+        })
+        .then(key => {
+            document.getElementById('sshKeyContent').value = key;
+        })
+        .catch(() => {
+            document.getElementById('sshKeyContent').value = 'Failed to load, SSH key not available. Run "Generate Keys" first.';
+        });
+}
+
+
+
+async function uploadSettingsAndSave(btn) {
+  return withActionLock("save", async () => {
+    stopPolling();
+    const triggerBtn = btn instanceof HTMLElement ? btn : document.querySelector('button[onclick*="uploadSettingsAndSave"]');
+    if (triggerBtn) {
+      disableBtnTemporarily(triggerBtn, 5000);
+    }
+
+    try {
+      const newJsonStr = formToSettingsJSON();
+      let newObj;
+      try {
+        newObj = JSON.parse(newJsonStr);
+      } catch (e) {
+        appendCliText("Save error: form produced invalid JSON\n", {scroll: 'force'});
+        return;
+      }
+
+      let oldObj = null;
+      try {
+        const response = await fetch(PATHS.SETTINGS + "?_=" + Date.now());
+        if (response.ok) {
+          const currentSettings = await response.text();
+          oldObj = JSON.parse(currentSettings);
+        }
+      } catch (e) {
+        // ignore - treat as changed
+      }
+
+      if (oldObj && deepEqualObjects(oldObj, newObj)) {
+        appendCliText("Settings unchanged - no need to save.\n", {scroll: 'force'});
+        return;
+      }
+
+      const merlinPayload = buildSettingsObjectForMerlin();
+      const payloadStr = JSON.stringify(merlinPayload);
+      if (payloadStr.length > 8000) {
+        appendCliText("Error: Payload too large to save.\n", {scroll: 'force'});
+        return;
+      }
+
+      appendCliText("Saving settings via Merlin...\n", {scroll: 'force'});
+
+      if (window.parent && typeof window.parent.MVM_save === "function") {
+        window.parent.MVM_save(merlinPayload);
+      } else {
+        appendCliText("Save error: parent page handler not available.\n", {scroll: 'force'});
+        return;
+      }
+    } catch (err) {
+      appendCliText("Save error: " + err + "\n", {scroll: 'force'});
+    }
+  }, 8000);
+}
+</script>
+
+<script>
+// Size clients panel to fit viewport when CLI overlay is open
+function adjustClientsPanelHeight(){
+  const cliPanel = document.getElementById('cliPanel');
+  const cliShell = cliPanel ? cliPanel.querySelector('.cli-shell') : null;
+  const clientsPanel = cliPanel ? cliPanel.querySelector('.clients-panel') : null;
+  if(!cliPanel || !cliShell || !clientsPanel) return;
+
+  if(!cliPanel.classList.contains('expanded')){
+    clientsPanel.style.maxHeight = '';
+    return;
+  }
+
+  const shellRect = cliShell.getBoundingClientRect();
+  if(!shellRect || !isFinite(shellRect.top)) return;
+
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
+  let available = viewportHeight - shellRect.top - 120;
+  if(!isFinite(available)) return;
+
+  available = Math.max(200, Math.floor(available));
+  clientsPanel.style.maxHeight = Math.min(360, available) + 'px';
+}
+
+// Re-align when expanding/collapsing CLI
+(function(){
+  const cliPanel = document.getElementById('cliPanel');
+  if(!cliPanel) return;
+  const observer = new MutationObserver(() => setTimeout(adjustClientsPanelHeight, 30));
+  observer.observe(cliPanel, { attributes: true, attributeFilter: ['class'] });
+})();
+</script>
+  </body>
+  </html>

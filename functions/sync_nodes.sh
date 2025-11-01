@@ -12,12 +12,12 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: sync_nodes.sh
+#               - File: sync_nodes.sh || version: 0.45                         #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys
+# - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
-
-# ===================== MerVLAN environment setup ============================ #
+#                                                                              #
+# ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -25,22 +25,22 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-# ===================== End of MerVLAN environment setup ===================== #
+# =========================================== End of MerVLAN environment setup #
 
-# ===================== File Synchronization Setup =========================== #
-FILES_TO_COPY="settings/settings.json settings/hw_settings.json settings/var_settings.sh settings/log_settings.sh functions/mervlan_manager.sh functions/collect_local_clients.sh functions/vlan_boot.sh functions/vlan_boot_event.sh functions/health_check.sh settings/services-start.tpl settings/service-event.tpl"
-FILES_TO_COPY_CHMOD="functions/mervlan_manager.sh functions/collect_local_clients.sh functions/vlan_boot.sh functions/vlan_boot_event.sh functions/health_check.sh"
+# ================================================= File Synchronization Setup #
+FILES_TO_COPY="settings/settings.json settings/hw_settings.json settings/var_settings.sh settings/log_settings.sh functions/mervlan_manager.sh functions/collect_local_clients.sh functions/vlan_boot.sh functions/vlan_boot_event.sh settings/services-start.tpl settings/service-event.tpl"
+FILES_TO_COPY_CHMOD="functions/mervlan_manager.sh functions/collect_local_clients.sh functions/vlan_boot.sh functions/vlan_boot_event.sh"
 FILES_TO_COPY_CHMOD_644="settings/var_settings.sh settings/log_settings.sh"
-# ============================= Debugging ==================================== #
+# ================================================================== Debugging #
 SYNC_DEBUG_PRE="${SYNC_DEBUG_PRE:-0}"
 SYNC_DEBUG_POST="${SYNC_DEBUG_POST:-1}"
-# ============================= SSH Parameters =============================== #
+# ============================================================= SSH Parameters #
 PING_MAX_ATTEMPTS="${PING_MAX_ATTEMPTS:-60}"
 PING_RETRY_INTERVAL="${PING_RETRY_INTERVAL:-5}"
 SSH_MAX_ATTEMPTS="${SSH_MAX_ATTEMPTS:-60}"
 SSH_RETRY_INTERVAL="${SSH_RETRY_INTERVAL:-5}"
 PING_STABILIZE_DELAY="${PING_STABILIZE_DELAY:-10}"
-# ===========================End of Settings ================================= #
+# =============================================================End of Settings #
 
 info -c cli,vlan "=== VLAN Manager File Synchronization ==="
 info -c cli,vlan ""
@@ -53,8 +53,8 @@ if [ ! -f "$SETTINGS_FILE" ]; then
 fi
 
 # Check if SSH keys are installed according to settings
-if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$HW_SETTINGS_FILE"; then
-    error -c cli,vlan "ERROR: SSH keys are not installed according to hw_settings.json"
+if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE"; then
+    error -c cli,vlan "ERROR: SSH keys are not installed according to general.json"
     warn -c cli,vlan "Please click on 'SSH Key Install' and follow the instructions"
     exit 1
 fi

@@ -12,13 +12,13 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: execute_nodes.sh
+#                - File: execute_nodes.sh || version: 0.45                     #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using
-#               the settings defined in settings.json.
+# - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
+#               the settings defined in settings.json.                         #
 # ──────────────────────────────────────────────────────────────────────────── #
-
-# ===================== MerVLAN environment setup ============================ #
+#                                                                              #
+# ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -26,7 +26,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-# ===================== End of MerVLAN environment setup ===================== #
+# =========================================== End of MerVLAN environment setup #
 
 info -c cli,vlan "=== VLAN Manager Node Execution ==="
 info -c cli,vlan ""
@@ -39,8 +39,8 @@ if [ ! -f "$SETTINGS_FILE" ]; then
 fi
 
 # Check if SSH keys are installed according to settings
-if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$HW_SETTINGS_FILE"; then
-    error -c cli,vlan "ERROR: SSH keys are not installed according to hw_settings.json"
+if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE"; then
+    error -c cli,vlan "ERROR: SSH keys are not installed according to general.json"
     warn -c cli,vlan "Please click on 'SSH Key Install' and follow the instructions"
     exit 1
 fi

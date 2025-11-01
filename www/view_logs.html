@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>XT8 VLAN Manager - Log Viewer</title>
+  <style>
+    body { 
+        background: #1E1E1E; 
+        color: #DADADA; 
+        font-family: Tahoma, Arial, sans-serif; 
+        margin: 0; 
+        padding: 15px;
+        overflow: hidden;
+    }
+    
+    .header { 
+        text-align: center; 
+        margin-bottom: 15px; 
+        border-bottom: 1px solid #444;
+        padding-bottom: 10px;
+    }
+    
+    h1 { 
+        color: #FFFFFF; 
+        margin: 0;
+        font-size: 18px;
+    }
+    
+    .controls {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+        padding: 10px;
+        background: #2D2D30;
+        border-radius: 4px;
+        height: 50px;
+        box-sizing: border-box;
+    }
+    
+    .control-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 30px;
+    }
+    
+    .control-item {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        height: 100%;
+    }
+    
+    .tabs {
+        display: flex;
+        margin-bottom: 10px;
+        border-bottom: 1px solid #444;
+    }
+    
+    .tab {
+        padding: 8px 16px;
+        background: #2D2D30;
+        border: 1px solid #444;
+        border-bottom: none;
+        border-radius: 4px 4px 0 0;
+        cursor: pointer;
+        margin-right: 5px;
+        transition: background-color 0.2s;
+    }
+    
+    .tab.active {
+        background: #4A90E2;
+        color: white;
+    }
+    
+    .tab:hover {
+        background: #357ABD;
+    }
+    
+    select, button {
+        background: #4A90E2;
+        border: 1px solid #555;
+        color: #fff;
+        height: 25px;
+        font-size: 14px;
+        padding: 0 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        box-sizing: border-box;
+        transition: background-color 0.2s;
+    }
+    
+    select:hover, button:hover {
+        background: #357ABD;
+    }
+    
+    input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        vertical-align: middle;
+    }
+    
+    label {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        height: 25px;
+        margin: 0;
+        font-size: 14px;
+    }
+    
+    .danger { 
+        background: #E74C3C; 
+    }
+    
+    .danger:hover { 
+        background: #C0392B; 
+    }
+    
+    .log-container {
+        background: #000;
+        border-radius: 8px;
+        overflow: hidden;
+        height: calc(100vh - 180px);
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .log-content {
+        background: #000;
+        color: #DADADA;
+        font-family: monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        padding: 10px;
+        overflow: auto;
+        flex-grow: 1;
+        border-radius: 0 0 8px 8px;
+        user-select: text;
+        -webkit-user-select: text;
+        -moz-user-select: text;
+        -ms-user-select: text;
+        
+        /* Scrollbar styling to match index.html */
+        scrollbar-width: thin;
+        scrollbar-color: #4A90E2 #1E1E1E;
+    }
+    
+    .log-content::-webkit-scrollbar { 
+        width: 10px; 
+        height: 10px; 
+    }
+    
+    .log-content::-webkit-scrollbar-track { 
+        background: #1E1E1E; 
+    }
+    
+    .log-content::-webkit-scrollbar-thumb { 
+        background: #4A90E2; 
+        border-radius: 8px; 
+        border: 2px solid #1E1E1E; 
+    }
+    
+    .log-content::-webkit-scrollbar-thumb:hover { 
+        background: #357ABD; 
+    }
+    
+    .log-content::-webkit-scrollbar-corner { 
+        background: #1E1E1E; 
+    }
+    
+    .status {
+        margin-left: 10px;
+        font-size: 12px;
+        color: #DADADA;
+        height: 25px;
+        display: flex;
+        align-items: center;
+    }
+    
+    .selection-mode {
+        background: #4A90E2;
+        padding: 2px 8px;
+        border-radius: 3px;
+        font-size: 11px;
+        margin-left: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>XT8 VLAN Manager - Log Viewer</h1>
+  </div>
+  
+  <div class="controls">
+    <div class="control-group">
+      <div class="control-item">
+        <label>
+          <input type="checkbox" id="autoScroll" checked> Auto-scroll
+        </label>
+      </div>
+      <div class="control-item">
+        <label>Refresh rate:
+          <select id="refreshRate">
+            <option value="1500">1.5s</option>
+            <option value="3000" selected>3s</option>
+            <option value="5000">5s</option>
+            <option value="7500">7.5s</option>
+            <option value="10000">10s</option>
+            <option value="30000">30s</option>
+            <option value="60000">1m</option>
+          </select>
+        </label>
+      </div>
+      <div class="control-item">
+        <span id="lastUpdate" class="status">Last update: Never</span>
+        <span id="selectionStatus" class="selection-mode" style="display: none;">Selection Mode - Auto-refresh paused</span>
+      </div>
+    </div>
+    <div class="control-group">
+      <button onclick="refreshLogs()">Refresh Now</button>
+      <button class="danger" onclick="window.close()">Close</button>
+    </div>
+  </div>
+  
+  <div class="tabs">
+        <div class="tab active" data-log="vlanmgr">MerVLAN log</div>
+        <div class="tab" data-log="syslog">Syslog</div>
+  </div>
+  
+  <div class="log-container">
+    <div class="log-content" id="logContent">
+Loading log content...
+    </div>
+  </div>
+
+  <script>
+    // Access logs via symlinked tmp directory
+    const LOG_PATHS = {
+        vlanmgr: "logs/vlan_manager.json",
+        syslog: "logs/syslog.json"
+    };
+    
+    let currentLog = 'vlanmgr';
+    let refreshInterval = null;
+    let autoScroll = true;
+    let lastContent = '';
+    let isTabSwitching = false;
+    let isUserSelecting = false;
+    let mouseDownTimeout = null;
+    
+    function updateTimestamp() {
+        const now = new Date();
+        document.getElementById('lastUpdate').textContent = 
+            `Last update: ${now.toLocaleTimeString()}`;
+    }
+    
+    function isAtBottom(el) {
+        return el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    }
+    
+    function scrollToBottom(el) {
+        el.scrollTop = el.scrollHeight;
+    }
+    
+    function filterSyslogContent(content) {
+        if (currentLog !== 'syslog') return content;
+        
+        // Filter out lines containing view_logs.html
+        return content.split('\n')
+            .filter(line => !line.includes('view_logs.html'))
+            .join('\n');
+    }
+    
+    async function loadLog() {
+        // Don't load if we're in the middle of switching tabs or user is selecting text
+        if (isTabSwitching || isUserSelecting) {
+            return;
+        }
+        
+        try {
+            // Simple fetch without cache-busting parameters to reduce log spam
+            const response = await fetch(LOG_PATHS[currentLog]);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            let content = await response.text();
+            
+            // Filter syslog content if needed
+            content = filterSyslogContent(content);
+            
+            const logContent = document.getElementById('logContent');
+            const shouldScroll = autoScroll && isAtBottom(logContent);
+            
+            if (content !== lastContent) {
+                logContent.textContent = content || '(Log file is empty)';
+                lastContent = content;
+                
+                if (shouldScroll) {
+                    scrollToBottom(logContent);
+                }
+                
+                updateTimestamp();
+            }
+        } catch (error) {
+            const logContent = document.getElementById('logContent');
+            if (error.message.includes('404')) {
+                logContent.textContent = 'Log file not found. The system may not be fully initialized.';
+            } else {
+                logContent.textContent = `Error loading log: ${error.message}`;
+            }
+            updateTimestamp();
+        }
+    }
+    
+    function refreshLogs() {
+        loadLog();
+    }
+    
+    function setupAutoRefresh() {
+        if (refreshInterval) {
+            clearInterval(refreshInterval);
+        }
+        
+        // Don't setup refresh if user is selecting text
+        if (isUserSelecting) {
+            return;
+        }
+        
+        const rate = parseInt(document.getElementById('refreshRate').value);
+        refreshInterval = setInterval(loadLog, rate);
+    }
+    
+    function pauseAutoRefresh() {
+        if (refreshInterval) {
+            clearInterval(refreshInterval);
+            refreshInterval = null;
+        }
+        document.getElementById('selectionStatus').style.display = 'inline';
+    }
+    
+    function resumeAutoRefresh() {
+        document.getElementById('selectionStatus').style.display = 'none';
+        setupAutoRefresh();
+    }
+    
+    function switchTab(logType) {
+        if (logType === currentLog) return;
+        
+        isTabSwitching = true;
+        currentLog = logType;
+        
+        // Update tabs immediately for responsive UI
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.classList.remove('active');
+        });
+        document.querySelector(`.tab[data-log="${logType}"]`).classList.add('active');
+        
+        // Show loading message immediately
+        const logContent = document.getElementById('logContent');
+        logContent.textContent = 'Loading...';
+        
+        // Clear current content and load new log with a small delay to allow UI to update
+        lastContent = '';
+        
+        // Use setTimeout to allow UI to update before fetching
+        setTimeout(() => {
+            loadLog();
+            isTabSwitching = false;
+        }, 50);
+    }
+    
+    // Event listeners for text selection support
+    function setupSelectionSupport() {
+        const logContent = document.getElementById('logContent');
+        
+        logContent.addEventListener('mousedown', function() {
+            // Set a short timeout - if mouse is still down after 100ms, assume selection
+            mouseDownTimeout = setTimeout(() => {
+                isUserSelecting = true;
+                pauseAutoRefresh();
+            }, 100);
+        });
+        
+        logContent.addEventListener('mouseup', function() {
+            // Clear the timeout if mouse is released quickly (click without selection)
+            if (mouseDownTimeout) {
+                clearTimeout(mouseDownTimeout);
+                mouseDownTimeout = null;
+            }
+            
+            // If user was selecting, wait a moment before resuming to allow for text copying
+            if (isUserSelecting) {
+                setTimeout(() => {
+                    isUserSelecting = false;
+                    resumeAutoRefresh();
+                }, 2000); // Resume after 2 seconds of inactivity
+            }
+        });
+        
+        logContent.addEventListener('keydown', function(e) {
+            // If user presses keys that might indicate text selection (Shift, Ctrl, Arrow keys)
+            if (e.shiftKey || e.ctrlKey || e.key.includes('Arrow')) {
+                isUserSelecting = true;
+                pauseAutoRefresh();
+            }
+        });
+        
+        logContent.addEventListener('keyup', function() {
+            if (isUserSelecting) {
+                setTimeout(() => {
+                    isUserSelecting = false;
+                    resumeAutoRefresh();
+                }, 2000);
+            }
+        });
+        
+        // Also resume when user clicks elsewhere
+        document.addEventListener('mousedown', function(e) {
+            if (!logContent.contains(e.target) && isUserSelecting) {
+                isUserSelecting = false;
+                resumeAutoRefresh();
+            }
+        });
+    }
+    
+    // Event listeners
+    document.getElementById('autoScroll').addEventListener('change', function() {
+        autoScroll = this.checked;
+    });
+    
+    document.getElementById('refreshRate').addEventListener('change', function() {
+        setupAutoRefresh();
+    });
+    
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', function() {
+            switchTab(this.getAttribute('data-log'));
+        });
+    });
+    
+    // Initialize
+    document.addEventListener('DOMContentLoaded', function() {
+        setupAutoRefresh();
+        setupSelectionSupport();
+        loadLog();
+        
+        // Make log content focusable for keyboard selection
+        document.getElementById('logContent').setAttribute('tabindex', '0');
+        
+        // Clean up interval when window closes
+        window.addEventListener('beforeunload', function() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+            if (mouseDownTimeout) {
+                clearTimeout(mouseDownTimeout);
+            }
+        });
+    });
+  </script>
+</body>
+</html>

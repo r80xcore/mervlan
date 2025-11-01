@@ -12,14 +12,14 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: collect_clients.sh
+#                - File: collect_clients.sh || version: 0.45                   #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Orchestrate collection of VLAN bridges and client MAC addresses
-#               from main and nodes to be stored in JSON format so they can be
-#               read by the MerVLAN GUI.
+# - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
+#               addresses from main and nodes to be stored in JSON format      #
+#               so they can be read by the MerVLAN GUI.                        #
 # ──────────────────────────────────────────────────────────────────────────── #
-
-# ===================== MerVLAN environment setup ============================ #
+#                                                                              #
+# ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -27,7 +27,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-# ===================== End of MerVLAN environment setup ===================== #
+# =========================================== End of MerVLAN environment setup #
 
 TIMEOUT=10
 
@@ -126,7 +126,7 @@ else
   if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
     warn -c cli,vlan "SSH keys not found - only collecting from main router"
     NODES_ENABLED=false
-  elif ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$HW_SETTINGS_FILE" 2>/dev/null; then
+  elif ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null; then
     warn -c cli,vlan "SSH keys not installed according to hw_settings.json"
     NODES_ENABLED=false
   fi

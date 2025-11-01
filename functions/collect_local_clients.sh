@@ -12,13 +12,13 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: collect_local_clients.sh
+#                - File: collect_local_clients.sh || version: 0.45             #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local
-#               node so it can be collected by collect_clients.sh.
+# - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local    #
+#               node so it can be collected by collect_clients.sh.             #
 # ──────────────────────────────────────────────────────────────────────────── #
-
-# ===================== MerVLAN environment setup ============================ #
+#                                                                              #
+# ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -26,7 +26,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-# ===================== End of MerVLAN environment setup ===================== #
+# =========================================== End of MerVLAN environment setup #
 
 OUT="${1:-$COLLECTDIR/clients_local.json}"
 NODE_NAME="${2:-$(hostname)}"

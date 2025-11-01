@@ -12,14 +12,14 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - file: mervlan_manager.sh
+#               - File: mervlan_manager.sh || version: 0.45                    #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.
-#               Applies VLAN settings to SSIDs and Ethernet ports based on
-#               settings defined in JSON files.
+# - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
+#               Applies VLAN settings to SSIDs and Ethernet ports based on     #
+#               settings defined in JSON files.                                #
 # ──────────────────────────────────────────────────────────────────────────── #
-
-# ===================== MerVLAN environment setup ============================ #
+#                                                                              #
+# ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -27,7 +27,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-# ===================== End of MerVLAN environment setup ===================== #
+# =========================================== End of MerVLAN environment setup #
 
 # --------------------------
 # JSON helpers (BusyBox-safe, improved for escaped quotes)
