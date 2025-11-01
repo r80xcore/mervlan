@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: dropbear_sshkey_gen.sh || version: 0.45               #
+#                - File: dropbear_sshkey_gen.sh || version="0.45"              #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Generate SSH key pairs for MerVLAN and set the SSH key         #
 #               flag if not already set.                                       #
@@ -27,9 +27,6 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 # =========================================== End of MerVLAN environment setup #
-# =============================================================== SSH Key flag #
-SSH_KEYS_INSTALLED="0"
-# ============================================================================ #
 
 # Function to update the JSON flag
 update_json_flag() {

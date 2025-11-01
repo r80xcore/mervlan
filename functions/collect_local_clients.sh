@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: collect_local_clients.sh || version: 0.45             #
+#                - File: collect_local_clients.sh || version="0.45"            #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local    #
 #               node so it can be collected by collect_clients.sh.             #

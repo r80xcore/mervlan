@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: log_settings.sh || version: 0.45                       #
+#               - File: log_settings.sh || version="0.45"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Define logging settings and environment variables used         #
 #               throughout the MerVLAN addon. Enables colored output,          #
@@ -18,7 +18,7 @@
 # ──────────────────────────────────────────────────────────────────────────── #
 
 # ===================================================== Central settings setup #
-: "${LOGROOT:=/tmp/mervlan/logs}"   # default dir for logs
+: "${LOGROOT:=/tmp/mervlan_tmp/logs}"   # default dir for logs
 : "${LOG_TAG:=mervlan}"             # syslog tag
 : "${LOG_SYSLOG:=1}"                # 1 = send marked logs to syslog
 : "${COLOR:=auto}"                  # auto | always | never

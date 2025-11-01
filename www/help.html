@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html>
+<head>
+      <!-- index.html version="0.45" -->
+  <meta charset="utf-8" />
+  <title>XT8 VLAN Manager - Complete User Guide</title>
+  <style>
+    body { 
+        background: #1E1E1E; 
+        color: #DADADA; 
+        font-family: Tahoma, Arial, sans-serif; 
+        margin: 0; 
+        padding: 15px;
+        overflow: hidden;
+    }
+    
+    .header { 
+        text-align: center; 
+        margin-bottom: 15px; 
+        border-bottom: 1px solid #444;
+        padding-bottom: 10px;
+    }
+    
+    h1 { 
+        color: #FFFFFF; 
+        margin: 0;
+        font-size: 18px;
+    }
+
+    .tabs {
+        display: flex;
+        border-bottom: 1px solid #444;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+    }
+
+    .tab {
+        padding: 8px 16px;
+        background: #2D2D30;
+        border: 1px solid #444;
+        border-bottom: none;
+        border-radius: 4px 4px 0 0;
+        cursor: pointer;
+        margin-right: 5px;
+        transition: background-color 0.2s;
+        user-select: none;
+    }
+
+    .tab.active {
+        background: #4A90E2;
+        color: white;
+    }
+
+    .tab:hover {
+        background: #357ABD;
+    }
+
+    .content {
+        background: #000;
+        border: 1px solid #444;
+        border-radius: 0 0 8px 8px;
+        padding: 15px;
+        height: calc(100vh - 160px);
+        overflow-y: auto;
+        white-space: pre-wrap;
+        font-size: 14px;
+        line-height: 1.5;
+        scrollbar-width: thin;
+        scrollbar-color: #4A90E2 #1E1E1E;
+    }
+
+    .content::-webkit-scrollbar { width: 10px; }
+    .content::-webkit-scrollbar-track { background: #1E1E1E; }
+    .content::-webkit-scrollbar-thumb {
+        background: #4A90E2;
+        border-radius: 8px;
+        border: 2px solid #1E1E1E;
+    }
+    .content::-webkit-scrollbar-thumb:hover { background: #357ABD; }
+
+    .button-bar {
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        justify-content: flex-end;
+        background: #1E1E1E;
+        padding: 5px 0 5px 0;
+        border-top: 1px solid #444;
+    }
+
+    button {
+        background: #4A90E2;
+        border: 1px solid #555;
+        color: #fff;
+        height: 28px;
+        font-size: 14px;
+        padding: 0 15px;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background-color 0.2s;
+    }
+
+    button:hover { background: #357ABD; }
+
+    .danger {
+        background: #E74C3C;
+    }
+    .danger:hover {
+        background: #C0392B;
+    }
+
+    h2 {
+        color: #4A90E2;
+        margin-top: 10px;
+        font-size: 16px;
+        border-bottom: 1px solid #333;
+        padding-bottom: 3px;
+    }
+
+    code {
+        background: #2D2D30;
+        color: #4A90E2;
+        padding: 2px 4px;
+        border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>XT8 VLAN Manager - Help & Usage Guide</h1>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="important">Important</div>
+    <div class="tab" data-tab="ssid">SSID Configuration</div>
+    <div class="tab" data-tab="lan">LAN Configuration</div>
+    <div class="tab" data-tab="general">General Settings</div>
+    <div class="tab" data-tab="controls">Controls</div>
+    <div class="tab" data-tab="cli">CLI Box & Active VLANs</div>
+  </div>
+
+  <div class="content" id="content"></div>
+
+  <div class="button-bar">
+    <button class="danger" onclick="window.close()">Close</button>
+  </div>
+
+  <script>
+    const SECTIONS = {
+      important: `
+MerVLAN - Usage Guide
+==============================
+
+Welcome to the MerVLAN Manager!
+This tool helps you configure VLANs, SSIDs, LAN ports,
+and access point nodes on your AP.
+
+Before making changes:
+- Always review existing VLAN assignments.
+- Avoid duplicate VLAN IDs between SSIDs and LAN ports.
+- Use [Dry Run] to simulate changes safely.
+
+`,
+      ssid: `
+SSID CONFIGURATION
+------------------------------
+For each SSID:
+
+• SSID        : Must match an existing SSID from the Merlin GUI. (Empty equals not used)
+• VLAN ID     : Number (2–4096). Avoid duplicates unless intentional.
+• AP Isolation: "On" isolates wireless clients.
+
+Status Icons:
+✅ Valid configuration
+❌ Invalid or missing SSID
+🟡 Duplicate VLAN detected
+
+Tips:
+- Each SSID can have its own VLAN.
+- AP isolation is recommended for guest networks.
+`,
+      lan: `
+LAN PORT VLANs
+------------------------------
+For each LAN port:
+
+• VLAN ID     : Number (2–4096). Avoid duplicates unless intentional.
+• Port Isolation: "On" isolates this port from others.
+
+Same status icons as SSIDs apply.
+
+Access Point Nodes (optional):
+- Define up to 5 AP nodes (IP addresses)
+- Example: 192.168.1.10
+- Status icons:
+  ✅ Valid IP
+  ❌ Invalid or missing IP
+`,
+      general: `
+GENERAL SETTINGS
+------------------------------
+[PERSISTENT]
+Toggles whether settings are committed to nvram.
+- "On"  = Saved across reboots.
+- "Off" = Temporary, cleared on reboot.
+
+[DRY RUN]
+Simulates VLAN changes without applying them.
+Useful for verifying configurations.
+
+Buttons:
+• [Save]  → Save settings to settings.conf
+• [Load]  → Load previously saved settings
+• [Clear] → Reset all fields to blank
+
+`,
+      controls: `
+CONTROLS
+------------------------------
+• [Apply VLAN] → Apply the current VLAN configuration.
+• [Sync Nodes]       → Synchronize all AP nodes.
+• [Enable Service]   → Enable VLAN Manager on boot.
+• [Disable Service]  → Disable auto-start.
+• [Service Status]   → Show current service status.
+• [SSH Key Install]  → Open SSH key installation & guide.
+
+Tips:
+- Always save before running the manager.
+- "Enable Service" ensures VLANs persist across reboots and events.
+`,
+      cli: `
+CLI BOX & ACTIVE VLANS
+------------------------------
+The console window displays real-time feedback and command results.
+
+• Commands such as "Apply VLAN" and "Sync Nodes"
+  print output here.
+• [Clear Debug] removes all console text.
+• [Help] opens this usage guide.
+• Active VLANs on main and nodes are listed below the CLI box. Refresh as needed.
+
+STATUS ICONS
+------------------------------
+✅ Configured and saved
+❎ Not configured
+🟩 Edited but not saved
+❌ Invalid or missing value
+🟡 Duplicate VLAN detected
+
+`
+    };
+
+    const contentEl = document.getElementById('content');
+    const tabs = document.querySelectorAll('.tab');
+
+    function showTab(tabName) {
+      tabs.forEach(t => t.classList.remove('active'));
+      document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
+      contentEl.textContent = SECTIONS[tabName] || "No content available.";
+      contentEl.scrollTop = 0;
+    }
+
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => showTab(tab.getAttribute('data-tab')));
+    });
+
+    // Default to the first tab
+    showTab('important');
+  </script>
+</body>
+</html>

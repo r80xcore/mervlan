@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: vlan_boot.sh || version: 0.45                         #
+#                - File: mervlan_boot.sh || version="0.45"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -39,6 +39,57 @@ INJ_BASE="${MERV_BASE%/}"
 
 # Cron support removed: no enable/disable functions should remain.
 
+render_template_variant() {
+  # $1=template path, $2=variant id, $3=output file, $4=resolved MERV_BASE
+  local template="${1}" variant="${2}" output="${3}" inj="${4}" raw status
+
+  raw="${output}.raw"
+  [ -n "$variant" ] || variant="1"
+
+  if ! awk -v want="$variant" '
+    BEGIN {
+      capture = 0;
+      found = 0;
+    }
+    /^TEMPLATE_[0-9]+[[:space:]]*$/ {
+      section = $0;
+      sub(/^TEMPLATE_/, "", section);
+      gsub(/[[:space:]]/, "", section);
+      capture = (section == want);
+      if (capture) {
+        found = 1;
+      }
+      next;
+    }
+    capture {
+      print;
+    }
+    END {
+      if (!found) {
+        exit 1;
+      }
+    }
+  ' "$template" > "$raw" 2>/dev/null; then
+    status=$?
+    rm -f "$raw" 2>/dev/null || :
+    if [ "$status" -ne 1 ]; then
+      return 1
+    fi
+    # Variant markers missing or requested variant not found; fall back to entire template
+    if ! cp "$template" "$raw" 2>/dev/null; then
+      return 1
+    fi
+  fi
+
+  if ! sed "s|MERV_BASE_PLACEHOLDER|$inj|g" "$raw" > "$output" 2>/dev/null; then
+    rm -f "$raw" "$output" 2>/dev/null || :
+    return 1
+  fi
+
+  rm -f "$raw" 2>/dev/null || :
+  return 0
+}
+
 copy_inject() {
   # $1=template $2=dest
   local tmpl dest inj tmp injtmp combtmp
@@ -50,10 +101,21 @@ copy_inject() {
   injtmp="${tmp}.inj"
   combtmp="${tmp}.combined"
 
-  # produce injected content from template (non-destructive)
-  if ! sed "s|MERV_BASE_PLACEHOLDER|$inj|g" "$tmpl" > "$injtmp" 2>/dev/null; then
-    rm -f "$injtmp" 2>/dev/null || :
-    return 1
+  local variant="1"
+  if [ -f "$dest" ] && [ -s "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
+    variant="2"
+  fi
+
+  if ! render_template_variant "$tmpl" "$variant" "$injtmp" "$inj"; then
+    if [ "$variant" = "2" ]; then
+      if ! render_template_variant "$tmpl" "1" "$injtmp" "$inj"; then
+        rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
+        return 1
+      fi
+    else
+      rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
+      return 1
+    fi
   fi
 
   if [ -f "$dest" ]; then
@@ -90,7 +152,7 @@ copy_inject() {
 # (assuming copy_inject appended it). It is conservative: if no match is found
 # the destination is left untouched.
 remove_inject() {
-  local tmpl dest inj tmp injtmp tmpout
+  local tmpl dest inj tmp injtmp tmpout variant
   tmpl="$1"; dest="$2"
   [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
   [ -f "$dest" ] || return 0
@@ -99,32 +161,75 @@ remove_inject() {
   tmp="$(mktemp "${TMPDIR:-/tmp}/merv_rmv.XXXXXX" 2>/dev/null || printf '%s/merv_rmv.%s' "${TMPDIR:-/tmp}" "$$")"
   injtmp="${tmp}.inj"
   tmpout="${tmp}.out"
+  rm -f "$tmp" 2>/dev/null || :
 
-  if ! sed "s|MERV_BASE_PLACEHOLDER|$inj|g" "$tmpl" > "$injtmp" 2>/dev/null; then
-    rm -f "$injtmp" 2>/dev/null || :
-    return 1
+  local variants="2 1" status
+  if [ ! -s "$dest" ]; then
+    variants="1 2"
   fi
 
-  # Remove first literal occurrence of the injected block (safe fallback)
-  awk -v injfile="$injtmp" '
-    BEGIN{ m=0; while((getline l < injfile) > 0){ m++; inj[m]=l } close(injfile) }
-    { lines[++n]=$0 }
-    END{
-      pos=0;
-      for(i=1;i<=n;i++){
-        if(m>0 && lines[i]==inj[1]){
-          ok=1; for(j=1;j<=m;j++){ if(i+j-1>n || lines[i+j-1]!=inj[j]){ ok=0; break } }
-          if(ok){ pos=i }
+  for variant in $variants; do
+    if ! render_template_variant "$tmpl" "$variant" "$injtmp" "$inj"; then
+      continue
+    fi
+
+  if awk -v injfile="$injtmp" '
+      BEGIN {
+        m = 0;
+        while ((getline l < injfile) > 0) {
+          m++;
+          inj[m] = l;
+        }
+        close(injfile);
+      }
+      {
+        lines[++n] = $0;
+      }
+      END {
+        pos = 0;
+        for (i = 1; i <= n; i++) {
+          if (m > 0 && lines[i] == inj[1]) {
+            ok = 1;
+            for (j = 1; j <= m; j++) {
+              if (i + j - 1 > n || lines[i + j - 1] != inj[j]) {
+                ok = 0;
+                break;
+              }
+            }
+            if (ok) {
+              pos = i;
+            }
+          }
+        }
+        if (pos == 0) {
+          for (i = 1; i <= n; i++) print lines[i];
+          exit 1;
+        }
+        last = pos - 1;
+        while (last > 0 && lines[last] == "") last--;
+        for (i = 1; i <= last; i++) print lines[i];
+        rem = pos + m;
+        if (rem <= n) {
+          print "";
+          for (i = rem; i <= n; i++) print lines[i];
         }
       }
-      if(pos==0){ for(i=1;i<=n;i++) print lines[i]; exit }
-      last=pos-1; while(last>0 && lines[last]=="") last--;
-      for(i=1;i<=last;i++) print lines[i];
-      rem=pos+m; if(rem<=n){ print ""; for(i=rem;i<=n;i++) print lines[i] }
-    }
-  ' "$dest" > "$tmpout" 2>/dev/null && mv -f "$tmpout" "$dest" 2>/dev/null || { rm -f "$tmpout" "$injtmp" 2>/dev/null || :; return 1; }
+    ' "$dest" > "$tmpout" 2>/dev/null; then
+      if mv -f "$tmpout" "$dest" 2>/dev/null; then
+        break
+      fi
+    else
+      status=$?
+      rm -f "$tmpout" 2>/dev/null || :
+      if [ "$status" -gt 1 ]; then
+        rm -f "$injtmp" 2>/dev/null || :
+        return 1
+      fi
+      # status == 1 means template block not found; try next variant
+    fi
+  done
 
-  rm -f "$injtmp" 2>/dev/null || :
+  rm -f "$injtmp" "$tmpout" "$tmp" 2>/dev/null || :
   return 0
 }
 
@@ -156,7 +261,7 @@ run_ssh_command() {
     fi
     
     info -c cli,vlan "Running '$cmd' on $node_ip via SSH..."
-    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/actions' && ./vlan_boot.sh '$cmd'" 2>&1; then
+    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh '$cmd'" 2>&1; then
         info -c cli,vlan "✓ Command '$cmd' succeeded on $node_ip"
         return 0
     else
@@ -200,8 +305,8 @@ collect_node_status() {
   NODE_STATUS_OUTPUT=""
   for node_ip in $NODE_IPS; do
     # Attempt a lightweight status fetch via internal 'report' action
-    if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/actions' && ./vlan_boot.sh report" 2>/dev/null; then
-      ns=$(dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/actions' && ./vlan_boot.sh report" 2>/dev/null | tail -1)
+    if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null; then
+      ns=$(dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
       # Expect format: REPORT boot=1 event=active
       [ -n "$ns" ] || ns="REPORT error=empty"
       NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:${ns#REPORT }"
