@@ -3,6 +3,10 @@
 
 MerVLAN is an addon for Asuswrt‑Merlin focused on AP-mode deployments. It provides multi-node VLAN management with per-SSID and per‑Ethernet‑port tagging, a lightweight web UI, and boot/service-event integration so changes persist across reboots.
 
+# Important
+
+Addon is in beta. Issues might be present.
+
 ## Features
 
 - Per-SSID and per‑Ethernet‑port VLAN tagging

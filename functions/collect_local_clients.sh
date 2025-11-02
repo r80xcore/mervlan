@@ -26,6 +26,13 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+
+export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
+umask 022
+logger -t "VLANMgr" "collect_local_clients: PATH=$PATH"
+for cmd in ip brctl awk grep sed; do
+  command -v "$cmd" >/dev/null 2>&1 || logger -t "VLANMgr" "collect_local_clients: missing cmd $cmd"
+done
 # =========================================== End of MerVLAN environment setup #
 
 OUT="${1:-$COLLECTDIR/clients_local.json}"
@@ -38,6 +45,7 @@ FDB_RETRY_SLEEP="${FDB_RETRY_SLEEP:-1}"
 
 info -c vlan "Collecting VLAN clients (MAC-only) on $NODE_NAME"
 info -c cli  "Collecting VLAN clients (MAC-only) on $NODE_NAME"
+info -c cli  "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT'"
 
 # --- Helpers ---
 json_escape() { echo "$1" | sed -e 's/\\/\\\\/g' -e 's/\"/\\\"/g'; }
@@ -54,7 +62,12 @@ get_bridges() {
 
 # Non-local MACs learned on this bridge (column 2 where local=no)
 collect_macs_for_bridge() {
-  local bridge="$1" out="$2" i=0 tmp="$out.tmp"
+  local bridge="$1"
+  local out="$2"
+  local i=0
+  local tmp
+  tmp="${out}.tmp"
+  info -c cli "collect_local_clients: collecting bridge='$bridge' out='$out' tmp='$tmp'"
   : > "$tmp"
   while [ $i -lt "$FDB_RETRIES" ]; do
     brctl showmacs "$bridge" 2>/dev/null | awk '$3=="no"{print tolower($2)}' >> "$tmp"
@@ -87,6 +100,7 @@ BR_LIST="$(get_bridges)"
 # First pass: gather MACs per bridge
 for BR in $BR_LIST; do
   MACS_FILE="$COLLECTDIR/mac_${BR}.lst"
+  info -c cli "collect_local_clients: bridge=$BR macs_file='$MACS_FILE'"
   collect_macs_for_bridge "$BR" "$MACS_FILE"
 done
 

@@ -27,6 +27,9 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+
+export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
+umask 022
 # =========================================== End of MerVLAN environment setup #
 
 TIMEOUT=10
@@ -106,11 +109,15 @@ collect_from_node() {
 
 # ---- main router JSON ----
 info -c cli,vlan "Collecting clients from main router (JSON)..."
-"$FUNCDIR/collect_local_clients.sh" "$COLLECTDIR/main.json" "Main Router"
-if [ $? -eq 0 ]; then
+MAIN_JSON="$COLLECTDIR/main.json"
+if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" >>"$LOG_chan_cli" 2>&1; then
   info -c cli,vlan "✓ Main router collection completed"
 else
-  error -c cli,vlan "✗ Main router collection failed"
+  rc=$?
+  error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
+  if [ ! -s "$MAIN_JSON" ]; then
+    printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+  fi
 fi
 
 # ---- nodes ----
