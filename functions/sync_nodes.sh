@@ -28,8 +28,8 @@ fi
 # =========================================== End of MerVLAN environment setup #
 
 # ================================================= File Synchronization Setup #
-FILES_TO_COPY="settings/settings.json settings/hw_settings.json settings/var_settings.sh settings/log_settings.sh functions/mervlan_manager.sh functions/collect_local_clients.sh functions/vlan_boot.sh functions/vlan_boot_event.sh settings/services-start.tpl settings/service-event.tpl"
-FILES_TO_COPY_CHMOD="functions/mervlan_manager.sh functions/collect_local_clients.sh functions/vlan_boot.sh functions/vlan_boot_event.sh"
+FILES_TO_COPY="settings/settings.json settings/hw_settings.json settings/var_settings.sh settings/log_settings.sh functions/mervlan_manager.sh functions/collect_local_clients.sh functions/mervlan_boot.sh functions/heal_event.sh functions/service-event-handler.sh settings/services-start.tpl settings/service-event.tpl"
+FILES_TO_COPY_CHMOD="functions/mervlan_manager.sh functions/collect_local_clients.sh functions/mervlan_boot.sh functions/heal_event.sh functions/service-event-handler.sh"
 FILES_TO_COPY_CHMOD_644="settings/var_settings.sh settings/log_settings.sh"
 # ================================================================== Debugging #
 SYNC_DEBUG_PRE="${SYNC_DEBUG_PRE:-0}"

@@ -71,13 +71,13 @@ case "${TYPE}_${EVENT}" in
     dispatch_if_executable "/jffs/addons/mervlan/functions/dropbear_sshkey_gen.sh"
     ;;
   enableservice_vlanmgr)
-    dispatch_if_executable "/jffs/addons/mervlan/functions/vlan_boot.sh" enable
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mervlan_boot.sh" enable
     ;;
   disableservice_vlanmgr)
-    dispatch_if_executable "/jffs/addons/mervlan/functions/vlan_boot.sh" disable
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mervlan_boot.sh" disable
     ;;
   checkservice_vlanmgr)
-    dispatch_if_executable "/jffs/addons/mervlan/functions/vlan_boot.sh" status
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mervlan_boot.sh" status
     ;;
   collectclients_vlanmgr)
     dispatch_if_executable "/jffs/addons/mervlan/functions/collect_clients.sh"
