@@ -16,7 +16,7 @@
 #               throughout the MerVLAN addon. Enables colored output,          #
 #               per-channel log files, and syslog integration.                 #
 # ──────────────────────────────────────────────────────────────────────────── #
-
+[ -n "${LOG_SETTINGS_LOADED:-}" ] && return 0 2>/dev/null
 # ===================================================== Central settings setup #
 : "${LOGROOT:=/tmp/mervlan_tmp/logs}"   # default dir for logs
 : "${LOG_TAG:=mervlan}"             # syslog tag

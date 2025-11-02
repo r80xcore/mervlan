@@ -15,11 +15,11 @@
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
 # ──────────────────────────────────────────────────────────────────────────── #
-
+[ -n "${VAR_SETTINGS_LOADED:-}" ] && return 0 2>/dev/null
 # Only set if not already set (allows override for testing)
 : "${MERV_BASE:?MERV_BASE must be set before sourcing folder_settings.sh}"
 
-[ -n "${VAR_SETTINGS_LOADED:-}" ] && return 0 2>/dev/null
+
 
 # Folders
 readonly SCRIPTS_DIR="/jffs/scripts"

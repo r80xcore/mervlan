@@ -692,11 +692,11 @@ function showTooltip() {
         const PATHS = { 
           HELP_DOC: "readme.txt", 
           // CLI output is written to /tmp and exposed via symlink at $VLAN_BASE/tmp
-          CLI_LOG: "logs/cli_output.json",
+          CLI_LOG: "tmp/logs/cli_output.json",
           // settings.json is stored under the settings/ directory
           SETTINGS: "settings/settings.json",
           // clients overview JSON
-          CLIENTS_JSON: "results/vlan_clients.json"
+          CLIENTS_JSON: "tmp/results/vlan_clients.json"
         };
 
     function isAtBottom(el){ return el.scrollTop + el.clientHeight >= el.scrollHeight - 10; }

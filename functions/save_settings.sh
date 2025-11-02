@@ -157,9 +157,9 @@ echo "}" >> "${TMP_JSON}"
 # STEP 4: install persistent copy
 ###############################################################################
 
-cp "${TMP_JSON}" "${SETTINGS_JSON}"
-chmod 600 "${SETTINGS_JSON}"
-info -c vlan "save_settings.sh: wrote ${SETTINGS_JSON}"
+cp "${TMP_JSON}" "${SETTINGS_FILE}"
+chmod 600 "${SETTINGS_FILE}"
+info -c vlan "save_settings.sh: wrote ${SETTINGS_FILE}"
 
 ###############################################################################
 # STEP 5: install public (UI-fetchable) copy
@@ -170,12 +170,12 @@ info -c vlan "save_settings.sh: wrote ${SETTINGS_JSON}"
 ###############################################################################
 
 if [ -n "${PUBLIC_MERV_BASE}" ]; then
-    if mkdir -p "${PUBLIC_SETTINGSDIR}" 2>/dev/null; then
+    if mkdir -p "${PUBLIC_SETTINGS_DIR}" 2>/dev/null; then
         cp "${TMP_JSON}" "${PUBLIC_SETTINGS_FILE}"
         chmod 644 "${PUBLIC_SETTINGS_FILE}"
         info -c vlan,cli "Settings saved!"
     else
-        warn -c vlan "save_settings.sh: WARN can't mkdir ${PUBLIC_SETTINGSDIR}"
+        warn -c vlan "save_settings.sh: WARN can't mkdir ${PUBLIC_SETTINGS_DIR}"
     fi
 else
     error -c vlan "save_settings.sh: WARN no public base dir available, skipping web copy"
