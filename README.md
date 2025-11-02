@@ -24,7 +24,7 @@ MerVLAN is an addon for Asuswrt‑Merlin focused on AP-mode deployments. It prov
 SSH into the AP and run this command to install the addon. The addon will
 be places under "Tools" in the GUI.
 ```
-mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/5966094dfdc139280a0b2381d857087a3250a82a/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full
+mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full
 ```
 
 ## Uninstall
