@@ -179,7 +179,7 @@ if [ $? != 0 ]; then
 fi
 
 # 2. Obtain the first available mount point into $am_webui_page
-am_get_webui_page "$ADDON_DIR/$ADDON/vlan_manager.asp"
+am_get_webui_page "$ADDON_DIR/$ADDON/mervlan.asp"
 
 if [ "$am_webui_page" = "none" ]; then
     logger -t "$ADDON" "Unable to install $ADDON (no free user page)"
@@ -188,7 +188,7 @@ fi
 logger -t "$ADDON" "Mounting $ADDON as $am_webui_page"
 
 # 3. Publish our page to /www/user/<slot>.asp
-cp "$ADDON_DIR/$ADDON/vlan_manager.asp" "/www/user/$am_webui_page"
+cp "$ADDON_DIR/$ADDON/mervlan.asp" "/www/user/$am_webui_page"
 
 # 3a. Create Project Dirs
 if create_dirs && create_logs; then
