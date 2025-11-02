@@ -240,8 +240,8 @@ Loading log content...
   <script>
     // Access logs via symlinked tmp directory
     const LOG_PATHS = {
-        vlanmgr: "logs/vlan_manager.json",
-        syslog: "logs/syslog.json"
+        vlanmgr: "tmp/logs/mervlan.json",
+        syslog: "/tmp/logs/syslog.json" // Note: syslog tab is currently disabled
     };
     
     let currentLog = 'vlanmgr';

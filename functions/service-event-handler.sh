@@ -45,16 +45,73 @@ esac
 
 logger -t "VLANMgr" "handler: RAW='${RAW}' TYPE='${TYPE}' EVENT='${EVENT}' (args: '$1' '$2' '$3')"
 
+# Lightweight debounce/lock setup (static defaults)
+LOCKDIR="/tmp/mervlan_tmp/locks"
+DEBOUNCE_SECONDS=3
+mkdir -p "$LOCKDIR" 2>/dev/null || :
+
 dispatch_if_executable() {
-  SCRIPT_PATH="$1"
+  local SCRIPT_PATH="$1"
   shift
-  if [ -x "${SCRIPT_PATH}" ]; then
-    "${SCRIPT_PATH}" "$@"
-  elif [ -f "${SCRIPT_PATH}" ]; then
-    sh "${SCRIPT_PATH}" "$@"
+
+  local key lock_root lock_dir stamp now last window
+  key="${RAW:-${SCRIPT_PATH##*/}}"
+  lock_root="${LOCKDIR%/}"
+  lock_dir="${lock_root}/${key}.lock"
+  stamp="${lock_root}/${key}.last"
+  window="${DEBOUNCE_SECONDS:-0}"
+
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    # Allow stale lock cleanup if outside debounce window
+    if [ "$window" -gt 0 ] 2>/dev/null && [ -f "$stamp" ]; then
+      now="$(date +%s 2>/dev/null || echo 0)"
+      last="$(cat "$stamp" 2>/dev/null || echo 0)"
+      case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      if [ $((now - last)) -ge "$window" ]; then
+        rmdir "$lock_dir" 2>/dev/null || :
+        mkdir "$lock_dir" 2>/dev/null || {
+          logger -t "VLANMgr" "handler: ${key} already running; skipping";
+          return 0;
+        }
+      else
+        logger -t "VLANMgr" "handler: ${key} already running; skipping"
+        return 0
+      fi
+    else
+      logger -t "VLANMgr" "handler: ${key} already running; skipping"
+      return 0
+    fi
+  fi
+
+  trap 'rmdir "$lock_dir" 2>/dev/null' EXIT INT TERM
+
+  if [ "$window" -gt 0 ] 2>/dev/null; then
+    now="$(date +%s 2>/dev/null || echo 0)"
+    if [ -f "$stamp" ]; then
+      last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    else
+      last=0
+    fi
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$window" ]; then
+      logger -t "VLANMgr" "handler: debounced ${key} (window=${window}s); skipping"
+      rmdir "$lock_dir" 2>/dev/null
+      trap - EXIT INT TERM
+      return 0
+    fi
+    printf '%s' "$now" >"$stamp" 2>/dev/null || :
+  fi
+
+  if [ -x "$SCRIPT_PATH" ]; then
+    "$SCRIPT_PATH" "$@"
+  elif [ -f "$SCRIPT_PATH" ]; then
+    sh "$SCRIPT_PATH" "$@"
   else
     logger -t "VLANMgr" "handler: missing script ${SCRIPT_PATH}"
   fi
+
+  rmdir "$lock_dir" 2>/dev/null
+  trap - EXIT INT TERM
 }
 
 case "${TYPE}_${EVENT}" in

@@ -177,6 +177,7 @@ create_dirs() {
     for d in \
         "$TMP_DIR" \
         "$TMP_DIR/logs" \
+        "$TMP_DIR"/results \
         "$PUBLIC_DIR" \
         "$PUBLIC_DIR/settings" \
         "$PUBLIC_DIR/.ssh" \
@@ -200,6 +201,7 @@ create_dirs_first_install() {
         "$base/functions" \
         "$base/settings" \
         "$base/flags" \
+        "$base/www" \
         "$base/.ssh"
     do
         mkdir -p "$d" 2>/dev/null || {

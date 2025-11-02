@@ -17,7 +17,7 @@
 # - Purpose:    Disable the MerVLAN addon and clean up necessary files.        #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-
+MERV_BASE="/jffs/addons/mervlan"
 ADDON="Merlin_VLAN_Manager"
 LOGTAG="VLAN"
 ACTION="${1:-standard}"
@@ -81,7 +81,7 @@ rm -rf /www/user/merlin_vlan_manager
             echo "[download_mervlan] WARNING: setupdisable failed" >&2
         fi
     else
-        echo "[download_mervlan] WARNING: mervlan_boot.sh not executable or missing; skipping setupenable" >&2
+        echo "[download_mervlan] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
     fi
 
 ########################################

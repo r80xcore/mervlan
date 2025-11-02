@@ -64,6 +64,20 @@ update_json_flag() {
     fi
 }
 
+# Symlink function
+create_link() {
+    # create_link <target> <dest>
+    local target="$1" dest="$2"
+    
+    if [ -L "$dest" ]; then
+        rm -f "$dest"
+    fi
+    ln -sf "$target" "$dest" || {
+        printf 'ERROR: Failed to create symlink %s -> %s\n' "$target" "$dest" >&2
+        return 1
+    }
+}
+
 info -c cli "=== VLAN Manager SSH Key Generator ==="
 info -c cli ""
 
@@ -102,7 +116,11 @@ if "$DROPBEARKEY" -t ed25519 -f "$SSH_KEY" 2>/dev/null; then
     cat "$SSH_PUBKEY"
     
     # Update JSON flag to indicate keys are available
-    update_json_flag "1" "Keys generated successfully"
+    update_json_flag "1"
+    info -c cli,vlan "Keys generated successfully"
+    # Create and log symlinks
+    create_link "$SSH_PUBKEY" "$PUBLIC_DIR/.ssh/vlan_manager.pub"
+    info -c cli,vlan "✓ Created symlink for public key at $PUBLIC_DIR/.ssh/vlan_manager.json"
     exit 0
 else
     error -c cli,vlan "ERROR: Failed to generate SSH key pair"
