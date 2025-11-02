@@ -118,6 +118,33 @@ copy_inject() {
     fi
   fi
 
+  # If the rendered block already exists verbatim in dest, skip injection (idempotent)
+  if [ -f "$dest" ]; then
+    if awk -v injfile="$injtmp" '
+      BEGIN {
+        m = 0;
+        while ((getline l < injfile) > 0) { m++; inj[m] = l; }
+        close(injfile);
+      }
+      { lines[++n] = $0; }
+      END {
+        if (m == 0) exit 1;
+        for (i = 1; i <= n; i++) {
+          ok = 1;
+          for (j = 1; j <= m; j++) {
+            if (i + j - 1 > n || lines[i + j - 1] != inj[j]) { ok = 0; break; }
+          }
+          if (ok) exit 0;
+        }
+        exit 1;
+      }
+    ' "$dest" >/dev/null 2>&1; then
+      info -c vlan,cli "Injection skipped: block already present in $dest"
+      rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
+      return 0
+    fi
+  fi
+
   if [ -f "$dest" ]; then
     # Create a new file containing dest without trailing blank lines,
     # then add exactly one blank line followed by the injected content.
@@ -322,8 +349,7 @@ case "$ACTION" in
 
     # Install templates → /jffs/scripts with MERV_BASE injected
     copy_inject "$TPL_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
-    copy_inject "$TPL_EVENT"    "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
-    info -c vlan,cli "Installed services-start & service-event with MERV_BASE=$MERV_BASE"
+    info -c vlan,cli "Installed services-start with MERV_BASE=$MERV_BASE (service-event managed at setup)"
 
     # Boot flag
     mkdir -p "$FLAGDIR"
@@ -340,17 +366,32 @@ case "$ACTION" in
     if [ -f "$SERVICES_START" ]; then
       remove_inject "$TPL_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
     fi
-    if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
-      remove_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" || warn -c vlan,cli "Failed to remove injected service-event content"
-    fi
 
     # Boot flag OFF
     mkdir -p "$FLAGDIR"
     echo 0 > "$BOOT_FLAG"
 
-  info -c vlan,cli "Removed services-start/service-event"
+  info -c vlan,cli "Removed services-start injection (service-event unchanged)"
     
     handle_nodes_via_ssh "disable"
+    ;;
+
+  # Setup-only management of service-event wrapper
+  setupenable)
+    mkdir -p "$SCRIPTS_DIR"
+    copy_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
+    info -c vlan,cli "Installed service-event with MERV_BASE=$MERV_BASE (setup-only)"
+    handle_nodes_via_ssh "setupenable"
+    ;;
+
+  setupdisable)
+    if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
+      remove_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" || warn -c vlan,cli "Failed to remove injected service-event content"
+      info -c vlan,cli "Removed service-event injection (setup-only disable)"
+    else
+      info -c vlan,cli "service-event not present; nothing to disable"
+    fi
+    handle_nodes_via_ssh "setupdisable"
     ;;
 
   status)
@@ -398,7 +439,7 @@ case "$ACTION" in
     ;;
 
   *)
-    echo "Usage: $0 {enable|disable|status}" >&2
+  echo "Usage: $0 {enable|disable|status|setupenable|setupdisable}" >&2
     exit 2
     ;;
 esac

@@ -30,6 +30,44 @@ fi
 # =========================================== End of MerVLAN environment setup #
 
 
+# --------------------------
+# Early no-op guard: skip if no VLANs are enabled
+# --------------------------
+any_vlan_configured() {
+  # Check Ethernet port VLANs
+  local idx=1 vlan
+  for eth in $ETH_PORTS; do
+    vlan=$(read_json "ETH${idx}_VLAN" "$SETTINGS_FILE")
+    case "$vlan" in
+      ''|none|NONE) ;;                 # not configured
+      trunk|TRUNK) ;;                  # not a specific VLAN ID
+      *) if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then return 0; fi ;;
+    esac
+    idx=$((idx+1))
+  done
+
+  # Check SSID VLANs (only count if SSID is actually set)
+  local i=1 ssid
+  while [ $i -le "$MAX_SSIDS" ]; do
+    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
+    vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
+    if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ]; then
+      if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+        return 0
+      fi
+    fi
+    i=$((i+1))
+  done
+
+  return 1
+}
+
+# Fast path: if settings define no numeric VLANs, do nothing
+if ! any_vlan_configured; then
+  info -c vlan "Heal: no VLANs configured in settings; exiting"
+  exit 0
+fi
+
 # make sure locks directory exists
 mkdir -p "$LOCKDIR" 2>/dev/null
 
@@ -77,7 +115,7 @@ expected_vlans_from_settings() {
     grep -Eo '"ETH[0-9]+_VLAN"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null
   } | sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | grep -E '^[0-9]+$' \
-    | awk '{n=$1+0; if (n>=2 && n<=4096) print n}' \
+    | awk '{n=$1+0; if (n>=2 && n<=4094) print n}' \
     | sort -n \
     | uniq
 }

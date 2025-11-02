@@ -136,6 +136,30 @@ download_mervlan() {
     done
         echo "[download_mervlan] permission step complete"
 
+    # Inject service-event on fresh download so a new install is functional
+    if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
+        echo "[download_mervlan] invoking setupenable to inject service-event"
+        if sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable; then
+            echo "[download_mervlan] setupenable completed successfully"
+        else
+            echo "[download_mervlan] WARNING: setupenable failed" >&2
+        fi
+    else
+        echo "[download_mervlan] WARNING: mervlan_boot.sh not executable or missing; skipping setupenable" >&2
+    fi
+
+        # Setup HW probe on fresh install
+    if [ -x "$MERV_BASE/functions/hw_probe.sh" ]; then
+        echo "[download_mervlan] invoking hw_probe to inject settings"
+        if sh "$MERV_BASE/functions/hw_probe.sh"; then
+            echo "[download_mervlan] hw_probe completed successfully"
+        else
+            echo "[download_mervlan] WARNING: hw_probe failed" >&2
+        fi
+    else
+        echo "[download_mervlan] WARNING: hw_probe.sh not executable or missing; skipping setupenable" >&2
+    fi
+
   trap - EXIT
     if [ "$created" -eq 1 ]; then
         echo "[download_mervlan] cleaning tmp (manual): $tmp"

@@ -65,6 +65,15 @@ function MVM_save(settingsObj) {
 function MVM_trigger(actionScriptName) {
   MVM_exec(actionScriptName);
 }
+
+// Convenience wrappers for service-event actions handled by service-event-handler.sh
+function MVM_apply() {             MVM_exec("apply_vlanmgr"); }
+function MVM_sync() {              MVM_exec("sync_vlanmgr"); }
+function MVM_genkey() {            MVM_exec("genkey_vlanmgr"); }
+function MVM_enableService() {     MVM_exec("enableservice_vlanmgr"); }
+function MVM_disableService() {    MVM_exec("disableservice_vlanmgr"); }
+function MVM_checkService() {      MVM_exec("checkservice_vlanmgr"); }
+function MVM_collectClients() {    MVM_exec("collectclients_vlanmgr"); }
 </script>
 </head>
 

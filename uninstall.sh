@@ -72,6 +72,18 @@ fi
 # Remove our static asset directory
 rm -rf /www/user/merlin_vlan_manager
 
+    # Inject service-event to disable event handler
+    if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
+        echo "[download_mervlan] invoking setupdisable to inject service-event"
+        if sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable; then
+            echo "[download_mervlan] setupdisable completed successfully"
+        else
+            echo "[download_mervlan] WARNING: setupdisable failed" >&2
+        fi
+    else
+        echo "[download_mervlan] WARNING: mervlan_boot.sh not executable or missing; skipping setupenable" >&2
+    fi
+
 ########################################
 # 5. Mark addon disabled / cleanup settings
 ########################################
