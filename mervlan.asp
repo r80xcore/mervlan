@@ -119,7 +119,7 @@ function MVM_trigger(actionScriptName) {
             <!-- THE IFRAME -->
             <iframe
               id="vlan_iframe"
-              src="/user/merlin_vlan_manager/index.html"
+              src="/user/mervlan/index.html"
               style="
                 width:100%;
                 min-height: 950px;

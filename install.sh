@@ -34,45 +34,86 @@ TMP="${TMP_DIR:-$(mktemp -d)}"
 
 download_mervlan() {
   set -e
-  mkdir -p "$MERV_BASE"
+    echo "[download_mervlan] start"
+    echo "[download_mervlan] GITHUB_URL=$GITHUB_URL"
+    echo "[download_mervlan] MERV_BASE=$MERV_BASE"
+    mkdir -p "$MERV_BASE"
+    echo "[download_mervlan] ensured MERV_BASE exists"
 
   # Use provided TMP_DIR; otherwise create a private temp workspace
   local tmp created=0
-  if [ -n "$TMP_DIR" ]; then
+    if [ -n "$TMP_DIR" ]; then
     tmp="$TMP_DIR"
     mkdir -p "$tmp"
   else
     tmp="$(mktemp -d)"; created=1
   fi
-  trap '[ "$created" -eq 1 ] && rm -rf "$tmp"' EXIT
+    echo "[download_mervlan] tmp workspace: $tmp (created=$created)"
+    trap 'if [ "$created" -eq 1 ]; then echo "[download_mervlan] cleaning tmp: $tmp"; rm -rf "$tmp"; fi' EXIT
 
   # Fetch archive to a file (curl only)
-  /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$tmp/mervlan.tar.gz"
+    echo "[download_mervlan] downloading archive -> $tmp/mervlan.tar.gz"
+    /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$tmp/mervlan.tar.gz"
+    if [ -s "$tmp/mervlan.tar.gz" ]; then
+        echo "[download_mervlan] download ok, size=$(wc -c < "$tmp/mervlan.tar.gz" 2>/dev/null) bytes"
+    else
+        echo "[download_mervlan] ERROR: download failed or empty file" >&2
+        return 1
+    fi
 
   # Extract: prefer tar -xzf; fallback to gzip -dc | tar -x for BusyBox without -z
-  if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
-    tar -xzf "$tmp/mervlan.tar.gz" -C "$tmp"
+    if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
+        echo "[download_mervlan] extracting with tar -xzf"
+        tar -xzf "$tmp/mervlan.tar.gz" -C "$tmp"
   else
-    gzip -dc "$tmp/mervlan.tar.gz" | tar -x -C "$tmp"
+        echo "[download_mervlan] extracting with gzip -dc | tar -x (fallback)"
+        gzip -dc "$tmp/mervlan.tar.gz" | tar -x -C "$tmp"
   fi
+    echo "[download_mervlan] extraction complete; top-level entries:"
+    ls -1 "$tmp" 2>/dev/null | sed 's/^/[download_mervlan]   /'
 
-  # BusyBox-safe topdir detection
-  local topdir=""
-  for d in "$tmp"/*; do
-    [ -d "$d" ] && { topdir="$d"; break; }
-  done
+    # Determine top-level extracted directory from archive listing, with fallbacks
+    local topdir="" topname=""
+    if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
+        topname="$(tar -tzf "$tmp/mervlan.tar.gz" 2>/dev/null | head -1 | cut -d/ -f1)"
+        echo "[download_mervlan] tar lists topname: ${topname:-<none>}"
+    else
+        topname="$(gzip -dc "$tmp/mervlan.tar.gz" 2>/dev/null | tar -t 2>/dev/null | head -1 | cut -d/ -f1)"
+        echo "[download_mervlan] gzip|tar lists topname: ${topname:-<none>}"
+    fi
+    if [ -n "$topname" ] && [ -d "$tmp/$topname" ]; then
+        topdir="$tmp/$topname"
+    else
+        # Prefer directories matching mervlan-* if present
+        for d in "$tmp"/mervlan-*; do
+            [ -d "$d" ] && { topdir="$d"; break; }
+        done
+        # Else pick first directory that isn't a known temp subdir like 'logs'
+        if [ -z "$topdir" ]; then
+            for d in "$tmp"/*; do
+                [ -d "$d" ] || continue
+                [ "$(basename "$d")" = "logs" ] && continue
+                topdir="$d"; break
+            done
+        fi
+    fi
+    echo "[download_mervlan] detected topdir (final): ${topdir:-<none>}"
 
   if [ -n "$topdir" ]; then
-    if ! cp -a "$topdir"/. "$MERV_BASE"/ 2>/dev/null; then
+        echo "[download_mervlan] copying contents from $topdir -> $MERV_BASE"
+        if ! cp -a "$topdir"/. "$MERV_BASE"/ 2>/dev/null; then
+            echo "[download_mervlan] cp -a failed; using tar pipe fallback"
       ( cd "$topdir" && tar -cf - . ) | ( cd "$MERV_BASE" && tar -xpf - )
     fi
+        echo "[download_mervlan] copy step complete"
   else
     echo "ERROR: Unexpected archive layout (no top directory)" >&2
     return 1
   fi
 
-    # Permissions: BusyBox-safe (no find). 755 for all .sh except the two settings files -> 644
+        # Permissions: BusyBox-safe (no find). 755 for all .sh except the two settings files -> 644
     # First set 644 for settings/log_settings.sh and settings/var_settings.sh if present
+        echo "[download_mervlan] adjusting file permissions (.sh)"
     for depth in "" "*/" "*/*/"; do
         for f in $MERV_BASE/${depth}*.sh; do
             [ -f "$f" ] 2>/dev/null || continue
@@ -93,9 +134,14 @@ download_mervlan() {
             fi
         done
     done
+        echo "[download_mervlan] permission step complete"
 
   trap - EXIT
-  [ "$created" -eq 1 ] && rm -rf "$tmp"
+    if [ "$created" -eq 1 ]; then
+        echo "[download_mervlan] cleaning tmp (manual): $tmp"
+        rm -rf "$tmp"
+    fi
+    echo "[download_mervlan] done"
 }
 
 
