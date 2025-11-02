@@ -32,7 +32,7 @@
 #                             with channel "vlan" and LOG_SYSLOG=1
 # ========================================================== Override settings #
 LOG_chan_cli="$LOGROOT/cli_output.log"
-LOG_chan_vlan="$LOGROOT/mervlan.log"
+LOG_chan_vlan="$LOGROOT/vlan_manager.log"
 # ============================================== End of Central settings setup #
 
 
