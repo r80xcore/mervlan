@@ -71,9 +71,28 @@ download_mervlan() {
     return 1
   fi
 
-  # Permissions: all *.sh => 755, except settings files => 644
-  find "$MERV_BASE" -type f -name '*.sh' ! -name 'log_settings.sh' ! -name 'var_settings.sh' -exec chmod 755 {} +
-  find "$MERV_BASE" -type f \( -name 'log_settings.sh' -o -name 'var_settings.sh' \) -exec chmod 644 {} +
+    # Permissions: BusyBox-safe (no find). 755 for all .sh except the two settings files -> 644
+    # First set 644 for settings/log_settings.sh and settings/var_settings.sh if present
+    for depth in "" "*/" "*/*/"; do
+        for f in $MERV_BASE/${depth}*.sh; do
+            [ -f "$f" ] 2>/dev/null || continue
+            base="$(basename "$f")"
+            if [ "$base" = "log_settings.sh" ] || [ "$base" = "var_settings.sh" ]; then
+                chmod 644 "$f" 2>/dev/null || :
+            fi
+        done
+    done
+
+    # Then apply 755 to all other .sh files
+    for depth in "" "*/" "*/*/"; do
+        for f in $MERV_BASE/${depth}*.sh; do
+            [ -f "$f" ] 2>/dev/null || continue
+            base="$(basename "$f")"
+            if [ "$base" != "log_settings.sh" ] && [ "$base" != "var_settings.sh" ]; then
+                chmod 755 "$f" 2>/dev/null || :
+            fi
+        done
+    done
 
   trap - EXIT
   [ "$created" -eq 1 ] && rm -rf "$tmp"
