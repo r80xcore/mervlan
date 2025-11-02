@@ -33,48 +33,52 @@ TMP="${TMP_DIR:-$(mktemp -d)}"
 # Helpers Begin ------------------------------------------------------
 
 download_mervlan() {
-    set -e
-    mkdir -p "$MERV_BASE"
+  set -e
+  mkdir -p "$MERV_BASE"
 
-    # Use provided TMP_DIR; otherwise create a private temp workspace
-    local tmp created=0
-    if [ -n "$TMP_DIR" ]; then
-        tmp="$TMP_DIR"
-        mkdir -p "$tmp"
-    else
-        tmp="$(mktemp -d)"; created=1
+  # Use provided TMP_DIR; otherwise create a private temp workspace
+  local tmp created=0
+  if [ -n "$TMP_DIR" ]; then
+    tmp="$TMP_DIR"
+    mkdir -p "$tmp"
+  else
+    tmp="$(mktemp -d)"; created=1
+  fi
+  trap '[ "$created" -eq 1 ] && rm -rf "$tmp"' EXIT
+
+  # Fetch archive to a file (curl only)
+  /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$tmp/mervlan.tar.gz"
+
+  # Extract: prefer tar -xzf; fallback to gzip -dc | tar -x for BusyBox without -z
+  if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
+    tar -xzf "$tmp/mervlan.tar.gz" -C "$tmp"
+  else
+    gzip -dc "$tmp/mervlan.tar.gz" | tar -x -C "$tmp"
+  fi
+
+  # BusyBox-safe topdir detection
+  local topdir=""
+  for d in "$tmp"/*; do
+    [ -d "$d" ] && { topdir="$d"; break; }
+  done
+
+  if [ -n "$topdir" ]; then
+    if ! cp -a "$topdir"/. "$MERV_BASE"/ 2>/dev/null; then
+      ( cd "$topdir" && tar -cf - . ) | ( cd "$MERV_BASE" && tar -xpf - )
     fi
-    trap '[ "$created" -eq 1 ] && rm -rf "$tmp"' EXIT
+  else
+    echo "ERROR: Unexpected archive layout (no top directory)" >&2
+    return 1
+  fi
 
-    # Fetch archive to a file (curl only)
-    /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$tmp/mervlan.tar.gz"
+  # Permissions: all *.sh => 755, except settings files => 644
+  find "$MERV_BASE" -type f -name '*.sh' ! -name 'log_settings.sh' ! -name 'var_settings.sh' -exec chmod 755 {} +
+  find "$MERV_BASE" -type f \( -name 'log_settings.sh' -o -name 'var_settings.sh' \) -exec chmod 644 {} +
 
-    # Extract: prefer tar -xzf; fallback to gzip -dc | tar -x for BusyBox without -z
-    if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
-        tar -xzf "$tmp/mervlan.tar.gz" -C "$tmp"
-    else
-        gzip -dc "$tmp/mervlan.tar.gz" | tar -x -C "$tmp"
-    fi
-
-    # Find the top-level extracted directory and copy all contents (including dotfiles)
-    local topdir
-    topdir="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-    if [ -n "$topdir" ]; then
-        if ! cp -a "$topdir"/. "$MERV_BASE"/ 2>/dev/null; then
-            ( cd "$topdir" && tar -cf - . ) | ( cd "$MERV_BASE" && tar -xpf - )
-        fi
-    else
-        echo "ERROR: Unexpected archive layout (no top directory)" >&2
-        return 1
-    fi
-
-    # Permissions: all *.sh => 755, except settings files => 644
-    find "$MERV_BASE" -type f -name '*.sh' ! -name 'log_settings.sh' ! -name 'var_settings.sh' -exec chmod 755 {} +
-    find "$MERV_BASE" -type f \( -name 'log_settings.sh' -o -name 'var_settings.sh' \) -exec chmod 644 {} +
-
-    trap - EXIT
-    [ "$created" -eq 1 ] && rm -rf "$tmp"
+  trap - EXIT
+  [ "$created" -eq 1 ] && rm -rf "$tmp"
 }
+
 
 
 
