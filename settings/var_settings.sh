@@ -52,6 +52,7 @@ readonly CUSTOM_SETTINGS_FILE="/jffs/addons/custom_settings.txt"
 readonly SERVICE_EVENT_HANDLER="$FUNCDIR/service-event-handler.sh"
 readonly TPL_SERVICES="$SETTINGSDIR/services-start.tpl"
 readonly TPL_EVENT="$SETTINGSDIR/service-event.tpl"
+readonly TPL_ADDON="$SETTINGSDIR/services-start-addon.tpl"
 readonly SERVICES_START="$SCRIPTS_DIR/services-start"
 readonly SERVICE_EVENT_WRAPPER="$SCRIPTS_DIR/service-event"
 
