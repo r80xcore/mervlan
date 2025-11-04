@@ -23,6 +23,41 @@ LOGTAG="VLAN"
 ACTION="${1:-standard}"
 source /usr/sbin/helper.sh
 
+SETTINGS_FILE="$MERV_BASE/settings/settings.json"
+GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
+BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
+
+has_configured_nodes() {
+    [ -f "$SETTINGS_FILE" ] || return 1
+    local nodes
+    nodes=$(grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
+        grep -v "none" | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [ -n "$nodes" ]
+}
+
+ssh_keys_installed() {
+    [ -f "$GENERAL_SETTINGS_FILE" ] || return 1
+    grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
+}
+
+if has_configured_nodes && ssh_keys_installed; then
+    if [ -x "$BOOT_SCRIPT" ]; then
+        logger -t "$LOGTAG" "Pre-uninstall: disabling hooks locally and on nodes"
+        if ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+            logger -t "$LOGTAG" "WARNING: mervlan_boot.sh disable failed pre-uninstall"
+        fi
+        if ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then
+            logger -t "$LOGTAG" "WARNING: mervlan_boot.sh nodedisable failed pre-uninstall"
+        fi
+    else
+        logger -t "$LOGTAG" "WARNING: mervlan_boot.sh missing; cannot pre-disable hooks"
+    fi
+else
+    logger -t "$LOGTAG" "Pre-uninstall: no eligible nodes detected or SSH keys not installed"
+fi
+
 ########################################
 # 1. Figure out which user page we mounted
 ########################################
@@ -72,17 +107,17 @@ fi
 # Remove our static asset directory
 rm -rf /www/user/merlin_vlan_manager
 
-    # Inject service-event to disable event handler
-    if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-        echo "[download_mervlan] invoking setupdisable to inject service-event"
-        if sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable; then
-            echo "[download_mervlan] setupdisable completed successfully"
-        else
-            echo "[download_mervlan] WARNING: setupdisable failed" >&2
-        fi
+# Remove service-event and addon hooks via setupdisable
+if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
+    echo "[uninstall] invoking setupdisable to remove hooks"
+    if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
+        echo "[uninstall] setupdisable completed successfully"
     else
-        echo "[download_mervlan] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
+        echo "[uninstall] WARNING: setupdisable failed" >&2
     fi
+else
+    echo "[uninstall] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
+fi
 
 ########################################
 # 5. Mark addon disabled / cleanup settings

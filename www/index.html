@@ -12,7 +12,7 @@
     <!-- LEFT: Forms -->
   <div class="form-box form-box--main">
       <!-- <div class="table-align"><div class="main-title"><img src="vlan_logo.png" alt="VLAN Manager" class="main-logo"></div></div> -->
-      <form id="settingsForm" action="#" onsubmit="return false;">
+      <form id="settingsForm" action="#" onsubmit="event.preventDefault(); return false;">
         <!-- SSIDs -->
         <!-- SSIDs -->
         <table id="ssidTable" class="FormTable_table vlan-table">
@@ -100,13 +100,13 @@
         <div class="form-box controls-panel">
           <h2>Controls</h2>
       <div class="button-row button-row-main">
-        <button class="button_gen" onclick="handleApplyClick(this)" title="Run vlan_manager locally">Apply VLAN</button>
-        <button class="button_gen" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
-        <button class="button_gen" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
+        <button type="button" class="button_gen" onclick="handleApplyClick(this)" title="Run vlan_manager locally">Apply VLAN</button>
+        <button type="button" class="button_gen" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
+        <button type="button" class="button_gen" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
       <div class="button-row button-row-service">
-        <button class="button_gen" onclick="triggerAction('enableservice_vlanmgr', this, 'Enable Service')" title="Enable auto-start on boot">Enable Service</button>
-        <button class="button_gen" onclick="triggerAction('disableservice_vlanmgr', this, 'Disable Service')" title="Disable auto-start on boot">Disable Service</button>
-        <button class="button_gen" onclick="triggerAction('checkservice_vlanmgr', this, 'Service Status')" title="Service enabled on boot?">Service Status</button>
+        <button type="button" class="button_gen" onclick="triggerAction('enableservice_vlanmgr', this, 'Enable Service')" title="Enable auto-start on boot">Enable Service</button>
+        <button type="button" class="button_gen" onclick="triggerAction('disableservice_vlanmgr', this, 'Disable Service')" title="Disable auto-start on boot">Disable Service</button>
+        <button type="button" class="button_gen" onclick="triggerAction('checkservice_vlanmgr', this, 'Service Status')" title="Service enabled on boot?">Service Status</button>
           </div>
         </div>
 
@@ -145,7 +145,7 @@
               <div class="clients-panel">
                 <div class="clients-header">
                   <span>Active VLAN Clients</span>
-                  <button id="refreshClientsBtn" class="button_gen" title="Collect and refresh client list" onclick="refreshClients(this)">Refresh</button>
+                  <button type="button" id="refreshClientsBtn" class="button_gen" title="Collect and refresh client list" onclick="refreshClients(this)">Refresh</button>
                 </div>
                 <div id="vlanOverview" class="clients-body"></div>
               </div>
@@ -216,12 +216,12 @@
     <div class="modal__body">
       <p class="modal__intro">Choose how to run the VLAN Manager:</p>
       <div class="modal__section vlan-options">
-        <button class="button_gen" onclick="runVlanManagerLocal()">
+        <button type="button" class="button_gen" onclick="runVlanManagerLocal()">
           <div class="vlan-option__title">Run VLAN Manager (Local Only)</div>
           <div class="vlan-option__subtitle">Apply VLAN configuration to this router only</div>
         </button>
 
-        <button class="button_gen" onclick="runVlanManagerWithNodes()">
+        <button type="button" class="button_gen" onclick="runVlanManagerWithNodes()">
           <div class="vlan-option__title">Run VLAN Manager + Nodes</div>
           <div class="vlan-option__subtitle">Apply VLAN configuration to this router and all configured nodes</div>
         </button>

@@ -288,7 +288,7 @@ run_ssh_command() {
     fi
     
     info -c cli,vlan "Running '$cmd' on $node_ip via SSH..."
-    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh '$cmd'" 2>&1; then
+  if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$cmd'" 2>&1; then
         info -c cli,vlan "✓ Command '$cmd' succeeded on $node_ip"
         return 0
     else
@@ -301,6 +301,10 @@ run_ssh_command() {
 handle_nodes_via_ssh() {
   # Function to remove injected blocks
     local cmd="$1"
+  if [ "${MERV_SKIP_NODE_SYNC:-0}" = "1" ]; then
+    info -c cli,vlan "Skipping node propagation for '$cmd' (MERV_SKIP_NODE_SYNC=1)"
+    return 0
+  fi
     local NODE_IPS=$(get_node_ips)
     
     if [ -z "$NODE_IPS" ]; then
@@ -380,6 +384,7 @@ case "$ACTION" in
   setupenable)
     mkdir -p "$SCRIPTS_DIR"
     copy_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
+    copy_inject "$TPL_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install addon boot entry"; exit 1; }
     info -c vlan,cli "Installed service-event with MERV_BASE=$MERV_BASE (setup-only)"
     handle_nodes_via_ssh "setupenable"
     ;;
@@ -391,15 +396,96 @@ case "$ACTION" in
     else
       info -c vlan,cli "service-event not present; nothing to disable"
     fi
+    if [ -f "$SERVICES_START" ]; then
+      remove_inject "$TPL_ADDON" "$SERVICES_START" || warn -c vlan,cli "Failed to remove addon boot entry"
+    fi
     handle_nodes_via_ssh "setupdisable"
     ;;
+  
+  # Node setup-only management of service-event and services-start addon entry
+  nodeenable)
+    scope="${2:-}"
+    force_local=0
+    case "$scope" in
+      --local|-l|local) force_local=1 ;;
+    esac
+    if [ "${MERV_FORCE_LOCAL:-0}" = "1" ]; then
+      force_local=1
+    fi
+    if [ "${MERV_NODE_CONTEXT:-0}" = "1" ] || [ "$force_local" = "1" ]; then
+      mkdir -p "$SCRIPTS_DIR"
+      copy_inject "$TPL_EVENT_NODES" "$SERVICE_EVENT_HANDLER" \
+        || { error -c vlan,cli "Failed to install node mervlan_boot.sh"; exit 1; }
+      copy_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" \
+        || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
+      chmod 755 "$SERVICE_EVENT_WRAPPER" "$BOOT_SCRIPT" 2>/dev/null \
+        || { warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"; exit 1; }
+
+      info -c vlan,cli "Installed node mervlan_boot.sh, service-event, services-start with MERV_BASE=$MERV_BASE"
+      exit 0
+    fi
+
+    NODE_IPS=$(get_node_ips)
+    if [ -z "$NODE_IPS" ]; then
+      info -c vlan,cli "No nodes configured; skipping nodeenable"
+      exit 0
+    fi
+
+    NODE_LIST=$(echo "$NODE_IPS" | tr '\n' ' ')
+    info -c vlan,cli "Propagating nodeenable to nodes: $NODE_LIST"
+    handle_nodes_via_ssh "nodeenable"
+    exit 0
+    ;;
+
+
+
+  nodedisable)
+    scope="${2:-}"
+    force_local=0
+    case "$scope" in
+      --local|-l|local) force_local=1 ;;
+    esac
+    if [ "${MERV_FORCE_LOCAL:-0}" = "1" ]; then
+      force_local=1
+    fi
+    if [ "${MERV_NODE_CONTEXT:-0}" = "1" ] || [ "$force_local" = "1" ]; then
+      if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
+        remove_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" \
+        || { error -c vlan,cli "Failed to remove node service-event"; exit 1; }
+      else
+        info -c vlan,cli "service-event not present on node; nothing to disable"
+      fi
+      if [ -f "$SERVICES_START" ]; then
+        remove_inject "$TPL_SERVICES" "$SERVICES_START" \
+          || warn -c vlan,cli "Failed to remove addon boot entry"
+      fi
+      exit 0
+    fi
+
+    NODE_IPS=$(get_node_ips)
+    if [ -z "$NODE_IPS" ]; then
+      info -c vlan,cli "No nodes configured; skipping nodedisable"
+      exit 0
+    fi
+
+    NODE_LIST=$(echo "$NODE_IPS" | tr '\n' ' ')
+    info -c vlan,cli "Propagating nodedisable to nodes: $NODE_LIST"
+    handle_nodes_via_ssh "nodedisable"
+    exit 0
+    ;;
+
 
   status)
     boot_state=disabled
+    addon_state=missing
     event_state=missing
     cron_state=absent
 
     [ -f "$BOOT_FLAG" ] && [ "$(cat "$BOOT_FLAG" 2>/dev/null)" = "1" ] && boot_state=enabled
+
+    if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then
+      addon_state=active
+    fi
 
     if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
       if grep -q "service-event disabled" "$SERVICE_EVENT_WRAPPER"; then
@@ -416,9 +502,9 @@ case "$ACTION" in
     NODE_IPS=$(get_node_ips)
     if [ -n "$NODE_IPS" ]; then
       collect_node_status
-      info -c vlan,cli "Status: boot=$boot_state service-event=$event_state cron=$cron_state nodes:${NODE_STATUS_OUTPUT:- none}"
+      info -c vlan,cli "Status: boot=$boot_state addon=$addon_state service-event=$event_state cron=$cron_state nodes:${NODE_STATUS_OUTPUT:- none}"
     else
-      info -c vlan,cli "Status: boot=$boot_state service-event=$event_state cron=$cron_state (no nodes configured)"
+      info -c vlan,cli "Status: boot=$boot_state addon=$addon_state service-event=$event_state cron=$cron_state (no nodes configured)"
     fi
     ;;
 
@@ -426,20 +512,22 @@ case "$ACTION" in
   report)
   # Internal terse report for remote aggregation (stdout only, no log function)
   boot_state=0
+  addon_state=missing
   event_state=missing
   cron_state=absent
   if [ -f "$BOOT_FLAG" ] && [ "$(cat "$BOOT_FLAG" 2>/dev/null)" = "1" ]; then boot_state=1; fi
+  if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
   if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
     if grep -q "service-event disabled" "$SERVICE_EVENT_WRAPPER"; then event_state=disabled; elif grep -q "functions/vlan_boot_event.sh" "$SERVICE_EVENT_WRAPPER"; then event_state=active; else event_state=custom; fi
   fi
     cron_line=""
   # Cron support removed; cron_state remains 'absent'
-  echo "REPORT boot=$boot_state event=$event_state cron=$cron_state"
+  echo "REPORT boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state"
     exit 0
     ;;
 
   *)
-  echo "Usage: $0 {enable|disable|status|setupenable|setupdisable}" >&2
+echo "Usage: $0 {enable|disable|status|setupenable|setupdisable|nodeenable|nodedisable|report}" >&2
     exit 2
     ;;
 esac

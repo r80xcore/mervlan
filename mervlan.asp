@@ -34,7 +34,18 @@ function initial(){
 }
 </script>
 <script type="text/javascript">
+var _mvmLast = { name: null, t: 0 };
+
 function MVM_exec(actionScriptName, settingsObjOrNull) {
+  var now = (typeof Date.now === "function") ? Date.now() : new Date().getTime();
+  if (_mvmLast.name === actionScriptName && (now - _mvmLast.t) < 2000) {
+    if (window.console && typeof console.log === "function") {
+      console.log("[parent] deduped", actionScriptName);
+    }
+    return;
+  }
+  _mvmLast = { name: actionScriptName, t: now };
+
   var amng = document.getElementById("amng_custom");
 
   if (settingsObjOrNull) {
@@ -48,7 +59,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull) {
   }
 
   document.form.action_script.value = actionScriptName;
-  document.form.action_mode.value = "apply";
+  document.form.action_mode.value = "run";
   document.form.action_wait.value = "5";
 
   if (typeof showLoading === "function") {

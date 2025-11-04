@@ -29,6 +29,24 @@ MERV_BASE="$ADDON_DIR/$ADDON"
 PUBLIC_DIR="/www/user/mervlan"
 TMP_DIR="/tmp/mervlan_tmp"
 TMP="${TMP_DIR:-$(mktemp -d)}"
+SETTINGS_FILE="$MERV_BASE/settings/settings.json"
+GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
+BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
+
+has_configured_nodes() {
+    [ -f "$SETTINGS_FILE" ] || return 1
+    local nodes
+    nodes=$(grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
+        grep -v "none" | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    [ -n "$nodes" ]
+}
+
+ssh_keys_installed() {
+    [ -f "$GENERAL_SETTINGS_FILE" ] || return 1
+    grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
+}
 
 # Helpers Begin ------------------------------------------------------
 
@@ -139,7 +157,7 @@ download_mervlan() {
     # Inject service-event on fresh download so a new install is functional
     if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
         echo "[download_mervlan] invoking setupenable to inject service-event"
-        if sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable; then
+        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1; then
             echo "[download_mervlan] setupenable completed successfully"
         else
             echo "[download_mervlan] WARNING: setupenable failed" >&2
@@ -323,4 +341,31 @@ am_settings_set mervlan_version "v0.45"
 
 logger -t "$ADDON" "Installed tab 'VLAN' under Tools -> $am_webui_page"
 echo "$ADDON" "Installed tab 'VLAN' under Tools -> $am_webui_page"
+
+# Ensure boot/service-event hooks are present even on non-full installs
+if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
+    if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1; then
+        logger -t "$ADDON" "addon setupenable completed (post-install)"
+    else
+        logger -t "$ADDON" "WARNING: setupenable failed during post-install"
+    fi
+else
+    logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping post-install setupenable"
+fi
+
+if has_configured_nodes && ssh_keys_installed; then
+    if [ -x "$BOOT_SCRIPT" ]; then
+        logger -t "$ADDON" "Propagating nodeenable to configured nodes"
+        if sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then
+            logger -t "$ADDON" "nodeenable completed successfully"
+        else
+            logger -t "$ADDON" "WARNING: nodeenable encountered errors"
+        fi
+    else
+        logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping nodeenable"
+    fi
+else
+    logger -t "$ADDON" "Nodeenable skipped (no nodes configured or SSH keys not installed)"
+fi
+
 exit 0
