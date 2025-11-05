@@ -343,6 +343,7 @@ cp -p "$ADDON_DIR/$ADDON/www/vlan_form_style.css"   "$PUBLIC_DIR/vlan_form_style
 cp -p "$ADDON_DIR/$ADDON/www/help.html"             "$PUBLIC_DIR/help.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/view_logs.html"        "$PUBLIC_DIR/view_logs.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/settings/settings.json"    "$PUBLIC_DIR/settings/settings.json" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/settings/hw_settings.json" "$PUBLIC_DIR/settings/hw_settings.json" 2>/dev/null
 
 # 3c. Publish SSH public key for UI if it already exists (rename to .json for compatibility)
 if [ -f "$ADDON_DIR/$ADDON/.ssh/vlan_manager.pub" ]; then
