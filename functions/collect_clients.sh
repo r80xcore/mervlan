@@ -32,57 +32,87 @@ export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
 # =========================================== End of MerVLAN environment setup #
 
+# ============================================================================ #
+#                            CONFIGURATION & SETUP                             #
+# Define collection timeout and initialize logging. Prepare working            #
+# directories and clear any stale results from previous runs.                  #
+# ============================================================================ #
+
+# Timeout (seconds) for remote SSH commands; prevents hanging on slow nodes
 TIMEOUT=10
 
 info -c cli,vlan "=== VLAN Client Collection Started ==="
 
-# Prepare dirs
+# Create temporary collection directory and results directory
 mkdir -p "$COLLECTDIR" "$RESULTDIR"
 
-# Clear previous results
+# Remove any stale results file from previous collection attempts
 if [ -f "$OUT_FINAL" ]; then
   rm -f "$OUT_FINAL"
   info -c cli,vlan "Cleared previous results at $OUT_FINAL"
 fi
 
-# ---- helpers ----
+# ============================================================================ #
+#                             HELPER FUNCTIONS                                 #
+# Utility functions for node discovery, SSH validation, and remote collection  #
+# of VLAN client data from both main router and satellite nodes.               #
+# ============================================================================ #
+
+# ============================================================================ #
+# get_node_ips                                                                 #
+# Extract NODE1-NODE5 IP addresses from settings.json. Parse JSON format       #
+# and filter out "none" entries and invalid IP addresses.                      #
+# ============================================================================ #
 get_node_ips() {
+  # Extract NODE entries from settings file (JSON format with "NODE[1-5]": "IP")
   grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" \
     | sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | grep -v "none" \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
 }
 
+# ============================================================================ #
+# test_ssh_connection                                                          #
+# Verify SSH connectivity to a node using dropbear client. Attempts echo       #
+# command with timeout. Returns 0 if successful, 1 if connection fails.        #
+# ============================================================================ #
 test_ssh_connection() {
   local node_ip="$1"
+  # Attempt to SSH and run echo; grep for success string to verify connection
   dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"
 }
 
-# Collect JSON from a node; always write a JSON file (even on error)
+# ============================================================================ #
+# collect_from_node                                                            #
+# Orchestrate client collection from a remote node. Tests reachability, SSH    #
+# connectivity, and executes remote collect_local_clients.sh. Always writes    #
+# a JSON output file (even on error) for unified result merging.               #
+# ============================================================================ #
 collect_from_node() {
   local node_ip="$1"
   local output_file="$2"
 
   info -c cli,vlan "→ Collecting from node $node_ip"
 
-  # Reachability
+  # Test ping reachability; if unreachable, write error JSON and return
   if ! ping -c 1 -W 3 "$node_ip" >/dev/null 2>&1; then
     warn -c cli,vlan "Node $node_ip is not reachable via ping"
     printf '{"router":"%s","error":"unreachable","vlans":[]}' "$node_ip" > "$output_file"
     return 1
   fi
 
-  # SSH
+  # Test SSH connectivity; if failed, write error JSON and return
   if ! test_ssh_connection "$node_ip"; then
     warn -c cli,vlan "SSH connection failed to $node_ip"
     printf '{"router":"%s","error":"ssh-failed","vlans":[]}' "$node_ip" > "$output_file"
     return 1
   fi
 
-  # Run remote collector and fetch JSON in one shot
-  # Path is the same as synced by actions/sync_nodes.sh: $[collect_local_clients.sh](http://_vscodecontentref_/2)
-  # Prefer local timeout if available, otherwise run without it (dbclient has its own ConnectTimeout)
+  # Run remote collector and fetch JSON in one shot via SSH
+  # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
+  # Prefer 'timeout' command if available to prevent hangs; otherwise rely on dbclient timeout
   if command -v timeout >/dev/null 2>&1; then
+    # timeout command available: use it to enforce TIMEOUT seconds limit
     if timeout "$TIMEOUT" dbclient -y -i "$SSH_KEY" "admin@$node_ip" \
          "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
          > "$output_file" 2>/dev/null; then
@@ -94,6 +124,7 @@ collect_from_node() {
       return 1
     fi
   else
+    # timeout not available; run without explicit timeout (dbclient has built-in ConnectTimeout)
     if dbclient -y -i "$SSH_KEY" "admin@$node_ip" \
          "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
          > "$output_file" 2>/dev/null; then
@@ -107,60 +138,101 @@ collect_from_node() {
   fi
 }
 
-# ---- main router JSON ----
+# ============================================================================ #
+#                         MAIN ROUTER COLLECTION                               #
+# Invoke collect_local_clients.sh locally to gather VLAN bridges and client    #
+# MAC addresses from the main router. Output written to temporary JSON file.   #
+# ============================================================================ #
+
 info -c cli,vlan "Collecting clients from main router (JSON)..."
 MAIN_JSON="$COLLECTDIR/main.json"
+
+# Call local collector; redirect output to CLI log channel
 if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" >>"$LOG_chan_cli" 2>&1; then
   info -c cli,vlan "✓ Main router collection completed"
 else
+  # Collector returned error; log failure code and write error JSON if file is empty
   rc=$?
   error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
   if [ ! -s "$MAIN_JSON" ]; then
+    # Write error JSON so result merging doesn't fail on missing file
     printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
   fi
 fi
 
-# ---- nodes ----
+# ============================================================================ #
+#                          NODE DISCOVERY & VALIDATION                         #
+# Check if nodes are configured in settings.json. Verify SSH keys are          #
+# installed and marked as enabled in configuration before attempting remote    #
+# collection from any nodes.                                                   #
+# ============================================================================ #
+
+# Extract configured node IPs from settings.json
 NODE_IPS=$(get_node_ips)
+
 if [ -z "$NODE_IPS" ]; then
+  # No nodes configured; collection will only include main router
   info -c cli,vlan "No nodes configured in settings.json"
   NODES_ENABLED=false
 else
+  # Nodes are configured; check prerequisites before attempting collection
   NODES_ENABLED=true
   info -c cli,vlan "Found configured nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
 
-  # Check SSH keys present and marked installed in hw_settings.json
+  # Verify SSH key files exist locally
   if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
     warn -c cli,vlan "SSH keys not found - only collecting from main router"
     NODES_ENABLED=false
+  # Verify SSH keys are marked as installed in general settings
   elif ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null; then
     warn -c cli,vlan "SSH keys not installed according to hw_settings.json"
     NODES_ENABLED=false
   fi
 fi
 
+# ============================================================================ #
+#                        PARALLEL NODE COLLECTION                              #
+# Spawn background collection jobs for each configured node. Run jobs in       #
+# parallel to minimize total time. Wait for all jobs to complete before        #
+# proceeding to result merging.                                                #
+# ============================================================================ #
+
 if [ "$NODES_ENABLED" = "true" ]; then
+  # Spawn collection background jobs for each node
   for node_ip in $NODE_IPS; do
     collect_from_node "$node_ip" "$COLLECTDIR/node_${node_ip}.json" &
   done
+  # Wait for all background collection jobs to complete
   info -c cli,vlan "Waiting for node collections to complete..."
   wait
   info -c cli,vlan "All node collections finished"
 fi
 
-# ---- merge to one JSON ----
+# ============================================================================ #
+#                          MERGE RESULTS TO JSON                               #
+# Combine main router and all node JSON files into a single result JSON.       #
+# Add timestamp and array wrapper. Clean up intermediate files.                #
+# ============================================================================ #
+
 info -c cli,vlan "Merging JSON results..."
+# Capture current timestamp in ISO 8601 format
 DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
 
+# Build final JSON structure with timestamp and array of node results
 {
   echo "{"
   echo "  \"generated\": \"$DATE_NOW\","
   echo "  \"nodes\": ["
 
+  # Track first entry to avoid trailing comma after last entry
   FIRST=1
+  # Iterate through all collected JSON files (main router + nodes)
   for json_file in "$COLLECTDIR/main.json" "$COLLECTDIR"/node_*.json; do
+    # Skip if file doesn't exist
     [ -f "$json_file" ] || continue
+    # Add comma separator between entries (not before first entry)
     if [ $FIRST -eq 1 ]; then FIRST=0; else echo ","; fi
+    # Indent and append JSON content (sed adds 4 spaces to each line)
     sed 's/^/    /' "$json_file"
   done
 
@@ -168,7 +240,13 @@ DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
   echo "}"
 } > "$OUT_FINAL"
 
-# Cleanup
+# ============================================================================ #
+#                            CLEANUP & COMPLETION                              #
+# Remove temporary collection directory and all intermediate JSON files.       #
+# Log final result location and exit successfully.                             #
+# ============================================================================ #
+
+# Remove temporary directory and all intermediate collection files
 rm -rf "$COLLECTDIR"
 
 info -c cli,vlan "✓ Client collection completed - JSON saved to $OUT_FINAL"

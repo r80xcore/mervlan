@@ -20,7 +20,16 @@
 
 source /usr/sbin/helper.sh
 
-# Folder and file paths
+# ========================================================================== #
+# CONFIGURATION PATHS & CONSTANTS — Source locations and workspace defaults  #
+# ========================================================================== #
+
+# GITHUB_URL — Tarball endpoint for fetching latest MerVLAN release snapshot
+# ADDON_DIR/ADDON/MERV_BASE — Install root beneath /jffs/addons
+# PUBLIC_DIR — Files exposed to web UI for SPA assets and JSON data
+# TMP_DIR/TMP — Workspace for transient downloads and log files
+# SETTINGS_FILE/GENERAL_SETTINGS_FILE — JSON configs used during install
+# BOOT_SCRIPT — Helper used for setupenable/nodeenable orchestration
 
 GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/main"
 ADDON_DIR="/jffs/addons"
@@ -33,6 +42,13 @@ SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 
+# ========================================================================== #
+# NODE & SSH STATE HELPERS — Detect existing node config and key installs    #
+# ========================================================================== #
+
+# has_configured_nodes — Report if any NODE1..NODE5 entries contain IPs
+# Returns: 0 when at least one valid IPv4 is present, 1 otherwise
+# Explanation: Allows installer to decide whether to call nodeenable later
 has_configured_nodes() {
     [ -f "$SETTINGS_FILE" ] || return 1
     local nodes
@@ -43,13 +59,22 @@ has_configured_nodes() {
     [ -n "$nodes" ]
 }
 
+# ssh_keys_installed — Check general.json flag indicating SSH setup complete
+# Returns: 0 if flag==1, 1 otherwise (missing file or value)
 ssh_keys_installed() {
     [ -f "$GENERAL_SETTINGS_FILE" ] || return 1
     grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
 }
 
-# Helpers Begin ------------------------------------------------------
+# ========================================================================== #
+# DOWNLOAD & BOOTSTRAP UTILITIES — Fetch repo and prepare fresh install      #
+# ========================================================================== #
 
+# download_mervlan — Retrieve tarball, extract, copy into $MERV_BASE
+# Args: none (uses global paths/URLs)
+# Returns: 0 on success, non-zero on download/extract failures
+# Explanation: Handles BusyBox quirks (tar -z support), ensures permissions,
+#   injects service-event hooks, and runs hardware probe on new installs
 download_mervlan() {
   set -e
     echo "[download_mervlan] start"
@@ -189,7 +214,13 @@ download_mervlan() {
 
 
 
-# Create directory function
+# ========================================================================== #
+# DIRECTORY & LOG SETUP — Ensure runtime paths exist with correct perms      #
+# ========================================================================== #
+
+# create_dirs — Prepare temp/log/public directories used by web UI & CLI
+# Returns: 0 on success, 1 on failure (logs error message)
+# Explanation: Creates shared folders for logs, results, and user-facing UI
 create_dirs() {
     local d
     for d in \
@@ -209,7 +240,9 @@ create_dirs() {
     done
 }
 
-# --- Create Project Dirs & Logs ---
+# create_dirs_first_install — Build addon skeleton under $MERV_BASE
+# Returns: 0 on success, 1 on failure
+# Explanation: Used for "full" mode to lay out initial folder hierarchy
 create_dirs_first_install() {
     # Create base addon directories inside MERV_BASE on first install
     local base d
@@ -229,7 +262,8 @@ create_dirs_first_install() {
     done
 }
 
-# Symlink function
+# create_link — Idempotent symlink helper for exposing logs/results via UI
+# Args: target, dest; recreates existing symlink if present
 create_link() {
     # create_link <target> <dest>
     local target="$1" dest="$2"
@@ -242,7 +276,8 @@ create_link() {
         return 1
     }
 }
-# Create log function
+# create_logs — Initialize log files with safe permissions
+# Explanation: Truncates/creates CLI and VLAN manager logs and sets modes
 create_logs() {
     : > "$TMP_DIR/logs/cli_output.log"    || { printf 'ERROR: Failed to init cli_output.log\n' >&2; return 1; }
     : > "$TMP_DIR/logs/vlan_manager.log"       || { printf 'ERROR: Failed to init vlan_manager.log\n' >&2; return 1; }
@@ -251,15 +286,22 @@ create_logs() {
     chmod 644 "$TMP_DIR/logs/cli_output.log" "$TMP_DIR/logs/vlan_manager.log"
 }
 
-# Helpers End --------------------------------------------------------
+# ========================================================================== #
+# INSTALL ENTRYPOINT — Support "full" bootstrap mode with download step     #
+# ========================================================================== #
 
 # Handle "full" install mode: first-install dirs + fetch latest, then continue
+# Full mode bootstraps directory skeleton and downloads the current package
 MODE="${1:-}"
 if [ "$MODE" = "full" ]; then
     logger -t "$ADDON" "Full install requested: creating base dirs and downloading package"
     create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
     download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
 fi
+
+# ========================================================================== #
+# CORE INSTALL FLOW — Validate firmware support and mount addon web page     #
+# ========================================================================== #
 
 # 1. Does the firmware support addons?
 nvram get rc_support | grep -q am_addons
@@ -271,6 +313,7 @@ fi
 # 2. Obtain the first available mount point into $am_webui_page
 am_get_webui_page "$ADDON_DIR/$ADDON/mervlan.asp"
 
+# Abort installation if router has no free user page slots available
 if [ "$am_webui_page" = "none" ]; then
     logger -t "$ADDON" "Unable to install $ADDON (no free user page)"
     exit 5
@@ -280,7 +323,12 @@ logger -t "$ADDON" "Mounting $ADDON as $am_webui_page"
 # 3. Publish our page to /www/user/<slot>.asp
 cp "$ADDON_DIR/$ADDON/mervlan.asp" "/www/user/$am_webui_page"
 
+# ========================================================================== #
+# FILE & ASSET PROVISIONING — Prepare runtime directories and static assets  #
+# ========================================================================== #
+
 # 3a. Create Project Dirs
+# Ensure runtime temp/log directories exist before exposing UI assets
 if create_dirs && create_logs; then
     logger -t "$ADDON" "Logs & folder structure complete!"
 else
@@ -317,6 +365,10 @@ logger -t "$ADDON" "Symlinks created successfully"
 echo "$ADDON" "Symlinks created successfully"
 
 
+# ========================================================================== #
+# ASUSWRT UI INTEGRATION — Modify menu tree and persist addon metadata       #
+# ========================================================================== #
+
 # 4. Copy menuTree.js (if not already bind-mounted) so we can modify it
 if [ ! -f /tmp/menuTree.js ]; then
     cp /www/require/modules/menuTree.js /tmp/
@@ -342,6 +394,10 @@ am_settings_set mervlan_version "v0.45"
 logger -t "$ADDON" "Installed tab 'VLAN' under Tools -> $am_webui_page"
 echo "$ADDON" "Installed tab 'VLAN' under Tools -> $am_webui_page"
 
+# ========================================================================== #
+# POST-INSTALL HOOKS — Ensure service scripts reachable and sync nodes       #
+# ========================================================================== #
+
 # Ensure boot/service-event hooks are present even on non-full installs
 if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
     if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1; then
@@ -353,6 +409,7 @@ else
     logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping post-install setupenable"
 fi
 
+# If nodes are configured and SSH keys are ready, propagate nodeenable now
 if has_configured_nodes && ssh_keys_installed; then
     if [ -x "$BOOT_SCRIPT" ]; then
         logger -t "$ADDON" "Propagating nodeenable to configured nodes"

@@ -28,31 +28,43 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 # =========================================== End of MerVLAN environment setup #
 
+# ============================================================================ #
+#                          INITIALIZATION & LOGGING                            #
+# Display welcome message and prepare for node execution. Log script           #
+# invocation for diagnostic purposes.                                          #
+# ============================================================================ #
+
 info -c cli,vlan "=== VLAN Manager Node Execution ==="
 info -c cli,vlan ""
 
+# ============================================================================ #
+#                         PRE-EXECUTION VALIDATION                             #
+# Verify that all required files and configurations are present and valid      #
+# before attempting to connect to or execute on any nodes. Abort if checks     #
+# fail to prevent partial or corrupted state.                                  #
+# ============================================================================ #
 
-# Check if settings file exists
+# Verify settings.json exists at expected location
 if [ ! -f "$SETTINGS_FILE" ]; then
     error -c cli,vlan "ERROR: Settings file not found at $SETTINGS_FILE"
     exit 1
 fi
 
-# Check if SSH keys are installed according to settings
+# Verify SSH keys are marked as installed in general.json
 if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE"; then
     error -c cli,vlan "ERROR: SSH keys are not installed according to general.json"
     warn -c cli,vlan "Please click on 'SSH Key Install' and follow the instructions"
     exit 1
 fi
 
-# Check if SSH key files exist
+# Verify SSH key pair files actually exist on filesystem
 if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
     error -c cli,vlan "ERROR: SSH key files not found"
     warn -c cli,vlan "Please run the SSH key generator first"
     exit 1
 fi
 
-# Check if public key is installed in /root/.ssh/authorized_keys
+# Verify public key is installed in authorized_keys on this router
 PUBKEY_CONTENT=$(cat "$SSH_PUBKEY")
 if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF "$PUBKEY_CONTENT" /root/.ssh/authorized_keys; then
     error -c cli,vlan "ERROR: SSH public key not found in /root/.ssh/authorized_keys"
@@ -63,8 +75,19 @@ fi
 
 info -c cli,vlan "✓ SSH key verification passed"
 
-# Get node IPs from settings.json
+# ============================================================================ #
+#                             HELPER FUNCTIONS                                 #
+# Utility functions for node discovery, SSH validation, JFFS verification,     #
+# settings synchronization, and remote VLAN manager execution.                 #
+# ============================================================================ #
+
+# ============================================================================ #
+# get_node_ips                                                                 #
+# Extract NODE1-NODE5 IP addresses from settings.json. Parse JSON format       #
+# and filter out "none" entries and invalid IP addresses.                      #
+# ============================================================================ #
 get_node_ips() {
+    # Extract NODE entries matching JSON "NODE[1-5]": "IP" format
     grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
     sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
     grep -v "none" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
@@ -72,6 +95,7 @@ get_node_ips() {
 
 NODE_IPS=$(get_node_ips)
 
+# Check if any nodes are configured
 if [ -z "$NODE_IPS" ]; then
     warn -c cli,vlan "No nodes configured in settings.json"
     exit 0
@@ -80,11 +104,16 @@ fi
 info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
 echo ""
 
-# Function to check if JFFS and JFFS scripts are enabled
+# ============================================================================ #
+# check_remote_jffs_status                                                     #
+# Query remote node's JFFS and JFFS scripts settings via SSH. Returns          #
+# status string "jffs2_on jffs2_scripts" or error code 2 on SSH failure.       #
+# ============================================================================ #
 check_remote_jffs_status() {
     local node_ip="$1"
     local output
 
+    # Execute remote nvram queries and capture output
     output=$(dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
@@ -92,16 +121,19 @@ check_remote_jffs_status() {
         return 2
     fi
 
+    # Extract first line (jffs2_on) and second line (jffs2_scripts); strip carriage returns
     local jffs_on
     local jffs_scripts
     jffs_on=$(echo "$output" | sed -n '1p' | tr -d '\r')
     jffs_scripts=$(echo "$output" | sed -n '2p' | tr -d '\r')
 
+    # Default to "0" (disabled) if empty
     [ -z "$jffs_on" ] && jffs_on="0"
     [ -z "$jffs_scripts" ] && jffs_scripts="0"
 
     printf '%s %s\n' "$jffs_on" "$jffs_scripts"
 
+    # Return success only if both are enabled ("1")
     if [ "$jffs_on" = "1" ] && [ "$jffs_scripts" = "1" ]; then
         return 0
     else
@@ -109,9 +141,14 @@ check_remote_jffs_status() {
     fi
 }
 
-# Function to test SSH connection to a node
+# ============================================================================ #
+# test_ssh_connection                                                          #
+# Verify SSH connectivity to a node using dropbear client. Attempts echo       #
+# command with timeout. Returns 0 if successful, 1 if connection fails.        #
+# ============================================================================ #
 test_ssh_connection() {
     local node_ip="$1"
+    # Attempt to SSH and run echo; grep for success string to verify connection
     if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
         return 0
     else
@@ -119,10 +156,16 @@ test_ssh_connection() {
     fi
 }
 
+# ============================================================================ #
+# ensure_jffs_ready                                                            #
+# Verify JFFS is enabled on the remote node. Abort with error if JFFS is not   #
+# fully enabled (indicates "Sync Nodes" must be run first).                    #
+# ============================================================================ #
 ensure_jffs_ready() {
     local node_ip="$1"
     local jffs_status
 
+    # Query JFFS status; success means both jffs2_on and jffs2_scripts are 1
     if jffs_status=$(check_remote_jffs_status "$node_ip"); then
         info -c cli,vlan "✓ JFFS already enabled on $node_ip"
         return 0
@@ -135,6 +178,7 @@ ensure_jffs_ready() {
         [ -z "$jffs_on" ] && jffs_on="0"
         [ -z "$jffs_scripts" ] && jffs_scripts="0"
 
+        # Status 1 means JFFS not fully enabled; status > 1 means SSH error
         if [ $status -eq 1 ]; then
             error -c cli,vlan "✗ JFFS is not fully enabled on $node_ip (jffs2_on=$jffs_on, jffs2_scripts=$jffs_scripts)"
             error -c cli,vlan '   "Sync Nodes" must be executed before multi-configuring nodes.'
@@ -146,6 +190,11 @@ ensure_jffs_ready() {
     fi
 }
 
+# ============================================================================ #
+# ensure_settings_conf_exists                                                  #
+# Verify that local settings.json exists before attempting to propagate it     #
+# to nodes. Abort if missing to prevent blank or corrupted node configs.       #
+# ============================================================================ #
 ensure_settings_conf_exists() {
     if [ ! -f "$SETTINGS_FILE" ]; then
         error -c cli,vlan "ERROR: settings.json not found at $SETTINGS_FILE"
@@ -154,10 +203,16 @@ ensure_settings_conf_exists() {
     return 0
 }
 
+# ============================================================================ #
+# ensure_remote_settings_dir                                                   #
+# Create settings directory on remote node via SSH. Required before copying    #
+# settings.json to node. Fails if directory creation fails.                    #
+# ============================================================================ #
 ensure_remote_settings_dir() {
     local node_ip="$1"
     local remote_dir="$SETTINGSDIR"
 
+    # Attempt to create settings directory on remote node
     if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
         info -c cli,vlan "✓ Ensured directory $remote_dir on $node_ip"
         return 0
@@ -167,6 +222,11 @@ ensure_remote_settings_dir() {
     fi
 }
 
+# ============================================================================ #
+# copy_settings_conf_to_node                                                   #
+# Transfer local settings.json to remote node's settings directory via SSH.    #
+# Uses atomic rename to avoid partial file reads. Logs all steps.              #
+# ============================================================================ #
 copy_settings_conf_to_node() {
     local node_ip="$1"
     local file_rel="settings/settings.json"
@@ -174,10 +234,12 @@ copy_settings_conf_to_node() {
 
     info -c cli,vlan "Copying $file_rel to $node_ip"
 
+    # Ensure remote directory exists before copying
     if ! ensure_remote_settings_dir "$node_ip"; then
         return 1
     fi
 
+    # Use cat pipe through SSH with atomic rename (write to .tmp then mv)
     if cat "$SETTINGS_FILE" | dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
         info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
         return 0
@@ -187,26 +249,36 @@ copy_settings_conf_to_node() {
     fi
 }
 
+# ============================================================================ #
+# verify_settings_conf_on_node                                                 #
+# Verify that settings.json was copied correctly to node. Check file exists,   #
+# compare file sizes, and validate MD5 checksums if available.                 #
+# ============================================================================ #
 verify_settings_conf_on_node() {
     local node_ip="$1"
     local remote_file="$MERV_BASE/settings/settings.json"
 
+    # Verify file exists on remote node
     if ! dbclient -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
         error -c cli,vlan "✗ settings.json not found on $node_ip at $remote_file"
         return 1
     fi
 
+    # Compare file sizes (local vs remote)
     local remote_size=$(dbclient -y -i "$SSH_KEY" "admin@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
     local local_size=$(stat -c%s "$SETTINGS_FILE" 2>/dev/null || wc -c < "$SETTINGS_FILE" 2>/dev/null || echo 0)
 
+    # Extract numeric values; strip any non-digit characters
     remote_size=$(echo "$remote_size" | tr -cd '0-9')
     local_size=$(echo "$local_size" | tr -cd '0-9')
 
+    # Fail if sizes don't match or file is empty
     if [ "$remote_size" -ne "$local_size" ] || [ "$remote_size" -eq 0 ]; then
         error -c cli,vlan "⚠️  Size mismatch for settings.json on $node_ip (local: $local_size, remote: $remote_size)"
         return 1
     fi
 
+    # Attempt MD5 checksum verification if md5sum/md5 available
     local local_md5=""
     local remote_md5=""
 
@@ -216,10 +288,12 @@ verify_settings_conf_on_node() {
         local_md5=$(md5 -r "$SETTINGS_FILE" 2>/dev/null | awk '{print $1}')
     fi
 
+    # If we have a local MD5, fetch remote MD5 and compare
     if [ -n "$local_md5" ]; then
         remote_md5=$(dbclient -y -i "$SSH_KEY" "admin@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
         remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
 
+        # Compare MD5s if remote MD5 was successfully computed
         if [ -n "$remote_md5" ] && [ "$remote_md5" != "NA" ]; then
             if [ "$local_md5" != "$remote_md5" ]; then
                 error -c cli,vlan "✗ MD5 mismatch for settings.json on $node_ip (local: $local_md5, remote: $remote_md5)"
@@ -230,21 +304,30 @@ verify_settings_conf_on_node() {
         fi
     fi
 
+    # If no MD5 available, consider verification complete based on size
     info -c cli,vlan "✓ Verified settings.json on $node_ip (size: $remote_size bytes)"
     return 0
 }
 
+# ============================================================================ #
+# sync_settings_conf_for_node                                                  #
+# Orchestrate settings synchronization for a single node. Check JFFS status,   #
+# copy settings.json, and verify successful transfer.                          #
+# ============================================================================ #
 sync_settings_conf_for_node() {
     local node_ip="$1"
 
+    # Verify JFFS is enabled on node (abort if not)
     if ! ensure_jffs_ready "$node_ip"; then
         return 1
     fi
 
+    # Copy local settings.json to remote node
     if ! copy_settings_conf_to_node "$node_ip"; then
         return 1
     fi
 
+    # Verify that settings.json transferred correctly
     if ! verify_settings_conf_on_node "$node_ip"; then
         return 1
     fi
@@ -252,19 +335,23 @@ sync_settings_conf_for_node() {
     return 0
 }
 
-# Ensure local settings.json exists before proceeding
+# Verify local settings.json exists before proceeding with any node operations
 if ! ensure_settings_conf_exists; then
     exit 1
 fi
 
-# Function to execute VLAN manager on a node
+# ============================================================================ #
+# execute_vlan_manager_on_node                                                 #
+# Invoke mervlan_manager.sh on a remote node via SSH. Logs all steps and       #
+# captures output. Returns 0 on success, 1 on failure.                         #
+# ============================================================================ #
 execute_vlan_manager_on_node() {
     local node_ip="$1"
     local remote_vlan_manager="$MERV_BASE/functions/mervlan_manager.sh"
     
     info -c cli,vlan "Executing VLAN manager on $node_ip..."
     
-    # Execute the VLAN manager script on the remote node
+    # Change to MERV_BASE and execute mervlan_manager.sh on remote node
     if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd $MERV_BASE && $remote_vlan_manager" 2>/dev/null; then
         info -c cli,vlan "✓ Successfully executed VLAN manager on $node_ip"
         return 0
@@ -274,21 +361,26 @@ execute_vlan_manager_on_node() {
     fi
 }
 
-# Main execution process
+# ============================================================================ #
+#                      MAIN NODE EXECUTION LOOP                                #
+# Iterate through all configured nodes. For each node, test connectivity,      #
+# verify SSH, synchronize settings, and execute VLAN manager remotely.         #
+# ============================================================================ #
+
 info -c cli,vlan "Starting VLAN manager execution on nodes..."
 overall_success=true
 
 for node_ip in $NODE_IPS; do
     info -c cli,vlan "Processing node: $node_ip"
     
-    # Test connectivity
+    # Test ping reachability; skip node if unreachable
     if ! ping -c 1 -W 2 "$node_ip" >/dev/null 2>&1; then
         error -c cli,vlan "✗ Node $node_ip is not reachable via ping"
         overall_success=false
         continue
     fi
     
-    # Test SSH connection
+    # Test SSH connectivity; skip node if SSH fails
     if ! test_ssh_connection "$node_ip"; then
         error -c cli,vlan "✗ SSH connection failed to $node_ip"
         info -c cli,vlan "   Check if SSH key is properly installed on the node"
@@ -298,13 +390,13 @@ for node_ip in $NODE_IPS; do
     
     info -c cli,vlan "✓ SSH connection successful to $node_ip"
 
-    # Ensure JFFS and synchronize settings.json before execution
+    # Verify JFFS and copy settings.json to node
     if ! sync_settings_conf_for_node "$node_ip"; then
         overall_success=false
         continue
     fi
     
-    # Execute VLAN manager on the node
+    # Execute VLAN manager on the remote node
     if ! execute_vlan_manager_on_node "$node_ip"; then
         overall_success=false
     fi
@@ -313,9 +405,15 @@ for node_ip in $NODE_IPS; do
     echo ""
 done
 
-# Execute on main router after nodes
+# ============================================================================ #
+#                     EXECUTE ON MAIN ROUTER                                   #
+# After all nodes have been configured, run VLAN manager on main router        #
+# to apply the final consolidated settings.                                    #
+# ============================================================================ #
+
 info -c cli,vlan "Executing VLAN manager on main router..."
 local_success=true
+# Execute local VLAN manager script and capture output to CLI log
 if "$ACTDIR/run_vlan.sh" >> "$CLI_LOG" 2>&1; then
   info -c cli,vlan "✓ Successfully executed VLAN manager on main router"
   local_success=true
@@ -324,7 +422,12 @@ else
   local_success=false
 fi
 
-# Summary
+# ============================================================================ #
+#                        EXECUTION SUMMARY                                     #
+# Report overall success or failure based on node and main router execution    #
+# results. Exit with appropriate code (0=success, 1=failure).                  #
+# ============================================================================ #
+
 info -c cli,vlan "=== Execution Summary ==="
 
 if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then

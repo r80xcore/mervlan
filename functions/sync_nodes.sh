@@ -27,7 +27,12 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 # =========================================== End of MerVLAN environment setup #
 
-# ================================================= File Synchronization Setup #
+# ========================================================================== #
+# FILE SYNC SETUP — Source/destination lists and synchronization parameters  #
+# ========================================================================== #
+
+# FILES_TO_COPY — Files to replicate to each node (preserves folder structure)
+# Includes settings, shell helpers, and service templates required for MerVLAN
 FILES_TO_COPY="
 settings/settings.json 
 settings/hw_settings.json 
@@ -43,50 +48,60 @@ settings/service-event-nodes.tpl
 settings/services-start-addon.tpl
 "
 
+# FILES_TO_COPY_CHMOD — Files requiring executable permissions on nodes (755)
 FILES_TO_COPY_CHMOD="
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh
 functions/collect_local_clients.sh
 functions/heal_event.sh
 "
+# FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
 FILES_TO_COPY_CHMOD_644="settings/var_settings.sh settings/log_settings.sh"
 
-# ================================================================== Debugging #
+# ========================================================================== #
+# SYNCHRONIZATION PARAMETERS — Debug toggles and SSH retry behaviour         #
+# ========================================================================== #
+
+# SYNC_DEBUG_PRE/POST toggle verbose remote listings (before/after copy)
 SYNC_DEBUG_PRE="${SYNC_DEBUG_PRE:-0}"
 SYNC_DEBUG_POST="${SYNC_DEBUG_POST:-1}"
-# ============================================================= SSH Parameters #
+# Ping/SSH retry windows allow nodes time to boot and expose services
 PING_MAX_ATTEMPTS="${PING_MAX_ATTEMPTS:-60}"
 PING_RETRY_INTERVAL="${PING_RETRY_INTERVAL:-5}"
 SSH_MAX_ATTEMPTS="${SSH_MAX_ATTEMPTS:-60}"
 SSH_RETRY_INTERVAL="${SSH_RETRY_INTERVAL:-5}"
+# Extra settle period after ping success so daemons can come online
 PING_STABILIZE_DELAY="${PING_STABILIZE_DELAY:-10}"
-# =============================================================End of Settings #
+
+# ========================================================================== #
+# PRE-FLIGHT VALIDATION — Ensure local configuration and SSH keys are ready  #
+# ========================================================================== #
 
 info -c cli,vlan "=== VLAN Manager File Synchronization ==="
 info -c cli,vlan ""
 
-
-# Check if settings file exists
+# Check if settings file exists (required for node discovery and file paths)
 if [ ! -f "$SETTINGS_FILE" ]; then
     error -c cli,vlan "ERROR: Settings file not found at $SETTINGS_FILE"
     exit 1
 fi
 
-# Check if SSH keys are installed according to settings
+# Validate UI flag indicating SSH keys were installed by the user
 if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE"; then
     error -c cli,vlan "ERROR: SSH keys are not installed according to general.json"
     warn -c cli,vlan "Please click on 'SSH Key Install' and follow the instructions"
     exit 1
 fi
 
-# Check if SSH key files exist
+# Verify private/public key files exist on router before contacting nodes
 if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
     error -c cli,vlan "ERROR: SSH key files not found"
     warn -c cli,vlan "Please run the SSH key generator first"
     exit 1
 fi
 
-# Check if public key is installed in /root/.ssh/authorized_keys
+# Confirm server-side authorized_keys includes generated public key
+# Without this, Dropbear rejects key-based logins during sync
 PUBKEY_CONTENT=$(cat "$SSH_PUBKEY")
 if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF "$PUBKEY_CONTENT" /root/.ssh/authorized_keys; then
     error -c cli,vlan "ERROR: SSH public key not found in /root/.ssh/authorized_keys"
@@ -97,7 +112,11 @@ fi
 
 info -c cli,vlan "✓ SSH key verification passed"
 
-# Get node IPs from settings.json
+# ========================================================================== #
+# NODE DISCOVERY — Extract and validate node IP addresses from settings      #
+# ========================================================================== #
+
+# get_node_ips — Pull NODE1..NODE5 entries, filter placeholders/invalid IPs
 get_node_ips() {
     grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
     sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
@@ -114,7 +133,11 @@ fi
 info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
 echo ""
 
-# Function to test SSH connection to a node
+# ========================================================================== #
+# SSH & JFFS HELPERS — Connectivity tests and persistent storage checks     #
+# ========================================================================== #
+
+# test_ssh_connection — Probe Dropbear SSH connectivity using key auth only
 test_ssh_connection() {
     local node_ip="$1"
     if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
@@ -124,7 +147,7 @@ test_ssh_connection() {
     fi
 }
 
-# Function to check if JFFS and JFFS scripts are enabled
+# check_remote_jffs_status — Inspect nvram flags controlling persistent storage
 check_remote_jffs_status() {
     local node_ip="$1"
     local output
@@ -153,7 +176,11 @@ check_remote_jffs_status() {
     fi
 }
 
-# Function to enable JFFS, commit, and reboot the node
+# ========================================================================== #
+# JFFS REMEDIATION — Enable persistent storage and wait for reboot cycle     #
+# ========================================================================== #
+
+# enable_jffs_and_reboot — Toggle nvram flags, commit, and trigger reboot
 enable_jffs_and_reboot() {
     local node_ip="$1"
 
@@ -173,7 +200,7 @@ enable_jffs_and_reboot() {
     fi
 }
 
-# Wait for ping response after reboot
+# wait_for_node_ping — Poll reachability until ICMP responds or we give up
 wait_for_node_ping() {
     local node_ip="$1"
     local attempt=0
@@ -197,7 +224,7 @@ wait_for_node_ping() {
     return 1
 }
 
-# Wait for SSH readiness and /jffs availability
+# wait_for_node_ssh_jffs — Ensure SSH responds and /jffs mount is ready
 wait_for_node_ssh_jffs() {
     local node_ip="$1"
     local attempt=0
@@ -217,7 +244,7 @@ wait_for_node_ssh_jffs() {
     return 1
 }
 
-# Ensure JFFS is enabled before proceeding with synchronization
+# ensure_jffs_ready — Verify or remediate JFFS status before file sync
 ensure_jffs_ready() {
     local node_ip="$1"
     local jffs_status
@@ -268,7 +295,11 @@ ensure_jffs_ready() {
     fi
 }
 
-# Function to create remote directory structure for a specific file
+# ========================================================================== #
+# FILE OPERATIONS — Directory creation, copy, verification, permissions      #
+# ========================================================================== #
+
+# create_remote_dirs_for_file — Ensure remote path exists before copy
 create_remote_dirs_for_file() {
     local node_ip="$1"
     local file="$2"
@@ -290,7 +321,7 @@ create_remote_dirs_for_file() {
     return 0
 }
 
-# Function to copy file to node while preserving folder structure
+# copy_file_to_node — Stream file via SSH, using atomic temp file replacement
 copy_file_to_node() {
     local node_ip="$1"
     local file="$2"
@@ -311,7 +342,7 @@ copy_file_to_node() {
     fi
 }
 
-# Function to verify file on node with correct path
+# verify_file_on_node — Confirm remote file exists, matches size/optional hash
 verify_file_on_node() {
     local node_ip="$1"
     local file="$2"
@@ -364,7 +395,7 @@ verify_file_on_node() {
     fi
 }
 
-# Function to set permissions on remote files
+# set_remote_permissions — Apply 755 to scripts that must be executable
 set_remote_permissions() {
     local node_ip="$1"
     local file="$2"
@@ -379,7 +410,7 @@ set_remote_permissions() {
     fi
 }
 
-# Set remote permissions to 644 (rw-r--r--)
+# set_remote_permissions_644 — Ensure sourced configs stay non-executable
 set_remote_permissions_644() {
     local node_ip="$1"
     local file="$2"
@@ -394,7 +425,11 @@ set_remote_permissions_644() {
     fi
 }
 
-# Function to debug remote file system (BusyBox-safe, no find -exec)
+# ========================================================================== #
+# DEBUG UTILITIES — Optional verbose listing during troubleshooting          #
+# ========================================================================== #
+
+# debug_remote_files — Recursively list remote MerVLAN directory contents
 debug_remote_files() {
     local node_ip="$1"
     local stage="$2"  # optional: before | after
@@ -410,7 +445,10 @@ debug_remote_files() {
     info -c cli "Debugging completed on $node_ip${stage:+ ($stage)}"
 }
 
-# Main synchronization process
+# ========================================================================== #
+# MAIN SYNCHRONIZATION LOOP — Iterate nodes and orchestrate copy workflow    #
+# ========================================================================== #
+
 info -c cli,vlan "Starting file synchronization..."
 overall_success=true
 
@@ -521,7 +559,10 @@ else
     warn -c cli,vlan "⚠️  Nodeenable reported issues; review logs for details"
 fi
 
-# Summary
+# ========================================================================== #
+# SUMMARY & EXIT — Report overall status and exit with success/failure       #
+# ========================================================================== #
+
 info -c cli,vlan "=== Synchronization Complete ==="
 
 if [ "$overall_success" = "true" ]; then
