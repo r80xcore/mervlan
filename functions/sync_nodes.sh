@@ -478,13 +478,14 @@ for node_ip in $NODE_IPS; do
         continue
     fi
     
-    # Create base remote directory structure
-    if ! dbclient -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$MERV_BASE'" 2>/dev/null; then
-        error -c cli,vlan "✗ Failed to create base directory $MERV_BASE on $node_ip"
+    # Create base remote directories (addon path + runtime folders)
+    remote_mkdir_cmd="mkdir -p '$MERV_BASE' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
+    if ! dbclient -y -i "$SSH_KEY" "admin@$node_ip" "$remote_mkdir_cmd" 2>/dev/null; then
+        error -c cli,vlan "✗ Failed to create required directories on $node_ip"
         overall_success=false
         continue
     else
-        info -c cli,vlan "✓ Ensured base directory $MERV_BASE on $node_ip"
+        info -c cli,vlan "✓ Ensured remote directories on $node_ip: $MERV_BASE, $TMPDIR, $LOGDIR, $LOCKDIR, $RESULTDIR, $CHANGES, $COLLECTDIR"
     fi
     
     # Debug: show remote directory before copying (optional)

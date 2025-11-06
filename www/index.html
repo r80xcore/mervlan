@@ -1021,7 +1021,8 @@ function queueServiceAction(actionScriptName, opts = {}) {
         button = null,
         description = actionScriptName,
         cooldownMs = 8000,
-        afterSubmit
+        afterSubmit,
+        parentOpts
     } = opts;
 
     const handler = async () => {
@@ -1032,22 +1033,20 @@ function queueServiceAction(actionScriptName, opts = {}) {
         appendCliText(`\n[${timestamp}] Queued action: ${description}\n`, { scroll: 'force' });
         lastLogText = "";
 
-    if (window.parent) {
-      if (typeof window.parent.MVM_trigger === "function") {
-        window.parent.MVM_trigger(actionScriptName);
-      } else if (typeof window.parent.MVM_exec === "function") {
-        window.parent.MVM_exec(actionScriptName, null);
-      } else {
-        appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
-        return;
-      }
-            if (typeof afterSubmit === "function") {
-                try { afterSubmit(); } catch (err) { console.error(err); }
-            }
-            startPolling();
+        const parentWin = window.parent;
+        if (parentWin && typeof parentWin.MVM_trigger === "function") {
+            parentWin.MVM_trigger(actionScriptName, parentOpts);
+        } else if (parentWin && typeof parentWin.MVM_exec === "function") {
+            parentWin.MVM_exec(actionScriptName, null, parentOpts);
         } else {
-      appendCliText(`[${new Date().toLocaleString()}] Parent window unavailable for ${description}.\n`, { scroll: 'force' });
+            appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
+            return;
         }
+
+        if (typeof afterSubmit === "function") {
+            try { afterSubmit(); } catch (err) { console.error(err); }
+        }
+        startPolling();
     };
 
     return withActionLock(actionScriptName, handler, cooldownMs);
@@ -1108,7 +1107,7 @@ async function runVlanManagerLocal() {
 // Run VLAN Manager with nodes
 async function runVlanManagerWithNodes() {
   document.getElementById('vlanManagerModal').style.display = 'none';
-  return queueServiceAction('sync_vlanmgr', {
+  return queueServiceAction('executenodes_vlanmgr', {
     description: 'Run VLAN Manager + Nodes',
     cooldownMs: 8000
   });

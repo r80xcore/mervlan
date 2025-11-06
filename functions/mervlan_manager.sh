@@ -152,8 +152,6 @@ wait_for_interface() {
   return 1
 }
 
-}
-
 # ========================================================================== #
 # CORE VLAN FUNCTIONS — Bridge management, VLAN creation, interface attachment  #
 # ========================================================================== #
@@ -597,8 +595,6 @@ restart_services() {
   fi
 }
 
-}
-
 # ========================================================================== #
 # MAIN EXECUTION — Orchestrate VLAN configuration application flow           #
 # ========================================================================== #
@@ -684,6 +680,20 @@ main() {
 
   # Summary: display final configuration status
   show_configuration_summary
+
+  if [ -x "$FUNCDIR/collect_clients.sh" ]; then
+    info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
+    sleep 5
+    info -c cli,vlan "Refreshing VLAN client list via collect_clients.sh"
+    if "$FUNCDIR/collect_clients.sh"; then
+      info -c cli,vlan "✓ VLAN client list refresh completed"
+    else
+      rc=$?
+      warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
+    fi
+  else
+    warn -c cli,vlan "collect_clients.sh not found; skipping client refresh"
+  fi
 }
 
 # Entry point: call main with command-line arguments

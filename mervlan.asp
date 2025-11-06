@@ -68,7 +68,8 @@ function showLoadingSafe() {
  * Execute a backend action with optional UI and behavior controls.
  * @param {string} actionScriptName - backend script (e.g., "sync_vlanmgr")
  * @param {?object} settingsObjOrNull - JSON payload for amng_custom
- * @param {?object} opts - { loading?: boolean, waitSec?: number, target?: string }
+ * @param {?object} opts - { loading?: boolean, waitSec?: number, target?: string,
+ *                           skipRefresh?: boolean }
  */
 function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   opts = opts || {};
@@ -103,8 +104,47 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     actionWaitField.value = String((opts.waitSec != null) ? opts.waitSec : 5);
     actionWaitField.setAttribute("value", actionWaitField.value);
   }
-  document.form.target = opts.target || "hidden_frame";
-  document.form.setAttribute("target", document.form.target);
+
+  var skipRefresh = !!opts.skipRefresh;
+  if (skipRefresh) {
+    // Minimize any server-side wait UI when we plan to suppress refresh
+    if (actionWaitField) {
+      actionWaitField.value = "0";
+      actionWaitField.setAttribute("value", "0");
+    }
+  }
+
+  var orig = {
+    refresh_self: (typeof window.refreshpage !== "undefined") ? window.refreshpage : undefined,
+    redirect_self: (typeof window.redirect_page !== "undefined") ? window.redirect_page : undefined,
+    refresh_parent: (window.parent && window.parent !== window && typeof window.parent.refreshpage !== "undefined") ? window.parent.refreshpage : undefined,
+    redirect_parent: (window.parent && window.parent !== window && typeof window.parent.redirect_page !== "undefined") ? window.parent.redirect_page : undefined
+  };
+
+  if (skipRefresh) {
+    try {
+      if (document.form.next_page) {
+        document.form.next_page.value = "";
+      }
+    } catch (e) {}
+
+    window.refreshpage = function() {};
+    window.redirect_page = function() {};
+
+    if (window.parent && window.parent !== window) {
+      try { window.parent.refreshpage = function() {}; } catch (e) {}
+      try { window.parent.redirect_page = function() {}; } catch (e2) {}
+    }
+  }
+
+  if (skipRefresh) {
+    var sbox = mvmEnsureSandboxFrame();
+    document.form.target = sbox.name;
+    document.form.setAttribute("target", sbox.name);
+  } else {
+    document.form.target = opts.target || "hidden_frame";
+    document.form.setAttribute("target", document.form.target);
+  }
 
   var wantLoading = (opts.loading !== false);
   if (wantLoading) {
@@ -114,73 +154,183 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   }
 
   // Keep overlay hidden if we opted out of loading feedback
-  if (!wantLoading) {
-    var hf = document.getElementById("hidden_frame");
-    if (hf) {
-      var oneShot = function() {
-        if (hf.removeEventListener) {
-          hf.removeEventListener("load", oneShot);
-        } else if (hf.detachEvent) {
-          hf.detachEvent("onload", oneShot);
-        }
-        hideLoadingSafe();
-      };
-      if (hf.addEventListener) {
-        hf.addEventListener("load", oneShot);
-      } else if (hf.attachEvent) {
-        hf.attachEvent("onload", oneShot);
+  var targetFrameId = skipRefresh ? "mvm_sandbox_iframe" : (document.form.target || "hidden_frame");
+  var tf = document.getElementById(targetFrameId);
+  if (tf) {
+    var oneShot = function() {
+      if (tf.removeEventListener) {
+        tf.removeEventListener("load", oneShot);
+      } else if (tf.detachEvent) {
+        tf.detachEvent("onload", oneShot);
       }
+      hideLoadingSafe();
+      if (skipRefresh) {
+        if (typeof orig.refresh_self !== "undefined") {
+          window.refreshpage = orig.refresh_self;
+        } else {
+          try { delete window.refreshpage; } catch (e) { window.refreshpage = undefined; }
+        }
+
+        if (typeof orig.redirect_self !== "undefined") {
+          window.redirect_page = orig.redirect_self;
+        } else {
+          try { delete window.redirect_page; } catch (e2) { window.redirect_page = undefined; }
+        }
+
+        if (window.parent && window.parent !== window) {
+          try {
+            if (typeof orig.refresh_parent !== "undefined") {
+              window.parent.refreshpage = orig.refresh_parent;
+            } else {
+              window.parent.refreshpage = undefined;
+            }
+          } catch (e3) {}
+
+          try {
+            if (typeof orig.redirect_parent !== "undefined") {
+              window.parent.redirect_page = orig.redirect_parent;
+            } else {
+              window.parent.redirect_page = undefined;
+            }
+          } catch (e4) {}
+        }
+        mvmRemoveSandboxFrame();
+      } else if (!wantLoading) {
+        hideLoadingSafe();
+      }
+    };
+    if (tf.addEventListener) {
+      tf.addEventListener("load", oneShot);
+    } else if (tf.attachEvent) {
+      tf.attachEvent("onload", oneShot);
     }
+  } else if (skipRefresh) {
+    if (typeof orig.refresh_self !== "undefined") {
+      window.refreshpage = orig.refresh_self;
+    } else {
+      try { delete window.refreshpage; } catch (e) { window.refreshpage = undefined; }
+    }
+
+    if (typeof orig.redirect_self !== "undefined") {
+      window.redirect_page = orig.redirect_self;
+    } else {
+      try { delete window.redirect_page; } catch (e2) { window.redirect_page = undefined; }
+    }
+
+    if (window.parent && window.parent !== window) {
+      try {
+        if (typeof orig.refresh_parent !== "undefined") {
+          window.parent.refreshpage = orig.refresh_parent;
+        } else {
+          window.parent.refreshpage = undefined;
+        }
+      } catch (e3) {}
+
+      try {
+        if (typeof orig.redirect_parent !== "undefined") {
+          window.parent.redirect_page = orig.redirect_parent;
+        } else {
+          window.parent.redirect_page = undefined;
+        }
+      } catch (e4) {}
+    }
+    mvmRemoveSandboxFrame();
   }
 
   document.form.submit();
 }
+</script>
 
-/* Wrapper helpers — pass opts (loading/waitSec/target) to customize behavior */
-function MVM_save(settingsObj, opts)         { MVM_exec("save_vlanmgr",          settingsObj, opts); }
-function MVM_trigger(actionScriptName, opts) { MVM_exec(actionScriptName,        null,        opts); }
-function MVM_apply(opts)                     { MVM_exec("apply_vlanmgr",         null,        opts); }
-function MVM_sync(opts)                      { MVM_exec("sync_vlanmgr",          null,        opts); }
-function MVM_genkey(opts)                    { MVM_exec("genkey_vlanmgr",        null,        opts); }
-function MVM_enableService(opts)             { MVM_exec("enableservice_vlanmgr", null,        opts); }
-function MVM_disableService(opts)            { MVM_exec("disableservice_vlanmgr",null,        opts); }
-function MVM_checkService(opts)              { MVM_exec("checkservice_vlanmgr",  null,        opts); }
-function MVM_collectClients(opts)            { MVM_exec("collectclients_vlanmgr",null,        opts); }
-
-/* Usage examples:
- *   MVM_sync();                                   // overlay + 5s wait (default)
- *   MVM_sync({ loading: true, waitSec: 30 });      // heavy job, longer wait
- *   MVM_checkService({ loading: false, waitSec: 0 }); // quick status, no overlay
- */
-
-// Optional policy map: entries default to no overlay + instant completion
-var MVM_NO_LOADING = {
-  checkservice_vlanmgr: true,
-  collectclients_vlanmgr: true
-};
-
-// Policy-aware entry point: merges defaults with per-call overrides
-function MVM_execPolicy(actionScriptName, settingsObjOrNull, overrideOpts) {
-  var noLoad = !!MVM_NO_LOADING[actionScriptName];
-  var defaults = {
-    loading: !noLoad,
-    waitSec: noLoad ? 0 : 5,
-    target: "hidden_frame"
-  };
-
-  if (overrideOpts) {
-    if (Object.prototype.hasOwnProperty.call(overrideOpts, "loading")) {
-      defaults.loading = overrideOpts.loading;
-    }
-    if (Object.prototype.hasOwnProperty.call(overrideOpts, "waitSec")) {
-      defaults.waitSec = overrideOpts.waitSec;
-    }
-    if (Object.prototype.hasOwnProperty.call(overrideOpts, "target")) {
-      defaults.target = overrideOpts.target;
-    }
+<script type="text/javascript">
+function mvmEnsureSandboxFrame() {
+  var id = "mvm_sandbox_iframe";
+  var s = document.getElementById(id);
+  if (s) {
+    return s;
   }
 
-  MVM_exec(actionScriptName, settingsObjOrNull, defaults);
+  s = document.createElement("iframe");
+  s.id = id;
+  s.name = id;
+  s.setAttribute("sandbox", "allow-forms allow-scripts");
+  s.style.width = "0";
+  s.style.height = "0";
+  s.style.border = "0";
+  s.style.position = "absolute";
+  s.style.left = "-99999px";
+  document.body.appendChild(s);
+  return s;
+}
+function mvmRemoveSandboxFrame() {
+  var s = document.getElementById("mvm_sandbox_iframe");
+  if (s && s.parentNode) {
+    s.parentNode.removeChild(s);
+  }
+}
+</script>
+
+<script type="text/javascript">
+/* === Policy lines you edit === */
+const MVM_NO_REFRESH = new Set([
+  // Actions that must NOT refresh the page after running:
+  // "save_vlanmgr",
+  "collectclients_vlanmgr",
+  "sync_vlanmgr",
+  "apply_vlanmgr",
+  "genkey_vlanmgr",
+  // "checkservice_vlanmgr",
+  // "collectclients_vlanmgr",
+]);
+
+const MVM_NO_LOADING = new Set([
+  // Actions that should NOT show the loading overlay:
+  // "checkservice_vlanmgr",
+  // "collectclients_vlanmgr",
+]);
+
+// Optional: actions that need a longer/shorter wait (seconds)
+const MVM_WAIT_OVERRIDE = {
+  // "sync_vlanmgr": 30,
+  // "apply_vlanmgr": 20,
+};
+
+/* Build final opts for an action using the policy + any per-call override */
+function mvmOptsFor(actionName, overrideOpts) {
+  const opts = {
+    loading: !MVM_NO_LOADING.has(actionName),
+    skipRefresh: MVM_NO_REFRESH.has(actionName),
+    waitSec: (Object.prototype.hasOwnProperty.call(MVM_WAIT_OVERRIDE, actionName)
+              ? MVM_WAIT_OVERRIDE[actionName]
+              : 5),
+    target: "hidden_frame",
+  };
+  if (overrideOpts && typeof overrideOpts === "object") {
+    // Let buttons override anything ad-hoc
+    if ("loading" in overrideOpts)     opts.loading = overrideOpts.loading;
+    if ("skipRefresh" in overrideOpts) opts.skipRefresh = overrideOpts.skipRefresh;
+    if ("waitSec" in overrideOpts)     opts.waitSec = overrideOpts.waitSec;
+    if ("target" in overrideOpts)      opts.target = overrideOpts.target;
+  }
+  return opts;
+}
+
+/* === Wrapper helpers (policy-aware) ===
+   You keep calling these from your buttons,
+   and you ONLY edit the sets/maps above. */
+function MVM_save(settingsObj, opts)         { return MVM_exec("save_vlanmgr",          settingsObj, mvmOptsFor("save_vlanmgr",          opts)); }
+function MVM_trigger(actionScriptName, opts) { return MVM_exec(actionScriptName,        null,        mvmOptsFor(actionScriptName,        opts)); }
+function MVM_apply(opts)                     { return MVM_exec("apply_vlanmgr",         null,        mvmOptsFor("apply_vlanmgr",         opts)); }
+function MVM_sync(opts)                      { return MVM_exec("sync_vlanmgr",          null,        mvmOptsFor("sync_vlanmgr",          opts)); }
+function MVM_executeNodes(opts)              { return MVM_exec("executenodes_vlanmgr",  null,        mvmOptsFor("executenodes_vlanmgr",  opts)); }
+function MVM_genkey(opts)                    { return MVM_exec("genkey_vlanmgr",        null,        mvmOptsFor("genkey_vlanmgr",        opts)); }
+function MVM_enableService(opts)             { return MVM_exec("enableservice_vlanmgr", null,        mvmOptsFor("enableservice_vlanmgr", opts)); }
+function MVM_disableService(opts)            { return MVM_exec("disableservice_vlanmgr",null,        mvmOptsFor("disableservice_vlanmgr",opts)); }
+function MVM_checkService(opts)              { return MVM_exec("checkservice_vlanmgr",  null,        mvmOptsFor("checkservice_vlanmgr",  opts)); }
+function MVM_collectClients(opts)            { return MVM_exec("collectclients_vlanmgr",null,        mvmOptsFor("collectclients_vlanmgr",opts)); }
+
+// Convenience helper for silent saves invoked from the embedded SPA
+function MVM_save_quiet(settingsObj) {
+  return MVM_save(settingsObj, { loading: false, waitSec: 0, skipRefresh: true });
 }
 </script>
 </head>

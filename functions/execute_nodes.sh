@@ -347,16 +347,34 @@ fi
 # ============================================================================ #
 execute_vlan_manager_on_node() {
     local node_ip="$1"
-    local remote_vlan_manager="$MERV_BASE/functions/mervlan_manager.sh"
+    local remote_vlan_manager
+    remote_vlan_manager="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
     
     info -c cli,vlan "Executing VLAN manager on $node_ip..."
-    
-    # Change to MERV_BASE and execute mervlan_manager.sh on remote node
-    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd $MERV_BASE && $remote_vlan_manager" 2>/dev/null; then
+
+    # Ensure the script exists on the remote node before attempting execution
+    if ! dbclient -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_vlan_manager'" 2>/dev/null; then
+        error -c cli,vlan "✗ VLAN manager script missing on $node_ip at $remote_vlan_manager"
+        warn  -c cli,vlan "   Run 'Sync Nodes' to deploy the addon before executing nodes"
+        return 1
+    fi
+
+    # Execute the remote script and capture its output for logging/diagnostics
+    local output
+    output=$(dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
+    local rc=$?
+
+    if [ $rc -eq 0 ]; then
         info -c cli,vlan "✓ Successfully executed VLAN manager on $node_ip"
+        if [ -n "$output" ]; then
+            printf '%s\n' "$output" >>"$CLI_LOG"
+        fi
         return 0
     else
-        error -c cli,vlan "✗ Failed to execute VLAN manager on $node_ip"
+        error -c cli,vlan "✗ Failed to execute VLAN manager on $node_ip (rc=$rc)"
+        if [ -n "$output" ]; then
+            printf '%s\n' "$output" >>"$CLI_LOG"
+        fi
         return 1
     fi
 }
@@ -413,13 +431,20 @@ done
 
 info -c cli,vlan "Executing VLAN manager on main router..."
 local_success=true
-# Execute local VLAN manager script and capture output to CLI log
-if "$ACTDIR/run_vlan.sh" >> "$CLI_LOG" 2>&1; then
-  info -c cli,vlan "✓ Successfully executed VLAN manager on main router"
-  local_success=true
+local local_script
+local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
+
+if [ ! -f "$local_script" ]; then
+    error -c cli,vlan "✗ Local VLAN manager script missing at $local_script"
+    local_success=false
 else
-  error -c cli,vlan "✗ Failed to execute VLAN manager on main router"
-  local_success=false
+    if sh "$local_script" >>"$CLI_LOG" 2>&1; then
+        info -c cli,vlan "✓ Successfully executed VLAN manager on main router"
+        local_success=true
+    else
+        error -c cli,vlan "✗ Failed to execute VLAN manager on main router"
+        local_success=false
+    fi
 fi
 
 # ============================================================================ #
