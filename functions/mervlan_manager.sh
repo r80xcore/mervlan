@@ -692,7 +692,7 @@ main() {
       warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
     fi
   else
-    warn -c cli,vlan "collect_clients.sh not found; skipping client refresh"
+    info -c cli,vlan "this is a node; skipping client refresh"
   fi
 }
 
