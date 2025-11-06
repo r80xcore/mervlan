@@ -226,7 +226,10 @@ create_dirs() {
     for d in \
         "$TMP_DIR" \
         "$TMP_DIR/logs" \
+        "$TMP_DIR/locks" \
         "$TMP_DIR"/results \
+        "$TMP_DIR"/results/vlan_changes \
+        "$TMP_DIR"/results/client_collection \
         "$PUBLIC_DIR" \
         "$PUBLIC_DIR/settings" \
         "$PUBLIC_DIR/.ssh" \

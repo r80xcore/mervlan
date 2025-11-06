@@ -1,0 +1,40 @@
+mervlan v0.46
+
+#############################################################
+
+# execute_nodes.sh v0.45 - v0.46
+# Reworked to fix broken paths
+
+# mervlan_boot.sh v0.45 -> v0.46
+# Added SSH-propagated node actions (nodeenable, nodedisable, setupenable, setupdisable) so main commands fan out to satellites.
+# Hardened template injection logic; corrected service-event-nodes.tpl handling so the main router service handler no longer receives the node variant.
+
+# mervlan_manager.sh v0.45 -> v0.46
+# Queue-aware, timed restarts: skip duplicate restart_wireless/switch/httpd via /tmp/rc_service/ps and enforce timeouts.
+# Global mkdir lock: prevents overlapping runs from clobbering bridges/interfaces.
+# VAP wait cap: wait_for_interface limited to ~63 s (exponential backoff).
+# Clean bridge teardown: detach all member ports before brctl delbr.
+# Safer delif: ignore empty bridge names and dedupe in remove_from_all_bridges.
+# Fail-fast env: exit if CHANGES or LOCKDIR aren’t set.
+# Full cmdlines: use ps w so token matching is reliable.
+# Cleaned stray braces and adjusted client-refresh conditions in mervlan_manager.sh to Ensured only the main router runs collect_clients.sh
+
+# service-event-handler.sh v0.45 -> v0.46
+# Added debounce to deflect multi-clicks or multi-calls.
+# Added missing executenodes_vlanmgr
+
+# sync_nodes.sh v0.45 -> v0.46
+# Hardened to create all runtime directories remotely before file sync.
+# Added missing hw_settings.json, preventing the execution of some scripts.
+
+# service-event-nodes.tpl
+# Added TEMPLATE_2 mirroring the service-event-handler.sh on main. Used to prevent accidental writes to the main version.
+
+# var_settings.sh v0.45 -> v0.46
+# added several definitions that is used in the updated versions.
+
+# index.html 
+Updated index.html buttons to send actions through the unified queue, added modal button wiring, and maintained per-action logging/locking.
+
+# mervlan.asp
+# Restored action_mode="apply" and built policy-controlled wrappers in mervlan.asp, including sandboxed skip-refresh handling and the shared MVM_trigger pathway.

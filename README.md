@@ -5,7 +5,7 @@ MerVLAN is an addon for Asuswrt‑Merlin focused on AP-mode deployments. It prov
 
 # Important
 
-Addon is in beta. Issues might be present.
+Addon is in beta. Issues might be present. 
 
 ## Features
 
@@ -43,6 +43,10 @@ mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.gith
 - Primary log dir: /tmp/mervlan_tmp/logs
 - The UI exposes log views via symlinks under /www/user/mervlan/tmp/logs
 - Logging behavior, colors, and syslog tagging are configured in settings/log_settings.sh
+
+# Changelog
+
+mervlan v0.46 (see changlog.txt for details)
 
 ## License
 

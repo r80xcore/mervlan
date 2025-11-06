@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.45"                   #
+#               - File: mervlan_manager.sh || version="0.46"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -99,11 +99,44 @@ DEFAULT_BRIDGE="br0"
 # STATE TRACKING & AUDIT — Change log, cleanup on exit, change tracking      #
 # ========================================================================== #
 
+# Fail fast if critical directories are unset to avoid writing to /
+[ -n "$CHANGES" ] || { error -c cli,vlan "CHANGES not set"; exit 1; }
+[ -n "$LOCKDIR" ] || { error -c cli,vlan "LOCKDIR not set"; exit 1; }
+
+# Ensure change-tracking and lock directories exist before use
+[ -d "$CHANGES" ] || mkdir -p "$CHANGES" 2>/dev/null || :
+[ -d "$LOCKDIR" ] || mkdir -p "$LOCKDIR" 2>/dev/null || :
+
 # Per-execution change log (cleaned up on exit via trap)
 CHANGE_LOG="$CHANGES/vlan_changes.$$"
+LOCK_PATH="$LOCKDIR/mervlan_manager.lock"
+LOCK_ACQUIRED=0
+
+acquire_script_lock() {
+  # Prevent concurrent runs from stomping on bridges/interfaces (mkdir-based lock)
+  attempts=0
+  while ! mkdir "$LOCK_PATH" 2>/dev/null; do
+    if [ $attempts -ge 30 ]; then
+      error -c cli,vlan "Another mervlan_manager run appears active; aborting"
+      exit 1
+    fi
+    warn -c cli,vlan "Another run in progress (lock $LOCK_PATH); waiting..."
+    sleep 2
+    attempts=$((attempts + 1))
+  done
+  LOCK_ACQUIRED=1
+}
+
+release_script_lock() {
+  [ "$LOCK_ACQUIRED" -eq 1 ] || return
+  rmdir "$LOCK_PATH" 2>/dev/null || :
+  LOCK_ACQUIRED=0
+}
+
 cleanup_on_exit() {
     # Remove per-execution change log file
     [ -f "$CHANGE_LOG" ] && rm -f "$CHANGE_LOG"
+    release_script_lock
 }
 trap cleanup_on_exit EXIT INT TERM
 
@@ -136,11 +169,11 @@ validate_configuration() {
 
 # wait_for_interface — Poll interface with exponential backoff until ready or timeout
 # Args: $1=interface_name
-# Returns: 0 if interface exists, 1 if timeout after ~1+2+4+8+16=31 seconds
+# Returns: 0 if interface exists, 1 if timeout after ~63 seconds
 # Explanation: Exponential backoff prevents busy-waiting. Useful for VAPs that appear after wireless restart.
 wait_for_interface() {
-  local iface="$1" max_attempts=10 attempt=0
-  # Poll up to 10 times with exponential sleep: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s
+  local iface="$1" max_attempts=6 attempt=0
+  # Poll up to 6 times with exponential sleep: 1s, 2s, 4s, 8s, 16s, 32s (~63s total)
   while [ $attempt -lt $max_attempts ]; do
     # Check if interface exists in /sys/class/net
     iface_exists "$iface" && return 0
@@ -205,10 +238,13 @@ validate_vlan_id() {
 # Returns: none (best-effort, ignores errors)
 remove_from_all_bridges() {
   iface="$1"
-  # List all bridges and remove this interface from each (ignores "interface not in bridge" errors)
-  for br in $(brctl show 2>/dev/null | awk 'NR>1 {print $1}'); do
-    brctl delif "$br" "$iface" 2>/dev/null
-  done
+  # List all bridges (unique names) and remove this interface from each
+  brctl show 2>/dev/null \
+    | awk 'NR>1 && $1!="" {print $1}' \
+    | sort -u \
+    | while read -r br; do
+        brctl delif "$br" "$iface" 2>/dev/null
+      done
 }
 
 # ensure_vlan_bridge — Create VLAN interface and bridge if not present
@@ -414,6 +450,7 @@ set_ap_isolation() {
 # Args: none (reads SETTINGS_FILE)
 # Returns: none (logs all actions)
 # Explanation: SSID_01-SSID_MAX_SSIDS, each with corresponding VLAN_01-VLAN_MAX_SSIDS
+# Initial pass is immediate; the post-restart second pass acts as the VAP safety net.
 # Also restores unconfigured SSIDs to br0 (prevents orphaning on VLAN changes)
 bind_configured_ssids() {
   USED_SSIDS=""
@@ -430,9 +467,8 @@ bind_configured_ssids() {
     if [ "$ssid" != "unused-placeholder" ]; then
       validate_vlan_id "$vlan" || { i=$((i+1)); continue; }
       # Find interface for this SSID (searches all bands/slots)
-      # Uses wait_for_interface with exponential backoff for VAP boot-up delay
       IFN="$(find_if_by_ssid_any "$ssid")"
-      if [ -n "$IFN" ] && wait_for_interface "$IFN"; then
+      if [ -n "$IFN" ]; then
         # Attach to appropriate bridge (br0, brVID, or trunk)
         attach_to_bridge "$IFN" "$vlan" "SSID_$(printf "%02d" $i)"
         # Track which SSIDs are configured (for restoration logic below)
@@ -546,8 +582,12 @@ cleanup_existing_config() {
   # Iterate through all bridges, remove those numbered br1+ (custom VLANs)
   for br in $(brctl show 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^br[1-9][0-9]*$'); do
     if [ "$DRY_RUN" = "yes" ]; then
-      echo "[DRY-RUN] ip link set $br down; brctl delbr $br"
+      echo "[DRY-RUN] detach all ports from $br; ip link set $br down; brctl delbr $br"
     else
+      # Detach any member interfaces so delbr succeeds (handles continuation lines)
+      for port in $(brctl show "$br" 2>/dev/null | awk 'NR>1 { if (NF>=4) print $4 }'); do
+        brctl delif "$br" "$port" 2>/dev/null
+      done
       # Bring bridge down before deletion
       ip link set "$br" down 2>/dev/null
       # Remove bridge interface
@@ -571,6 +611,73 @@ cleanup_existing_config() {
   done
 }
 
+# --- rc/queue helpers --------------------------------------------------------
+
+rc_queue_has() {
+  # true if rc has a pending/active matching token in the queue file
+  pattern="$1"
+  [ -n "$pattern" ] || return 1
+  [ -f /tmp/rc_service ] || return 1
+  grep -E "$pattern" /tmp/rc_service 2>/dev/null | grep -qv '^$'
+}
+
+rc_proc_busy() {
+  # best-effort: see if a service/rc job referencing our token is running
+  # Tokens intentionally allow partial matches (e.g., "switch") so compound
+  # subcommands like "switch restart" are still detected in process args.
+  pattern="$1"
+  [ -n "$pattern" ] || return 1
+  ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$pattern" >/dev/null 2>&1
+}
+
+run_service_with_timeout() {
+  # $1 = literal 'service' subcommand string (e.g., 'restart_wireless' or 'switch restart')
+  # $2 = timeout seconds
+  cmd_string="$1"
+  tmax="${2:-60}"
+
+  [ -n "$cmd_string" ] || return 1
+
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "[DRY-RUN] service $cmd_string"
+    return 0
+  fi
+
+  set -- $cmd_string
+  /sbin/service "$@" 2>/dev/null &
+  spid=$!
+
+  elapsed=0
+  while kill -0 "$spid" 2>/dev/null; do
+    if [ "$elapsed" -ge "$tmax" ]; then
+      warn -c cli,vlan "service $cmd_string exceeded ${tmax}s; continuing without waiting"
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  rc=0
+  wait "$spid" 2>/dev/null || rc=$?
+  return $rc
+}
+
+safe_service_restart() {
+  # $1 = subcommand string, $2 = token(s) to detect in rc queue (ERE), $3 = timeout seconds
+  subcmd="$1"
+  tokens="${2:-$1}"
+  timeout_sec="${3:-60}"
+
+  [ -n "$subcmd" ] || return 1
+
+  if rc_queue_has "$tokens" || rc_proc_busy "$tokens"; then
+    warn -c cli,vlan "rc busy with ($tokens); skipping 'service $subcmd'"
+    return 0
+  fi
+
+  run_service_with_timeout "$subcmd" "$timeout_sec"
+}
+
 # restart_services — Restart WiFi, bridge, and web server after configuration
 # Args: none
 # Returns: none (logs all actions)
@@ -582,12 +689,12 @@ restart_services() {
   [ "$DRY_RUN" = "yes" ] && return
 
   # Restart wireless radio drivers and VAP configuration
-  service restart_wireless 2>/dev/null
+  safe_service_restart "restart_wireless" "restart_wireless|wireless" 90
   sleep 2
   # Restart switch (bridge) driver to apply port configuration
-  /sbin/service switch restart 2>/dev/null
+  safe_service_restart "switch restart" "switch" 30
   # Restart web server (httpd) for UI refresh
-  service restart_httpd 2>/dev/null
+  safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
   # Restart EAP daemon if present (used for 802.1X auth on some models)
   if type eapd >/dev/null 2>&1 && [ -x /usr/sbin/eapd ]; then
     killall eapd 2>/dev/null
@@ -603,6 +710,7 @@ restart_services() {
 # Args: none (reads all global configuration)
 # Returns: none (exit code via mervlan_manager.sh script)
 main() {
+  acquire_script_lock
   # Pre-flight validation: verify required files and settings exist
   validate_configuration
   
