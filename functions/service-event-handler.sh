@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#          - File: service-event-handler.sh || version="0.46"                  #
+#          - File: service-event-handler.sh || version="0.46a"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Event handler for http and service events                      #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -195,7 +195,7 @@ case "${TYPE}_${EVENT}" in
     ;;
   apply_vlanmgr)
     # Apply configured VLAN settings to system (triggered by "Apply" button)
-    dispatch_if_executable "/jffs/addons/mervlan/functions/apply_vlans.sh"
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mervlan_manager.sh"
     ;;
   sync_vlanmgr)
     # Sync VLAN configuration to remote nodes (triggered manually)
