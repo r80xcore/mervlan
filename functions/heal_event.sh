@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                  - File: heal_event.sh || version="0.45"                     #
+#                  - File: heal_event.sh || version="0.46"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -42,6 +42,38 @@ fi
 # consistency checks.                                                          #
 # ============================================================================ #
 
+trim_spaces() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+to_lower() {
+  printf '%s' "$1" | tr 'A-Z' 'a-z'
+}
+
+read_json() {
+  key="$1"; file="$2"
+  [ -n "$key" ] && [ -f "$file" ] || return 1
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p; s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$file" \
+    | head -1 \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+is_number() {
+  local v
+  v=$(trim_spaces "$1")
+  case "$v" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+sanitize_epoch() {
+  local v
+  v=$(trim_spaces "$1")
+  is_number "$v" || v=0
+  printf '%s' "${v:-0}"
+}
+
 # ============================================================================ #
 # any_vlan_configured                                                          #
 # Scan settings.json for any numeric VLAN assignments (2–4094) on Ethernet     #
@@ -49,14 +81,21 @@ fi
 # Used as early guard to skip processing if no VLANs are configured.           #
 # ============================================================================ #
 any_vlan_configured() {
+  # Ensure MAX_SSIDS is numeric; fallback to 12 if unset
+  local max_ssids
+  max_ssids=$(sanitize_epoch "$MAX_SSIDS")
+  [ "$max_ssids" -ge 1 ] 2>/dev/null || max_ssids=12
+
   # Check Ethernet port VLANs
-  local idx=1 vlan
+  local idx=1 vlan token
   for eth in $ETH_PORTS; do
     vlan=$(read_json "ETH${idx}_VLAN" "$SETTINGS_FILE")
+    vlan=$(trim_spaces "$vlan")
+    token=$(to_lower "$vlan")
     # Ignore unconfigured, trunk, or non-numeric entries
-    case "$vlan" in
-      ''|none|NONE) ;;                 # not configured
-      trunk|TRUNK) ;;                  # not a specific VLAN ID
+    case "$token" in
+      ''|none) ;;                      # not configured
+      trunk) ;;                        # not a specific VLAN ID
       # Valid VLAN ID range is 2–4094 (excluding default VLAN 1)
       *) if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then return 0; fi ;;
     esac
@@ -64,12 +103,15 @@ any_vlan_configured() {
   done
 
   # Check SSID VLANs (only count if SSID is actually set)
-  local i=1 ssid
-  while [ $i -le "$MAX_SSIDS" ]; do
+  local i=1 ssid ssid_token
+  while [ $i -le "$max_ssids" ]; do
     ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
     vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
+    ssid=$(trim_spaces "$ssid")
+    vlan=$(trim_spaces "$vlan")
+    ssid_token=$(to_lower "$ssid")
     # Only consider SSID if it has a valid name (not unused placeholder)
-    if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ]; then
+    if [ -n "$ssid_token" ] && [ "$ssid_token" != "unused-placeholder" ]; then
       # Check if VLAN is numeric and within valid range
       if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
         return 0
@@ -89,7 +131,7 @@ any_vlan_configured() {
 
 # Fast path: if settings define no numeric VLANs, do nothing
 if ! any_vlan_configured; then
-  info -c vlan "Heal: no VLANs configured in settings; exiting"
+  info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
   exit 0
 fi
 
@@ -117,6 +159,8 @@ COOLDOWN_FILE="$LOCKDIR/vlan_heal.last"
 COOLDOWN_SEC=90
 # Delay between config checks during retry (allows interfaces to settle)
 VLAN_SETTLE_DELAY="${VLAN_SETTLE_DELAY:-3}"
+VLAN_SETTLE_DELAY=$(sanitize_epoch "$VLAN_SETTLE_DELAY")
+[ "$VLAN_SETTLE_DELAY" -ge 1 ] 2>/dev/null || VLAN_SETTLE_DELAY=3
 
 # ============================================================================ #
 # heal_allowed                                                                 #
@@ -124,11 +168,13 @@ VLAN_SETTLE_DELAY="${VLAN_SETTLE_DELAY:-3}"
 # invocation. Returns 0 if heal is allowed, 1 if within cooldown window.       #
 # ============================================================================ #
 heal_allowed() {
+  local now last_raw last
   now=$(date +%s)
   # Read timestamp of last heal; default to 0 (epoch) if file doesn't exist
-  last=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+  last_raw=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+  last=$(sanitize_epoch "$last_raw")
   # Return success if elapsed time >= cooldown threshold
-  [ $((now - last)) -ge $COOLDOWN_SEC ]
+  [ $((now - last)) -ge "$COOLDOWN_SEC" ]
 }
 
 # ============================================================================ #
@@ -142,12 +188,15 @@ mark_heal() {
 
 # Event debounce: suppress same event if triggered again within 2 seconds
 EVENT_DEBOUNCE="$LOCKDIR/vlan_event.last"
-if [ -f "$EVENT_DEBOUNCE" ] && [ $(( $(date +%s) - $(cat "$EVENT_DEBOUNCE" 2>/dev/null || echo 0) )) -lt 2 ]; then
+event_now=$(date +%s)
+last_event_raw=$(cat "$EVENT_DEBOUNCE" 2>/dev/null || echo 0)
+last_event=$(sanitize_epoch "$last_event_raw")
+if [ "$last_event" -gt 0 ] && [ $((event_now - last_event)) -lt 2 ]; then
   info -c vlan "Event suppressed by debounce: [$*]"
   exit 0
 fi
 # Record current event timestamp for next debounce check
-date +%s > "$EVENT_DEBOUNCE"
+printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # ============================================================================ #
 #                           VLAN VALIDATION LOGIC                              #
@@ -182,6 +231,7 @@ expected_vlans_from_settings() {
     # Extract all ETH*_VLAN entries from settings.json
     grep -Eo '"ETH[0-9]+_VLAN"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null
   } | sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
     | grep -E '^[0-9]+$' \
     | awk '{n=$1+0; if (n>=2 && n<=4094) print n}' \
     | sort -n \
@@ -316,6 +366,11 @@ if [ "$1" = "--test" ] || [ "$1" = "test" ]; then
 fi
 
 EVENT="$*"
+
+if [ -z "$EVENT" ]; then
+  info -c cli,vlan "Heal: invoked without event payload; nothing to do"
+  exit 0
+fi
 
 # ============================================================================ #
 # Event-based VLAN healing dispatch                                            #
