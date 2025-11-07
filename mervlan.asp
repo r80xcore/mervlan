@@ -74,6 +74,13 @@ function showLoadingSafe() {
 function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   opts = opts || {};
 
+  if (!MVM_ALLOWED_ACTIONS.has(actionScriptName)) {
+    if (window.console && typeof console.warn === "function") {
+      console.warn("[MVM] blocked disallowed action", actionScriptName);
+    }
+    return;
+  }
+
   // Prevent rapid double-clicks from issuing duplicate requests
   var now = (typeof Date.now === "function") ? Date.now() : new Date().getTime();
   if (_mvmLast.name === actionScriptName && (now - _mvmLast.t) < 2000) {
@@ -286,6 +293,18 @@ const MVM_NO_LOADING = new Set([
   // Actions that should NOT show the loading overlay:
   // "checkservice_vlanmgr",
   // "collectclients_vlanmgr",
+]);
+
+const MVM_ALLOWED_ACTIONS = new Set([
+  "save_vlanmgr",
+  "apply_vlanmgr",
+  "sync_vlanmgr",
+  "executenodes_vlanmgr",
+  "genkey_vlanmgr",
+  "enableservice_vlanmgr",
+  "disableservice_vlanmgr",
+  "checkservice_vlanmgr",
+  "collectclients_vlanmgr"
 ]);
 
 // Optional: actions that need a longer/shorter wait (seconds)
