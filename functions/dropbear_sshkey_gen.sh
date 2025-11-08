@@ -158,7 +158,7 @@ if "$DROPBEARKEY" -t ed25519 -f "$SSH_KEY" 2>/dev/null; then
     update_json_flag "1"
     info -c cli,vlan "Keys generated successfully"
     # Create symlink to expose public key to web UI
-    create_link "$SSH_PUBKEY" "$PUBLIC_DIR/.ssh/vlan_manager.pub"
+    create_link "$SSH_PUBKEY" "$PUBLIC_DIR/.ssh/vlan_manager.json"
     info -c cli,vlan "✓ Created symlink for public key at $PUBLIC_DIR/.ssh/vlan_manager.json"
     exit 0
 else
