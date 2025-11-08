@@ -379,13 +379,14 @@ if [ ! -f /tmp/menuTree.js ]; then
     mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
 fi
 
-# 5. Insert our tab at the end of the Tools menu
-# Clean any previous VLAN/MerVLAN line so we're idempotent
-sed -i '/tabName: "VLAN"/d' /tmp/menuTree.js
+# 5. Insert our tab inside the LAN menu
+# Clean any previous MerVLAN line so we're idempotent (leave other VLAN tabs intact)
 sed -i '/tabName: "MerVLAN"/d' /tmp/menuTree.js
 
-# Append our MerVLAN tab within the LAN menu block
-sed -i "/Advanced_SwitchCtrl_Content.asp\", tabName: \"<#3510#>\"/a {url: \"$am_webui_page\", tabName: \"MerVLAN\"}," /tmp/menuTree.js
+# Append our MerVLAN tab just before the LAN menu's __INHERIT__ sentinel
+sed -i "/index: \"menu_LAN\"/,/{url: \"NULL\", tabName: \"__INHERIT__\"}/ {/{url: \"NULL\", tabName: \"__INHERIT__\"}/i \\
+{url: \"$am_webui_page\", tabName: \"MerVLAN\"},
+}" /tmp/menuTree.js
 
 # 6. Remount after sed (bind+sed quirk)
 umount /www/require/modules/menuTree.js
@@ -396,8 +397,8 @@ am_settings_set mervlan_page "$am_webui_page"
 am_settings_set mervlan_state "enabled"
 am_settings_set mervlan_version "v0.46"
 
-logger -t "$ADDON" "Installed tab 'VLAN' under Tools -> $am_webui_page"
-echo "$ADDON" "Installed tab 'VLAN' under Tools -> $am_webui_page"
+logger -t "$ADDON" "Installed tab 'MerVLAN' under LAN -> $am_webui_page"
+echo "$ADDON" "Installed tab 'MerVLAN' under LAN -> $am_webui_page"
 
 # ========================================================================== #
 # POST-INSTALL HOOKS — Ensure service scripts reachable and sync nodes       #
