@@ -284,7 +284,7 @@ const MVM_NO_REFRESH = new Set([
   "collectclients_vlanmgr",
   "sync_vlanmgr",
   "apply_vlanmgr",
-  "genkey_vlanmgr",
+  "genkey_vlanmgr"
   // "checkservice_vlanmgr",
   // "collectclients_vlanmgr",
 ]);
@@ -300,6 +300,7 @@ const MVM_ALLOWED_ACTIONS = new Set([
   "apply_vlanmgr",
   "sync_vlanmgr",
   "executenodes_vlanmgr",
+  "executenodesonly_vlanmgr",
   "genkey_vlanmgr",
   "enableservice_vlanmgr",
   "disableservice_vlanmgr",
@@ -341,6 +342,7 @@ function MVM_trigger(actionScriptName, opts) { return MVM_exec(actionScriptName,
 function MVM_apply(opts)                     { return MVM_exec("apply_vlanmgr",         null,        mvmOptsFor("apply_vlanmgr",         opts)); }
 function MVM_sync(opts)                      { return MVM_exec("sync_vlanmgr",          null,        mvmOptsFor("sync_vlanmgr",          opts)); }
 function MVM_executeNodes(opts)              { return MVM_exec("executenodes_vlanmgr",  null,        mvmOptsFor("executenodes_vlanmgr",  opts)); }
+function MVM_executeNodesOnly(opts)          { return MVM_exec("executenodesonly_vlanmgr",  null,        mvmOptsFor("executenodesonly_vlanmgr",  opts)); }
 function MVM_genkey(opts)                    { return MVM_exec("genkey_vlanmgr",        null,        mvmOptsFor("genkey_vlanmgr",        opts)); }
 function MVM_enableService(opts)             { return MVM_exec("enableservice_vlanmgr", null,        mvmOptsFor("enableservice_vlanmgr", opts)); }
 function MVM_disableService(opts)            { return MVM_exec("disableservice_vlanmgr",null,        mvmOptsFor("disableservice_vlanmgr",opts)); }

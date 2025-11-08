@@ -146,45 +146,50 @@ RT-AC5300) MODEL="AC5300"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN
 # AC3100: Dual-band with 4 LAN + Gig WAN
 RT-AC3100) MODEL="AC3100"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 
-# === Models with Native VLAN GUI (skip override) ===
-# These models have built-in VLAN support in firmware; do not override.
-# Confirmed models: GT-AX11000_PRO, GT-AX6000, GT-AXE16000, RT-AX86U_PRO,
-# RT-AX88U_PRO, XT12, ET12, and BE-series (firmware dependent).
-RT-AX88U|GT-AX11000|GT-AXE11000|GT-AX6000|XT12|GT-AX11000_PRO|GT-AXE16000|RT-AX86U_PRO|RT-AX88U_PRO|RT-BE96U|GT-BE98_PRO|RT-BE86U|RT-BE88U|RT-BE7200|RT-BE92U|GT-BE98)
-    MODEL="$PRODUCTID"
-    ETH_PORTS=""
-    LAN_PORT_LABELS=""
-    MAX_ETH_PORTS=0
-    WAN_IF="eth0"
-    info "Model $PRODUCTID has native VLAN GUI support - skipping LAN port override"
-    ;;
+# === Pro / Multi-Gig Models ===
+# AX88U: 8× LAN + 1× WAN
+RT-AX88U) MODEL="AX88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8"; MAX_ETH_PORTS=8; WAN_IF="eth0" ;;
+# GT-AX11000: 4× GbE LAN + 1× 2.5G WAN/LAN (max 5 LAN when 1G is WAN)
+GT-AX11000) MODEL="GT-AX11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# GT-AXE11000: 4× GbE LAN + 1× 2.5G WAN/LAN (max 5 LAN when 1G is WAN)
+GT-AXE11000) MODEL="GT-AXE11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# GT-AX6000: dual 2.5G WAN/LAN + 4× GbE LAN (max 5 LAN with one 2.5G as WAN)
+GT-AX6000) MODEL="GT-AX6000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# XT12 (ZenWiFi Pro XT12): 1× 2.5G WAN + 1× 2.5G LAN + 2× GbE LAN (3 LAN usable)
+XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
+# GT-AX11000_PRO: 10G WAN/LAN + 4× GbE LAN + 2.5G WAN (max 5 LAN)
+GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# GT-AXE16000: two 10G WAN/LAN + 4× GbE LAN + 2.5G WAN (max 6 LAN)
+GT-AXE16000) MODEL="GT-AXE16000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
+# RT-AX86U_PRO: 4× GbE LAN + 1× 2.5G WAN/LAN + 1× GbE WAN (max 5 LAN using 1G as WAN)
+RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# RT-AX88U_PRO: 4× GbE LAN + two 2.5G WAN/LAN (one used as WAN → 5 LAN)
+RT-AX88U_PRO) MODEL="RT-AX88U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# RT-BE96U: 10G WAN/LAN + 1G WAN/LAN + 3× 1G LAN + 10G LAN (one WAN/LAN used → 5 LAN)
+RT-BE96U) MODEL="RT-BE96U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# GT-BE98_PRO: 10G WAN/LAN + 2.5G WAN/LAN + 10G LAN + 3× 2.5G LAN + 1× 1G LAN (one WAN/LAN used → 6 LAN)
+GT-BE98_PRO) MODEL="GT-BE98_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
+# RT-BE86U: 10G WAN/LAN + 3× 2.5G LAN (+ optional 2.5G WAN/LAN depending on region) — max 4 LAN
+RT-BE86U) MODEL="RT-BE86U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+# RT-BE88U: 10G RJ45 WAN/LAN + 10G SFP+ + 2.5G WAN/LAN + 3× 2.5G LAN + 4× 1G LAN (use SFP+ as WAN → max 9 LAN)
+RT-BE88U) MODEL="RT-BE88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8 eth9"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8 LAN9"; MAX_ETH_PORTS=9; WAN_IF="eth0" ;;
+# RT-BE7200: alias of RT-BE88U (same ports; max 9 LAN when SFP+ is WAN)
+RT-BE7200) MODEL="RT-BE7200"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8 eth9"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8 LAN9"; MAX_ETH_PORTS=9; WAN_IF="eth0" ;;
+# RT-BE92U: 10G WAN/LAN + 2.5G WAN/LAN + 3× 2.5G LAN (one WAN/LAN used → 4 LAN)
+RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+# GT-BE98: 10G WAN/LAN + 2.5G WAN/LAN + 10G LAN + 3× 2.5G LAN + 1× 1G LAN (one WAN/LAN used → 6 LAN)
+GT-BE98) MODEL="GT-BE98"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
 
 # === Fallback for Unknown Models ===
 # Attempt to auto-detect ethernet ports by scanning /sys/class/net. If fewer
 # than 4 ports found, default to 4 ports (common minimum). Cap SSID count.
     *)
         MODEL="$PRODUCTID"
-        ETH_PORTS=""
-        LAN_PORT_LABELS=""
-        MAX_ETH_PORTS=0
-        # Scan for eth1..eth8 interfaces
-        for eth in eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8; do
-            if [ -d "/sys/class/net/$eth" ]; then
-                ETH_PORTS="$ETH_PORTS $eth"
-                LAN_PORT_LABELS="$LAN_PORT_LABELS LAN$((MAX_ETH_PORTS+1))"
-                MAX_ETH_PORTS=$((MAX_ETH_PORTS + 1))
-            fi
-        done
-
-        # If fewer than 4 ports detected, default to standard configuration
-        if [ -z "$ETH_PORTS" ] || [ $MAX_ETH_PORTS -lt 4 ]; then
-            ETH_PORTS="eth1 eth2 eth3 eth4"
-            LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"
-            MAX_ETH_PORTS=4
-        fi
-
+        ETH_PORTS="eth1 eth2 eth3 eth4"
+        LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"
+        MAX_ETH_PORTS=4
         # Default SSID cap for unknown models
-        MAX_SSIDS=8
+        MAX_SSIDS=6
         WAN_IF="eth0"
         ;;
 esac

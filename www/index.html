@@ -225,6 +225,11 @@
           <div class="vlan-option__title">Run VLAN Manager + Nodes</div>
           <div class="vlan-option__subtitle">Apply VLAN configuration to this router and all configured nodes</div>
         </button>
+
+        <button type="button" class="button_gen" onclick="runVlanManagerOnlyNodes()">
+          <div class="vlan-option__title">Run VLAN Manager on Nodes Only</div>
+          <div class="vlan-option__subtitle">Apply VLAN configuration to all configured nodes only</div>
+        </button>
       </div>
     </div>
   </div>
@@ -1109,6 +1114,15 @@ async function runVlanManagerWithNodes() {
   document.getElementById('vlanManagerModal').style.display = 'none';
   return queueServiceAction('executenodes_vlanmgr', {
     description: 'Run VLAN Manager + Nodes',
+    cooldownMs: 8000
+  });
+}
+
+// Run VLAN Manager with nodes
+async function runVlanManagerOnlyNodes() {
+  document.getElementById('vlanManagerModal').style.display = 'none';
+  return queueServiceAction('executenodesonly_vlanmgr', {
+    description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
   });
 }

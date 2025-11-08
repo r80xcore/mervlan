@@ -37,6 +37,21 @@ fi
 info -c cli,vlan "=== VLAN Manager Node Execution ==="
 info -c cli,vlan ""
 
+# Optional mode selector (accept "nodesonly" to skip local execution)
+MODE="full"
+if [ $# -gt 0 ]; then
+    case "$1" in
+        nodesonly)
+            MODE="nodesonly"
+            shift
+            info -c cli,vlan "Nodes-only mode: local VLAN manager execution will be skipped"
+            ;;
+        *)
+            warn -c cli,vlan "Unknown argument '$1'; ignoring and proceeding normally"
+            ;;
+    esac
+fi
+
 # ============================================================================ #
 #                         PRE-EXECUTION VALIDATION                             #
 # Verify that all required files and configurations are present and valid      #
@@ -429,21 +444,26 @@ done
 # to apply the final consolidated settings.                                    #
 # ============================================================================ #
 
-info -c cli,vlan "Executing VLAN manager on main router..."
 local_success=true
-local local_script
-local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
 
-if [ ! -f "$local_script" ]; then
-    error -c cli,vlan "✗ Local VLAN manager script missing at $local_script"
-    local_success=false
+if [ "$MODE" = "nodesonly" ]; then
+    info -c cli,vlan "Skipping VLAN manager execution on main router (nodes-only mode)"
 else
-    if sh "$local_script" >>"$CLI_LOG" 2>&1; then
-        info -c cli,vlan "✓ Successfully executed VLAN manager on main router"
-        local_success=true
-    else
-        error -c cli,vlan "✗ Failed to execute VLAN manager on main router"
+    info -c cli,vlan "Executing VLAN manager on main router..."
+    local local_script
+    local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
+
+    if [ ! -f "$local_script" ]; then
+        error -c cli,vlan "✗ Local VLAN manager script missing at $local_script"
         local_success=false
+    else
+        if sh "$local_script" >>"$CLI_LOG" 2>&1; then
+            info -c cli,vlan "✓ Successfully executed VLAN manager on main router"
+            local_success=true
+        else
+            error -c cli,vlan "✗ Failed to execute VLAN manager on main router"
+            local_success=false
+        fi
     fi
 fi
 
@@ -456,10 +476,14 @@ fi
 info -c cli,vlan "=== Execution Summary ==="
 
 if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then
-  info -c cli,vlan "✓ SUCCESS: VLAN manager executed on all nodes and main router"
-  exit 0
+    if [ "$MODE" = "nodesonly" ]; then
+        info -c cli,vlan "✓ SUCCESS: VLAN manager executed on all nodes (main router skipped)"
+    else
+        info -c cli,vlan "✓ SUCCESS: VLAN manager executed on all nodes and main router"
+    fi
+    exit 0
 else
-  warn -c cli,vlan "⚠️  PARTIAL SUCCESS: See details above (nodes or main may have failed)"
-  info -c cli,vlan "Check the log at $CLI_LOG for details"
-  exit 1
+    warn -c cli,vlan "⚠️  PARTIAL SUCCESS: See details above (nodes or main may have failed)"
+    info -c cli,vlan "Check the log at $CLI_LOG for details"
+    exit 1
 fi

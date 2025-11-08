@@ -205,6 +205,10 @@ case "${TYPE}_${EVENT}" in
     # Execute VLAN Manager workflow on configured nodes (runs execute_nodes.sh)
     dispatch_if_executable "/jffs/addons/mervlan/functions/execute_nodes.sh"
     ;;
+  executenodesonly_vlanmgr)
+    # Execute VLAN Manager workflow on configured nodes (runs execute_nodes.sh)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/execute_nodes.sh" nodesonly
+    ;;
   genkey_vlanmgr)
     # Generate SSH keys for node communication (triggered during setup)
     dispatch_if_executable "/jffs/addons/mervlan/functions/dropbear_sshkey_gen.sh"
