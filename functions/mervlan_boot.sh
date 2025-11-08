@@ -321,8 +321,8 @@ get_node_ips() {
 # Returns: 0 if "connected" echo received, 1 if SSH fails or no response
 test_ssh_connection() {
     local node_ip="$1"
-    # Use dbclient (Dropbear SSH client) with private key auth, 5-sec timeout
-    if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
+    # Use db-client (Dropbear SSH client) with private key auth, 5-sec timeout
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
         return 0
     else
         return 1
@@ -345,7 +345,7 @@ run_ssh_command() {
     
     info -c cli,vlan "Running '$cmd' on $node_ip via SSH..."
     # Execute command on node with MERV_NODE_CONTEXT=1 (forces local node execution)
-    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$cmd'" 2>&1; then
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$cmd'" 2>&1; then
         info -c cli,vlan "✓ Command '$cmd' succeeded on $node_ip"
         return 0
     else
@@ -403,9 +403,9 @@ collect_node_status() {
   # Poll each node for its report output (minimal logging)
   for node_ip in $NODE_IPS; do
     # Attempt lightweight status fetch via internal 'report' action (no logging output)
-    if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null; then
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null; then
       # Extract report line (format: REPORT boot=1 event=active addon=active cron=absent)
-      ns=$(dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+      ns=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
       # Fallback if report returns empty or malformed
       [ -n "$ns" ] || ns="REPORT error=empty"
       # Append to global: format "ip:boot=X event=Y addon=Z cron=W"

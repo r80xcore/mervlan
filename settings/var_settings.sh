@@ -59,6 +59,10 @@ readonly SERVICES_START="$SCRIPTS_DIR/services-start"
 readonly SERVICE_EVENT_WRAPPER="$SCRIPTS_DIR/service-event"
 
 
+# SSH Port Override
+export SSH_PORT="22"
+
+
 
 # Logs
 readonly LOGFILE="$LOGDIR/mervlan.log"

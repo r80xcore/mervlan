@@ -46,6 +46,47 @@ BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 # NODE & SSH STATE HELPERS — Detect existing node config and key installs    #
 # ========================================================================== #
 
+prompt_ssh_port_override() {
+    local vs_path="$MERV_BASE/settings/var_settings.sh"
+    [ -f "$vs_path" ] || return 0
+
+    echo ""
+    echo "[install] Configure SSH port for node connections."
+
+    while :; do
+        printf '[install] Use default SSH port 22? [Y/n]: '
+        IFS= read -r reply || reply=""
+        case "$reply" in
+            ""|Y|y|YES|yes|Yes)
+                echo "[install] Keeping default SSH port 22."
+                return 0
+                ;;
+            N|n|NO|no|No)
+                while :; do
+                    printf '[install] Enter SSH port (1-65535): '
+                    IFS= read -r port || port=""
+                    case "$port" in
+                        ''|*[^0-9]*) echo "[install] Invalid entry; please enter digits only."; continue ;;
+                    esac
+                    if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+                        if grep -q '^export SSH_PORT="' "$vs_path" 2>/dev/null; then
+                            # safer sed quoting for BusyBox
+                            sed -i 's/^export SSH_PORT="[^"]*"/export SSH_PORT="'"$port"'"/' "$vs_path"
+                        else
+                            printf '\nexport SSH_PORT="%s"\n' "$port" >>"$vs_path"
+                        fi
+                        echo "[install] SSH port updated to $port in var_settings.sh."
+                        return 0
+                    else
+                        echo "[install] Port out of range (1-65535)."
+                    fi
+                done
+                ;;
+            *) echo "[install] Please answer Y or N." ;;
+        esac
+    done
+}
+
 # has_configured_nodes — Report if any NODE1..NODE5 entries contain IPs
 # Returns: 0 when at least one valid IPv4 is present, 1 otherwise
 # Explanation: Allows installer to decide whether to call nodeenable later
@@ -93,6 +134,10 @@ download_mervlan() {
   fi
     echo "[download_mervlan] tmp workspace: $tmp (created=$created)"
     trap 'if [ "$created" -eq 1 ]; then echo "[download_mervlan] cleaning tmp: $tmp"; rm -rf "$tmp"; fi' EXIT
+
+# ========================================================================== #
+# SSH PORT CONFIGURATION — Optional override for node SSH connections       #
+# ========================================================================== #
 
   # Fetch archive to a file (curl only)
     echo "[download_mervlan] downloading archive -> $tmp/mervlan.tar.gz"
@@ -338,6 +383,8 @@ else
     logger -t "$ADDON" "ERROR: Failed to initialize directories or logs"
     exit 1
 fi
+
+prompt_ssh_port_override
 
 # 3b. Copy Static assets to Public Dir
 cp -p "$ADDON_DIR/$ADDON/www/index.html"            "$PUBLIC_DIR/index.html" 2>/dev/null

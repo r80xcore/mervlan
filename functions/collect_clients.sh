@@ -79,7 +79,7 @@ get_node_ips() {
 test_ssh_connection() {
   local node_ip="$1"
   # Attempt to SSH and run echo; grep for success string to verify connection
-  dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"
+  dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"
 }
 
 # ============================================================================ #
@@ -110,10 +110,10 @@ collect_from_node() {
 
   # Run remote collector and fetch JSON in one shot via SSH
   # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
-  # Prefer 'timeout' command if available to prevent hangs; otherwise rely on dbclient timeout
+  # Prefer 'timeout' command if available to prevent hangs; otherwise rely on db-client timeout
   if command -v timeout >/dev/null 2>&1; then
     # timeout command available: use it to enforce TIMEOUT seconds limit
-    if timeout "$TIMEOUT" dbclient -y -i "$SSH_KEY" "admin@$node_ip" \
+    if timeout "$TIMEOUT" dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" \
          "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
          > "$output_file" 2>/dev/null; then
       info -c cli,vlan "✓ Successfully collected from $node_ip"
@@ -124,8 +124,8 @@ collect_from_node() {
       return 1
     fi
   else
-    # timeout not available; run without explicit timeout (dbclient has built-in ConnectTimeout)
-    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" \
+    # timeout not available; run without explicit timeout (db-client has built-in ConnectTimeout)
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" \
          "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
          > "$output_file" 2>/dev/null; then
       info -c cli,vlan "✓ Successfully collected from $node_ip"

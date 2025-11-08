@@ -129,7 +129,7 @@ check_remote_jffs_status() {
     local output
 
     # Execute remote nvram queries and capture output
-    output=$(dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
+    output=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
@@ -164,7 +164,7 @@ check_remote_jffs_status() {
 test_ssh_connection() {
     local node_ip="$1"
     # Attempt to SSH and run echo; grep for success string to verify connection
-    if dbclient -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
         return 0
     else
         return 1
@@ -228,7 +228,7 @@ ensure_remote_settings_dir() {
     local remote_dir="$SETTINGSDIR"
 
     # Attempt to create settings directory on remote node
-    if dbclient -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
         info -c cli,vlan "✓ Ensured directory $remote_dir on $node_ip"
         return 0
     else
@@ -255,7 +255,7 @@ copy_settings_conf_to_node() {
     fi
 
     # Use cat pipe through SSH with atomic rename (write to .tmp then mv)
-    if cat "$SETTINGS_FILE" | dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+    if cat "$SETTINGS_FILE" | dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
         info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
         return 0
     else
@@ -274,13 +274,13 @@ verify_settings_conf_on_node() {
     local remote_file="$MERV_BASE/settings/settings.json"
 
     # Verify file exists on remote node
-    if ! dbclient -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
+    if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
         error -c cli,vlan "✗ settings.json not found on $node_ip at $remote_file"
         return 1
     fi
 
     # Compare file sizes (local vs remote)
-    local remote_size=$(dbclient -y -i "$SSH_KEY" "admin@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
+    local remote_size=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
     local local_size=$(stat -c%s "$SETTINGS_FILE" 2>/dev/null || wc -c < "$SETTINGS_FILE" 2>/dev/null || echo 0)
 
     # Extract numeric values; strip any non-digit characters
@@ -305,7 +305,7 @@ verify_settings_conf_on_node() {
 
     # If we have a local MD5, fetch remote MD5 and compare
     if [ -n "$local_md5" ]; then
-        remote_md5=$(dbclient -y -i "$SSH_KEY" "admin@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
+        remote_md5=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
         remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
 
         # Compare MD5s if remote MD5 was successfully computed
@@ -368,7 +368,7 @@ execute_vlan_manager_on_node() {
     info -c cli,vlan "Executing VLAN manager on $node_ip..."
 
     # Ensure the script exists on the remote node before attempting execution
-    if ! dbclient -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_vlan_manager'" 2>/dev/null; then
+    if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_vlan_manager'" 2>/dev/null; then
         error -c cli,vlan "✗ VLAN manager script missing on $node_ip at $remote_vlan_manager"
         warn  -c cli,vlan "   Run 'Sync Nodes' to deploy the addon before executing nodes"
         return 1
@@ -376,7 +376,7 @@ execute_vlan_manager_on_node() {
 
     # Execute the remote script and capture its output for logging/diagnostics
     local output
-    output=$(dbclient -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
+    output=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
     local rc=$?
 
     if [ $rc -eq 0 ]; then
