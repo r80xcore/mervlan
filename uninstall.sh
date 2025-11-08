@@ -90,8 +90,9 @@ fi
 ########################################
 # 1. Figure out which user page we mounted
 ########################################
-# We saved this during install
-am_page="$(am_settings_get merlin_vlan_manager_page)"
+# We saved this during install (new key) — fall back to legacy name if absent
+am_page="$(am_settings_get mervlan_page)"
+[ -n "$am_page" ] || am_page="$(am_settings_get merlin_vlan_manager_page)"
 
 # Discover the ASP slot by title when the stored page reference is empty
 if [ -z "$am_page" ]; then
@@ -111,16 +112,16 @@ if [ ! -f /tmp/menuTree.js ]; then
     mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js 2>/dev/null
 fi
 
-# 3. Remove our VLAN tab entry from Tools
-#    We only nuke the specific line that references our page + tabName "VLAN".
-# Remove the navigation entry that points to our VLAN Manager UI
+# 3. Remove our MerVLAN tab entry from LAN
+#    We only nuke the specific line that references our page + tabName "MerVLAN".
+# Remove the navigation entry that points to our MerVLAN UI
 if [ -f /tmp/menuTree.js ]; then
     # Prefer precise removal using the page URL when available
     if [ -n "$am_page" ]; then
-        sed -i "/url: \"$am_page\".*tabName: \"VLAN\"/d" /tmp/menuTree.js
+        sed -i "/url: \"$am_page\".*tabName: \"MerVLAN\"/d" /tmp/menuTree.js
     else
-        # fallback: remove any tab literally called VLAN
-        sed -i '/tabName: "VLAN"/d' /tmp/menuTree.js
+        # fallback: remove any tab literally called MerVLAN
+        sed -i '/tabName: "MerVLAN"/d' /tmp/menuTree.js
     fi
 
     # Rebind to refresh, same quirk as installer
@@ -137,8 +138,9 @@ if [ -n "$am_page" ]; then
     rm -f "/www/user/$am_page"
 fi
 
-# Remove our static asset directory
-rm -rf /www/user/merlin_vlan_manager
+# Remove our static asset directory (new path, keep legacy for safety)
+rm -rf /www/user/mervlan 2>/dev/null
+rm -rf /www/user/merlin_vlan_manager 2>/dev/null
 
 # Remove service-event and addon hooks via setupdisable
 # Run setupdisable to unregister service-event handlers and node sync scripts
@@ -157,6 +159,9 @@ fi
 ########################################
 # 5. Mark addon disabled / cleanup settings
 ########################################
+am_settings_set mervlan_state "disabled"
+am_settings_set mervlan_page ""
+am_settings_set mervlan_version ""
 am_settings_set merlin_vlan_manager_state "disabled"
 am_settings_set merlin_vlan_manager_page ""
 am_settings_set merlin_vlan_manager_version ""
@@ -167,5 +172,6 @@ if [ "$ACTION" = "full" ]; then
     logger -t "$LOGTAG" "Performing full uninstall (removing addon directories)"
     rm -rf /jffs/addons/mervlan 2>/dev/null
     rm -rf /tmp/mervlan_tmp 2>/dev/null
+    rm -rf /www/user/mervlan 2>/dev/null
 fi
 exit 0
