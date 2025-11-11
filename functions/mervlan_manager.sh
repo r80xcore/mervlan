@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.46"                   #
+#               - File: mervlan_manager.sh || version="0.47"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -33,24 +33,30 @@ fi
 # JSON HELPERS — BusyBox-safe parsing for settings and hardware JSON files    #
 # ========================================================================== #
 
+# esc_key — Escape regex-special characters in JSON key names for sed
+# Args: $1=key_name
+# Returns: escaped key suitable for embedding in sed patterns
+esc_key() {
+  printf '%s' "$1" | sed 's/[][\\.^$*]/\\&/g'
+}
+
 # read_json — Extract scalar value from JSON file by key name
 # Args: $1=key_name, $2=file_path
 # Returns: stdout value (quoted string or bare number), or empty if not found
 # Explanation: Uses sed with enhanced regex to handle escaped quotes. Prefers
 #   quoted strings; falls back to bare values for numbers. Trims whitespace.
 read_json() {
+  local key file key_re
   key="$1"; file="$2"
-  # Enhanced regex to handle escaped quotes in values
-  # Try quoted string first, then bare value (for numbers), extract first match
-  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p; s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$file" | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+  key_re=$(esc_key "$key")
+  sed -n "s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p; s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$file" | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
 # read_json_number — Extract numeric value from JSON key (grep only digits)
 # Args: $1=key_name, $2=file_path
 # Returns: stdout numeric value, or empty if not found or non-numeric
-read_json_number() { 
-  # Pipe read_json output through grep to extract leading digits only
-  read_json "$1" "$2" | grep -o '^[0-9]\+' 
+read_json_number() {
+  read_json "$1" "$2" | grep -o '^[0-9]\+'
 }
 
 # read_json_array — Extract JSON array and flatten to space-separated values
@@ -58,11 +64,40 @@ read_json_number() {
 # Returns: stdout space-separated values (quotes and commas removed)
 # Explanation: Extracts [a,b,c] bracket content, removes whitespace/quotes/commas
 read_json_array() {
+  local key file key_re
   key="$1"; file="$2"
-  # Extract content between [ and ], then normalize spacing and separators
-  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p" "$file" \
+  key_re=$(esc_key "$key")
+  sed -n "s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p" "$file" \
     | sed 's/[[:space:]]//g; s/"//g; s/,/ /g'
 }
+
+# ========================================================================== #
+# STRING NORMALIZATION HELPERS — ensure consistent SSID and interface matching #
+# ========================================================================== #
+
+normalize_basic() {
+  val="$1"
+  val=$(printf '%s' "$val" | tr -d '\r\357\273\277\342\200\213\342\200\214\342\200\215')
+  printf '%s' "$val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+normalize_iface() {
+  normalize_basic "$1"
+}
+
+normalize_ssid() {
+  val=$(normalize_basic "$1")
+  printf '%s' "$val" | sed \
+    -e 's/—/-/g' -e 's/–/-/g' \
+    -e "s/[‘’]/'/g" -e 's/[“”]/"/g'
+}
+
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+BOUND_IFACES=""
+WATCH_IFACES=""
 
 # ========================================================================== #
 # INITIALIZATION & HARDWARE DETECTION — Load configs and validate setup       #
@@ -90,6 +125,12 @@ DRY_RUN=$(read_json DRY_RUN "$SETTINGS_FILE")
 [ -z "$PERSISTENT" ] && PERSISTENT="no"
 [ -z "$DRY_RUN" ] && DRY_RUN="yes"
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
+
+# Temporarily force non-persistent mode until feature is fixed
+if [ "$PERSISTENT" != "no" ]; then
+  warn -c cli,vlan "Persistent mode is forced off pending fixes; running non-persistent"
+fi
+PERSISTENT="no"
 
 # Resolve bridge and WAN interface
 UPLINK_PORT="$WAN_IF"
@@ -182,6 +223,7 @@ wait_for_interface() {
     attempt=$((attempt + 1))
   done
   # Timeout: interface never appeared
+  warn -c cli,vlan "Interface $iface did not appear within ~63s (skipping)"
   return 1
 }
 
@@ -264,7 +306,8 @@ ensure_vlan_bridge() {
       echo "[DRY-RUN] ip link set ${UPLINK_PORT}.${VID} up"
     else
       # Create VLAN sub-interface (e.g., eth0.100)
-      ip link add link "$UPLINK_PORT" name "${UPLINK_PORT}.${VID}" type vlan id "$VID" 2>/dev/null || {
+      ip link add link "$UPLINK_PORT" name "${UPLINK_PORT}.${VID}" type vlan id "$VID" 2>/dev/null || \
+      iface_exists "${UPLINK_PORT}.${VID}" || {
         error -c cli,vlan "Failed to create VLAN interface ${UPLINK_PORT}.${VID}"
         return 1
       }
@@ -281,6 +324,8 @@ ensure_vlan_bridge() {
       echo "[DRY-RUN] brctl addbr br${VID}"
       echo "[DRY-RUN] brctl addif br${VID} ${UPLINK_PORT}.${VID}"
       echo "[DRY-RUN] ip link set br${VID} up"
+      echo "[DRY-RUN] brctl stp br${VID} off"
+      echo "[DRY-RUN] brctl setfd br${VID} 0"
     else
       # Create bridge interface
       brctl addbr "br${VID}" 2>/dev/null || {
@@ -291,10 +336,64 @@ ensure_vlan_bridge() {
       brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null
       # Bring bridge up (enter active state)
       ip link set "br${VID}" up 2>/dev/null
+      brctl stp "br${VID}" off 2>/dev/null
+      brctl setfd "br${VID}" 0 2>/dev/null
       info -c cli,vlan "Created bridge br${VID}"
       track_change "Created bridge br${VID}"
     fi
+  else
+    if [ "$DRY_RUN" = "yes" ]; then
+      echo "[DRY-RUN] brctl stp br${VID} off"
+      echo "[DRY-RUN] brctl setfd br${VID} 0"
+    else
+      brctl stp "br${VID}" off 2>/dev/null
+      brctl setfd "br${VID}" 0 2>/dev/null
+    fi
   fi
+}
+
+member_of_bridge_brctl_fallback() {
+  br="$1"
+  iface="$2"
+  [ -n "$br" ] && [ -n "$iface" ] || return 1
+  brctl show 2>/dev/null | awk -v BR="$br" -v IF="$iface" '
+    NR==1 { next }
+    {
+      if ($1 != "") cur=$1
+      for (i=1; i<=NF; i++) {
+        gsub(/\r/, "", $i)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      }
+      if (cur==BR) {
+        for (i=1; i<=NF; i++) {
+          if ($i == IF) { found=1; exit }
+        }
+      }
+    }
+    END { exit(found?0:1) }
+  ' >/dev/null 2>&1
+}
+
+member_of_bridge_sysfs() {
+  br="$1"
+  iface="$2"
+  [ -n "$br" ] && [ -n "$iface" ] || return 1
+  [ -d "/sys/class/net/$br" ] || return 1
+  [ -e "/sys/class/net/$br/brif/$iface" ]
+}
+
+member_of_bridge() {
+  br="$1"
+  iface="$2"
+  member_of_bridge_sysfs "$br" "$iface" && return 0
+  member_of_bridge_brctl_fallback "$br" "$iface"
+}
+
+verify_interface_binding() {
+  iface="$1"
+  vid="$2"
+  [ "$vid" = "none" ] || [ "$vid" = "trunk" ] && return 0
+  member_of_bridge "br${vid}" "$iface"
 }
 
 # attach_to_bridge — Attach interface to appropriate bridge based on VLAN config
@@ -331,16 +430,19 @@ attach_to_bridge() {
         info -c cli,vlan "$LABEL -> $DEFAULT_BRIDGE (untagged)"
         track_change "Attached $IF to $DEFAULT_BRIDGE (untagged)"
       fi
+      note_bound_iface "$IF"
       ;;
     trunk)
       # Trunk mode: leave unconfigured (passthrough, no bridge)
       info -c cli,vlan "$LABEL set as trunk (no bridge)"
+      note_bound_iface "$IF"
       ;;
     *)
       # Attach to VLAN bridge (e.g., br100 for VLAN 100)
       ensure_vlan_bridge "$VID" || return 1
       if [ "$DRY_RUN" = "yes" ]; then
         echo "[DRY-RUN] brctl addif br${VID} $IF"
+        note_bound_iface "$IF"
       else
         brctl addif "br${VID}" "$IF" 2>/dev/null || {
           error -c cli,vlan "Failed to attach $IF to br${VID}"
@@ -348,9 +450,54 @@ attach_to_bridge() {
         }
         info -c cli,vlan "$LABEL -> br${VID} (VLAN $VID)"
         track_change "Attached $IF to br${VID} (VLAN $VID)"
+        if ! verify_interface_binding "$IF" "$VID"; then
+          sleep 2
+          brctl addif "br${VID}" "$IF" 2>/dev/null || true
+          verify_interface_binding "$IF" "$VID" >/dev/null 2>&1 || :
+        fi
+        note_bound_iface "$IF"
+        queue_watch "$IF,$VID"
       fi
       ;;
   esac
+}
+
+note_bound_iface() {
+  local iface
+  iface=$(normalize_iface "$1")
+  [ -n "$iface" ] || return 0
+  case " $BOUND_IFACES " in
+    *" $iface "*) return 0 ;;
+  esac
+  BOUND_IFACES="$BOUND_IFACES $iface"
+}
+
+queue_watch() {
+  raw="$1"
+  iface_part=$(normalize_iface "${raw%,*}")
+  vid_part="${raw#*,}"
+  [ -n "$iface_part" ] || return 0
+  kv="${iface_part},${vid_part}"
+  in_list=0
+  case " $WATCH_IFACES " in
+    *" $kv "*) in_list=1 ;;
+  esac
+  [ $in_list -eq 0 ] && WATCH_IFACES="$WATCH_IFACES $kv"
+
+  # Log on second pass even if already queued previously
+  if [ "${WATCHDOG_QUEUE_LOG:-0}" = "1" ]; then
+    info -c cli,vlan "staging ${iface_part} -> br${vid_part} for watchdog verification"
+  fi
+}
+
+iface_bound() {
+  local iface
+  iface=$(normalize_iface "$1")
+  [ -n "$iface" ] || return 1
+  case " $BOUND_IFACES " in
+    *" $iface "*) return 0 ;;
+  esac
+  return 1
 }
 
 # ========================================================================== #
@@ -365,32 +512,63 @@ find_if_by_ssid() {
   BAND="$1"
   TARGET="$2"
 
-  [ -z "$TARGET" ] && return 1
-  # Skip placeholder SSIDs (used to mark unused slots in settings)
-  [ "$TARGET" = "unused-placeholder" ] && return 1
+  TARGET_NORM=$(normalize_ssid "$TARGET")
+  [ -z "$TARGET_NORM" ] && return 1
+  [ "$TARGET_NORM" = "unused-placeholder" ] && return 1
+  TARGET_LOWER=$(to_lower "$TARGET_NORM")
 
-  # Try base radio first (primary SSID on band, e.g., wl0, wl1, wl2)
-  # Check if SSID matches and interface exists and is ready
+  FALLBACK_IFACE=""
+  FALLBACK_LABEL=""
+  FALLBACK_COUNT=0
+
   SSID_BASE="$(nvram get wl${BAND}_ssid 2>/dev/null)"
   IF_BASE="$(nvram get wl${BAND}_ifname 2>/dev/null)"
-  if [ "$SSID_BASE" = "$TARGET" ] && [ -n "$IF_BASE" ] && iface_exists "$IF_BASE"; then
-    echo "$IF_BASE"
-    return 0
+  IF_BASE=$(normalize_iface "$IF_BASE")
+  if [ -n "$IF_BASE" ] && iface_exists "$IF_BASE"; then
+    BASE_NORM=$(normalize_ssid "$SSID_BASE")
+    if [ "$BASE_NORM" = "$TARGET_NORM" ]; then
+      echo "$IF_BASE"
+      return 0
+    fi
+    if [ -n "$BASE_NORM" ] && [ "$(to_lower "$BASE_NORM")" = "$TARGET_LOWER" ]; then
+      FALLBACK_IFACE="$IF_BASE"
+      FALLBACK_LABEL="$BASE_NORM -> $IF_BASE"
+      FALLBACK_COUNT=1
+    fi
   fi
 
-  # Try guest AP slots 1, 2, 3 (VAPs on base band, e.g., wl0.1, wl0.2, wl0.3)
   for slot in 1 2 3; do
-    # Query NVRAM for guest slot SSID (wl0.1_ssid format)
     SSID="$(nvram get wl${BAND}.${slot}_ssid 2>/dev/null)"
-    [ "$SSID" = "$TARGET" ] || continue
-    # Get interface name for this slot
     IFN="$(nvram get wl${BAND}.${slot}_ifname 2>/dev/null)"
-    if [ -n "$IFN" ] && iface_exists "$IFN"; then
+    IFN=$(normalize_iface "$IFN")
+    [ -n "$IFN" ] || continue
+    iface_exists "$IFN" || continue
+    SSID_NORM=$(normalize_ssid "$SSID")
+    if [ "$SSID_NORM" = "$TARGET_NORM" ]; then
       echo "$IFN"
       return 0
     fi
+    if [ -n "$SSID_NORM" ] && [ "$(to_lower "$SSID_NORM")" = "$TARGET_LOWER" ]; then
+      if [ "$FALLBACK_COUNT" -eq 0 ]; then
+        FALLBACK_IFACE="$IFN"
+        FALLBACK_LABEL="$SSID_NORM -> $IFN"
+      else
+        FALLBACK_LABEL="$FALLBACK_LABEL, $SSID_NORM -> $IFN"
+      fi
+      FALLBACK_COUNT=$((FALLBACK_COUNT + 1))
+    fi
   done
-  
+
+  if [ "$FALLBACK_COUNT" -eq 1 ]; then
+    warn -c cli,vlan "Case-insensitive match for '$TARGET_NORM' -> $FALLBACK_IFACE"
+    echo "$FALLBACK_IFACE"
+    return 0
+  fi
+
+  if [ "$FALLBACK_COUNT" -gt 1 ]; then
+    warn -c cli,vlan "Ambiguous case-insensitive matches for '$TARGET_NORM': $FALLBACK_LABEL"
+  fi
+
   return 1
 }
 
@@ -401,18 +579,56 @@ find_if_by_ssid() {
 # Use case: Fallback when band/slot unknown, or user moves SSID between bands
 find_if_by_ssid_any() {
   ssid="$1"
-  [ -z "$ssid" ] && return 1
-  # Extract all NVRAM keys with matching SSID value (e.g., wl0_ssid=MySSID)
-  keys=$(nvram show 2>/dev/null | grep '_ssid=' | grep -F "=${ssid}" | awk -F= '{print $1}' | sed 's/_ssid$//')
-  for key in $keys; do
-    # Get interface name for this NVRAM key root (e.g., wl0 -> wl0_ifname)
-    iface=$(nvram get ${key}_ifname 2>/dev/null)
-    # Verify interface is valid wireless VAP (starts with wl) and exists in kernel
-    if [ -n "$iface" ] && echo "$iface" | grep -q '^wl' && iface_exists "$iface"; then
-      echo "$iface"
-      return 0
-    fi
-  done
+  TARGET_NORM=$(normalize_ssid "$ssid")
+  [ -z "$TARGET_NORM" ] && return 1
+  [ "$TARGET_NORM" = "unused-placeholder" ] && return 1
+  TARGET_LOWER=$(to_lower "$TARGET_NORM")
+
+  FALLBACK_IFACE=""
+  FALLBACK_LABELS=""
+  FALLBACK_COUNT=0
+
+  while IFS= read -r entry; do
+    case "$entry" in
+      *_ssid=*)
+        key=${entry%%=*}
+        raw=${entry#*=}
+        base=${key%_ssid}
+        iface=$(nvram get ${base}_ifname 2>/dev/null)
+        iface=$(normalize_iface "$iface")
+        [ -n "$iface" ] || continue
+        echo "$iface" | grep -q '^wl' || continue
+        iface_exists "$iface" || continue
+        ssid_norm=$(normalize_ssid "$raw")
+        if [ "$ssid_norm" = "$TARGET_NORM" ]; then
+          echo "$iface"
+          return 0
+        fi
+        if [ -n "$ssid_norm" ] && [ "$(to_lower "$ssid_norm")" = "$TARGET_LOWER" ]; then
+          if [ "$FALLBACK_COUNT" -eq 0 ]; then
+            FALLBACK_IFACE="$iface"
+            FALLBACK_LABELS="$ssid_norm -> $iface"
+          else
+            FALLBACK_LABELS="$FALLBACK_LABELS, $ssid_norm -> $iface"
+          fi
+          FALLBACK_COUNT=$((FALLBACK_COUNT + 1))
+        fi
+        ;;
+    esac
+  done <<EOF
+$(nvram show 2>/dev/null | grep '_ssid=')
+EOF
+
+  if [ "$FALLBACK_COUNT" -eq 1 ]; then
+    warn -c cli,vlan "Case-insensitive match for '$TARGET_NORM' -> $FALLBACK_IFACE"
+    echo "$FALLBACK_IFACE"
+    return 0
+  fi
+
+  if [ "$FALLBACK_COUNT" -gt 1 ]; then
+    warn -c cli,vlan "Ambiguous case-insensitive matches for '$TARGET_NORM': $FALLBACK_LABELS"
+  fi
+
   return 1
 }
 
@@ -438,8 +654,10 @@ set_ap_isolation() {
         }
         info -c cli,vlan "Set AP isolation=$VAL for $IFN"
         # Persist in NVRAM for specific bands/slots (wl0, wl0.1, etc.)
-        case "$IFN" in wl[0-2]|wl[0-2].[1-3]) nvram set "${IFN}_ap_isolate=$VAL" ;; esac
-        [ "$PERSISTENT" = "yes" ] && nvram commit
+        if [ "$PERSISTENT" = "yes" ]; then
+          case "$IFN" in wl[0-2]|wl[0-2].[1-3]) nvram set "${IFN}_ap_isolate=$VAL" ;; esac
+          nvram commit
+        fi
         track_change "Set AP isolation=$VAL for $IFN"
       fi
       ;;
@@ -453,7 +671,6 @@ set_ap_isolation() {
 # Initial pass is immediate; the post-restart second pass acts as the VAP safety net.
 # Also restores unconfigured SSIDs to br0 (prevents orphaning on VLAN changes)
 bind_configured_ssids() {
-  USED_SSIDS=""
   i=1
   # Loop through all SSID slots (SSID_01, SSID_02, etc. up to MAX_SSIDS)
   while [ $i -le "$MAX_SSIDS" ]; do
@@ -469,10 +686,14 @@ bind_configured_ssids() {
       # Find interface for this SSID (searches all bands/slots)
       IFN="$(find_if_by_ssid_any "$ssid")"
       if [ -n "$IFN" ]; then
+        info -c cli,vlan "Resolved SSID '$ssid' -> $IFN"
+        if ! wait_for_interface "$IFN"; then
+          warn -c cli,vlan "$IFN did not appear within timeout"
+          i=$((i+1))
+          continue
+        fi
         # Attach to appropriate bridge (br0, brVID, or trunk)
         attach_to_bridge "$IFN" "$vlan" "SSID_$(printf "%02d" $i)"
-        # Track which SSIDs are configured (for restoration logic below)
-        USED_SSIDS="$USED_SSIDS $ssid"
       else
         warn -c cli,vlan "SSID_$(printf "%02d" $i) '$ssid' not found on any band"
       fi
@@ -482,22 +703,18 @@ bind_configured_ssids() {
     i=$((i+1))
   done
 
-  # Restore unconfigured SSIDs to br0 (prevents orphaning if VLAN config changed)
-  # Query all NVRAM SSIDs, restore any not in configured list
-  ALL_NVRAM_SSIDS=$(nvram show 2>/dev/null | grep '_ssid=' | awk -F= '{print $2}')
-  for s in $ALL_NVRAM_SSIDS; do
-    # Skip if this SSID was explicitly configured
-    case " $USED_SSIDS " in
-      *" $s "*) continue ;;
-    esac
-    # Find interface for unconfigured SSID
-    iface=$(find_if_by_ssid_any "$s")
-    [ -z "$iface" ] && continue
-    # Skip internal VAPs (e.g., wl0.4-9)
-    is_internal_vap "$iface" && continue
-    # Attach to default bridge (untagged LAN)
-    attach_to_bridge "$iface" "none" "Unconfigured SSID $s"
-  done
+  BOUND_SET=" $BOUND_IFACES "
+  for iface in $(nvram show 2>/dev/null | grep '_ifname=' | awk -F= '{print $2}' \
+    | grep -E '^(wl[0-2](\.[123])?$|eth[456])' | sort -u); do
+      iface=$(normalize_iface "$iface")
+      [ -n "$iface" ] || continue
+      iface_exists "$iface" || continue
+      is_internal_vap "$iface" && continue
+      case "$BOUND_SET" in
+        *" $iface "*) continue ;;
+      esac
+      attach_to_bridge "$iface" "none" "Unconfigured IF $iface"
+    done
 }
 
 # --------------------------
@@ -585,7 +802,7 @@ cleanup_existing_config() {
       echo "[DRY-RUN] detach all ports from $br; ip link set $br down; brctl delbr $br"
     else
       # Detach any member interfaces so delbr succeeds (handles continuation lines)
-      for port in $(brctl show "$br" 2>/dev/null | awk 'NR>1 { if (NF>=4) print $4 }'); do
+      for port in $(brctl show "$br" 2>/dev/null | awk 'NR>1 { for (i=4; i<=NF; i++) print $i }'); do
         brctl delif "$br" "$port" 2>/dev/null
       done
       # Bring bridge down before deletion
@@ -678,28 +895,92 @@ safe_service_restart() {
   run_service_with_timeout "$subcmd" "$timeout_sec"
 }
 
+wait_for_rc_quiet() {
+  quiet=0
+  need=6
+  while :; do
+    if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
+       rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
+      quiet=0
+      sleep 1
+      continue
+    fi
+    quiet=$((quiet + 1))
+    [ "$quiet" -ge "$need" ] && break
+    sleep 1
+  done
+}
+
 # restart_services — Restart WiFi, bridge, and web server after configuration
 # Args: none
 # Returns: none (logs all actions)
 # Explanation: Restarts wireless to pick up new VAP configuration, then resets
 # bridge and HTTP services. Handles optional eapd (EAP daemon) if present.
+is_ap_mode() {
+  [ "$(nvram get sw_mode 2>/dev/null)" = "3" ]
+}
+
 restart_services() {
   info -c cli,vlan "Restarting WiFi & bridge services..."
   # Skip if dry-run mode
   [ "$DRY_RUN" = "yes" ] && return
 
-  # Restart wireless radio drivers and VAP configuration
-  safe_service_restart "restart_wireless" "restart_wireless|wireless" 90
-  sleep 2
-  # Restart switch (bridge) driver to apply port configuration
-  safe_service_restart "switch restart" "switch" 30
-  # Restart web server (httpd) for UI refresh
-  safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
-  # Restart EAP daemon if present (used for 802.1X auth on some models)
+  if is_ap_mode; then
+    # Prefer a lighter touch in AP mode to avoid rc race conditions
+    safe_service_restart "switch restart" "switch" 30
+    safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
+  else
+    safe_service_restart "restart_wireless" "restart_wireless|wireless" 90
+    sleep 2
+    safe_service_restart "switch restart" "switch" 30
+    safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
+  fi
+
   if type eapd >/dev/null 2>&1 && [ -x /usr/sbin/eapd ]; then
     killall eapd 2>/dev/null
     /usr/sbin/eapd 2>/dev/null
   fi
+
+  # Optional per-VAP bounce could be added here when specific VAPs changed.
+}
+
+post_rc_watchdog() {
+  case "$WATCH_IFACES" in
+    "" ) return 0 ;;
+  esac
+  (
+    sleep "${WATCHDOG_DELAY_SEC:-25}"
+    info -c cli,vlan "watchdog: starting verification for: $WATCH_IFACES"
+    for pair in $WATCH_IFACES; do
+      iface="${pair%,*}"
+      vid="${pair#*,}"
+      [ -n "$iface" ] || continue
+      [ "$vid" = "none" ] && continue
+      [ "$vid" = "trunk" ] && continue
+      if [ ! -d "/sys/class/net/$iface" ]; then
+        info -c cli,vlan "watchdog: ${iface} no longer exists, skipping"
+        continue
+      fi
+      if member_of_bridge "br${vid}" "$iface"; then
+        info -c cli,vlan "watchdog: ${iface} already on br${vid}, no action"
+      elif member_of_bridge "br0" "$iface"; then
+        info -c cli,vlan "watchdog: ${iface} on br0, moving to br${vid}"
+        brctl delif br0 "$iface" 2>/dev/null
+        if ! ensure_vlan_bridge "$vid"; then
+          warn -c cli,vlan "watchdog: ensure_vlan_bridge br${vid} failed; cannot move ${iface}"
+          continue
+        fi
+        if brctl addif "br${vid}" "$iface" 2>/dev/null; then
+          info -c cli,vlan "watchdog: moved ${iface} -> br${vid}"
+        else
+          warn -c cli,vlan "watchdog: failed to move ${iface} -> br${vid}"
+        fi
+      else
+        info -c cli,vlan "watchdog: ${iface} not found on br0 or br${vid} (likely settled elsewhere), no action"
+      fi
+    done
+    info -c cli,vlan "watchdog: verification complete"
+  ) &
 }
 
 # ========================================================================== #
@@ -746,17 +1027,21 @@ main() {
   cleanup_existing_config
 
   # Configuration phase 1: Attach Ethernet LAN ports to appropriate bridges
-  idx=1
-  for eth in $ETH_PORTS; do
-    vlan=$(read_json "ETH${idx}_VLAN" "$SETTINGS_FILE")
-    [ -z "$vlan" ] && vlan="none"
-    # Attach Ethernet port to br0 (untagged) or brVID (tagged)
-    attach_to_bridge "$eth" "$vlan" "LAN Port $idx"
-    idx=$((idx+1))
-  done
+  if [ -n "$ETH_PORTS" ]; then
+    idx=1
+    for eth in $ETH_PORTS; do
+      vlan=$(read_json "ETH${idx}_VLAN" "$SETTINGS_FILE")
+      [ -z "$vlan" ] && vlan="none"
+      # Attach Ethernet port to br0 (untagged) or brVID (tagged)
+      attach_to_bridge "$eth" "$vlan" "LAN Port $idx"
+      idx=$((idx+1))
+    done
+  fi
 
   # Configuration phase 2: Bind all configured SSIDs dynamically (1..MAX_SSIDS)
   # This includes restoring unconfigured SSIDs to br0
+  WATCHDOG_QUEUE_LOG=0
+  export WATCHDOG_QUEUE_LOG
   bind_configured_ssids
 
   # Configuration phase 3: Apply AP isolation policies across all SSIDs
@@ -780,14 +1065,23 @@ main() {
     # Restart WiFi services to pick up new VAP configuration
     restart_services
 
+    info -c cli,vlan "Waiting for rc/wlconf to go quiet..."
+    wait_for_rc_quiet
+    sleep 2
+
     # Second pass for new VAPs that appear after wireless restart
-    # Some VAPs may not exist until after restart_wireless completes
-    info -c cli,vlan "Second pass for new VAPs..."
+  info -c cli,vlan "Second pass for new VAPs..."
+  WATCHDOG_QUEUE_LOG=1
+  export WATCHDOG_QUEUE_LOG
     bind_configured_ssids
+
+    post_rc_watchdog
   }
 
   # Summary: display final configuration status
   show_configuration_summary
+
+  info -c cli,vlan "VLAN manager run completed at $(date '+%H:%M:%S')"
 
   if [ -x "$FUNCDIR/collect_clients.sh" ]; then
     info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
