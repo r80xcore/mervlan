@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.46"                     #
+#                - File: mervlan_boot.sh || version="0.47"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -26,6 +26,8 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -f "$TEMPLATE_LIB" ] || { error -c vlan,cli "Missing template library: $TEMPLATE_LIB"; exit 1; }
+. "$TEMPLATE_LIB"
 # =========================================== End of MerVLAN environment setup #
 
 # ========================================================================== #
@@ -36,269 +38,259 @@ fi
 BOOT_FLAG="$FLAGDIR/boot_enabled"
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
-# VLAN manager path (referenced in comments, legacy constant)
-VLAN_RUN_LINE="$MERV_BASE/functions/vlan_manager.sh"
-# Legacy tag constants (cron support removed, no longer used)
-TAG="# ENABLE MERVLAN BOOT"
-EVENT_TAG="# MERVLAN MANAGER SERVICE-EVENT"
-# INJ_BASE without trailing slash (used for sed substitutions)
-INJ_BASE="${MERV_BASE%/}"
+# Marker format and lock helper
+MARKER_PREFIX="### >>> MERVLAN START:"
+MARKER_SUFFIX="### <<< MERVLAN END:"
+# Use basename of the template as a stable template id in markers
+_template_id() { basename -- "$1"; }
+_dest_id() { basename -- "$1"; }
 
-# ========================================================================== #
-#                      TEMPLATE INJECTION UTILITIES                          #
-# Extract variants, inject, remove idempotently                              #
-# ========================================================================== #
+_has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# render_template_variant — Extract template variant and apply MERV_BASE substitution
-# Args: $1=template_path, $2=variant_id (1|2), $3=output_file, $4=MERV_BASE_resolved
-# Returns: 0 on success, 1 if variant not found or template malformed
-# Explanation: Searches template for TEMPLATE_<id> marker, extracts that section,
-#   performs sed substitution of MERV_BASE_PLACEHOLDER. If variant missing, falls back to entire template.
-#   Uses AWK for line-by-line parsing to avoid loading entire file into memory.
-render_template_variant() {
-  # $1=template path, $2=variant id, $3=output file, $4=resolved MERV_BASE
-  local template="${1}" variant="${2}" output="${3}" inj="${4}" raw status
+: "${MERV_DISABLE_LOCKS:=0}"
 
-  raw="${output}.raw"
-  [ -n "$variant" ] || variant="1"
+# Compute content hash (md5 is in busybox; sha256 may not be)
+_content_md5() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
 
-  # AWK script: Extract TEMPLATE_<id> section if present, or entire template as fallback
-  if ! awk -v want="$variant" '
-    BEGIN {
-      capture = 0;
-      found = 0;
-    }
-    /^TEMPLATE_[0-9]+[[:space:]]*$/ {
-      section = $0;
-      sub(/^TEMPLATE_/, "", section);
-      gsub(/[[:space:]]/, "", section);
-      capture = (section == want);
-      if (capture) {
-        found = 1;
-      }
-      next;
-    }
-    capture {
-      print;
-    }
-    END {
-      if (!found) {
-        exit 1;
-      }
-    }
-  ' "$template" > "$raw" 2>/dev/null; then
-    status=$?
-    rm -f "$raw" 2>/dev/null || :
-    if [ "$status" -ne 1 ]; then
-      return 1
+select_template_variant() {
+  local name="$1" dest="$2" requested="$3" dest_id
+  [ -n "$name" ] || return 1
+  if [ -n "$requested" ]; then
+    printf '%s' "$requested"
+    return 0
+  fi
+
+  if [ -n "$dest" ] && [ -f "$dest" ]; then
+    dest_id="$(_dest_id "$dest")"
+    if LC_ALL=C grep -Fq "$MARKER_PREFIX $dest_id [tpl=${name}.v1.tpl" "$dest" 2>/dev/null; then
+      printf '1'
+      return 0
     fi
-    # Variant markers missing or requested variant not found; fall back to entire template
-    if ! cp "$template" "$raw" 2>/dev/null; then
-      return 1
+    if LC_ALL=C grep -Fq "$MARKER_PREFIX $dest_id [tpl=${name}.v2.tpl" "$dest" 2>/dev/null; then
+      printf '2'
+      return 0
     fi
-  fi
-
-  # Perform sed substitution: replace MERV_BASE_PLACEHOLDER with resolved MERV_BASE
-  if ! sed "s|MERV_BASE_PLACEHOLDER|$inj|g" "$raw" > "$output" 2>/dev/null; then
-    rm -f "$raw" "$output" 2>/dev/null || :
-    return 1
-  fi
-
-  # Clean up temporary raw file
-  rm -f "$raw" 2>/dev/null || :
-  return 0
-}
-
-# copy_inject — Idempotently inject template content into destination file
-# Args: $1=template_path, $2=dest_file
-# Returns: 0 on success (inject completed or already present), 1 on failure
-# Explanation: Renders template variant (tries variant 2 for shebang files, falls back to 1).
-#   Checks if rendered block already exists verbatim in dest (idempotent). Appends with
-#   single blank line separator. Atomically replaces destination via mktemp + mv.
-copy_inject() {
-  # $1=template $2=dest
-  local tmpl dest inj tmp injtmp combtmp
-  tmpl="$1"; dest="$2"
-  [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
-
-  inj="${MERV_BASE%/}"
-  # Create temporary file for rendered template and combined output
-  tmp="$(mktemp "${TMPDIR:-/tmp}/merv_inj.XXXXXX" 2>/dev/null || printf '%s/merv_inj.%s' "${TMPDIR:-/tmp}" "$$")"
-  injtmp="${tmp}.inj"
-  combtmp="${tmp}.combined"
-
-  # Detect template variant: use variant 2 if dest has shebang (#!), else variant 1
-  local variant="1"
-  if [ -f "$dest" ] && [ -s "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
-    variant="2"
-  fi
-
-  # Render template with detected variant; fallback to variant 1 if variant 2 fails
-  if ! render_template_variant "$tmpl" "$variant" "$injtmp" "$inj"; then
-    if [ "$variant" = "2" ]; then
-      if ! render_template_variant "$tmpl" "1" "$injtmp" "$inj"; then
-        rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
-        return 1
-      fi
-    else
-      rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
-      return 1
-    fi
-  fi
-
-  # Check idempotence: if rendered block already exists verbatim in dest, skip injection
-  if [ -f "$dest" ]; then
-    if awk -v injfile="$injtmp" '
-      BEGIN {
-        m = 0;
-        while ((getline l < injfile) > 0) { m++; inj[m] = l; }
-        close(injfile);
-      }
-      { lines[++n] = $0; }
-      END {
-        if (m == 0) exit 1;
-        for (i = 1; i <= n; i++) {
-          ok = 1;
-          for (j = 1; j <= m; j++) {
-            if (i + j - 1 > n || lines[i + j - 1] != inj[j]) { ok = 0; break; }
-          }
-          if (ok) exit 0;
-        }
-        exit 1;
-      }
-    ' "$dest" >/dev/null 2>&1; then
-      info -c vlan,cli "Injection skipped: block already present in $dest"
-      rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
+    if head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
+      printf '2'
       return 0
     fi
   fi
 
-  if [ -f "$dest" ]; then
-    # Remove trailing blank lines from dest, then append blank separator + rendered content
-    if ! awk '{ lines[NR] = $0 } END { n = NR; while (n>0 && lines[n]=="") n--; for (i=1;i<=n;i++) print lines[i] }' "$dest" > "$combtmp" 2>/dev/null; then
-      rm -f "$injtmp" "$combtmp" 2>/dev/null || :
-      return 1
-    fi
-    # add single blank line separator
-    printf '\n' >> "$combtmp"
-    cat "$injtmp" >> "$combtmp"
-    # atomic replace via mv (ensures consistency even on crash)
-    if ! mv -f "$combtmp" "$dest" 2>/dev/null; then
-      rm -f "$injtmp" "$combtmp" 2>/dev/null || :
-      return 1
-    fi
-  else
-    # ensure parent dir exists, then install injected file
-    mkdir -p "$(dirname "$dest")" 2>/dev/null || { rm -f "$injtmp" 2>/dev/null || :; return 1; }
-    if ! mv -f "$injtmp" "$dest" 2>/dev/null; then
-      rm -f "$injtmp" 2>/dev/null || :
-      return 1
-    fi
-  fi
-
-  chmod 755 "$dest" 2>/dev/null || warn -c vlan,cli "Could not set chmod on $dest"
-  rm -f "$tmp" "$injtmp" "$combtmp" 2>/dev/null || :
+  printf '1'
   return 0
 }
 
-# remove_inject — Conservatively remove injected template content from destination
+inject_template() {
+  local name="$1" dest="$2" variant="${3:-}" resolved tpl rc
+  resolved=$(select_template_variant "$name" "$dest" "$variant") || return 1
+  tpl=$(tpl_path "$name" "$resolved" "$dest") || return 1
+  copy_inject "$tpl" "$dest"
+  rc=$?
+  rm -f "$tpl" 2>/dev/null || :
+  return $rc
+}
+
+remove_template_block() {
+  local name="$1" dest="$2" variant="${3:-}" resolved tpl rc
+  resolved=$(select_template_variant "$name" "$dest" "$variant") || return 1
+  tpl=$(tpl_path "$name" "$resolved" "$dest") || return 1
+  remove_inject "$tpl" "$dest"
+  rc=$?
+  rm -f "$tpl" 2>/dev/null || :
+  return $rc
+}
+
+is_node() {
+  [ "${MERV_NODE_CONTEXT:-0}" = "1" ] && return 0
+  [ -f "$MERV_BASE/.is_node" ] && return 0
+  return 1
+}
+
+marker_present() {
+  local name="$1" dest="$2" destid tplid start_base
+  [ -f "$dest" ] || return 1
+  destid="$(_dest_id "$dest")"
+  tplid="${name}.v"
+  start_base="$MARKER_PREFIX $destid [tpl=${tplid}"
+  LC_ALL=C grep -qF "$start_base" "$dest" 2>/dev/null
+}
+
+# copy_inject — Marker-bounded injection that preserves surrounding content
+# Args: $1=rendered_template_path, $2=dest_file
+# Returns: 0 on success (injected or updated), 1 on failure
+copy_inject() {
+  local tmpl="$1" dest="$2"
+  [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
+
+  local block_file md5 tplid destid start_tag end_tag start_base end_base
+
+  block_file="$(mktemp "${TMPDIR:-/tmp}/merv_inj_block.XXXXXX" 2>/dev/null || printf '%s/merv_inj_block.%s' "${TMPDIR:-/tmp}" "$$")"
+
+  md5="$(_content_md5 "$tmpl")"
+  tplid="$(_template_id "$tmpl")"
+  destid="$(_dest_id "$dest")"
+  start_tag="$MARKER_PREFIX $destid [tpl=$tplid md5=$md5]"
+  end_tag="$MARKER_SUFFIX $destid [tpl=$tplid md5=$md5]"
+  start_base="$MARKER_PREFIX $destid [tpl=$tplid "
+  end_base="$MARKER_SUFFIX $destid [tpl=$tplid "
+
+  {
+    printf '%s\n' "$start_tag"
+    cat "$tmpl"
+    printf '%s\n' "$end_tag"
+  } > "$block_file"
+
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || { rm -f "$block_file" 2>/dev/null || :; return 1; }
+  [ -f "$dest" ] || : > "$dest"
+
+  if LC_ALL=C grep -Fq "$start_base" "$dest"; then
+    if ! LC_ALL=C grep -Fq "$end_base" "$dest"; then
+      error -c vlan,cli "Cowardly refusing to modify $dest: found START marker without matching END. Please fix markers manually."
+      rm -f "$block_file" 2>/dev/null || :
+      return 1
+    fi
+  fi
+
+  tmp_new="${dest}.new"
+  inject_block() {
+    local count dedupe_tmp last_char
+    awk -v start_base="$start_base" -v end_base="$end_base" -v blockf="$block_file" '
+      BEGIN { replaced = 0; skipping = 0; }
+      {
+        if (!replaced) {
+          if (index($0, start_base) == 1) {
+            while ((getline line < blockf) > 0) {
+              print line;
+            }
+            close(blockf);
+            replaced = 1;
+            skipping = 1;
+          } else {
+            print;
+          }
+        } else if (skipping) {
+          if (index($0, end_base) == 1) {
+            skipping = 0;
+          }
+        }
+      }
+    ' "$dest" > "$tmp_new" || return 1
+
+    if LC_ALL=C grep -qF "$start_base" "$dest"; then
+      mv -f "$tmp_new" "$dest" || return 1
+    else
+      rm -f "$tmp_new" 2>/dev/null || :
+      if [ -s "$dest" ]; then
+        last_char=$(tail -c 1 "$dest" 2>/dev/null | tr '\n' '_')
+        [ "$last_char" = "_" ] || printf '\n' >> "$dest"
+      fi
+      cat "$block_file" >> "$dest" || return 1
+    fi
+
+    while :; do
+      count=$(LC_ALL=C grep -Fc "$start_base" "$dest" 2>/dev/null || printf '0')
+      [ "$count" -gt 1 ] 2>/dev/null || break
+      dedupe_tmp="${dest}.dedupe.$$"
+      awk -v start_base="$start_base" -v end_base="$end_base" '
+        BEGIN { skipping = 0; seen = 0 }
+        {
+          if (!skipping) {
+            if (index($0, start_base) == 1) {
+              if (seen) { skipping = 1; next }
+              seen = 1
+            }
+            print
+          } else if (index($0, end_base) == 1) {
+            skipping = 0
+          }
+        }
+      ' "$dest" > "$dedupe_tmp" || { rm -f "$dedupe_tmp" 2>/dev/null || :; break; }
+      mv -f "$dedupe_tmp" "$dest" || { rm -f "$dedupe_tmp" 2>/dev/null || :; break; }
+    done
+
+    return 0
+  }
+
+  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! _has_cmd flock; then
+    inject_block || { rm -f "$block_file" "$tmp_new" 2>/dev/null || :; return 1; }
+  else
+    if ! (
+      flock -w 5 200 || exit 1
+      inject_block
+    ) 200>"${dest}.lock"; then
+      rm -f "$block_file" "$tmp_new" 2>/dev/null || :
+      return 1
+    fi
+  fi
+
+  if [ ! -x "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
+    chmod 755 "$dest" 2>/dev/null || warn -c vlan,cli "Could not set chmod on $dest"
+  fi
+
+  rm -f "$block_file" 2>/dev/null || :
+  return 0
+}
+
+# remove_inject — Remove only the marker-bounded block for the given template
 # Args: $1=template_path, $2=dest_file
-# Returns: 0 on success or no-op, 1 on fatal error (template parse failure)
-# Explanation: Renders template via multi-variant detection (prefers variant 2 if dest
-#   is empty or non-shebang, else tries variant 1 first). Searches for first literal
-#   occurrence of rendered block and removes it with preceding/trailing blank lines.
-#   Conservative: does nothing if block not found (returns 1 from AWK, interpreted as no-op).
+# Returns: 0 on success (or block absent), 1 on fatal error
 remove_inject() {
-  local tmpl dest inj tmp injtmp tmpout variant
-  tmpl="$1"; dest="$2"
+  local tmpl="$1" dest="$2"
   [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
   [ -f "$dest" ] || return 0
 
-  inj="${MERV_BASE%/}"
-  # Create temporary files for rendering and output
-  tmp="$(mktemp "${TMPDIR:-/tmp}/merv_rmv.XXXXXX" 2>/dev/null || printf '%s/merv_rmv.%s' "${TMPDIR:-/tmp}" "$$")"
-  injtmp="${tmp}.inj"
-  tmpout="${tmp}.out"
-  rm -f "$tmp" 2>/dev/null || :
+  local tplid destid start_base end_base
+  tplid="$(_template_id "$tmpl")"
+  destid="$(_dest_id "$dest")"
+  start_base="$MARKER_PREFIX $destid [tpl=$tplid "
+  end_base="$MARKER_SUFFIX $destid [tpl=$tplid "
 
-  # Try variant 2 first if dest has content (likely has shebang), else variant 1 first
-  local variants="2 1" status
-  if [ ! -s "$dest" ]; then
-    variants="1 2"
+  if ! LC_ALL=C grep -Fq "$start_base" "$dest"; then
+    return 0
   fi
 
-  for variant in $variants; do
-    # Render the template variant (skip if rendering fails for this variant)
-    if ! render_template_variant "$tmpl" "$variant" "$injtmp" "$inj"; then
-      continue
-    fi
+  if ! LC_ALL=C grep -Fq "$end_base" "$dest"; then
+    error -c vlan,cli "Cowardly refusing to modify $dest: found START marker without matching END. Please fix markers manually."
+    return 1
+  fi
 
-    # AWK: Find first occurrence of rendered block in dest and remove it with blank line cleanup
-    if awk -v injfile="$injtmp" '
-      BEGIN {
-        m = 0;
-        while ((getline l < injfile) > 0) {
-          m++;
-          inj[m] = l;
-        }
-        close(injfile);
-      }
+  tmp_new="${dest}.new"
+  remove_block() {
+    awk -v start_base="$start_base" -v end_base="$end_base" '
+      BEGIN { skipping = 0; removed = 0; }
       {
-        lines[++n] = $0;
-      }
-      END {
-        pos = 0;
-        # Search for block start (first line match of injected content)
-        for (i = 1; i <= n; i++) {
-          if (m > 0 && lines[i] == inj[1]) {
-            # Verify full block match at this position
-            ok = 1;
-            for (j = 1; j <= m; j++) {
-              if (i + j - 1 > n || lines[i + j - 1] != inj[j]) {
-                ok = 0;
-                break;
-              }
-            }
-            if (ok) {
-              pos = i;
-            }
+        if (!skipping) {
+          if (index($0, start_base) == 1) {
+            skipping = 1;
+            removed = 1;
+            next;
+          }
+          print;
+        } else {
+          if (index($0, end_base) == 1) {
+            skipping = 0;
+            next;
           }
         }
-        if (pos == 0) {
-          # Block not found: output all lines unchanged, signal not-found via exit 1
-          for (i = 1; i <= n; i++) print lines[i];
-          exit 1;
-        }
-        # Found at pos: output lines before block (trim trailing blanks), then lines after
-        last = pos - 1;
-        while (last > 0 && lines[last] == "") last--;
-        for (i = 1; i <= last; i++) print lines[i];
-        rem = pos + m;
-        if (rem <= n) {
-          # Output single blank separator and remaining lines after block
-          print "";
-          for (i = rem; i <= n; i++) print lines[i];
-        }
       }
-    ' "$dest" > "$tmpout" 2>/dev/null; then
-      # Block found and removed; atomically replace dest
-      if mv -f "$tmpout" "$dest" 2>/dev/null; then
-        break
-      fi
-    else
-      status=$?
-      rm -f "$tmpout" 2>/dev/null || :
-      if [ "$status" -gt 1 ]; then
-        # Fatal error (template parse failed, not just block-not-found)
-        rm -f "$injtmp" 2>/dev/null || :
-        return 1
-      fi
-      # status == 1 means template block not found; try next variant
-    fi
-  done
+      END { }
+    ' "$dest" > "$tmp_new" || return 1
 
-  # Clean up temporary files
-  rm -f "$injtmp" "$tmpout" "$tmp" 2>/dev/null || :
+    mv -f "$tmp_new" "$dest"
+  }
+
+  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! _has_cmd flock; then
+    remove_block || { rm -f "$tmp_new" 2>/dev/null || :; return 1; }
+  else
+    if ! (
+      flock -w 5 200 || exit 1
+      remove_block
+    ) 200>"${dest}.lock"; then
+      rm -f "$tmp_new" 2>/dev/null || :
+      return 1
+    fi
+  fi
+
   return 0
 }
 
@@ -430,7 +422,7 @@ case "$ACTION" in
     mkdir -p "$SCRIPTS_DIR"
 
     # Inject services-start code to auto-load mervlan.asp at system boot
-    copy_inject "$TPL_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
+  inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
     info -c vlan,cli "Installed services-start with MERV_BASE=$MERV_BASE (service-event managed at setup)"
 
     # Create boot flag directory and set enabled state (1 = enabled)
@@ -449,7 +441,7 @@ case "$ACTION" in
   disable)
     # Remove injected services-start code (idempotent; no-op if not found)
     if [ -f "$SERVICES_START" ]; then
-      remove_inject "$TPL_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
+  remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
     fi
 
     # Create boot flag directory and set disabled state (0 = disabled)
@@ -469,9 +461,9 @@ case "$ACTION" in
     # Ensure /jffs/scripts directory exists
     mkdir -p "$SCRIPTS_DIR"
     # Inject service-event wrapper into system rc_service handler
-    copy_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
+  inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
     # Inject addon boot entry into services-start (for addon install.sh auto-load)
-    copy_inject "$TPL_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install addon boot entry"; exit 1; }
+  inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install addon boot entry"; exit 1; }
     info -c vlan,cli "Installed service-event with MERV_BASE=$MERV_BASE (setup-only)"
     # Propagate setupenable to all configured nodes via SSH
     handle_nodes_via_ssh "setupenable"
@@ -483,14 +475,14 @@ case "$ACTION" in
   setupdisable)
     # Remove injected service-event wrapper content (idempotent)
     if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
-      remove_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" || warn -c vlan,cli "Failed to remove injected service-event content"
+  remove_template_block "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || warn -c vlan,cli "Failed to remove injected service-event content"
       info -c vlan,cli "Removed service-event injection (setup-only disable)"
     else
       info -c vlan,cli "service-event not present; nothing to disable"
     fi
     # Remove injected addon boot entry from services-start (idempotent)
     if [ -f "$SERVICES_START" ]; then
-      remove_inject "$TPL_ADDON" "$SERVICES_START" || warn -c vlan,cli "Failed to remove addon boot entry"
+  remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || warn -c vlan,cli "Failed to remove addon boot entry"
     fi
     # Propagate setupdisable to all configured nodes via SSH
     handle_nodes_via_ssh "setupdisable"
@@ -512,16 +504,22 @@ case "$ACTION" in
     fi
     # Execute locally on this node if MERV_NODE_CONTEXT=1 (SSH propagation) or force_local=1
     if [ "${MERV_NODE_CONTEXT:-0}" = "1" ] || [ "$force_local" = "1" ]; then
+      if ! is_node; then
+        error -c vlan,cli "Refusing nodeenable on this device (not marked as node)"
+        error -c vlan,cli "Create $MERV_BASE/.is_node or run via SSH with MERV_NODE_CONTEXT=1"
+        exit 1
+      fi
       mkdir -p "$SCRIPTS_DIR"
       # Install node service-event handler (mervlan_boot.sh for nodes)
-      copy_inject "$TPL_EVENT_NODES" "$SERVICE_EVENT_HANDLER" \
-        || { error -c vlan,cli "Failed to install node mervlan_boot.sh"; exit 1; }
+      inject_template "$TEMPLATE_SERVICE_EVENT_NODES" "$SERVICE_EVENT_HANDLER" || { error -c vlan,cli "Failed to install node mervlan_boot.sh"; exit 1; }
+  chmod 755 "$SERVICE_EVENT_HANDLER" 2>/dev/null || { warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_HANDLER"; exit 1; }
       # Install node service-event wrapper
-      copy_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" \
-        || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
+      inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
       # Set executable permissions on installed scripts
-      chmod 755 "$SERVICE_EVENT_WRAPPER" "$BOOT_SCRIPT" 2>/dev/null \
-        || { warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"; exit 1; }
+      chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || { warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"; exit 1; }
+      if [ -n "$BOOT_SCRIPT" ]; then
+        chmod 755 "$BOOT_SCRIPT" 2>/dev/null || warn -c vlan,cli "Could not chmod 755 $BOOT_SCRIPT"
+      fi
 
       info -c vlan,cli "Installed node mervlan_boot.sh, service-event, services-start with MERV_BASE=$MERV_BASE"
       exit 0
@@ -558,17 +556,21 @@ case "$ACTION" in
     fi
     # Execute locally on this node if MERV_NODE_CONTEXT=1 (SSH propagation) or force_local=1
     if [ "${MERV_NODE_CONTEXT:-0}" = "1" ] || [ "$force_local" = "1" ]; then
+      if ! is_node; then
+        info -c vlan,cli "Not flagged as node; skipping nodedisable"
+        exit 0
+      fi
       # Remove node service-event wrapper injection if present
       if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
-        remove_inject "$TPL_EVENT" "$SERVICE_EVENT_WRAPPER" \
+        remove_template_block "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" \
         || { error -c vlan,cli "Failed to remove node service-event"; exit 1; }
       else
         info -c vlan,cli "service-event not present on node; nothing to disable"
       fi
       # Remove addon boot entry from services-start if present
       if [ -f "$SERVICES_START" ]; then
-        remove_inject "$TPL_SERVICES" "$SERVICES_START" \
-          || warn -c vlan,cli "Failed to remove addon boot entry"
+        remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" \
+          || warn -c vlan,cli "Failed to remove services-start block"
       fi
       exit 0
     fi
@@ -608,10 +610,9 @@ case "$ACTION" in
 
     # Check if service-event wrapper is present and examine its state
     if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
-      # Determine event state: disabled/active/custom based on grep patterns
       if grep -q "service-event disabled" "$SERVICE_EVENT_WRAPPER"; then
         event_state=disabled
-      elif grep -q "functions/vlan_boot_event.sh" "$SERVICE_EVENT_WRAPPER"; then
+      elif marker_present "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER"; then
         event_state=active
       else
         event_state=custom
@@ -648,7 +649,13 @@ case "$ACTION" in
     if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
     # Check service-event wrapper and determine state: disabled/active/custom
     if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
-      if grep -q "service-event disabled" "$SERVICE_EVENT_WRAPPER"; then event_state=disabled; elif grep -q "functions/vlan_boot_event.sh" "$SERVICE_EVENT_WRAPPER"; then event_state=active; else event_state=custom; fi
+      if grep -q "service-event disabled" "$SERVICE_EVENT_WRAPPER"; then
+        event_state=disabled
+      elif marker_present "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER"; then
+        event_state=active
+      else
+        event_state=custom
+      fi
     fi
     # Cron support removed; cron_state remains 'absent'
     cron_line=""

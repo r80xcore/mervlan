@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.46"                        #
+#               - File: sync_nodes.sh || version="0.47"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -42,6 +42,7 @@ functions/mervlan_boot.sh
 functions/mervlan_manager.sh 
 functions/collect_local_clients.sh 
 functions/heal_event.sh  
+templates/mervlan_templates.sh
 settings/services-start.tpl 
 settings/service-event.tpl
 settings/service-event-nodes.tpl
@@ -56,7 +57,7 @@ functions/collect_local_clients.sh
 functions/heal_event.sh
 "
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
-FILES_TO_COPY_CHMOD_644="settings/var_settings.sh settings/log_settings.sh"
+FILES_TO_COPY_CHMOD_644="settings/var_settings.sh settings/log_settings.sh templates/mervlan_templates.sh"
 
 # ========================================================================== #
 # SYNCHRONIZATION PARAMETERS — Debug toggles and SSH retry behaviour         #
@@ -425,6 +426,28 @@ set_remote_permissions_644() {
     fi
 }
 
+# mark_node_remote — Create node sentinel flag to enable node-only flows
+mark_node_remote() {
+    local node_ip="$1"
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$MERV_BASE' && : > '$MERV_BASE/.is_node' && chmod 644 '$MERV_BASE/.is_node'" 2>/dev/null; then
+        info -c cli,vlan "✓ Marked $node_ip as MerVLAN node (.is_node)"
+        return 0
+    fi
+    error -c cli,vlan "✗ Failed to write .is_node sentinel on $node_ip"
+    return 1
+}
+
+# unmark_node_remote — Remove node sentinel during teardown (unused but available)
+unmark_node_remote() {
+    local node_ip="$1"
+    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "rm -f '$MERV_BASE/.is_node'" 2>/dev/null; then
+        info -c cli,vlan "✓ Cleared node sentinel on $node_ip"
+        return 0
+    fi
+    warn -c cli,vlan "⚠️  Could not remove .is_node sentinel on $node_ip"
+    return 1
+}
+
 # ========================================================================== #
 # DEBUG UTILITIES — Optional verbose listing during troubleshooting          #
 # ========================================================================== #
@@ -530,7 +553,9 @@ for node_ip in $NODE_IPS; do
             for file in $FILES_TO_COPY_CHMOD; do
                 # Check if this file is in our copy list
                 if echo "$FILES_TO_COPY" | grep -q "$file"; then
-                    set_remote_permissions "$node_ip" "$file"
+                    if set_remote_permissions "$node_ip" "$file"; then
+                        info -c cli,vlan "chmod 755 on $node_ip:$file"
+                    fi
                 fi
             done
 
@@ -538,9 +563,40 @@ for node_ip in $NODE_IPS; do
             for file in $FILES_TO_COPY_CHMOD_644; do
                 # Check if this file is in our copy list
                 if echo "$FILES_TO_COPY" | grep -q "$file"; then
-                    set_remote_permissions_644 "$node_ip" "$file"
+                    if set_remote_permissions_644 "$node_ip" "$file"; then
+                        info -c cli,vlan "chmod 644 on $node_ip:$file"
+                    fi
                 fi
             done
+
+            if ! mark_node_remote "$node_ip"; then
+                overall_success=false
+                continue
+            fi
+
+            if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "[ -f '$MERV_BASE/.is_node' ]" 2>/dev/null; then
+                warn -c cli,vlan "⚠️  .is_node sentinel missing on $node_ip after mark"
+            fi
+
+                        if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" \
+                            -o ConnectTimeout=5 -o PasswordAuthentication=no \
+                            "admin@$node_ip" \
+                            "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local" 2>&1; then
+                info -c cli,vlan "✓ nodeenable applied on $node_ip"
+                                report_line=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" \
+                                    -o ConnectTimeout=5 -o PasswordAuthentication=no \
+                                    "admin@$node_ip" \
+                                    "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+                                if [ -n "$report_line" ]; then
+                                        info -c cli,vlan "Node $node_ip report: $report_line"
+                                        echo "$report_line" | grep -q 'event=active' || warn -c cli,vlan "⚠️ event not active on $node_ip"
+                                else
+                                        warn -c cli,vlan "⚠️ no report output from $node_ip after nodeenable"
+                                fi
+            else
+                warn -c cli,vlan "⚠️ nodeenable failed on $node_ip"
+                overall_success=false
+            fi
         else
             error -c cli,vlan "✗ File verification failed for $node_ip"
             overall_success=false
@@ -552,13 +608,7 @@ for node_ip in $NODE_IPS; do
     info -c cli,vlan "--- Completed node: $node_ip ---"
     echo ""
 done
-
-info -c cli,vlan "Triggering nodeenable on synchronized nodes"
-if sh "$MERV_BASE/functions/mervlan_boot.sh" nodeenable --local; then
-    info -c cli,vlan "✓ Nodeenable completed for all reachable nodes"
-else
-    warn -c cli,vlan "⚠️  Nodeenable reported issues; review logs for details"
-fi
+# Global nodeenable sweep removed; handled per-node in loop above
 
 # ========================================================================== #
 # SUMMARY & EXIT — Report overall status and exit with success/failure       #
