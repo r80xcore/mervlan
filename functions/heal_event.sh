@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                  - File: heal_event.sh || version="0.46"                     #
+#                  - File: heal_event.sh || version="0.47"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -28,7 +28,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 # =========================================== End of MerVLAN environment setup #
-
+. /usr/sbin/helper.sh
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -135,16 +135,21 @@ if ! any_vlan_configured; then
   exit 0
 fi
 
+# Skip if vlan manager already busy (avoid holding our lock needlessly)
+MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
+if [ -d "$MANAGER_LOCK" ]; then
+  info -c vlan "Heal: skipping [initial] because mervlan_manager is active"
+  exit 0
+fi
+
 # Ensure locks directory exists for all lock/cooldown files
 mkdir -p "$LOCKDIR" 2>/dev/null
 
 # Simple lock using mkdir (atomic operation) to avoid concurrent runs
 LOCK="$LOCKDIR/vlan_event.lock"
 if mkdir "$LOCK" 2>/dev/null; then
-  # Clean up lock on script exit
   trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 else
-  # Another instance is running; exit silently
   exit 0
 fi
 
@@ -161,6 +166,11 @@ COOLDOWN_SEC=90
 VLAN_SETTLE_DELAY="${VLAN_SETTLE_DELAY:-3}"
 VLAN_SETTLE_DELAY=$(sanitize_epoch "$VLAN_SETTLE_DELAY")
 [ "$VLAN_SETTLE_DELAY" -ge 1 ] 2>/dev/null || VLAN_SETTLE_DELAY=3
+
+# Health heartbeat and mismatch tracking for cron-based monitoring
+HEALTH_OK_FILE="$LOCKDIR/vlan_health_ok.last"
+HEALTH_LOG_INTERVAL_SEC=$((12 * 3600))
+LAST_MISMATCH_FILE="$LOCKDIR/vlan_last_mismatch.last"
 
 # ============================================================================ #
 # heal_allowed                                                                 #
@@ -186,17 +196,39 @@ mark_heal() {
   date +%s > "$COOLDOWN_FILE"
 }
 
-# Event debounce: suppress same event if triggered again within 2 seconds
-EVENT_DEBOUNCE="$LOCKDIR/vlan_event.last"
-event_now=$(date +%s)
-last_event_raw=$(cat "$EVENT_DEBOUNCE" 2>/dev/null || echo 0)
-last_event=$(sanitize_epoch "$last_event_raw")
-if [ "$last_event" -gt 0 ] && [ $((event_now - last_event)) -lt 2 ]; then
-  info -c vlan "Event suppressed by debounce: [$*]"
-  exit 0
-fi
-# Record current event timestamp for next debounce check
-printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
+record_mismatch() {
+  date +%s > "$LAST_MISMATCH_FILE"
+}
+
+log_health_ok_if_needed() {
+  local now last_ok_raw last_ok last_m_raw last_m since_ts hours since_str
+
+  now=$(date +%s)
+  last_ok_raw=$(cat "$HEALTH_OK_FILE" 2>/dev/null || echo 0)
+  last_ok=$(sanitize_epoch "$last_ok_raw")
+
+  if [ $((now - last_ok)) -lt "$HEALTH_LOG_INTERVAL_SEC" ]; then
+    return 0
+  fi
+
+  last_m_raw=$(cat "$LAST_MISMATCH_FILE" 2>/dev/null || echo 0)
+  last_m=$(sanitize_epoch "$last_m_raw")
+
+  if [ "$last_m" -gt 0 ]; then
+    since_ts="$last_m"
+  else
+    since_ts="$now"
+  fi
+
+  hours=$(( (now - since_ts) / 3600 ))
+  [ "$hours" -lt 0 ] && hours=0
+
+  since_str=$(date -d "@$since_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')
+
+  info -c vlan "Heal: no VLAN damage since ${since_str} (≈${hours}h ago)"
+
+  printf '%s\n' "$now" > "$HEALTH_OK_FILE"
+}
 
 # ============================================================================ #
 #                           VLAN VALIDATION LOGIC                              #
@@ -210,14 +242,76 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 # by scanning /sys/class/net. Excludes br0 (main LAN bridge). Returns sorted   #
 # numeric list of VLAN IDs.                                                    #
 # ============================================================================ #
-actual_vlans_from_kernel() {
-  # List all network interfaces; filter bridge devices excluding br0
-  ls /sys/class/net 2>/dev/null \
-    | grep -E '^br[0-9]+$' \
-    | grep -v '^br0$' \
-    | sed 's/^br//' \
-    | sort -n
+bridge_has_members() {
+  local br member has_edge members count
+  br="$1"
+
+  [ -d "/sys/class/net/$br/brif" ] || return 1
+
+  members=$(ls "/sys/class/net/$br/brif" 2>/dev/null)
+  [ -n "$members" ] || return 1
+
+  count=0
+  has_edge=0
+  for member in $members; do
+    count=$((count + 1))
+    case "$member" in
+      eth[0-9]*|vlan[0-9]*|bond[0-9]*) ;;  # uplink/backhaul style members
+      wl*|ra*|ath*|psta*|apcli*|lan*|wan*) has_edge=1 ;;
+      *) has_edge=1 ;;
+    esac
+  done
+
+  [ "$count" -gt 0 ] && [ "$has_edge" -eq 1 ]
 }
+
+actual_vlans_from_kernel() {
+  local br name
+
+  for br in /sys/class/net/br[0-9]*; do
+    [ -e "$br" ] || continue
+    name="${br##*/}"
+    [ "$name" = "br0" ] && continue
+
+    if bridge_has_members "$name"; then
+      printf '%s\n' "${name#br}"
+    fi
+  done | sort -n
+}
+
+wait_for_rc_quiet() {
+  local need max_wait quiet start now
+
+  need="${1:-6}"
+  max_wait="${2:-45}"
+  quiet=0
+  start=$(date +%s)
+
+  info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
+
+  while :; do
+    # If either queue or process is busy, reset quiet counter
+    if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
+       rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
+      quiet=0
+    else
+      quiet=$((quiet + 1))
+      if [ "$quiet" -ge "$need" ]; then
+        info -c vlan "wait_for_rc_quiet: rc quiet for ${quiet}s; proceeding"
+        return 0
+      fi
+    fi
+
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$max_wait" ]; then
+      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s; continuing"
+      return 0
+    fi
+
+    sleep 1
+  done
+}
+
 
 # ============================================================================ #
 # expected_vlans_from_settings                                                 #
@@ -246,61 +340,160 @@ expected_vlans_from_settings() {
 # stabilize.                                                                   #
 # ============================================================================ #
 check_vlan_config() {
-  local exp cur exp_str cur_str missing extra attempt max_attempts
+  local exp cur exp_str cur_str missing extra
 
-  # Query expected VLANs from settings file
   exp=$(expected_vlans_from_settings)
   if [ -z "$exp" ]; then
     info -c vlan "VLAN check OK: no VLANs configured in settings"
     return 0
   fi
-  # Convert list to space-separated string for logging
   exp_str=$(printf '%s\n' "$exp" | xargs 2>/dev/null)
 
-  # Retry loop: check once, wait for settle, check again
-  max_attempts=2
-  attempt=1
-  while [ $attempt -le $max_attempts ]; do
-    # Query actual VLANs from kernel
+  local delays="1 1 2 2 4"
+  local attempt=1
+  local total_passes=5
+
+  for delay in $delays; do
     cur=$(actual_vlans_from_kernel)
     cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
-    # Compare expected vs actual (line-by-line for accuracy)
+
     if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
-      # Log success message; include settle message on retry
-      if [ $attempt -gt 1 ]; then
-        info -c vlan "VLANs restored after settle (${VLAN_SETTLE_DELAY}s): ${cur_str:-none}"
-      else
-        info -c vlan "VLAN check OK: expected=${exp_str:-none} actual=${cur_str:-none}"
+      info -c vlan "VLAN check pass ${attempt}/${total_passes} OK: expected=${exp_str:-none} actual=${cur_str:-none}"
+
+      if [ "$attempt" -eq "$total_passes" ]; then
+        info -c vlan "VLAN check final OK after ${attempt} passes: ${cur_str:-none}"
+        return 0
       fi
-      return 0
+
+      sleep "$delay"
+    else
+      missing=""
+      for vid in $exp; do
+        printf '%s\n' "$cur" | grep -Fx "$vid" >/dev/null 2>&1 || missing="$missing $vid"
+      done
+      missing=${missing# }
+
+      extra=""
+      for vid in $cur; do
+        printf '%s\n' "$exp" | grep -Fx "$vid" >/dev/null 2>&1 || extra="$extra $vid"
+      done
+      extra=${extra# }
+
+      warn -c vlan "VLAN mismatch on pass ${attempt}/${total_passes}: expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
+      return 1
     fi
-    # Break loop if this was the last attempt
-    [ $attempt -lt $max_attempts ] || break
-    # Wait for network interfaces to settle before retry
-    sleep "$VLAN_SETTLE_DELAY"
+
     attempt=$((attempt + 1))
   done
 
-  # Compute missing VLANs (in expected but not in actual)
+  info -c vlan "VLAN check completed fallback path; treating as OK (expected=${exp_str:-none})"
+  return 0
+}
+
+check_vlan_config_fast() {
+  local exp cur exp_str cur_str missing extra
+
+  exp=$(expected_vlans_from_settings)
+  if [ -z "$exp" ]; then
+    return 0
+  fi
+  exp_str=$(printf '%s\n' "$exp" | xargs 2>/dev/null)
+
+  cur=$(actual_vlans_from_kernel)
+  cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
+
+  if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
+    return 0
+  fi
+
   missing=""
   for vid in $exp; do
     printf '%s\n' "$cur" | grep -Fx "$vid" >/dev/null 2>&1 || missing="$missing $vid"
   done
-  # Strip leading space from missing list
   missing=${missing# }
 
-  # Compute extra VLANs (in actual but not in expected)
   extra=""
   for vid in $cur; do
     printf '%s\n' "$exp" | grep -Fx "$vid" >/dev/null 2>&1 || extra="$extra $vid"
   done
-  # Strip leading space from extra list
   extra=${extra# }
 
-  # Log full mismatch details for troubleshooting
-  warn -c vlan "VLAN mismatch after settle: expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
+  warn -c vlan "Fast VLAN mismatch: expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
   return 1
 }
+
+# Manual test mode: allow admins to invoke a one-off validation
+if [ "$1" = "--test" ] || [ "$1" = "test" ]; then
+  info -c vlan "Manual VLAN check triggered via --test"
+  if ! check_vlan_config; then
+    if heal_allowed; then
+      info -c cli,vlan "Manual check detected mismatch — invoking vlan_manager (cooldown ${COOLDOWN_SEC}s)"
+      mark_heal
+      "$VLAN_MANAGER" >/dev/null 2>&1 &
+    else
+      info -c cli,vlan "Manual check mismatch but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+    fi
+  fi
+  exit 0
+fi
+
+# Normalize incoming event payload into a single lower-case token
+RAW_EVENT="$1"
+if [ $# -gt 0 ]; then
+  shift
+  while [ $# -gt 0 ]; do
+    RAW_EVENT="${RAW_EVENT}_$1"
+    shift
+  done
+fi
+
+if [ -z "$RAW_EVENT" ]; then
+  info -c cli,vlan "Heal: invoked without event payload; nothing to do"
+  exit 0
+fi
+
+EVENT=$(printf '%s' "$RAW_EVENT" | tr 'A-Z' 'a-z' | tr ' ' '_' | tr '-' '_')
+EVENT=$(printf '%s' "$EVENT" | tr -s '_' '_' | sed 's/^_//; s/_$//')
+EVENT_LABEL="$EVENT"
+
+# Skip heal attempts while mervlan_manager is already applying changes
+if [ -d "$MANAGER_LOCK" ]; then
+  info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active"
+  exit 0
+fi
+
+# Event debounce: suppress same event if triggered again within 2 seconds
+EVENT_DEBOUNCE="$LOCKDIR/vlan_event.last"
+event_now=$(date +%s)
+last_event_raw=$(cat "$EVENT_DEBOUNCE" 2>/dev/null || echo 0)
+last_event=$(sanitize_epoch "$last_event_raw")
+if [ "$last_event" -gt 0 ] && [ $((event_now - last_event)) -lt 2 ]; then
+  info -c vlan "Event suppressed by debounce: [$EVENT_LABEL]"
+  exit 0
+fi
+# Record current event timestamp for next debounce check
+printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
+
+
+# --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
+if [ "$EVENT" = "cron" ]; then
+  if ! check_vlan_config_fast; then
+    record_mismatch
+
+    if heal_allowed; then
+      info -c cli,vlan "Cron: VLAN config mismatch detected — invoking vlan_manager (cooldown ${COOLDOWN_SEC}s)"
+      mark_heal
+      "$VLAN_MANAGER" >/dev/null 2>&1 &
+    else
+      info -c cli,vlan "Cron: VLAN mismatch detected but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+    fi
+  else
+    log_health_ok_if_needed
+  fi
+
+  exit 0
+fi
+
 
 # ============================================================================ #
 #                         SERVICE MONITORING (UNUSED)                          #
@@ -340,37 +533,47 @@ ensure_process() {
 #        ensure_process actions "$ACTIONS" "$ACTIONS_PIDFILE"
 #}
 
+should_heal_event() {
+  case "$1" in
+    # Wi-Fi / LAN / NET
+    restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|wl*_restart|wl*_start|wl*_down|wl*_up|\
+    restart_lan*|lan_restart|lan_start|lan|lan_*|\
+    restart_net*|net_restart|net_start|net|net_*)
+      return 0
+      ;;
+    # WAN lifecycle
+    wan_start*|wan_restart*|restart_wan*|wan_down*|wan_up*|wan_renew*|wan|wan_rebind*|\
+    wan_stop*|wan_connect*|wan_disconnect*)
+      return 0
+      ;;
+    # Firewall / NAT reconfigure
+    firewall_start*|restart_firewall*|firewall_restart*|firewall|firewall_*|\
+    nat_start*|restart_nat*|nat_restart*|nat|nat_*)
+      return 0
+      ;;
+    # HTTPD / GUI reboot
+    httpd|httpd_*|restart_httpd*|httpd_restart*)
+      return 0
+      ;;
+    # Generic reload orchestrators
+    reload|reload_*|restart_all|services_restart|service_restart|restart_services|service_reload)
+      return 0
+      ;;
+    # dnsmasq refresh
+    dnsmasq|dnsmasq_*|restart_dnsmasq*|dnsmasq_restart*|dnsmasq_start*|dnsmasq_stop*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # ============================================================================ #
 #                          MAIN EVENT HANDLER                                  #
 # Dispatch on event type. For system events (restart, wireless, wan, httpd),   #
 # check VLAN config and heal if needed and cooldown allows.                    #
 # ============================================================================ #
-
-# Test mode: if called with --test, perform manual VLAN check
-if [ "$1" = "--test" ] || [ "$1" = "test" ]; then
-  info -c vlan "Manual VLAN check triggered via --test"
-  if ! check_vlan_config; then
-    # VLAN mismatch detected; check if heal is allowed by cooldown
-    if heal_allowed; then
-      info -c cli,vlan "Manual check detected mismatch — invoking vlan_manager (cooldown ${COOLDOWN_SEC}s)"
-      # Mark heal time first to prevent rapid re-triggers
-      mark_heal
-      # Invoke VLAN manager in background
-      "$VLAN_MANAGER" >/dev/null 2>&1 &
-    else
-      # Cooldown still active from previous heal
-      info -c cli,vlan "Manual check mismatch but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
-    fi
-  fi
-  exit 0
-fi
-
-EVENT="$*"
-
-if [ -z "$EVENT" ]; then
-  info -c cli,vlan "Heal: invoked without event payload; nothing to do"
-  exit 0
-fi
 
 # ============================================================================ #
 # Event-based VLAN healing dispatch                                            #
@@ -378,25 +581,26 @@ fi
 # heal if config mismatch is detected and cooldown allows.                     #
 # ============================================================================ #
 
-case "$EVENT" in
-  # Trigger on restart, wireless, httpd, and WAN events (common VLAN disruptors)
-  *restart*|*wireless*|*httpd*|*wan-start*|*wan-restart*)
-    if ! check_vlan_config; then
-      # VLAN config mismatch detected after event
-      if heal_allowed; then
-        info -c cli,vlan "VLAN config missing after [$EVENT] — healing (cooldown ${COOLDOWN_SEC}s)"
-        # Mark heal time first (prevents rapid re-triggers)
-        mark_heal
-        # Invoke VLAN manager in background to restore config
-        "$VLAN_MANAGER" >/dev/null 2>&1 &
-      else
-        # Cooldown is still active from previous heal attempt
-        info -c cli,vlan "Heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
-      fi
+if should_heal_event "$EVENT"; then
+  info -c vlan "Heal: event [$EVENT_LABEL] matched watchlist"
+  if ! check_vlan_config; then
+    record_mismatch
+    # VLAN config mismatch detected after event
+    if heal_allowed; then
+      info -c cli,vlan "VLAN config missing after [$EVENT_LABEL] — waiting for rc quiet, then healing (cooldown ${COOLDOWN_SEC}s)"
+      # Allow rc to finish wireless/LAN/httpd work so interfaces exist
+      wait_for_rc_quiet
+      # Mark heal time first (prevents rapid re-triggers)
+      mark_heal
+      # Invoke VLAN manager in background to restore config
+      "$VLAN_MANAGER" >/dev/null 2>&1 &
+    else
+      # Cooldown is still active from previous heal attempt
+      info -c cli,vlan "Heal suppressed after [$EVENT_LABEL] (within ${COOLDOWN_SEC}s cooldown)"
     fi
-    # Service monitoring currently disabled (uncommitted check_services call)
-    #check_services
-    ;;
-esac
+  fi
+  # Service monitoring currently disabled (uncommitted check_services call)
+  #check_services
+fi
 
 exit 0
