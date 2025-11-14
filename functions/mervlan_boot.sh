@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.47"                     #
+#                - File: mervlan_boot.sh || version="0.48"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -51,6 +51,17 @@ _has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 # Compute content hash (md5 is in busybox; sha256 may not be)
 _content_md5() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
+
+CRON_NAME="mervlan_health"
+CRU_BIN=""
+
+if command -v cru >/dev/null 2>&1; then
+  CRU_BIN=$(command -v cru)
+elif [ -x /usr/sbin/cru ]; then
+  CRU_BIN="/usr/sbin/cru"
+fi
+
+INJ_BASE="${MERV_BASE%/}"
 
 select_template_variant() {
   local name="$1" dest="$2" requested="$3" dest_id
@@ -409,6 +420,44 @@ collect_node_status() {
   done
 }
 
+enable_cron_now() {
+  if [ -z "$CRU_BIN" ]; then
+    warn -c vlan,cli "Cron enable skipped: cru command not available"
+    return 0
+  fi
+
+  info -c vlan,cli "Enabling cron: $CRON_NAME (*/5) -> $INJ_BASE/heal_event.sh cron"
+  "$CRU_BIN" d "$CRON_NAME" 2>/dev/null
+
+  if "$CRU_BIN" a "$CRON_NAME" "*/5 * * * * $INJ_BASE/heal_event.sh cron >/dev/null 2>&1"; then
+    info -c vlan,cli "Cron job $CRON_NAME added"
+  else
+    error -c vlan,cli "Failed to add cron job $CRON_NAME"
+    return 1
+  fi
+
+  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+    info -c vlan,cli "Cron confirmed for $CRON_NAME"
+  else
+    warn -c vlan,cli "Cron verification failed: $CRON_NAME not listed"
+  fi
+}
+
+disable_cron_now() {
+  if [ -z "$CRU_BIN" ]; then
+    warn -c vlan,cli "Cron disable skipped: cru command not available"
+    return 0
+  fi
+
+  "$CRU_BIN" d "$CRON_NAME" 2>/dev/null
+
+  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+    warn -c vlan,cli "Cron disable verification failed; entry still present"
+  else
+    info -c vlan,cli "Cron disabled: $CRON_NAME"
+  fi
+}
+
 # =============================================================================== #
 # MAIN ACTION DISPATCH — Entry point for all actions (enable/disable/status/etc)  #
 # =============================================================================== #
@@ -429,7 +478,8 @@ case "$ACTION" in
     mkdir -p "$FLAGDIR"
     echo 1 > "$BOOT_FLAG"
 
-    # Cron support removed — nothing to enable here
+  # Enable cron job for periodic VLAN health checks (main + nodes)
+  enable_cron_now
 
     # Propagate enable action to all configured nodes via SSH
     handle_nodes_via_ssh "enable"
@@ -449,9 +499,34 @@ case "$ACTION" in
     echo 0 > "$BOOT_FLAG"
 
     info -c vlan,cli "Removed services-start injection (service-event unchanged)"
+
+  # Disable cron job (main + nodes)
+  disable_cron_now
     
     # Propagate disable action to all configured nodes via SSH
     handle_nodes_via_ssh "disable"
+    ;;
+
+  # ========================================================================== #
+  # cron — enable and disable cron jobs for periodic VLAN health checks        #
+  # ========================================================================== #
+
+  cronenable)
+    if enable_cron_now; then
+      info -c vlan,cli "cronenable action completed"
+      exit 0
+    fi
+    error -c vlan,cli "cronenable action failed"
+    exit 1
+    ;;
+
+  crondisable)
+    if disable_cron_now; then
+      info -c vlan,cli "crondisable action completed"
+      exit 0
+    fi
+    error -c vlan,cli "crondisable action failed"
+    exit 1
     ;;
 
   # ========================================================================== #
@@ -619,7 +694,11 @@ case "$ACTION" in
       fi
     fi
 
-    # Cron support removed; cron_state remains 'absent'
+    if [ -n "$CRU_BIN" ]; then
+      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+        cron_state=present
+      fi
+    fi
 
     # Get list of configured nodes for status aggregation
     NODE_IPS=$(get_node_ips)
@@ -657,8 +736,11 @@ case "$ACTION" in
         event_state=custom
       fi
     fi
-    # Cron support removed; cron_state remains 'absent'
-    cron_line=""
+    if [ -n "$CRU_BIN" ]; then
+      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+        cron_state=present
+      fi
+    fi
     # Output terse report line: REPORT boot=0/1 addon=<state> event=<state> cron=<state>
     # Used by collect_node_status() for remote aggregation via SSH
     echo "REPORT boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state"
@@ -670,7 +752,7 @@ case "$ACTION" in
   # ========================================================================== #
   *)
     # Display usage information and exit with error code
-    echo "Usage: $0 {enable|disable|status|setupenable|setupdisable|nodeenable|nodedisable|report}" >&2
+    echo "Usage: $0 {enable|disable|cronenable|crondisable|status|setupenable|setupdisable|nodeenable|nodedisable|report}" >&2
     exit 2
     ;;
 esac
