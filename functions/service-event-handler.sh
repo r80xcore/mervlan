@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#          - File: service-event-handler.sh || version="0.46a"                  #
+#          - File: service-event-handler.sh || version="0.47"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Event handler for http and service events                      #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -68,6 +68,16 @@ case "${RAW}" in
     RAW="${TYPE}_${EVENT}"
     ;;
 esac
+
+# Build combined normalized name for downstream heal handlers
+TYPE_NORM=$(printf '%s' "$TYPE" | tr 'A-Z' 'a-z' | tr '-' '_')
+EVENT_NORM=$(printf '%s' "$EVENT" | tr 'A-Z' 'a-z' | tr '-' '_')
+if [ -n "$EVENT_NORM" ]; then
+  COMBINED_NORM="${TYPE_NORM}_${EVENT_NORM}"
+else
+  COMBINED_NORM="$TYPE_NORM"
+fi
+COMBINED_NORM=$(printf '%s' "$COMBINED_NORM" | tr -s '_' '_' | sed 's/^_//; s/_$//')
 
 # Log parsed event details for audit trail (helps with debugging)
 logger -t "VLANMgr" "handler: RAW='${RAW}' TYPE='${TYPE}' EVENT='${EVENT}' (args: '$1' '$2' '$3')"
@@ -230,11 +240,14 @@ case "${TYPE}_${EVENT}" in
     dispatch_if_executable "/jffs/addons/mervlan/functions/collect_clients.sh"
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
-  # Wildcard patterns catch restart_* and service events (httpd, wireless, WAN)
-  *restart*|*wireless*|*httpd*|*wan-start*|*wan-restart*|*wan_start*|*wan_restart*)
-    # System restart/service event detected: trigger healing/reconfig logic
-    # Passes RAW_NORM (dash→underscore normalized) for consistent pattern matching
-    dispatch_if_executable "/jffs/addons/mervlan/functions/heal_event.sh" "$RAW_NORM"
+  # Wildcard patterns catch restart_* and service events (httpd, wireless, WAN, LAN, NET, FW, NAT, DNS)
+  *restart*|*wireless*|*httpd*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*)
+    # Fire-and-forget heal so rc can continue applying its own changes
+    logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async)"
+    (
+      sleep "${MERV_HEAL_DELAY:-3}"
+      /jffs/addons/mervlan/functions/heal_event.sh "$COMBINED_NORM"
+    ) >/dev/null 2>&1 &
     ;;
   *)
     # Unknown event: no matching handler found
