@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#         - File: templates/mervlan_templates.sh || version="0.46"             #
+#         - File: templates/mervlan_templates.sh || version="0.47"             #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide unified template lookup utilities for MerVLAN.         #
 #               Each template is stored inline and can be materialized via     #
@@ -39,12 +39,16 @@ MERV_BASE_PLACEHOLDER/functions/service-event-handler.sh "$@"
 # MerVLAN auto-enable VLAN on boot
 sleep 10
 MERV_BASE_PLACEHOLDER/functions/mervlan_manager.sh
+sleep 10
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot.sh cronenable
 %%END
 
 %%TEMPLATE services-start 2
 # MerVLAN auto-enable VLAN on boot
 sleep 10
 MERV_BASE_PLACEHOLDER/functions/mervlan_manager.sh
+sleep 10
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot.sh cronenable
 %%END
 
 %%TEMPLATE services-start-addon 1
