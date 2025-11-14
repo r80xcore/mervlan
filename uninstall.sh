@@ -31,6 +31,16 @@ source /usr/sbin/helper.sh
 SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
+SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
+SSH_PORT="${SSH_PORT:-22}"
+
+list_configured_nodes() {
+    [ -f "$SETTINGS_FILE" ] || return 1
+    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | \
+        grep -v "none" | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
 
 # ============================================================================ #
 # NODE & SSH STATE HELPERS — Determine remote cleanup prerequisites           #
@@ -41,12 +51,8 @@ BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 # Explanation: Indicates whether remote hooks must be disabled before files
 #   are removed from the router.
 has_configured_nodes() {
-    [ -f "$SETTINGS_FILE" ] || return 1
     local nodes
-    nodes=$(grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-        grep -v "none" | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    nodes=$(list_configured_nodes)
     [ -n "$nodes" ]
 }
 
@@ -58,6 +64,69 @@ ssh_keys_installed() {
     [ -f "$GENERAL_SETTINGS_FILE" ] || return 1
     grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
 }
+
+get_node_ssh_user() {
+    local user
+    if [ -f "$GENERAL_SETTINGS_FILE" ]; then
+        user=$(grep -o '"NODE_SSH_USER"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENERAL_SETTINGS_FILE" 2>/dev/null | \
+            sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
+        [ -n "$user" ] || user=$(grep -o '"SSH_USER"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENERAL_SETTINGS_FILE" 2>/dev/null | \
+            sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
+    fi
+    [ -n "$user" ] || user="admin"
+    printf '%s\n' "$user"
+}
+
+remove_nodes_full_install() {
+    local nodes user ssh_bin impl node
+    nodes=$(list_configured_nodes)
+    [ -n "$nodes" ] || return 0
+
+    if command -v dbclient >/dev/null 2>&1; then
+        ssh_bin=$(command -v dbclient)
+        impl="dbclient"
+    elif command -v ssh >/dev/null 2>&1; then
+        ssh_bin=$(command -v ssh)
+        impl="ssh"
+    else
+        logger -t "$LOGTAG" "WARNING: No SSH client available; cannot clean nodes"
+        return 1
+    fi
+
+    if [ ! -f "$SSH_KEY" ]; then
+        logger -t "$LOGTAG" "WARNING: SSH key missing; skipping node cleanup"
+        return 1
+    fi
+
+    user=$(get_node_ssh_user)
+    for node in $nodes; do
+        if [ "$impl" = "dbclient" ]; then
+            if "$ssh_bin" -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no \
+                "$user@$node" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
+                logger -t "$LOGTAG" "Node cleanup success: $node"
+            else
+                logger -t "$LOGTAG" "WARNING: Node cleanup failed for $node"
+            fi
+        else
+            if "$ssh_bin" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                "$user@$node" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
+                logger -t "$LOGTAG" "Node cleanup success: $node"
+            else
+                logger -t "$LOGTAG" "WARNING: Node cleanup failed for $node"
+            fi
+        fi
+    done
+}
+
+# Ensure cron job is removed before continuing cleanup
+if [ -x "$BOOT_SCRIPT" ]; then
+    logger -t "$LOGTAG" "Pre-uninstall: disabling cron job"
+    if ! sh "$BOOT_SCRIPT" crondisable >/dev/null 2>&1; then
+        logger -t "$LOGTAG" "WARNING: mervlan_boot.sh crondisable failed pre-uninstall"
+    fi
+else
+    logger -t "$LOGTAG" "WARNING: mervlan_boot.sh missing; cannot disable cron job"
+fi
 
 # ============================================================================ #
 # PRE-UNINSTALL HOOK DISABLE — Stop MerVLAN services before file removal      #
@@ -170,6 +239,9 @@ logger -t "$LOGTAG" "$ADDON uninstalled"
 # When ACTION=full, remove addon directories for a clean slate reinstall later
 if [ "$ACTION" = "full" ]; then
     logger -t "$LOGTAG" "Performing full uninstall (removing addon directories)"
+    if has_configured_nodes && ssh_keys_installed; then
+        remove_nodes_full_install
+    fi
     rm -rf /jffs/addons/mervlan 2>/dev/null
     rm -rf /tmp/mervlan_tmp 2>/dev/null
     rm -rf /www/user/mervlan 2>/dev/null
