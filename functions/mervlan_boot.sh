@@ -34,8 +34,69 @@ fi
 # INITIALIZATION & CONSTANTS — Boot state flags, action dispatch, paths      #
 # ========================================================================== #
 
-# Boot enabled/disabled flag (filesystem state: 0 or 1)
-BOOT_FLAG="$FLAGDIR/boot_enabled"
+# General settings file holding persisted flags
+GENERAL_SETTINGS_FILE="$SETTINGSDIR/general.json"
+
+ensure_general_store() {
+  mkdir -p "$(dirname "$GENERAL_SETTINGS_FILE")" 2>/dev/null || return 1
+  [ -f "$GENERAL_SETTINGS_FILE" ] || printf '{\n  "SSH_KEYS_INSTALLED": "0",\n  "BOOT_ENABLED": "0"\n}\n' > "$GENERAL_SETTINGS_FILE"
+}
+
+update_general_flag() {
+  local key="$1" value="$2" tmp
+  ensure_general_store || return 1
+  tmp="${GENERAL_SETTINGS_FILE}.tmp.$$"
+  awk -v target="$key" -v replacement="$value" '
+    BEGIN { count = 0 }
+    match($0, /"([^"]+)"[[:space:]]*:[[:space:]]*"([^"]*)"/, m) {
+      k = m[1]
+      v = m[2]
+      if (!(k in seen)) {
+        order[count++] = k
+      }
+      seen[k] = v
+    }
+    END {
+      seen[target] = replacement
+      found = 0
+      for (i = 0; i < count; i++) {
+        if (order[i] == target) { found = 1; break }
+      }
+      if (!found) {
+        order[count++] = target
+      }
+      printf("{\n")
+      for (i = 0; i < count; i++) {
+        k = order[i]
+        printf("  \"%s\": \"%s\"", k, seen[k])
+        if (i < count - 1) { printf(",") }
+        printf("\n")
+      }
+      printf("}\n")
+    }
+  ' "$GENERAL_SETTINGS_FILE" > "$tmp" && mv "$tmp" "$GENERAL_SETTINGS_FILE"
+}
+
+get_general_flag() {
+  local key="$1" default_value="${2:-}"
+  [ -f "$GENERAL_SETTINGS_FILE" ] || { printf '%s' "$default_value"; return 0; }
+  awk -v target="$key" -v fallback="$default_value" '
+    BEGIN { found = 0 }
+    match($0, /"([^"]+)"[[:space:]]*:[[:space:]]*"([^"]*)"/, m) {
+      if (m[1] == target) {
+        print m[2]
+        found = 1
+        exit
+      }
+    }
+    END {
+      if (!found) {
+        print fallback
+      }
+    }
+  ' "$GENERAL_SETTINGS_FILE"
+}
+
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
 # Marker format and lock helper
@@ -471,15 +532,13 @@ case "$ACTION" in
     mkdir -p "$SCRIPTS_DIR"
 
     # Inject services-start code to auto-load mervlan.asp at system boot
-  inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
+    inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
     info -c vlan,cli "Installed services-start with MERV_BASE=$MERV_BASE (service-event managed at setup)"
 
-    # Create boot flag directory and set enabled state (1 = enabled)
-    mkdir -p "$FLAGDIR"
-    echo 1 > "$BOOT_FLAG"
-
-  # Enable cron job for periodic VLAN health checks (main + nodes)
-  enable_cron_now
+    # Persist boot enabled state to general.json
+    update_general_flag "BOOT_ENABLED" "1"
+    # Enable cron job for periodic VLAN health checks (main + nodes)
+    enable_cron_now
 
     # Propagate enable action to all configured nodes via SSH
     handle_nodes_via_ssh "enable"
@@ -491,17 +550,15 @@ case "$ACTION" in
   disable)
     # Remove injected services-start code (idempotent; no-op if not found)
     if [ -f "$SERVICES_START" ]; then
-  remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
+      remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
     fi
-
-    # Create boot flag directory and set disabled state (0 = disabled)
-    mkdir -p "$FLAGDIR"
-    echo 0 > "$BOOT_FLAG"
+    # Persist boot disabled state to general.json
+    update_general_flag "BOOT_ENABLED" "0"
 
     info -c vlan,cli "Removed services-start injection (service-event unchanged)"
 
-  # Disable cron job (main + nodes)
-  disable_cron_now
+    # Disable cron job (main + nodes)
+    disable_cron_now
     
     # Propagate disable action to all configured nodes via SSH
     handle_nodes_via_ssh "disable"
@@ -675,8 +732,10 @@ case "$ACTION" in
     event_state=missing
     cron_state=absent
 
-    # Check if boot flag exists and is set to "1" (enabled state)
-    [ -f "$BOOT_FLAG" ] && [ "$(cat "$BOOT_FLAG" 2>/dev/null)" = "1" ] && boot_state=enabled
+    # Check persisted boot state in general.json
+    if [ "$(get_general_flag "BOOT_ENABLED" "0")" = "1" ]; then
+      boot_state=enabled
+    fi
 
     # Check if addon install.sh entry exists in services-start
     if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then
@@ -722,8 +781,8 @@ case "$ACTION" in
     addon_state=missing
     event_state=missing
     cron_state=absent
-    # Check boot flag and set boot_state to 1 if enabled
-    if [ -f "$BOOT_FLAG" ] && [ "$(cat "$BOOT_FLAG" 2>/dev/null)" = "1" ]; then boot_state=1; fi
+  # Check persisted boot state and set boot_state to 1 if enabled
+  if [ "$(get_general_flag "BOOT_ENABLED" "0")" = "1" ]; then boot_state=1; fi
     # Check for addon install.sh entry in services-start
     if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
     # Check service-event wrapper and determine state: disabled/active/custom
