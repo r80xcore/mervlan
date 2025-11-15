@@ -43,10 +43,6 @@ functions/mervlan_manager.sh
 functions/collect_local_clients.sh 
 functions/heal_event.sh  
 templates/mervlan_templates.sh
-settings/services-start.tpl 
-settings/service-event.tpl
-settings/service-event-nodes.tpl
-settings/services-start-addon.tpl
 "
 
 # FILES_TO_COPY_CHMOD — Files requiring executable permissions on nodes (755)

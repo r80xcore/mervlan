@@ -1,6 +1,43 @@
-mervlan v0.46
+mervlan v0.47
+
+IMPORTANT! Scripts does not follow main version. Every script has its own version.
+
+CHANGES:
+
+NEW FILES:
+update_mervlan.sh v0.48
+Fully automated updating script that will preserve your current settings and pull the newest gitgub main branch.
+If any nodes/AP are setup with SSH key they will also be updated to this version.
+
+mervlan_templates.sh v0.47
+new template file containing everything needed and easily expandable.
+
+REMOVED FILES:
+all .tpl files are obsolete and now deleted.
+
+UPDATED FILES:
+heal_event.sh v0.47
+heavily reworked to be better at finding and handling events that breaks
+the VLAN bridges. Will do a 5-stage pass over 10 seconds when detecting 
+a bridge compromising event. Is coupled with a CRU job that does a 1-pass
+every 5 minutes silently. Will report every 12h. If any pass finds changes
+inside the VLAN bridges, mervlan_manager.sh will be executed. Both heal_event
+and mervlan_manager has locks, preventing hammering. Has a 90s cooldown.
+
+service-event-handler.sh v0.47
+Changed calls to heal-event to be run outside of the pipeline to prevent
+that asuswrt-merlin always finishes last and queues heal_event.sh after
+a VLAN compromising event is done, ensuring fast bridge healing.
+
+mervlan_boot.sh v0.48
+added CRU job calls. Moved BOOT_ENABLED to general.json
+
+mervlan_templates.sh v0.48
+updated node service-event-handler to match main changes.
+
 
 #############################################################
+previous version 0.46 changes
 
 # execute_nodes.sh v0.45 - v0.46
 # Reworked to fix broken paths
