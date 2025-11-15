@@ -35,7 +35,7 @@ fi
 # ========================================================================== #
 
 # General settings file holding persisted flags
-GENERAL_SETTINGS_FILE="$SETTINGSDIR/general.json"
+: "${GENERAL_SETTINGS_FILE:=$SETTINGSDIR/general.json}"
 
 ensure_general_store() {
   mkdir -p "$(dirname "$GENERAL_SETTINGS_FILE")" 2>/dev/null || return 1
