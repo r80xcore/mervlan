@@ -59,15 +59,10 @@ readonly TEMPLATE_SERVICES_ADDON="services-start-addon"
 readonly SERVICES_START="$SCRIPTS_DIR/services-start"
 readonly SERVICE_EVENT_WRAPPER="$SCRIPTS_DIR/service-event"
 
-
-# SSH Port Override
-export SSH_PORT="22"
-
-
-
 # Logs
 readonly LOGFILE="$LOGDIR/mervlan.log"
 readonly CLI_LOG="$LOGDIR/cli_output.log"
+
 
 # Flag: settings loaded
 VAR_SETTINGS_LOADED=1

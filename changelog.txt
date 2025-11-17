@@ -1,7 +1,29 @@
-mervlan v0.47
+mervlan v0.48
 
 IMPORTANT! Scripts does not follow main version. Every script has its own version.
 
+NEW FILES:
+lib_json.sh
+Centralized JSON flag management with multi-match parsing to prevent key loss.
+Seeded defaults once and updated json_get_flag/json_set_flag to preserve all entries.
+
+lib_ssh.sh
+Centralized SSH key checks, node credentials (NODE_SSH_USER / NODE_SSH_PORT), and flag syncing via the shared JSON helper.
+Stopped rewriting unrelated flags when refreshing SSH state.
+
+UPDATED FILES:
+install.sh / uninstall.sh
+Sourced the new helpers, reused ssh_keys_effectively_installed, and adopted the shared node credential getters.
+Enabled custom NODE_SSH_USER / NODE_SSH_PORT support during install/uninstall.
+
+update_mervlan.sh / sync_nodes.sh / execute_nodes.sh / collect_clients.sh / mervlan_boot.sh
+Dropped unsupported Dropbear options, switched all SSH calls to the shared user/port helpers, and ensured remote operations use the new credentials.
+dropbear_sshkey_gen.sh
+
+Replaced the inline JSON writer with the centralized helper to fix the SSH_KEYS_INSTALLED/BOOT_ENABLED overwrite bug.
+
+#############################################################
+previous version 0.46 changes
 CHANGES:
 
 NEW FILES:

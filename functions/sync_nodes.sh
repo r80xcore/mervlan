@@ -21,12 +21,14 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_SSH_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # =========================================== End of MerVLAN environment setup #
-
+SSH_NODE_USER=$(get_node_ssh_user)
+SSH_NODE_PORT=$(get_node_ssh_port)
 # ========================================================================== #
 # FILE SYNC SETUP — Source/destination lists and synchronization parameters  #
 # ========================================================================== #
@@ -38,6 +40,8 @@ settings/settings.json
 settings/hw_settings.json 
 settings/var_settings.sh 
 settings/log_settings.sh 
+settings/lib_json.sh
+settings/lib_ssh.sh 
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh 
 functions/collect_local_clients.sh 
@@ -53,7 +57,13 @@ functions/collect_local_clients.sh
 functions/heal_event.sh
 "
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
-FILES_TO_COPY_CHMOD_644="settings/var_settings.sh settings/log_settings.sh templates/mervlan_templates.sh"
+FILES_TO_COPY_CHMOD_644="
+settings/var_settings.sh 
+settings/log_settings.sh 
+settings/lib_json.sh  
+settings/lib_ssh.sh 
+templates/mervlan_templates.sh
+"
 
 # ========================================================================== #
 # SYNCHRONIZATION PARAMETERS — Debug toggles and SSH retry behaviour         #
@@ -83,23 +93,29 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     exit 1
 fi
 
-# Validate UI flag indicating SSH keys were installed by the user
-if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE"; then
-    error -c cli,vlan "ERROR: SSH keys are not installed according to general.json"
-    warn -c cli,vlan "Please click on 'SSH Key Install' and follow the instructions"
+# Validate that SSH keys are effectively installed via flag or file presence
+if ! ssh_keys_effectively_installed; then
+    error -c cli,vlan "ERROR: SSH keys are not fully configured"
+    warn -c cli,vlan "Either SSH_KEYS_INSTALLED is 0/missing and no key files exist,"
+    warn -c cli,vlan "or the SSH keys have not been generated/installed yet."
+    warn -c cli,vlan "Use 'SSH Key Install' in the UI to set them up."
     exit 1
 fi
 
-# Verify private/public key files exist on router before contacting nodes
-if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
-    error -c cli,vlan "ERROR: SSH key files not found"
-    warn -c cli,vlan "Please run the SSH key generator first"
+if [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ] || \
+   [ -z "${SSH_PUBKEY:-}" ] || [ ! -f "$SSH_PUBKEY" ]; then
+    error -c cli,vlan "ERROR: SSH key files not found (SSH_KEY/SSH_PUBKEY missing on disk)"
+    warn -c cli,vlan "Run the SSH key generator / installer again."
     exit 1
 fi
 
 # Confirm server-side authorized_keys includes generated public key
 # Without this, Dropbear rejects key-based logins during sync
-PUBKEY_CONTENT=$(cat "$SSH_PUBKEY")
+PUBKEY_CONTENT=$(cat "$SSH_PUBKEY" 2>/dev/null || printf '')
+if [ -z "$PUBKEY_CONTENT" ]; then
+    error -c cli,vlan "ERROR: SSH public key file is empty at $SSH_PUBKEY"
+    exit 1
+fi
 if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF "$PUBKEY_CONTENT" /root/.ssh/authorized_keys; then
     error -c cli,vlan "ERROR: SSH public key not found in /root/.ssh/authorized_keys"
     warn -c cli,vlan "Please install the SSH keys using the 'SSH Key Install' feature"
@@ -137,7 +153,7 @@ echo ""
 # test_ssh_connection — Probe Dropbear SSH connectivity using key auth only
 test_ssh_connection() {
     local node_ip="$1"
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
         return 0
     else
         return 1
@@ -149,7 +165,7 @@ check_remote_jffs_status() {
     local node_ip="$1"
     local output
 
-    output=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
+    output=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
@@ -183,7 +199,7 @@ enable_jffs_and_reboot() {
 
     info -c cli,vlan "Enabling JFFS and scripts on $node_ip and triggering reboot"
 
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o PasswordAuthentication=no "admin@$node_ip" "nvram set jffs2_on=1; nvram set jffs2_scripts=1; nvram commit; (sleep 2; reboot) &" 2>/dev/null; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "nvram set jffs2_on=1; nvram set jffs2_scripts=1; nvram commit; (sleep 2; reboot) &" 2>/dev/null; then
         info -c cli,vlan "✓ JFFS enable commands sent to $node_ip"
         return 0
     else
@@ -229,7 +245,7 @@ wait_for_node_ssh_jffs() {
     info -c cli,vlan "Waiting for SSH and /jffs on $node_ip ($SSH_MAX_ATTEMPTS attempts, ${SSH_RETRY_INTERVAL}s interval)"
 
     while [ $attempt -lt "$SSH_MAX_ATTEMPTS" ]; do
-        if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "test -d /jffs && ls /jffs >/dev/null 2>&1 && echo ready" 2>/dev/null | grep -q "ready"; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "test -d /jffs && ls /jffs >/dev/null 2>&1 && echo ready" 2>/dev/null | grep -q "ready"; then
             info -c cli,vlan "✓ SSH and /jffs ready on $node_ip"
             return 0
         fi
@@ -307,7 +323,7 @@ create_remote_dirs_for_file() {
     # If file is in a subdirectory, create that directory on remote
     if [ "$dir_path" != "." ]; then
         local remote_dir="$MERV_BASE/$dir_path"
-        if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
             info -c cli,vlan "✓ Created directory $remote_dir on $node_ip"
             return 0
         else
@@ -330,7 +346,7 @@ copy_file_to_node() {
     fi
     
     # Use cat to copy the file content (always overwrite)
-    if cat "$MERV_BASE/$file" | dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+    if cat "$MERV_BASE/$file" | dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
         info -c cli,vlan "✓ Copied $file to $node_ip:$remote_path"
         return 0
     else
@@ -344,13 +360,13 @@ verify_file_on_node() {
     local node_ip="$1"
     local file="$2"
     local remote_file="$MERV_BASE/$file"
-    
+
     # Check if file exists and has content
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
         # Check file size to ensure it's not empty
-        local remote_size=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
+        local remote_size=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
         local local_size=$(stat -c%s "$MERV_BASE/$file" 2>/dev/null || wc -c < "$MERV_BASE/$file" 2>/dev/null || echo 0)
-        
+
         # Remove any extra characters from size
         remote_size=$(echo "$remote_size" | tr -cd '0-9')
         local_size=$(echo "$local_size" | tr -cd '0-9')
@@ -366,7 +382,7 @@ verify_file_on_node() {
             fi
 
             if [ -n "$local_md5" ]; then
-                remote_md5=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
+                remote_md5=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
                 remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
 
                 if [ -n "$remote_md5" ] && [ "$remote_md5" != "NA" ]; then
@@ -398,7 +414,7 @@ set_remote_permissions() {
     local file="$2"
     local remote_file="$MERV_BASE/$file"
     
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "chmod 755 '$remote_file' 2>/dev/null; echo 'permissions_set'" 2>/dev/null | grep -q "permissions_set"; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "chmod 755 '$remote_file' 2>/dev/null; echo 'permissions_set'" 2>/dev/null | grep -q "permissions_set"; then
         info -c cli,vlan "✓ Set executable permissions for $file on $node_ip"
         return 0
     else
@@ -413,7 +429,7 @@ set_remote_permissions_644() {
     local file="$2"
     local remote_file="$MERV_BASE/$file"
 
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "chmod 644 '$remote_file' 2>/dev/null; echo 'permissions_644_set'" 2>/dev/null | grep -q "permissions_644_set"; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "chmod 644 '$remote_file' 2>/dev/null; echo 'permissions_644_set'" 2>/dev/null | grep -q "permissions_644_set"; then
         info -c cli,vlan "✓ Set 644 permissions for $file on $node_ip"
         return 0
     else
@@ -425,7 +441,7 @@ set_remote_permissions_644() {
 # mark_node_remote — Create node sentinel flag to enable node-only flows
 mark_node_remote() {
     local node_ip="$1"
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$MERV_BASE' && : > '$MERV_BASE/.is_node' && chmod 644 '$MERV_BASE/.is_node'" 2>/dev/null; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$MERV_BASE' && : > '$MERV_BASE/.is_node' && chmod 644 '$MERV_BASE/.is_node'" 2>/dev/null; then
         info -c cli,vlan "✓ Marked $node_ip as MerVLAN node (.is_node)"
         return 0
     fi
@@ -436,7 +452,7 @@ mark_node_remote() {
 # unmark_node_remote — Remove node sentinel during teardown (unused but available)
 unmark_node_remote() {
     local node_ip="$1"
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "rm -f '$MERV_BASE/.is_node'" 2>/dev/null; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "rm -f '$MERV_BASE/.is_node'" 2>/dev/null; then
         info -c cli,vlan "✓ Cleared node sentinel on $node_ip"
         return 0
     fi
@@ -453,7 +469,7 @@ debug_remote_files() {
     local node_ip="$1"
     local stage="$2"  # optional: before | after
     info -c cli "Debugging files on $node_ip${stage:+ ($stage)}..."
-    listing=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "if [ -d \"$MERV_BASE\" ]; then ls -laR \"$MERV_BASE\" 2>/dev/null || echo 'No files yet (ls failed)'; else echo 'Directory not found: $MERV_BASE'; fi" 2>/dev/null)
+    listing=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "if [ -d \"$MERV_BASE\" ]; then ls -laR \"$MERV_BASE\" 2>/dev/null || echo 'No files yet (ls failed)'; else echo 'Directory not found: $MERV_BASE'; fi" 2>/dev/null)
     if [ -n "$listing" ]; then
         echo "$listing" | while IFS= read -r line; do
             [ -n "$line" ] && info -c vlan "$line"
@@ -499,7 +515,7 @@ for node_ip in $NODE_IPS; do
     
     # Create base remote directories (addon path + runtime folders)
     remote_mkdir_cmd="mkdir -p '$MERV_BASE' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
-    if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "$remote_mkdir_cmd" 2>/dev/null; then
+    if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "$remote_mkdir_cmd" 2>/dev/null; then
         error -c cli,vlan "✗ Failed to create required directories on $node_ip"
         overall_success=false
         continue
@@ -570,25 +586,23 @@ for node_ip in $NODE_IPS; do
                 continue
             fi
 
-            if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "[ -f '$MERV_BASE/.is_node' ]" 2>/dev/null; then
+            if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "[ -f '$MERV_BASE/.is_node' ]" 2>/dev/null; then
                 warn -c cli,vlan "⚠️  .is_node sentinel missing on $node_ip after mark"
             fi
 
-                        if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" \
-                            -o ConnectTimeout=5 -o PasswordAuthentication=no \
-                            "admin@$node_ip" \
-                            "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local" 2>&1; then
+            if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+                "$SSH_NODE_USER@$node_ip" \
+                "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local" 2>&1; then
                 info -c cli,vlan "✓ nodeenable applied on $node_ip"
-                                report_line=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" \
-                                    -o ConnectTimeout=5 -o PasswordAuthentication=no \
-                                    "admin@$node_ip" \
-                                    "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
-                                if [ -n "$report_line" ]; then
-                                        info -c cli,vlan "Node $node_ip report: $report_line"
-                                        echo "$report_line" | grep -q 'event=active' || warn -c cli,vlan "⚠️ event not active on $node_ip"
-                                else
-                                        warn -c cli,vlan "⚠️ no report output from $node_ip after nodeenable"
-                                fi
+                report_line=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+                    "$SSH_NODE_USER@$node_ip" \
+                    "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+                if [ -n "$report_line" ]; then
+                    info -c cli,vlan "Node $node_ip report: $report_line"
+                    echo "$report_line" | grep -q 'event=active' || warn -c cli,vlan "⚠️ event not active on $node_ip"
+                else
+                    warn -c cli,vlan "⚠️ no report output from $node_ip after nodeenable"
+                fi
             else
                 warn -c cli,vlan "⚠️ nodeenable failed on $node_ip"
                 overall_success=false

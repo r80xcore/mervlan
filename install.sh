@@ -41,51 +41,16 @@ TMP="${TMP_DIR:-$(mktemp -d)}"
 SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
+SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
+SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
+
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 
 # ========================================================================== #
 # NODE & SSH STATE HELPERS — Detect existing node config and key installs    #
 # ========================================================================== #
-
-prompt_ssh_port_override() {
-    local vs_path="$MERV_BASE/settings/var_settings.sh"
-    [ -f "$vs_path" ] || return 0
-
-    echo ""
-    echo "[install] Configure SSH port for node connections."
-
-    while :; do
-        printf '[install] Use default SSH port 22? [Y/n]: '
-        IFS= read -r reply || reply=""
-        case "$reply" in
-            ""|Y|y|YES|yes|Yes)
-                echo "[install] Keeping default SSH port 22."
-                return 0
-                ;;
-            N|n|NO|no|No)
-                while :; do
-                    printf '[install] Enter SSH port (1-65535): '
-                    IFS= read -r port || port=""
-                    case "$port" in
-                        ''|*[^0-9]*) echo "[install] Invalid entry; please enter digits only."; continue ;;
-                    esac
-                    if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-                        if grep -q '^export SSH_PORT="' "$vs_path" 2>/dev/null; then
-                            # safer sed quoting for BusyBox
-                            sed -i 's/^export SSH_PORT="[^"]*"/export SSH_PORT="'"$port"'"/' "$vs_path"
-                        else
-                            printf '\nexport SSH_PORT="%s"\n' "$port" >>"$vs_path"
-                        fi
-                        echo "[install] SSH port updated to $port in var_settings.sh."
-                        return 0
-                    else
-                        echo "[install] Port out of range (1-65535)."
-                    fi
-                done
-                ;;
-            *) echo "[install] Please answer Y or N." ;;
-        esac
-    done
-}
+# Source: settings/lib_ssh.sh
 
 # has_configured_nodes — Report if any NODE1..NODE5 entries contain IPs
 # Returns: 0 when at least one valid IPv4 is present, 1 otherwise
@@ -98,13 +63,6 @@ has_configured_nodes() {
         grep -v "none" | \
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     [ -n "$nodes" ]
-}
-
-# ssh_keys_installed — Check general.json flag indicating SSH setup complete
-# Returns: 0 if flag==1, 1 otherwise (missing file or value)
-ssh_keys_installed() {
-    [ -f "$GENERAL_SETTINGS_FILE" ] || return 1
-    grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
 }
 
 # ========================================================================== #
@@ -138,6 +96,7 @@ download_mervlan() {
 # ========================================================================== #
 # SSH PORT CONFIGURATION — Optional override for node SSH connections       #
 # ========================================================================== #
+# Source: settings/lib_ssh.sh
 
   # Fetch archive to a file (curl only)
     echo "[download_mervlan] downloading archive -> $tmp/mervlan.tar.gz"
@@ -384,6 +343,7 @@ else
     exit 1
 fi
 
+prompt_ssh_user_override
 prompt_ssh_port_override
 
 # 3b. Copy Static assets to Public Dir
@@ -463,7 +423,7 @@ else
 fi
 
 # If nodes are configured and SSH keys are ready, propagate nodeenable now
-if has_configured_nodes && ssh_keys_installed; then
+if has_configured_nodes && ssh_keys_effectively_installed; then
     if [ -x "$BOOT_SCRIPT" ]; then
         logger -t "$ADDON" "Propagating nodeenable to configured nodes"
         if sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then

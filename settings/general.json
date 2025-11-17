@@ -1,4 +1,6 @@
 {
-  "SSH_KEYS_INSTALLED": "0",
-  "BOOT_ENABLED": "0"
+  "SSH_KEYS_INSTALLED": "0", 
+  "BOOT_ENABLED": "0", 
+  "NODE_SSH_PORT": "22",
+  "NODE_SSH_USER": "admin"
 }

@@ -22,12 +22,14 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # =========================================== End of MerVLAN environment setup #
-
+SSH_NODE_USER=$(get_node_ssh_user)
+SSH_NODE_PORT=$(get_node_ssh_port)
 # ============================================================================ #
 #                          INITIALIZATION & LOGGING                            #
 # Display welcome message and prepare for node execution. Log script           #
@@ -65,22 +67,28 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     exit 1
 fi
 
-# Verify SSH keys are marked as installed in general.json
-if ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE"; then
-    error -c cli,vlan "ERROR: SSH keys are not installed according to general.json"
-    warn -c cli,vlan "Please click on 'SSH Key Install' and follow the instructions"
+# Verify SSH keys are effectively installed via shared helper
+if ! ssh_keys_effectively_installed; then
+    error -c cli,vlan "ERROR: SSH keys are not fully configured"
+    warn -c cli,vlan "Either SSH_KEYS_INSTALLED is 0/missing and no key files exist, or the SSH keys have not been generated/installed yet."
+    warn -c cli,vlan "Use 'SSH Key Install' in the UI to set them up."
     exit 1
 fi
 
 # Verify SSH key pair files actually exist on filesystem
-if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
+if [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ] || \
+   [ -z "${SSH_PUBKEY:-}" ] || [ ! -f "$SSH_PUBKEY" ]; then
     error -c cli,vlan "ERROR: SSH key files not found"
     warn -c cli,vlan "Please run the SSH key generator first"
     exit 1
 fi
 
 # Verify public key is installed in authorized_keys on this router
-PUBKEY_CONTENT=$(cat "$SSH_PUBKEY")
+PUBKEY_CONTENT=$(cat "$SSH_PUBKEY" 2>/dev/null || printf '')
+if [ -z "$PUBKEY_CONTENT" ]; then
+    error -c cli,vlan "ERROR: SSH public key file is empty at $SSH_PUBKEY"
+    exit 1
+fi
 if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF "$PUBKEY_CONTENT" /root/.ssh/authorized_keys; then
     error -c cli,vlan "ERROR: SSH public key not found in /root/.ssh/authorized_keys"
     warn -c cli,vlan "Please install the SSH keys using the 'SSH Key Install' feature"
@@ -129,7 +137,7 @@ check_remote_jffs_status() {
     local output
 
     # Execute remote nvram queries and capture output
-    output=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
+    output=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
@@ -164,7 +172,7 @@ check_remote_jffs_status() {
 test_ssh_connection() {
     local node_ip="$1"
     # Attempt to SSH and run echo; grep for success string to verify connection
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
         return 0
     else
         return 1
@@ -228,7 +236,7 @@ ensure_remote_settings_dir() {
     local remote_dir="$SETTINGSDIR"
 
     # Attempt to create settings directory on remote node
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
+    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
         info -c cli,vlan "✓ Ensured directory $remote_dir on $node_ip"
         return 0
     else
@@ -255,7 +263,7 @@ copy_settings_conf_to_node() {
     fi
 
     # Use cat pipe through SSH with atomic rename (write to .tmp then mv)
-    if cat "$SETTINGS_FILE" | dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+    if cat "$SETTINGS_FILE" | dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
         info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
         return 0
     else
@@ -274,13 +282,13 @@ verify_settings_conf_on_node() {
     local remote_file="$MERV_BASE/settings/settings.json"
 
     # Verify file exists on remote node
-    if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
+    if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
         error -c cli,vlan "✗ settings.json not found on $node_ip at $remote_file"
         return 1
     fi
 
     # Compare file sizes (local vs remote)
-    local remote_size=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
+    local remote_size=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
     local local_size=$(stat -c%s "$SETTINGS_FILE" 2>/dev/null || wc -c < "$SETTINGS_FILE" 2>/dev/null || echo 0)
 
     # Extract numeric values; strip any non-digit characters
@@ -305,7 +313,7 @@ verify_settings_conf_on_node() {
 
     # If we have a local MD5, fetch remote MD5 and compare
     if [ -n "$local_md5" ]; then
-        remote_md5=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
+        remote_md5=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
         remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
 
         # Compare MD5s if remote MD5 was successfully computed
@@ -368,7 +376,7 @@ execute_vlan_manager_on_node() {
     info -c cli,vlan "Executing VLAN manager on $node_ip..."
 
     # Ensure the script exists on the remote node before attempting execution
-    if ! dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "test -f '$remote_vlan_manager'" 2>/dev/null; then
+    if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "test -f '$remote_vlan_manager'" 2>/dev/null; then
         error -c cli,vlan "✗ VLAN manager script missing on $node_ip at $remote_vlan_manager"
         warn  -c cli,vlan "   Run 'Sync Nodes' to deploy the addon before executing nodes"
         return 1
@@ -376,7 +384,7 @@ execute_vlan_manager_on_node() {
 
     # Execute the remote script and capture its output for logging/diagnostics
     local output
-    output=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
+    output=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
     local rc=$?
 
     if [ $rc -eq 0 ]; then

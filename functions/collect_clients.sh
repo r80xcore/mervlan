@@ -23,13 +23,17 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_SSH_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
+
+SSH_NODE_USER=$(get_node_ssh_user)
+SSH_NODE_PORT=$(get_node_ssh_port)
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -79,7 +83,7 @@ get_node_ips() {
 test_ssh_connection() {
   local node_ip="$1"
   # Attempt to SSH and run echo; grep for success string to verify connection
-  dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"
+  dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"
 }
 
 # ============================================================================ #
@@ -113,7 +117,7 @@ collect_from_node() {
   # Prefer 'timeout' command if available to prevent hangs; otherwise rely on db-client timeout
   if command -v timeout >/dev/null 2>&1; then
     # timeout command available: use it to enforce TIMEOUT seconds limit
-    if timeout "$TIMEOUT" dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" \
+  if timeout "$TIMEOUT" dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" \
          "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
          > "$output_file" 2>/dev/null; then
       info -c cli,vlan "✓ Successfully collected from $node_ip"
@@ -125,7 +129,7 @@ collect_from_node() {
     fi
   else
     # timeout not available; run without explicit timeout (db-client has built-in ConnectTimeout)
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" \
+  if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" \
          "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
          > "$output_file" 2>/dev/null; then
       info -c cli,vlan "✓ Successfully collected from $node_ip"
@@ -179,13 +183,13 @@ else
   NODES_ENABLED=true
   info -c cli,vlan "Found configured nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
 
-  # Verify SSH key files exist locally
-  if [ ! -f "$SSH_KEY" ] || [ ! -f "$SSH_PUBKEY" ]; then
-    warn -c cli,vlan "SSH keys not found - only collecting from main router"
+  if ! ssh_keys_effectively_installed; then
+    warn -c cli,vlan "SSH keys are not fully configured; only collecting from main router"
+    warn -c cli,vlan "Either SSH_KEYS_INSTALLED is 0/missing in general.json or key files are absent."
     NODES_ENABLED=false
-  # Verify SSH keys are marked as installed in general settings
-  elif ! grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null; then
-    warn -c cli,vlan "SSH keys not installed according to hw_settings.json"
+  elif [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ] || \
+       [ -z "${SSH_PUBKEY:-}" ] || [ ! -f "$SSH_PUBKEY" ]; then
+    warn -c cli,vlan "SSH key files not found on disk; only collecting from main router"
     NODES_ENABLED=false
   fi
 fi

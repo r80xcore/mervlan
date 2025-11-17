@@ -22,14 +22,17 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -f "$TEMPLATE_LIB" ] || { error -c vlan,cli "Missing template library: $TEMPLATE_LIB"; exit 1; }
 . "$TEMPLATE_LIB"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # =========================================== End of MerVLAN environment setup #
-
+SSH_NODE_USER=$(get_node_ssh_user)
+SSH_NODE_PORT=$(get_node_ssh_port)
 # ========================================================================== #
 # INITIALIZATION & CONSTANTS — Boot state flags, action dispatch, paths      #
 # ========================================================================== #
@@ -37,65 +40,6 @@ fi
 # General settings file holding persisted flags
 : "${GENERAL_SETTINGS_FILE:=$SETTINGSDIR/general.json}"
 
-ensure_general_store() {
-  mkdir -p "$(dirname "$GENERAL_SETTINGS_FILE")" 2>/dev/null || return 1
-  [ -f "$GENERAL_SETTINGS_FILE" ] || printf '{\n  "SSH_KEYS_INSTALLED": "0",\n  "BOOT_ENABLED": "0"\n}\n' > "$GENERAL_SETTINGS_FILE"
-}
-
-update_general_flag() {
-  local key="$1" value="$2" tmp
-  ensure_general_store || return 1
-  tmp="${GENERAL_SETTINGS_FILE}.tmp.$$"
-  awk -v target="$key" -v replacement="$value" '
-    BEGIN { count = 0 }
-    match($0, /"([^"]+)"[[:space:]]*:[[:space:]]*"([^"]*)"/, m) {
-      k = m[1]
-      v = m[2]
-      if (!(k in seen)) {
-        order[count++] = k
-      }
-      seen[k] = v
-    }
-    END {
-      seen[target] = replacement
-      found = 0
-      for (i = 0; i < count; i++) {
-        if (order[i] == target) { found = 1; break }
-      }
-      if (!found) {
-        order[count++] = target
-      }
-      printf("{\n")
-      for (i = 0; i < count; i++) {
-        k = order[i]
-        printf("  \"%s\": \"%s\"", k, seen[k])
-        if (i < count - 1) { printf(",") }
-        printf("\n")
-      }
-      printf("}\n")
-    }
-  ' "$GENERAL_SETTINGS_FILE" > "$tmp" && mv "$tmp" "$GENERAL_SETTINGS_FILE"
-}
-
-get_general_flag() {
-  local key="$1" default_value="${2:-}"
-  [ -f "$GENERAL_SETTINGS_FILE" ] || { printf '%s' "$default_value"; return 0; }
-  awk -v target="$key" -v fallback="$default_value" '
-    BEGIN { found = 0 }
-    match($0, /"([^"]+)"[[:space:]]*:[[:space:]]*"([^"]*)"/, m) {
-      if (m[1] == target) {
-        print m[2]
-        found = 1
-        exit
-      }
-    }
-    END {
-      if (!found) {
-        print fallback
-      }
-    }
-  ' "$GENERAL_SETTINGS_FILE"
-}
 
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
@@ -381,12 +325,12 @@ get_node_ips() {
 }
 
 # test_ssh_connection — Validate SSH connectivity to a specific node (same as sync_nodes.sh)
-# Args: $1 = node_ip (admin@node_ip will be tested)
+# Args: $1 = node_ip (uses configured SSH credentials from general.json)
 # Returns: 0 if "connected" echo received, 1 if SSH fails or no response
 test_ssh_connection() {
     local node_ip="$1"
     # Use db-client (Dropbear SSH client) with private key auth, 5-sec timeout
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
+  if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
         return 0
     else
         return 1
@@ -409,7 +353,7 @@ run_ssh_command() {
     
     info -c cli,vlan "Running '$cmd' on $node_ip via SSH..."
     # Execute command on node with MERV_NODE_CONTEXT=1 (forces local node execution)
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" "admin@$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$cmd'" 2>&1; then
+  if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$cmd'" 2>&1; then
         info -c cli,vlan "✓ Command '$cmd' succeeded on $node_ip"
         return 0
     else
@@ -423,36 +367,33 @@ run_ssh_command() {
 # Returns: 0 if all nodes succeeded, 1 if any failed (but continues all nodes)
 # Context: Respects MERV_SKIP_NODE_SYNC=1 override flag for skipping propagation
 handle_nodes_via_ssh() {
-  # Batch operation to remove injected blocks
-    local cmd="$1"
-  # Check override flag: skip node propagation entirely if set
+  local cmd="$1"
+
   if [ "${MERV_SKIP_NODE_SYNC:-0}" = "1" ]; then
     info -c cli,vlan "Skipping node propagation for '$cmd' (MERV_SKIP_NODE_SYNC=1)"
     return 0
   fi
-    local NODE_IPS=$(get_node_ips)
-    
-    if [ -z "$NODE_IPS" ]; then
-        return 0  # No nodes configured; skip propagation silently
+
+  local NODE_IPS
+  NODE_IPS=$(get_node_ips)
+  if [ -z "$NODE_IPS" ]; then
+    return 0
+  fi
+
+  info -c cli,vlan "Propagating '$cmd' to nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
+
+  local overall_success=true
+  for node_ip in $NODE_IPS; do
+    if ! run_ssh_command "$node_ip" "$cmd"; then
+      overall_success=false
     fi
-    
-    info -c cli,vlan "Propagating '$cmd' to nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
-      # Function to remove injected blocks
-    
-    local overall_success=true
-    # Execute action on each node, continue even if some fail
-    for node_ip in $NODE_IPS; do
-        if ! run_ssh_command "$node_ip" "$cmd"; then
-            overall_success=false
-        fi
-    done
-    
-    if [ "$overall_success" = "true" ]; then
-        info -c cli,vlan "✓ All nodes processed successfully for '$cmd'"
-    else
-              # Remove injected block previously added by copy_inject
-        warn -c cli,vlan "⚠️  Some nodes failed for '$cmd'"
-    fi
+  done
+
+  if [ "$overall_success" = "true" ]; then
+    info -c cli,vlan "✓ All nodes processed successfully for '$cmd'"
+  else
+    warn -c cli,vlan "⚠️  Some nodes failed for '$cmd'"
+  fi
 }
 
 # collect_node_status — Quietly poll all nodes via report action for status aggregation
@@ -461,24 +402,21 @@ handle_nodes_via_ssh() {
 # Returns: none (always succeeds, unreachable nodes marked as such)
 # Context: Used by status action to aggregate node state without verbose per-node logs
 collect_node_status() {
-  local NODE_IPS=$(get_node_ips)
-  [ -z "$NODE_IPS" ] && return 0
-  NODE_STATUS_OUTPUT=""
-  # Poll each node for its report output (minimal logging)
-  for node_ip in $NODE_IPS; do
-    # Attempt lightweight status fetch via internal 'report' action (no logging output)
-    if dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null; then
-      # Extract report line (format: REPORT boot=1 event=active addon=active cron=absent)
-      ns=$(dbclient -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no "admin@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
-      # Fallback if report returns empty or malformed
-      [ -n "$ns" ] || ns="REPORT error=empty"
-      # Append to global: format "ip:boot=X event=Y addon=Z cron=W"
-      NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:${ns#REPORT }"
-    else
-      # Mark unreachable nodes for aggregation
-      NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:unreachable"
-    fi
-  done
+    local NODE_IPS
+    NODE_IPS=$(get_node_ips)
+    [ -z "$NODE_IPS" ] && return 0
+
+    NODE_STATUS_OUTPUT=""
+    for node_ip in $NODE_IPS; do
+        if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null; then
+            local ns
+            ns=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+            [ -n "$ns" ] || ns="REPORT error=empty"
+            NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:${ns#REPORT }"
+        else
+            NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:unreachable"
+        fi
+    done
 }
 
 enable_cron_now() {
@@ -536,7 +474,9 @@ case "$ACTION" in
     info -c vlan,cli "Installed services-start with MERV_BASE=$MERV_BASE (service-event managed at setup)"
 
     # Persist boot enabled state to general.json
-    update_general_flag "BOOT_ENABLED" "1"
+    if ! json_set_flag "BOOT_ENABLED" "1" >/dev/null 2>&1; then
+      warn -c vlan,cli "Failed to persist BOOT_ENABLED=1"
+    fi
     # Enable cron job for periodic VLAN health checks (main + nodes)
     enable_cron_now
 
@@ -553,7 +493,9 @@ case "$ACTION" in
       remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
     fi
     # Persist boot disabled state to general.json
-    update_general_flag "BOOT_ENABLED" "0"
+    if ! json_set_flag "BOOT_ENABLED" "0" >/dev/null 2>&1; then
+      warn -c vlan,cli "Failed to persist BOOT_ENABLED=0"
+    fi
 
     info -c vlan,cli "Removed services-start injection (service-event unchanged)"
 
@@ -733,7 +675,7 @@ case "$ACTION" in
     cron_state=absent
 
     # Check persisted boot state in general.json
-    if [ "$(get_general_flag "BOOT_ENABLED" "0")" = "1" ]; then
+    if [ "$(json_get_flag "BOOT_ENABLED" "0")" = "1" ]; then
       boot_state=enabled
     fi
 
@@ -782,7 +724,7 @@ case "$ACTION" in
     event_state=missing
     cron_state=absent
   # Check persisted boot state and set boot_state to 1 if enabled
-  if [ "$(get_general_flag "BOOT_ENABLED" "0")" = "1" ]; then boot_state=1; fi
+  if [ "$(json_get_flag "BOOT_ENABLED" "0")" = "1" ]; then boot_state=1; fi
     # Check for addon install.sh entry in services-start
     if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
     # Check service-event wrapper and determine state: disabled/active/custom

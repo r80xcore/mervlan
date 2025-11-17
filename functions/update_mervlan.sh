@@ -21,14 +21,17 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # =========================================== End of MerVLAN environment setup #
 cd /tmp 2>/dev/null || cd / || :
 . /usr/sbin/helper.sh
-
+SSH_NODE_USER=$(get_node_ssh_user)
+SSH_NODE_PORT=$(get_node_ssh_port)
 # ========================================================================== #
 # PATHS & CONSTANTS                                                          #
 # ========================================================================== #
@@ -69,10 +72,12 @@ REQUIRED_STAGE_FILES="changelog.txt
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh
 functions/heal_event.sh
+functions/lib_json.sh
 functions/service-event-handler.sh
 functions/sync_nodes.sh
 settings/settings.json
 settings/general.json
+settings/lib_json.sh
 templates/mervlan_templates.sh
 www/index.html"
 
@@ -118,54 +123,27 @@ has_configured_nodes() {
 	[ -n "$nodes" ]
 }
 
-ssh_keys_installed() {
-	[ -f "$GENERAL_SETTINGS_FILE" ] || return 1
-	grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
-}
-
-get_node_ssh_user() {
-	local user
-	if [ -f "$GENERAL_SETTINGS_FILE" ]; then
-		user=$(grep -o '"NODE_SSH_USER"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENERAL_SETTINGS_FILE" 2>/dev/null | \
-			sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
-		[ -n "$user" ] || user=$(grep -o '"SSH_USER"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENERAL_SETTINGS_FILE" 2>/dev/null | \
-			sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
-	fi
-	[ -n "$user" ] || user="admin"
-	printf '%s\n' "$user"
-}
-
-get_node_ssh_port() {
-	case "${SSH_PORT:-}" in
-		""|*[!0-9]*) printf '22\n' ;;
-		*) printf '%s\n' "$SSH_PORT" ;;
-	esac
-}
-
 clean_remote_addon_dirs() {
-	local nodes user port node
-	nodes=$(list_configured_nodes)
-	if [ -z "$nodes" ]; then
-		info -c cli,vlan "Remote cleanup skipped (no nodes configured)"
-		return 0
-	fi
+    local nodes node
+    nodes=$(list_configured_nodes)
+    if [ -z "$nodes" ]; then
+        info -c cli,vlan "Remote cleanup skipped (no nodes configured)"
+        return 0
+    fi
 
-	if [ ! -f "$SSH_KEY" ]; then
-		info -c cli,vlan "Remote cleanup skipped (SSH key not found)"
-		return 0
-	fi
+    if [ ! -f "$SSH_KEY" ]; then
+        info -c cli,vlan "Remote cleanup skipped (SSH key not found)"
+        return 0
+    fi
 
-	user=$(get_node_ssh_user)
-	port=$(get_node_ssh_port)
-
-	for node in $nodes; do
-		if dbclient -p "$port" -y -i "$SSH_KEY" \
-			"$user@$node" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
-			info -c cli,vlan "Cleared remote addon directory on $node"
-		else
-			warn -c cli,vlan "Failed to clean remote addon directory on $node"
-		fi
-	done
+    for node in $nodes; do
+        if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+            "$SSH_NODE_USER@$node" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
+            info -c cli,vlan "Cleared remote addon directory on $node"
+        else
+            warn -c cli,vlan "Failed to clean remote addon directory on $node"
+        fi
+    done
 }
 
 # ========================================================================== #
@@ -190,7 +168,11 @@ done
 
 # Track previous boot state from backed-up general.json
 BOOT_WAS_ENABLED=0
-if [ -f "$BACKUP_DIR/settings/general.json" ]; then
+if command -v json_get_flag >/dev/null 2>&1; then
+	if [ "$(json_get_flag "BOOT_ENABLED" "0" "$BACKUP_DIR/settings/general.json" 2>/dev/null)" = "1" ]; then
+		BOOT_WAS_ENABLED=1
+	fi
+elif [ -f "$BACKUP_DIR/settings/general.json" ]; then
 	if grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$BACKUP_DIR/settings/general.json" 2>/dev/null; then
 		BOOT_WAS_ENABLED=1
 	fi
@@ -366,7 +348,7 @@ fi
 # ========================================================================== #
 
 # Refresh node files when SSH keys and nodes are configured
-if ssh_keys_installed && has_configured_nodes; then
+if ssh_keys_effectively_installed && has_configured_nodes; then
 	clean_remote_addon_dirs
 	if [ -x "$SYNC_SCRIPT" ]; then
 		info -c cli,vlan "Syncing nodes via sync_nodes.sh"

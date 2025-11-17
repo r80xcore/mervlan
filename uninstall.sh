@@ -32,7 +32,9 @@ SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
-SSH_PORT="${SSH_PORT:-22}"
+SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 
 list_configured_nodes() {
     [ -f "$SETTINGS_FILE" ] || return 1
@@ -56,29 +58,8 @@ has_configured_nodes() {
     [ -n "$nodes" ]
 }
 
-# ssh_keys_installed — Check general.json flag for SSH key deployment
-# Returns: 0 if SSH_KEYS_INSTALLED is "1", 1 otherwise
-# Explanation: Ensures passwordless SSH is available before attempting to run
-#   remote disable operations.
-ssh_keys_installed() {
-    [ -f "$GENERAL_SETTINGS_FILE" ] || return 1
-    grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$GENERAL_SETTINGS_FILE" 2>/dev/null
-}
-
-get_node_ssh_user() {
-    local user
-    if [ -f "$GENERAL_SETTINGS_FILE" ]; then
-        user=$(grep -o '"NODE_SSH_USER"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENERAL_SETTINGS_FILE" 2>/dev/null | \
-            sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
-        [ -n "$user" ] || user=$(grep -o '"SSH_USER"[[:space:]]*:[[:space:]]*"[^"]*"' "$GENERAL_SETTINGS_FILE" 2>/dev/null | \
-            sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1)
-    fi
-    [ -n "$user" ] || user="admin"
-    printf '%s\n' "$user"
-}
-
 remove_nodes_full_install() {
-    local nodes user ssh_bin impl node
+    local nodes user ssh_bin impl node port
     nodes=$(list_configured_nodes)
     [ -n "$nodes" ] || return 0
 
@@ -99,16 +80,17 @@ remove_nodes_full_install() {
     fi
 
     user=$(get_node_ssh_user)
+    port=$(get_node_ssh_port)
     for node in $nodes; do
         if [ "$impl" = "dbclient" ]; then
-            if "$ssh_bin" -p "$SSH_PORT" -y -i "$SSH_KEY" -o ConnectTimeout=5 -o PasswordAuthentication=no \
+            if "$ssh_bin" -p "$port" -y -i "$SSH_KEY" \
                 "$user@$node" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
                 logger -t "$LOGTAG" "Node cleanup success: $node"
             else
                 logger -t "$LOGTAG" "WARNING: Node cleanup failed for $node"
             fi
         else
-            if "$ssh_bin" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            if "$ssh_bin" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                 "$user@$node" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
                 logger -t "$LOGTAG" "Node cleanup success: $node"
             else
@@ -133,7 +115,7 @@ fi
 # ============================================================================ #
 
 # Disable router and node hooks first so MerVLAN stops executing during cleanup
-if has_configured_nodes && ssh_keys_installed; then
+if has_configured_nodes && ssh_keys_effectively_installed; then
     # Only attempt teardown when the boot helper script is available
     if [ -x "$BOOT_SCRIPT" ]; then
         logger -t "$LOGTAG" "Pre-uninstall: disabling hooks locally and on nodes"
@@ -239,7 +221,7 @@ logger -t "$LOGTAG" "$ADDON uninstalled"
 # When ACTION=full, remove addon directories for a clean slate reinstall later
 if [ "$ACTION" = "full" ]; then
     logger -t "$LOGTAG" "Performing full uninstall (removing addon directories)"
-    if has_configured_nodes && ssh_keys_installed; then
+    if has_configured_nodes && ssh_keys_effectively_installed; then
         remove_nodes_full_install
     fi
     rm -rf /jffs/addons/mervlan 2>/dev/null

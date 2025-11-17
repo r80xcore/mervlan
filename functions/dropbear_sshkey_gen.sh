@@ -22,10 +22,12 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -41,39 +43,23 @@ fi
 # file if empty. Logs all changes with reason context.                         #
 # ============================================================================ #
 update_json_flag() {
-    local value="$1"
-    local reason="$2"
-    
-  # Verify that the general settings file path exists
-  if [ ! -f "$GENERAL_SETTINGS_FILE" ]; then
-    warn -c cli,vlan "Warning: HW settings file not found at $GENERAL_SETTINGS_FILE"
-        return 1
-    fi
-    
-    # If file is empty, initialize it with flag
-    if [ ! -s "$GENERAL_SETTINGS_FILE" ]; then
-        # Create minimal JSON with SSH_KEYS_INSTALLED flag
-        echo "{\"SSH_KEYS_INSTALLED\": \"$value\"}" > "$GENERAL_SETTINGS_FILE"
-        info -c cli "✓ Initialized HW settings with SSH_KEYS_INSTALLED: $value ($reason)"
+    local value="$1" reason="$2"
+
+    # Prefer the sync helper if available – this preserves BOOT_ENABLED.
+    if command -v _sync_ssh_flag >/dev/null 2>&1; then
+        _sync_ssh_flag "$value"
+        info -c cli "✓ SSH_KEYS_INSTALLED set to $value via _sync_ssh_flag${reason:+ ($reason)}"
         return 0
     fi
-    
-    # Check if SSH_KEYS_INSTALLED flag already exists in the JSON
-  if grep -q '"SSH_KEYS_INSTALLED"' "$GENERAL_SETTINGS_FILE"; then
-        # Flag exists: update the value using sed replacement
-    if sed -i "s/\"SSH_KEYS_INSTALLED\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"SSH_KEYS_INSTALLED\": \"$value\"/" "$GENERAL_SETTINGS_FILE"; then
-            info -c cli "✓ Updated SSH_KEYS_INSTALLED to $value ($reason)"
-        else
-            warn -c cli,vlan "Warning: Failed to update SSH_KEYS_INSTALLED flag"
-        fi
-    else
-        # Flag does not exist: add new flag before closing brace
-    if sed -i 's/}/,"SSH_KEYS_INSTALLED": "'"$value"'"}/' "$GENERAL_SETTINGS_FILE"; then
-            info -c cli "✓ Added SSH_KEYS_INSTALLED: $value ($reason)"
-        else
-            warn -c cli,vlan "Warning: Failed to add SSH_KEYS_INSTALLED flag"
-        fi
+
+    # Fallback: direct write if lib_ssh isn't available for some reason.
+    if json_set_flag "SSH_KEYS_INSTALLED" "$value" >/dev/null 2>&1; then
+        info -c cli "✓ SSH_KEYS_INSTALLED set to $value${reason:+ ($reason)}"
+        return 0
     fi
+
+    warn -c cli,vlan "Warning: Failed to update SSH_KEYS_INSTALLED flag"
+    return 1
 }
 
 # ============================================================================ #
