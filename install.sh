@@ -933,14 +933,29 @@ create_logs() {
 # INSTALL ENTRYPOINT — Support "full" bootstrap mode with download step     #
 # ========================================================================== #
 
-# Handle "full" install mode: first-install dirs + fetch latest, then continue
-# Full mode bootstraps directory skeleton and downloads the current package
+# Handle "full" and "credentials" install mode: first-install dirs + fetch latest, then continue
 MODE="${1:-}"
-if [ "$MODE" = "full" ]; then
-    logger -t "$ADDON" "Full install requested: creating base dirs and downloading package"
-    create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
-    download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
-fi
+
+# Handle special modes before normal install flow
+case "$MODE" in
+    credentials)
+        # Only configure SSH credentials and exit
+        echo "[install] Credentials-only mode: configuring SSH username and port."
+        prompt_ssh_user_override
+        prompt_ssh_port_override
+        echo "[install] Credentials updated. Exiting."
+        exit 0
+        ;;
+    full)
+        logger -t "$ADDON" "Full install requested: creating base dirs and downloading package"
+        create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
+        download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
+        ;;
+    *)
+        # Standard / upgrade install: no special pre-work
+        ;;
+esac
+
 
 # ========================================================================== #
 # CORE INSTALL FLOW — Validate firmware support and mount addon web page     #
@@ -979,8 +994,11 @@ else
     exit 1
 fi
 
-prompt_ssh_user_override
-prompt_ssh_port_override
+# Only ask for SSH credentials during a full install
+if [ "$MODE" = "full" ]; then
+    prompt_ssh_user_override
+    prompt_ssh_port_override
+fi
 
 # 3b. Copy Static assets to Public Dir
 cp -p "$ADDON_DIR/$ADDON/www/index.html"            "$PUBLIC_DIR/index.html" 2>/dev/null
