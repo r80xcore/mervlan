@@ -28,7 +28,7 @@ source /usr/sbin/helper.sh
 # ADDON_DIR/ADDON/MERV_BASE — Install root beneath /jffs/addons
 # PUBLIC_DIR — Files exposed to web UI for SPA assets and JSON data
 # TMP_DIR/TMP — Workspace for transient downloads and log files
-# SETTINGS_FILE/GENERAL_SETTINGS_FILE — JSON configs used during install
+# SETTINGS_FILE — JSON configs used during install
 # BOOT_SCRIPT — Helper used for setupenable/nodeenable orchestration
 
 GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/main"
@@ -39,18 +39,310 @@ PUBLIC_DIR="/www/user/mervlan"
 TMP_DIR="/tmp/mervlan_tmp"
 TMP="${TMP_DIR:-$(mktemp -d)}"
 SETTINGS_FILE="$MERV_BASE/settings/settings.json"
-GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
 SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 
-[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
-[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+# ========================================================================== #
+# EMBEDDED JSON HELPERS — Minimal subset required during install            #
+# ========================================================================== #
+
+ensure_json_store() {
+    # ensure_json_store [file] [defaults]
+    # Create containing directory and seed JSON file if missing/empty.
+    local file="${1:-$SETTINGS_FILE}" defaults="${2:-}" dir
+
+    dir=$(dirname "$file")
+    mkdir -p "$dir" 2>/dev/null || return 1
+
+    if [ ! -s "$file" ]; then
+        if [ -n "$defaults" ]; then
+            printf '%s\n' "$defaults" > "$file" || return 1
+        else
+            printf '{\n}\n' > "$file" || return 1
+        fi
+    fi
+
+    return 0
+}
+
+json_escape_string() {
+    # json_escape_string <value>
+    local value="$1"
+    printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'
+}
+
+json_set_flag() {
+    # json_set_flag <key> <value> [file] [defaults]
+    local key="$1"
+    local value="$2"
+    local file="${3:-$SETTINGS_FILE}"
+    local defaults="${4:-}"
+    local json_value sed_value script tmp
+
+    [ -n "$key" ] || return 1
+
+    ensure_json_store "$file" "$defaults" || return 1
+
+    json_value=$(json_escape_string "$value")
+    sed_value=$(printf '%s' "$json_value" | sed 's/\\/\\\\/g; s/&/\\&/g')
+
+    if grep -q "\"$key\""[[:space:]]*: "$file" 2>/dev/null; then
+        script="${file}.sed.$$"
+        printf 's/"%s"[[:space:]]*:[[:space:]]*"[^"]*"/"%s": "%s"/\n' "$key" "$key" "$sed_value" > "$script" || {
+            rm -f "$script"
+            return 1
+        }
+        if ! sed -i -f "$script" "$file" 2>/dev/null; then
+            rm -f "$script"
+            return 1
+        fi
+        rm -f "$script"
+        return 0
+    fi
+
+    if grep -q '"[^"]\+"' "$file" 2>/dev/null; then
+        tmp="${file}.tmp.$$"
+        JSON_SET_FLAG_VALUE="$json_value" \
+        awk -v key="$key" '
+            BEGIN {
+                value = ENVIRON["JSON_SET_FLAG_VALUE"]
+                last_prop = -1
+            }
+            {
+                lines[NR] = $0
+                if ($0 ~ /"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*(,)?[[:space:]]*$/) {
+                    last_prop = NR
+                }
+            }
+            END {
+                if (last_prop == -1) {
+                    printf "{\n  \"%s\": \"%s\"\n}\n", key, value
+                    exit
+                }
+
+                for (i = 1; i < last_prop; i++) {
+                    print lines[i]
+                }
+
+                line = lines[last_prop]
+                sub(/[[:space:]]*$/, "", line)
+                if (line !~ /,$/) {
+                    line = line ","
+                }
+                print line
+
+                printf "  \"%s\": \"%s\"\n", key, value
+
+                for (i = last_prop + 1; i <= NR; i++) {
+                    print lines[i]
+                }
+            }
+        ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+        mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+        return 0
+    fi
+
+    printf '{\n  "%s": "%s"\n}\n' "$key" "$json_value" > "$file" || return 1
+    return 0
+}
+
+json_get_flag() {
+    # json_get_flag <key> [default] [file]
+    local key="$1"
+    local default_value="${2:-}"
+    local file="${3:-$SETTINGS_FILE}"
+
+    [ -n "$key" ] || { printf '%s\n' "$default_value"; return 1; }
+
+    if [ ! -s "$file" ]; then
+        printf '%s\n' "$default_value"
+        return 0
+    fi
+
+    # Extract "VALUE" from a line like:  "KEY": "VALUE",
+    # - ignores leading spaces
+    # - allows spaces around colon
+    # - ignores trailing comma and spaces
+    local value
+    value="$(sed -n "s/^[[:space:]]*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\\1/p" "$file")"
+
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+    else
+        printf '%s\n' "$default_value"
+    fi
+}
+
+
+# ========================================================================== #
+# EMBEDDED SSH HELPERS — Node credential prompts and key state detection    #
+# ========================================================================== #
+
+prompt_ssh_port_override() {
+    # Configure SSH port for node connections, stored in settings.json.
+    local current_port reply port
+
+    echo ""
+    echo "[install] Configure SSH port for node connections."
+
+    current_port=$(json_get_flag "NODE_SSH_PORT" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+    if [ "$current_port" = "__MISSING__" ] || [ -z "$current_port" ]; then
+        current_port=$(json_get_flag "SSH_PORT" "22" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+    [ -n "$current_port" ] || current_port="22"
+
+    while :; do
+        printf '[install] Use SSH port %s? [Y/n]: ' "$current_port"
+        IFS= read -r reply || reply=""
+        case "$reply" in
+            ""|Y|y|YES|yes|Yes)
+                echo "[install] Keeping SSH port $current_port."
+                json_set_flag "NODE_SSH_PORT" "$current_port" "$SETTINGS_FILE" >/dev/null 2>&1
+                json_set_flag "SSH_PORT" "$current_port" "$SETTINGS_FILE" >/dev/null 2>&1
+                return 0
+                ;;
+            N|n|NO|no|No)
+                while :; do
+                    printf '[install] Enter SSH port (1-65535): '
+                    IFS= read -r port || port=""
+                    case "$port" in
+                        ''|*[^0-9]*)
+                            echo "[install] Invalid entry; please enter digits only."
+                            continue
+                            ;;
+                    esac
+                    if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+                        if json_set_flag "NODE_SSH_PORT" "$port" "$SETTINGS_FILE" >/dev/null 2>&1; then
+                            json_set_flag "SSH_PORT" "$port" "$SETTINGS_FILE" >/dev/null 2>&1
+                            echo "[install] SSH port updated to $port in settings.json."
+                        else
+                            echo "[install] Failed to update SSH port in settings.json."
+                        fi
+                        return 0
+                    else
+                        echo "[install] Port out of range (1-65535)."
+                    fi
+                done
+                ;;
+            *)
+                echo "[install] Please answer Y or N."
+                ;;
+        esac
+    done
+}
+
+prompt_ssh_user_override() {
+    # Configure default SSH admin username for node connections.
+    local current_user reply new_user
+
+    echo ""
+    echo "[install] Configure default SSH admin username for node connections."
+
+    current_user=$(json_get_flag "NODE_SSH_USER" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+    if [ "$current_user" = "__MISSING__" ] || [ -z "$current_user" ]; then
+        current_user=$(json_get_flag "SSH_USER" "admin" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+    [ -n "$current_user" ] || current_user="admin"
+
+    while :; do
+        printf '[install] Use SSH username "%s"? [Y/n]: ' "$current_user"
+        IFS= read -r reply || reply=""
+        case "$reply" in
+            ""|Y|y|YES|yes|Yes)
+                echo "[install] Keeping SSH username \"$current_user\"."
+                json_set_flag "NODE_SSH_USER" "$current_user" "$SETTINGS_FILE" >/dev/null 2>&1
+                json_set_flag "SSH_USER" "$current_user" "$SETTINGS_FILE" >/dev/null 2>&1
+                return 0
+                ;;
+            N|n|NO|no|No)
+                while :; do
+                    printf '[install] Enter SSH username (no spaces, no quotes): '
+                    IFS= read -r new_user || new_user=""
+                    case "$new_user" in
+                        "")
+                            echo "[install] Username cannot be empty."
+                            continue
+                            ;;
+                        *["\ ]*)
+                            echo "[install] Invalid username; avoid spaces and double quotes."
+                            continue
+                            ;;
+                    esac
+
+                    if json_set_flag "NODE_SSH_USER" "$new_user" "$SETTINGS_FILE" >/dev/null 2>&1; then
+                        json_set_flag "SSH_USER" "$new_user" "$SETTINGS_FILE" >/dev/null 2>&1
+                        echo "[install] SSH username updated to \"$new_user\" in settings.json."
+                    else
+                        echo "[install] Failed to update SSH username in settings.json."
+                    fi
+                    return 0
+                done
+                ;;
+            *)
+                echo "[install] Please answer Y or N."
+                ;;
+        esac
+    done
+}
+
+_sync_ssh_flag() {
+    local desired="$1"
+    [ -n "$desired" ] || return 0
+
+    if command -v json_set_flag >/dev/null 2>&1; then
+        json_set_flag "SSH_KEYS_INSTALLED" "$desired" "$SETTINGS_FILE" >/dev/null 2>&1
+    fi
+    return 0
+}
+
+ssh_keys_effectively_installed() {
+    local flag="0" have_keys="0" flag_present="0"
+
+    if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ] && \
+       [ -n "${SSH_PUBKEY:-}" ] && [ -f "$SSH_PUBKEY" ]; then
+        have_keys="1"
+    fi
+
+    if command -v json_get_flag >/dev/null 2>&1; then
+        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
+        if [ "$(json_get_flag "SSH_KEYS_INSTALLED" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)" != "__MISSING__" ]; then
+            flag_present="1"
+        fi
+    elif [ -f "${SETTINGS_FILE:-}" ]; then
+        if grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$SETTINGS_FILE" 2>/dev/null; then
+            flag="1"
+        fi
+        if grep -q '"SSH_KEYS_INSTALLED"' "$SETTINGS_FILE" 2>/dev/null; then
+            flag_present="1"
+        fi
+    fi
+
+    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && command -v json_set_flag >/dev/null 2>&1; then
+        _sync_ssh_flag "$flag"
+        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+
+    if [ "$have_keys" = "1" ] && [ "$flag" != "1" ]; then
+        _sync_ssh_flag "1"
+        flag="1"
+    elif [ "$have_keys" = "0" ] && [ "$flag" = "1" ]; then
+        _sync_ssh_flag "0"
+        flag="0"
+    fi
+
+    if [ "$have_keys" = "1" ] || [ "$flag" = "1" ]; then
+        return 0
+    fi
+
+    return 1
+}
 
 # ========================================================================== #
 # NODE & SSH STATE HELPERS — Detect existing node config and key installs    #
 # ========================================================================== #
-# Source: settings/lib_ssh.sh
+# (Embedded subset in this script to avoid external dependencies)
 
 # has_configured_nodes — Report if any NODE1..NODE5 entries contain IPs
 # Returns: 0 when at least one valid IPv4 is present, 1 otherwise

@@ -29,12 +29,232 @@ ACTION="${1:-standard}"
 source /usr/sbin/helper.sh
 
 SETTINGS_FILE="$MERV_BASE/settings/settings.json"
-GENERAL_SETTINGS_FILE="$MERV_BASE/settings/general.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
 SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
-[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
-[ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+
+# ============================================================================ #
+# EMBEDDED JSON HELPERS — Minimal subset required during uninstall            #
+# ============================================================================ #
+
+ensure_json_store() {
+    local file="${1:-$SETTINGS_FILE}" defaults="${2:-}" dir
+
+    dir=$(dirname "$file")
+    mkdir -p "$dir" 2>/dev/null || return 1
+
+    if [ ! -s "$file" ]; then
+        if [ -n "$defaults" ]; then
+            printf '%s\n' "$defaults" > "$file" || return 1
+        else
+            printf '{\n}\n' > "$file" || return 1
+        fi
+    fi
+
+    return 0
+}
+
+json_escape_string() {
+    local value="$1"
+    printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'
+}
+
+json_set_flag() {
+    local key="$1"
+    local value="$2"
+    local file="${3:-$SETTINGS_FILE}"
+    local defaults="${4:-}"
+    local json_value sed_value script tmp
+
+    [ -n "$key" ] || return 1
+
+    ensure_json_store "$file" "$defaults" || return 1
+
+    json_value=$(json_escape_string "$value")
+    sed_value=$(printf '%s' "$json_value" | sed 's/\\/\\\\/g; s/&/\\&/g')
+
+    if grep -q "\"$key\""[[:space:]]*: "$file" 2>/dev/null; then
+        script="${file}.sed.$$"
+        printf 's/"%s"[[:space:]]*:[[:space:]]*"[^"]*"/"%s": "%s"/\n' "$key" "$key" "$sed_value" > "$script" || {
+            rm -f "$script"
+            return 1
+        }
+        if ! sed -i -f "$script" "$file" 2>/dev/null; then
+            rm -f "$script"
+            return 1
+        fi
+        rm -f "$script"
+        return 0
+    fi
+
+    if grep -q '"[^"]\+"' "$file" 2>/dev/null; then
+        tmp="${file}.tmp.$$"
+        JSON_SET_FLAG_VALUE="$json_value" \
+        awk -v key="$key" '
+            BEGIN {
+                value = ENVIRON["JSON_SET_FLAG_VALUE"]
+                last_prop = -1
+            }
+            {
+                lines[NR] = $0
+                if ($0 ~ /"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*(,)?[[:space:]]*$/) {
+                    last_prop = NR
+                }
+            }
+            END {
+                if (last_prop == -1) {
+                    printf "{\n  \"%s\": \"%s\"\n}\n", key, value
+                    exit
+                }
+
+                for (i = 1; i < last_prop; i++) {
+                    print lines[i]
+                }
+
+                line = lines[last_prop]
+                sub(/[[:space:]]*$/, "", line)
+                if (line !~ /,$/) {
+                    line = line ","
+                }
+                print line
+
+                printf "  \"%s\": \"%s\"\n", key, value
+
+                for (i = last_prop + 1; i <= NR; i++) {
+                    print lines[i]
+                }
+            }
+        ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+        mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+        return 0
+    fi
+
+    printf '{\n  "%s": "%s"\n}\n' "$key" "$json_value" > "$file" || return 1
+    return 0
+}
+
+json_get_flag() {
+    # json_get_flag <key> [default] [file]
+    local key="$1"
+    local default_value="${2:-}"
+    local file="${3:-$SETTINGS_FILE}"
+
+    [ -n "$key" ] || { printf '%s\n' "$default_value"; return 1; }
+
+    if [ ! -s "$file" ]; then
+        printf '%s\n' "$default_value"
+        return 0
+    fi
+
+    # Extract "VALUE" from a line like:  "KEY": "VALUE",
+    # - ignores leading spaces
+    # - allows spaces around colon
+    # - ignores trailing comma and spaces
+    local value
+    value="$(sed -n "s/^[[:space:]]*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\\1/p" "$file")"
+
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+    else
+        printf '%s\n' "$default_value"
+    fi
+}
+
+# ============================================================================ #
+# EMBEDDED SSH HELPERS — Node credentials & key state detection               #
+# ============================================================================ #
+
+get_node_ssh_user() {
+    local user="__MISSING__"
+
+    user=$(json_get_flag "NODE_SSH_USER" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+    if [ "$user" = "__MISSING__" ] || [ -z "$user" ]; then
+        user=$(json_get_flag "SSH_USER" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+    if [ "$user" = "__MISSING__" ] || [ -z "$user" ]; then
+        user="admin"
+    fi
+
+    printf '%s\n' "$user"
+}
+
+get_node_ssh_port() {
+    local port
+
+    case "${SSH_PORT:-}" in
+        ''|*[!0-9]*) port="" ;;
+        *) port="$SSH_PORT" ;;
+    esac
+
+    if [ -z "$port" ]; then
+        port=$(json_get_flag "NODE_SSH_PORT" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+        if [ "$port" = "__MISSING__" ] || [ -z "$port" ]; then
+            port=$(json_get_flag "SSH_PORT" "22" "$SETTINGS_FILE" 2>/dev/null)
+        fi
+    fi
+
+    case "$port" in
+        ''|*[!0-9]*) port="22" ;;
+    esac
+    if [ "$port" -lt 1 ] 2>/dev/null || [ "$port" -gt 65535 ] 2>/dev/null; then
+        port="22"
+    fi
+
+    printf '%s\n' "$port"
+}
+
+_sync_ssh_flag() {
+    local desired="$1"
+    [ -n "$desired" ] || return 0
+
+    if command -v json_set_flag >/dev/null 2>&1; then
+        json_set_flag "SSH_KEYS_INSTALLED" "$desired" "$SETTINGS_FILE" >/dev/null 2>&1
+    fi
+    return 0
+}
+
+ssh_keys_effectively_installed() {
+    local flag="0" have_keys="0" flag_present="0"
+
+    if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ] && \
+       [ -n "${SSH_PUBKEY:-}" ] && [ -f "$SSH_PUBKEY" ]; then
+        have_keys="1"
+    fi
+
+    if command -v json_get_flag >/dev/null 2>&1; then
+        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
+        if [ "$(json_get_flag "SSH_KEYS_INSTALLED" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)" != "__MISSING__" ]; then
+            flag_present="1"
+        fi
+    elif [ -f "${SETTINGS_FILE:-}" ]; then
+        if grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$SETTINGS_FILE" 2>/dev/null; then
+            flag="1"
+        fi
+        if grep -q '"SSH_KEYS_INSTALLED"' "$SETTINGS_FILE" 2>/dev/null; then
+            flag_present="1"
+        fi
+    fi
+
+    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && command -v json_set_flag >/dev/null 2>&1; then
+        _sync_ssh_flag "$flag"
+        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+
+    if [ "$have_keys" = "1" ] && [ "$flag" != "1" ]; then
+        _sync_ssh_flag "1"
+        flag="1"
+    elif [ "$have_keys" = "0" ] && [ "$flag" = "1" ]; then
+        _sync_ssh_flag "0"
+        flag="0"
+    fi
+
+    if [ "$have_keys" = "1" ] || [ "$flag" = "1" ]; then
+        return 0
+    fi
+
+    return 1
+}
 
 list_configured_nodes() {
     [ -f "$SETTINGS_FILE" ] || return 1
