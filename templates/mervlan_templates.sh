@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#         - File: templates/mervlan_templates.sh || version="0.48"             #
+#         - File: templates/mervlan_templates.sh || version="0.49"             #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide unified template lookup utilities for MerVLAN.         #
 #               Each template is stored inline and can be materialized via     #
@@ -59,7 +59,7 @@ sleep 5
 MERV_BASE_PLACEHOLDER/install.sh
 %%END
 
-%%TEMPLATE service-event-nodes 2
+%%TEMPLATE service-event-nodes 1
 #!/bin/sh
 #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -74,7 +74,7 @@ MERV_BASE_PLACEHOLDER/install.sh
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#          - File: service-event-handler.sh || version="0.47"                  #
+#          - File: service-event-handler.sh || version="0.48"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Event handler for http and service events                      #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -278,7 +278,7 @@ case "${TYPE}_${EVENT}" in
 esac
 %%END
 
-%%TEMPLATE service-event-nodes 1
+%%TEMPLATE service-event-nodes 2
 #!/bin/sh
 #
 # ──────────────────────────────────────────────────────────────────────────── #
