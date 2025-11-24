@@ -1,49 +1,121 @@
 {
-  "APISO_01": "0",
-  "APISO_02": "0",
-  "APISO_03": "0",
-  "APISO_04": "0",
-  "APISO_05": "0",
-  "APISO_06": "0",
-  "APISO_07": "0",
-  "APISO_08": "0",
-  "APISO_09": "0",
-  "APISO_10": "0",
-  "APISO_11": "0",
-  "APISO_12": "0",
-  "DRY_RUN": "yes",
-  "ETH1_VLAN": "none",
-  "ETH2_VLAN": "none",
-  "ETH3_VLAN": "none",
-  "ETH4_VLAN": "none",
-  "NODE1": "none",
-  "NODE2": "none",
-  "NODE3": "none",
-  "NODE4": "none",
-  "NODE5": "none",
-  "PERSISTENT": "no",
-  "SSID_01": "unused-placeholder",
-  "SSID_02": "unused-placeholder",
-  "SSID_03": "unused-placeholder",
-  "SSID_04": "unused-placeholder",
-  "SSID_05": "unused-placeholder",
-  "SSID_06": "unused-placeholder",
-  "SSID_07": "unused-placeholder",
-  "SSID_08": "unused-placeholder",
-  "SSID_09": "unused-placeholder",
-  "SSID_10": "unused-placeholder",
-  "SSID_11": "unused-placeholder",
-  "SSID_12": "unused-placeholder",
-  "VLAN_01": "none",
-  "VLAN_02": "none",
-  "VLAN_03": "none",
-  "VLAN_04": "none",
-  "VLAN_05": "none",
-  "VLAN_06": "none",
-  "VLAN_07": "none",
-  "VLAN_08": "none",
-  "VLAN_09": "none",
-  "VLAN_10": "none",
-  "VLAN_11": "none",
-  "VLAN_12": "none"
+  "General": {
+    "_description": "Global addon flags and behavior toggles",
+    "BOOT_ENABLED": "0",
+    "DRY_RUN": "yes",
+    "EXPERIMENTAL": "0",
+    "PERSISTENT": "no"
+  },
+
+  "SSH": {
+    "_description": "SSH settings for main router and nodes",
+    "SSH_USER": "admin",
+    "SSH_PORT": "22",
+    "NODE_SSH_USER": "admin",
+    "NODE_SSH_PORT": "22",
+    "SSH_KEYS_INSTALLED": "0"
+  },
+
+  "Nodes": {
+    "_description": "Configured node IPs (used for sync and remote execution)",
+    "NODE1": "none",
+    "NODE2": "none",
+    "NODE3": "none",
+    "NODE4": "none",
+    "NODE5": "none"
+  },
+
+  "WiFi": {
+    "_description": "SSID slots and per-SSID AP isolation flags (APISO)",
+    "SSIDs": {
+      "SSID_01": "unused-placeholder",
+      "SSID_02": "unused-placeholder",
+      "SSID_03": "unused-placeholder",
+      "SSID_04": "unused-placeholder",
+      "SSID_05": "unused-placeholder",
+      "SSID_06": "unused-placeholder",
+      "SSID_07": "unused-placeholder",
+      "SSID_08": "unused-placeholder",
+      "SSID_09": "unused-placeholder",
+      "SSID_10": "unused-placeholder",
+      "SSID_11": "unused-placeholder",
+      "SSID_12": "unused-placeholder"
+    },
+    "APISO": {
+      "APISO_01": "0",
+      "APISO_02": "0",
+      "APISO_03": "0",
+      "APISO_04": "0",
+      "APISO_05": "0",
+      "APISO_06": "0",
+      "APISO_07": "0",
+      "APISO_08": "0",
+      "APISO_09": "0",
+      "APISO_10": "0",
+      "APISO_11": "0",
+      "APISO_12": "0"
+    }
+  },
+
+  "VLAN": {
+    "_description": "All VLAN-related configuration: pool, per-port mapping, trunks",
+
+    "Pool": {
+      "_description": "Configured VLAN IDs exposed in the UI",
+      "VLAN_01": "none",
+      "VLAN_02": "none",
+      "VLAN_03": "none",
+      "VLAN_04": "none",
+      "VLAN_05": "none",
+      "VLAN_06": "none",
+      "VLAN_07": "none",
+      "VLAN_08": "none",
+      "VLAN_09": "none",
+      "VLAN_10": "none",
+      "VLAN_11": "none",
+      "VLAN_12": "none"
+    },
+
+    "Ethernet_ports": {
+      "_description": "Access-port VLAN mapping per physical LAN port",
+      "ETH1_VLAN": "none",
+      "ETH2_VLAN": "none",
+      "ETH3_VLAN": "none",
+      "ETH4_VLAN": "none",
+      "ETH5_VLAN": "none",
+      "ETH6_VLAN": "none",
+      "ETH7_VLAN": "none",
+      "ETH8_VLAN": "none"
+    },
+
+    "Trunks": {
+      "_description": "Per-port trunk enable plus tagged/untagged membership",
+      "TRUNK1": "0",
+      "TRUNK2": "0",
+      "TRUNK3": "0",
+      "TRUNK4": "0",
+      "TRUNK5": "0",
+      "TRUNK6": "0",
+      "TRUNK7": "0",
+      "TRUNK8": "0",
+
+      "TAGGED_TRUNK1": "none",
+      "TAGGED_TRUNK2": "none",
+      "TAGGED_TRUNK3": "none",
+      "TAGGED_TRUNK4": "none",
+      "TAGGED_TRUNK5": "none",
+      "TAGGED_TRUNK6": "none",
+      "TAGGED_TRUNK7": "none",
+      "TAGGED_TRUNK8": "none",
+
+      "UNTAGGED_TRUNK1": "none",
+      "UNTAGGED_TRUNK2": "none",
+      "UNTAGGED_TRUNK3": "none",
+      "UNTAGGED_TRUNK4": "none",
+      "UNTAGGED_TRUNK5": "none",
+      "UNTAGGED_TRUNK6": "none",
+      "UNTAGGED_TRUNK7": "none",
+      "UNTAGGED_TRUNK8": "none"
+    }
+  }
 }
