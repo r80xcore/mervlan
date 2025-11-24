@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.47"                        #
+#               - File: sync_nodes.sh || version="0.48"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -21,14 +21,72 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_SSH_LOADED
+    unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_SSH_LOADED LIB_JSON_LOADED LIB_DEBUG_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 # =========================================== End of MerVLAN environment setup #
+
+# Default no-op debug helpers; overridden if lib_debug.sh is loaded
+dbg_log() { :; }
+dbg_var() { :; }
+
+DRY_RUN_FORCED=0
+DEBUG_FORCED=0
+
+ORIGINAL_ARGS="$*"
+
+# ───── CLI arg parsing: dryrun + debug ─────
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        dryrun|--dry-run|-n)
+            DRY_RUN="yes"
+            DRY_RUN_FORCED=1
+            shift
+            ;;
+        debug|--debug|-d)
+            DEBUG=1
+            DEBUG_FORCED=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ -z "${DRY_RUN:-}" ]; then
+    DRY_RUN="$(json_get_flag "DRY_RUN" "yes" "$SETTINGS_FILE" 2>/dev/null)"
+fi
+[ -z "$DRY_RUN" ] && DRY_RUN="yes"
+
+DEBUG_JSON_FLAG="$(json_get_flag "SYNC_DEBUG" "0" "$SETTINGS_FILE" 2>/dev/null)"
+case "${DEBUG_JSON_FLAG}" in
+    1|yes|on|true) DEBUG_JSON=1 ;;
+    *)             DEBUG_JSON=0 ;;
+esac
+
+if [ "$DEBUG_FORCED" -eq 1 ] || [ "${DEBUG_JSON:-0}" -eq 1 ]; then
+    DEBUG=1
+else
+    DEBUG=0
+fi
+
+if [ "$DEBUG" -eq 1 ]; then
+    [ -n "${LIB_DEBUG_LOADED:-}" ] || . "$MERV_BASE/settings/lib_debug.sh"
+fi
+
+DBG_CHANNEL="vlan,cli"
+: "${DBG_PREFIX:=[DEBUG]}"
+
+dbg_log "sync_nodes.sh invoked with args: ${ORIGINAL_ARGS}"
+dbg_var DRY_RUN DRY_RUN_FORCED DEBUG DEBUG_FORCED DEBUG_JSON
+
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+dbg_var SSH_NODE_USER SSH_NODE_PORT
 # ========================================================================== #
 # FILE SYNC SETUP — Source/destination lists and synchronization parameters  #
 # ========================================================================== #
@@ -41,6 +99,7 @@ settings/hw_settings.json
 settings/var_settings.sh 
 settings/log_settings.sh 
 settings/lib_json.sh
+settings/lib_debug.sh
 settings/lib_ssh.sh 
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh 
@@ -61,9 +120,12 @@ FILES_TO_COPY_CHMOD_644="
 settings/var_settings.sh 
 settings/log_settings.sh 
 settings/lib_json.sh  
+settings/lib_debug.sh 
 settings/lib_ssh.sh 
 templates/mervlan_templates.sh
 "
+dbg_log "File synchronization manifest loaded"
+dbg_var FILES_TO_COPY FILES_TO_COPY_CHMOD FILES_TO_COPY_CHMOD_644
 
 # ========================================================================== #
 # SYNCHRONIZATION PARAMETERS — Debug toggles and SSH retry behaviour         #
@@ -79,6 +141,15 @@ SSH_MAX_ATTEMPTS="${SSH_MAX_ATTEMPTS:-60}"
 SSH_RETRY_INTERVAL="${SSH_RETRY_INTERVAL:-5}"
 # Extra settle period after ping success so daemons can come online
 PING_STABILIZE_DELAY="${PING_STABILIZE_DELAY:-10}"
+dbg_var SYNC_DEBUG_PRE SYNC_DEBUG_POST PING_MAX_ATTEMPTS PING_RETRY_INTERVAL SSH_MAX_ATTEMPTS SSH_RETRY_INTERVAL PING_STABILIZE_DELAY
+
+run_cmd() {
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c vlan,cli "[DRY-RUN] $*"
+        return 0
+    fi
+    "$@" 2>/dev/null
+}
 
 # ========================================================================== #
 # PRE-FLIGHT VALIDATION — Ensure local configuration and SSH keys are ready  #
@@ -86,6 +157,13 @@ PING_STABILIZE_DELAY="${PING_STABILIZE_DELAY:-10}"
 
 info -c cli,vlan "=== VLAN Manager File Synchronization ==="
 info -c cli,vlan ""
+
+if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "[DRY-RUN] Simulation mode active; no remote changes will be applied"
+fi
+if [ "${DEBUG:-0}" -eq 1 ]; then
+    info -c cli,vlan "[DEBUG] Additional debug logging enabled"
+fi
 
 # Check if settings file exists (required for node discovery and file paths)
 if [ ! -f "$SETTINGS_FILE" ]; then
@@ -137,6 +215,8 @@ get_node_ips() {
 }
 
 NODE_IPS=$(get_node_ips)
+dbg_log "Discovered node IPs"
+dbg_var NODE_IPS
 
 if [ -z "$NODE_IPS" ]; then
     warn -c cli,vlan "No nodes configured in settings.json"
@@ -196,14 +276,25 @@ check_remote_jffs_status() {
 # enable_jffs_and_reboot — Toggle nvram flags, commit, and trigger reboot
 enable_jffs_and_reboot() {
     local node_ip="$1"
+    local remote_cmd="nvram set jffs2_on=1; nvram set jffs2_scripts=1; nvram commit; (sleep 2; reboot) &"
 
     info -c cli,vlan "Enabling JFFS and scripts on $node_ip and triggering reboot"
+    dbg_log "enable_jffs_and_reboot issuing remote command"
+    dbg_var node_ip remote_cmd
 
-    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "nvram set jffs2_on=1; nvram set jffs2_scripts=1; nvram commit; (sleep 2; reboot) &" 2>/dev/null; then
+    if run_cmd dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "$remote_cmd"; then
+        if [ "$DRY_RUN" = "yes" ]; then
+            info -c cli,vlan "[DRY-RUN] Would enable JFFS on $node_ip"
+            return 0
+        fi
         info -c cli,vlan "✓ JFFS enable commands sent to $node_ip"
         return 0
     else
         local exit_code=$?
+        if [ "$DRY_RUN" = "yes" ]; then
+            info -c cli,vlan "[DRY-RUN] Simulated failure enabling JFFS on $node_ip (exit $exit_code)"
+            return 1
+        fi
         if [ "$exit_code" = "255" ]; then
             info -c cli,vlan "✓ JFFS enable commands sent to $node_ip (connection closed during reboot)"
             return 0
@@ -262,6 +353,9 @@ ensure_jffs_ready() {
     local node_ip="$1"
     local jffs_status
 
+    dbg_log "Checking JFFS readiness"
+    dbg_var node_ip
+
     if jffs_status=$(check_remote_jffs_status "$node_ip"); then
         info -c cli,vlan "✓ JFFS already enabled on $node_ip"
         return 0
@@ -276,6 +370,11 @@ ensure_jffs_ready() {
 
         if [ $status -eq 1 ]; then
             warn -c cli,vlan "JFFS not fully enabled on $node_ip (jffs2_on=$jffs_on, jffs2_scripts=$jffs_scripts). Remediating..."
+
+            if [ "$DRY_RUN" = "yes" ]; then
+                info -c cli,vlan "[DRY-RUN] Would enable JFFS and reboot $node_ip"
+                return 0
+            fi
 
             if ! enable_jffs_and_reboot "$node_ip"; then
                 return 1
@@ -323,11 +422,22 @@ create_remote_dirs_for_file() {
     # If file is in a subdirectory, create that directory on remote
     if [ "$dir_path" != "." ]; then
         local remote_dir="$MERV_BASE/$dir_path"
-    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
-            info -c cli,vlan "✓ Created directory $remote_dir on $node_ip"
+        dbg_log "Ensuring remote directory exists"
+        dbg_var node_ip remote_dir
+        if run_cmd dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$remote_dir'"; then
+            if [ "$DRY_RUN" = "yes" ]; then
+                info -c cli,vlan "[DRY-RUN] Would create directory $remote_dir on $node_ip"
+            else
+                info -c cli,vlan "✓ Created directory $remote_dir on $node_ip"
+            fi
             return 0
         else
-            error -c cli,vlan "✗ Failed to create directory $remote_dir on $node_ip"
+            local rc=$?
+            if [ "$DRY_RUN" = "yes" ]; then
+                info -c cli,vlan "[DRY-RUN] Simulated failure creating $remote_dir on $node_ip (exit $rc)"
+            else
+                error -c cli,vlan "✗ Failed to create directory $remote_dir on $node_ip"
+            fi
             return 1
         fi
     fi
@@ -345,6 +455,14 @@ copy_file_to_node() {
         return 1
     fi
     
+    dbg_log "Preparing to copy file to node"
+    dbg_var node_ip file remote_path
+
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would copy $file to $node_ip:$remote_path"
+        return 0
+    fi
+
     # Use cat to copy the file content (always overwrite)
     if cat "$MERV_BASE/$file" | dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
         info -c cli,vlan "✓ Copied $file to $node_ip:$remote_path"
@@ -413,7 +531,15 @@ set_remote_permissions() {
     local node_ip="$1"
     local file="$2"
     local remote_file="$MERV_BASE/$file"
-    
+
+    dbg_log "Applying chmod 755 on node"
+    dbg_var node_ip remote_file
+
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would set executable permissions for $file on $node_ip"
+        return 0
+    fi
+
     if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "chmod 755 '$remote_file' 2>/dev/null; echo 'permissions_set'" 2>/dev/null | grep -q "permissions_set"; then
         info -c cli,vlan "✓ Set executable permissions for $file on $node_ip"
         return 0
@@ -429,6 +555,14 @@ set_remote_permissions_644() {
     local file="$2"
     local remote_file="$MERV_BASE/$file"
 
+    dbg_log "Applying chmod 644 on node"
+    dbg_var node_ip remote_file
+
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would set 644 permissions for $file on $node_ip"
+        return 0
+    fi
+
     if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "chmod 644 '$remote_file' 2>/dev/null; echo 'permissions_644_set'" 2>/dev/null | grep -q "permissions_644_set"; then
         info -c cli,vlan "✓ Set 644 permissions for $file on $node_ip"
         return 0
@@ -441,17 +575,37 @@ set_remote_permissions_644() {
 # mark_node_remote — Create node sentinel flag to enable node-only flows
 mark_node_remote() {
     local node_ip="$1"
-    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$MERV_BASE' && : > '$MERV_BASE/.is_node' && chmod 644 '$MERV_BASE/.is_node'" 2>/dev/null; then
-        info -c cli,vlan "✓ Marked $node_ip as MerVLAN node (.is_node)"
+    local remote_cmd="mkdir -p '$MERV_BASE' && : > '$MERV_BASE/.is_node' && chmod 644 '$MERV_BASE/.is_node'"
+
+    dbg_log "Setting node sentinel remotely"
+    dbg_var node_ip remote_cmd
+
+    if run_cmd dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "$remote_cmd"; then
+        if [ "$DRY_RUN" = "yes" ]; then
+            info -c cli,vlan "[DRY-RUN] Would mark $node_ip as MerVLAN node"
+        else
+            info -c cli,vlan "✓ Marked $node_ip as MerVLAN node (.is_node)"
+        fi
         return 0
     fi
-    error -c cli,vlan "✗ Failed to write .is_node sentinel on $node_ip"
+
+    local rc=$?
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Simulated failure creating .is_node on $node_ip (exit $rc)"
+    else
+        error -c cli,vlan "✗ Failed to write .is_node sentinel on $node_ip"
+    fi
     return 1
 }
 
 # unmark_node_remote — Remove node sentinel during teardown (unused but available)
 unmark_node_remote() {
     local node_ip="$1"
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would remove node sentinel on $node_ip"
+        return 0
+    fi
+
     if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "rm -f '$MERV_BASE/.is_node'" 2>/dev/null; then
         info -c cli,vlan "✓ Cleared node sentinel on $node_ip"
         return 0
@@ -489,6 +643,8 @@ overall_success=true
 
 for node_ip in $NODE_IPS; do
     info -c cli,vlan "Processing node: $node_ip"
+    dbg_log "Beginning node synchronization"
+    dbg_var node_ip DRY_RUN
     
     # Test connectivity
     if ! ping -c 1 -W 2 "$node_ip" >/dev/null 2>&1; then
@@ -515,12 +671,23 @@ for node_ip in $NODE_IPS; do
     
     # Create base remote directories (addon path + runtime folders)
     remote_mkdir_cmd="mkdir -p '$MERV_BASE' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
-    if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "$remote_mkdir_cmd" 2>/dev/null; then
-        error -c cli,vlan "✗ Failed to create required directories on $node_ip"
+    dbg_log "Ensuring base directories on node"
+    dbg_var node_ip remote_mkdir_cmd
+    if ! run_cmd dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "$remote_mkdir_cmd"; then
+        rc=$?
+        if [ "$DRY_RUN" = "yes" ]; then
+            info -c cli,vlan "[DRY-RUN] Simulated failure creating required directories on $node_ip (exit $rc)"
+        else
+            error -c cli,vlan "✗ Failed to create required directories on $node_ip"
+        fi
         overall_success=false
         continue
     else
-        info -c cli,vlan "✓ Ensured remote directories on $node_ip: $MERV_BASE, $TMPDIR, $LOGDIR, $LOCKDIR, $RESULTDIR, $CHANGES, $COLLECTDIR"
+        if [ "$DRY_RUN" = "yes" ]; then
+            info -c cli,vlan "[DRY-RUN] Would ensure remote directories on $node_ip: $MERV_BASE, $TMPDIR, $LOGDIR, $LOCKDIR, $RESULTDIR, $CHANGES, $COLLECTDIR"
+        else
+            info -c cli,vlan "✓ Ensured remote directories on $node_ip: $MERV_BASE, $TMPDIR, $LOGDIR, $LOCKDIR, $RESULTDIR, $CHANGES, $COLLECTDIR"
+        fi
     fi
     
     # Debug: show remote directory before copying (optional)
@@ -549,6 +716,14 @@ for node_ip in $NODE_IPS; do
         debug_remote_files "$node_ip" "after"
     fi
     
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Skipping verification, permission updates, and nodeenable for $node_ip"
+        info -c cli,vlan "[DRY-RUN] Simulated synchronization complete for $node_ip"
+        info -c cli,vlan "--- Completed node: $node_ip ---"
+        echo ""
+        continue
+    fi
+
     # Verify files were copied
     if [ "$file_success" = "true" ]; then
         verification_success=true
@@ -586,26 +761,32 @@ for node_ip in $NODE_IPS; do
                 continue
             fi
 
-            if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "[ -f '$MERV_BASE/.is_node' ]" 2>/dev/null; then
-                warn -c cli,vlan "⚠️  .is_node sentinel missing on $node_ip after mark"
+            if [ "$DRY_RUN" != "yes" ]; then
+                if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "[ -f '$MERV_BASE/.is_node' ]" 2>/dev/null; then
+                    warn -c cli,vlan "⚠️  .is_node sentinel missing on $node_ip after mark"
+                fi
             fi
 
-            if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-                "$SSH_NODE_USER@$node_ip" \
-                "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local" 2>&1; then
-                info -c cli,vlan "✓ nodeenable applied on $node_ip"
-                report_line=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-                    "$SSH_NODE_USER@$node_ip" \
-                    "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
-                if [ -n "$report_line" ]; then
-                    info -c cli,vlan "Node $node_ip report: $report_line"
-                    echo "$report_line" | grep -q 'event=active' || warn -c cli,vlan "⚠️ event not active on $node_ip"
-                else
-                    warn -c cli,vlan "⚠️ no report output from $node_ip after nodeenable"
-                fi
+            if [ "$DRY_RUN" = "yes" ]; then
+                info -c cli,vlan "[DRY-RUN] Skipping nodeenable execution on $node_ip"
             else
-                warn -c cli,vlan "⚠️ nodeenable failed on $node_ip"
-                overall_success=false
+                if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+                    "$SSH_NODE_USER@$node_ip" \
+                    "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local" 2>&1; then
+                    info -c cli,vlan "✓ nodeenable applied on $node_ip"
+                    report_line=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+                        "$SSH_NODE_USER@$node_ip" \
+                        "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+                    if [ -n "$report_line" ]; then
+                        info -c cli,vlan "Node $node_ip report: $report_line"
+                        echo "$report_line" | grep -q 'event=active' || warn -c cli,vlan "⚠️ event not active on $node_ip"
+                    else
+                        warn -c cli,vlan "⚠️ no report output from $node_ip after nodeenable"
+                    fi
+                else
+                    warn -c cli,vlan "⚠️ nodeenable failed on $node_ip"
+                    overall_success=false
+                fi
             fi
         else
             error -c cli,vlan "✗ File verification failed for $node_ip"
@@ -627,12 +808,20 @@ done
 info -c cli,vlan "=== Synchronization Complete ==="
 
 if [ "$overall_success" = "true" ]; then
-    info -c cli,vlan "✓ SUCCESS: All files synchronized to all nodes"
-    info -c cli,vlan "Files copied: $FILES_TO_COPY"
-    info -c cli,vlan "Files made executable: $FILES_TO_COPY_CHMOD"
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] SUCCESS: Synchronization simulation completed (no changes applied)"
+    else
+        info -c cli,vlan "✓ SUCCESS: All files synchronized to all nodes"
+        info -c cli,vlan "Files copied: $FILES_TO_COPY"
+        info -c cli,vlan "Files made executable: $FILES_TO_COPY_CHMOD"
+    fi
     exit 0
 else
-    warn -c cli,vlan "⚠️  PARTIAL SUCCESS: Some files may not have been synchronized"
-    info -c cli,vlan "Check the log at $CLI_LOG for details"
+    if [ "$DRY_RUN" = "yes" ]; then
+        warn -c cli,vlan "[DRY-RUN] Simulation encountered issues; review output before running without dry-run"
+    else
+        warn -c cli,vlan "⚠️  PARTIAL SUCCESS: Some files may not have been synchronized"
+        info -c cli,vlan "Check the log at $CLI_LOG for details"
+    fi
     exit 1
 fi

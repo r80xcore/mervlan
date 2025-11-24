@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.47"                   #
+#               - File: mervlan_manager.sh || version="0.48"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -71,6 +71,60 @@ read_json_array() {
     | sed 's/[[:space:]]//g; s/"//g; s/,/ /g'
 }
 
+detect_trunk_ports() {
+  TRUNK_ENABLED_PORTS=""
+  local idx val port
+
+  idx=1
+  while [ $idx -le 8 ]; do
+    val=$(read_json_number "TRUNK${idx}" "$SETTINGS_FILE")
+    if [ -z "$val" ]; then
+      val=$(read_json_number "trunk${idx}" "$SETTINGS_FILE")
+    fi
+    case "$val" in
+      ''|0) ;;
+      *)
+        if [ "$val" -ge 1 ] 2>/dev/null && [ "$val" -le 8 ] 2>/dev/null; then
+          port="eth${val}"
+          case " $TRUNK_ENABLED_PORTS " in
+            *" $port "*) ;;
+            *) TRUNK_ENABLED_PORTS="${TRUNK_ENABLED_PORTS} $port" ;;
+          esac
+        fi
+        ;;
+    esac
+    idx=$((idx + 1))
+  done
+
+  TRUNK_ENABLED_PORTS=$(printf '%s\n' "$TRUNK_ENABLED_PORTS" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+}
+
+run_trunk_if_configured() {
+  TRUNK_APPLIED=0
+  detect_trunk_ports
+
+  if [ -z "$TRUNK_ENABLED_PORTS" ]; then
+    info -c cli,vlan "No trunk configuration enabled. Skipping."
+    return 0
+  fi
+
+  info -c cli,vlan "Trunk enabled on: $TRUNK_ENABLED_PORTS. Configuring..."
+
+  if [ ! -x "$FUNCDIR/mervlan_trunk.sh" ]; then
+    warn -c cli,vlan "Trunk configuration skipped because this is a node or remote AP"
+    return 1
+  fi
+
+  if DRY_RUN="$DRY_RUN" UPLINK_PORT="$UPLINK_PORT" DEFAULT_BRIDGE="$DEFAULT_BRIDGE" MAX_TRUNKS=8 \
+      "$FUNCDIR/mervlan_trunk.sh"; then
+    TRUNK_APPLIED=1
+    return 0
+  fi
+
+  warn -c cli,vlan "Trunk script execution failed"
+  return 1
+}
+
 # ========================================================================== #
 # STRING NORMALIZATION HELPERS — ensure consistent SSID and interface matching #
 # ========================================================================== #
@@ -98,6 +152,8 @@ to_lower() {
 
 BOUND_IFACES=""
 WATCH_IFACES=""
+TRUNK_ENABLED_PORTS=""
+TRUNK_APPLIED=0
 
 # ========================================================================== #
 # INITIALIZATION & HARDWARE DETECTION — Load configs and validate setup       #
@@ -772,6 +828,14 @@ show_configuration_summary() {
     info -c cli,vlan "  $line"
   done
 
+  if [ -n "${TRUNK_ENABLED_PORTS:-}" ]; then
+    if [ "$TRUNK_APPLIED" -eq 1 ]; then
+      info -c cli,vlan "Trunk summary: enabled on $TRUNK_ENABLED_PORTS"
+    else
+      info -c cli,vlan "Trunk summary: configuration requested on $TRUNK_ENABLED_PORTS but trunk script failed or was skipped"
+    fi
+  fi
+
   if [ "$DRY_RUN" = "yes" ]; then
     # Dry-run mode: remind user no changes were made
     info -c cli,vlan "=== DRY-RUN COMPLETE ==="
@@ -1077,6 +1141,8 @@ main() {
 
     post_rc_watchdog
   }
+
+  run_trunk_if_configured
 
   # Summary: display final configuration status
   show_configuration_summary

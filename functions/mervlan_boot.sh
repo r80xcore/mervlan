@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.48"                     #
+#                - File: mervlan_boot.sh || version="0.49"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -36,10 +36,6 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 # ========================================================================== #
 # INITIALIZATION & CONSTANTS — Boot state flags, action dispatch, paths      #
 # ========================================================================== #
-
-# General settings file holding persisted flags
-: "${GENERAL_SETTINGS_FILE:=$SETTINGSDIR/general.json}"
-
 
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
@@ -325,7 +321,7 @@ get_node_ips() {
 }
 
 # test_ssh_connection — Validate SSH connectivity to a specific node (same as sync_nodes.sh)
-# Args: $1 = node_ip (uses configured SSH credentials from general.json)
+# Args: $1 = node_ip (uses configured SSH credentials from settings.json)
 # Returns: 0 if "connected" echo received, 1 if SSH fails or no response
 test_ssh_connection() {
     local node_ip="$1"
@@ -473,8 +469,8 @@ case "$ACTION" in
     inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
     info -c vlan,cli "Installed services-start with MERV_BASE=$MERV_BASE (service-event managed at setup)"
 
-    # Persist boot enabled state to general.json
-    if ! json_set_flag "BOOT_ENABLED" "1" >/dev/null 2>&1; then
+    # Persist boot enabled state to settings.json
+    if ! json_set_flag "BOOT_ENABLED" "1" "$SETTINGS_FILE" >/dev/null 2>&1; then
       warn -c vlan,cli "Failed to persist BOOT_ENABLED=1"
     fi
     # Enable cron job for periodic VLAN health checks (main + nodes)
@@ -492,8 +488,8 @@ case "$ACTION" in
     if [ -f "$SERVICES_START" ]; then
       remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
     fi
-    # Persist boot disabled state to general.json
-    if ! json_set_flag "BOOT_ENABLED" "0" >/dev/null 2>&1; then
+    # Persist boot disabled state to settings.json
+    if ! json_set_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE" >/dev/null 2>&1; then
       warn -c vlan,cli "Failed to persist BOOT_ENABLED=0"
     fi
 
@@ -674,8 +670,8 @@ case "$ACTION" in
     event_state=missing
     cron_state=absent
 
-    # Check persisted boot state in general.json
-    if [ "$(json_get_flag "BOOT_ENABLED" "0")" = "1" ]; then
+    # Check persisted boot state in settings.json
+    if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE")" = "1" ]; then
       boot_state=enabled
     fi
 
@@ -723,8 +719,8 @@ case "$ACTION" in
     addon_state=missing
     event_state=missing
     cron_state=absent
-  # Check persisted boot state and set boot_state to 1 if enabled
-  if [ "$(json_get_flag "BOOT_ENABLED" "0")" = "1" ]; then boot_state=1; fi
+    # Check persisted boot state and set boot_state to 1 if enabled
+    if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE")" = "1" ]; then boot_state=1; fi
     # Check for addon install.sh entry in services-start
     if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
     # Check service-event wrapper and determine state: disabled/active/custom

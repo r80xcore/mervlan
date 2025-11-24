@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.48"                   #
+#                - File: update_mervlan.sh || version="0.49"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -43,8 +43,7 @@ readonly STAGE_DIR="$TMP_BASE/stage"
 readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
 
-BACKUP_LIST="settings/general.json
-settings/settings.json
+BACKUP_LIST="settings/settings.json
 settings/hw_settings.json"
 
 SSH_KEY_RELATIVE=""
@@ -72,12 +71,11 @@ REQUIRED_STAGE_FILES="changelog.txt
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh
 functions/heal_event.sh
-functions/lib_json.sh
 functions/service-event-handler.sh
 functions/sync_nodes.sh
 settings/settings.json
-settings/general.json
 settings/lib_json.sh
+settings/lib_ssh.sh
 templates/mervlan_templates.sh
 www/index.html"
 
@@ -166,14 +164,14 @@ for rel_path in $BACKUP_LIST; do
 	fi
 done
 
-# Track previous boot state from backed-up general.json
+# Track previous boot state from backed-up settings.json snapshot
 BOOT_WAS_ENABLED=0
 if command -v json_get_flag >/dev/null 2>&1; then
-	if [ "$(json_get_flag "BOOT_ENABLED" "0" "$BACKUP_DIR/settings/general.json" 2>/dev/null)" = "1" ]; then
+	if [ "$(json_get_flag "BOOT_ENABLED" "0" "$BACKUP_DIR/settings/settings.json" 2>/dev/null)" = "1" ]; then
 		BOOT_WAS_ENABLED=1
 	fi
-elif [ -f "$BACKUP_DIR/settings/general.json" ]; then
-	if grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$BACKUP_DIR/settings/general.json" 2>/dev/null; then
+elif [ -f "$BACKUP_DIR/settings/settings.json" ]; then
+	if grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$BACKUP_DIR/settings/settings.json" 2>/dev/null; then
 		BOOT_WAS_ENABLED=1
 	fi
 fi

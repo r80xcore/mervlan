@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: collect_clients.sh || version="0.45"                  #
+#                - File: collect_clients.sh || version="0.46"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -185,7 +185,7 @@ else
 
   if ! ssh_keys_effectively_installed; then
     warn -c cli,vlan "SSH keys are not fully configured; only collecting from main router"
-    warn -c cli,vlan "Either SSH_KEYS_INSTALLED is 0/missing in general.json or key files are absent."
+  warn -c cli,vlan "Either SSH_KEYS_INSTALLED is 0/missing in settings.json or key files are absent."
     NODES_ENABLED=false
   elif [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ] || \
        [ -z "${SSH_PUBKEY:-}" ] || [ ! -f "$SSH_PUBKEY" ]; then

@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: var_settings.sh || version="0.46"                     #
+#                - File: var_settings.sh || version="0.47"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -45,7 +45,6 @@ readonly SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 readonly DROPBEARKEY="/usr/bin/dropbearkey"
 readonly SETTINGS_FILE="$SETTINGSDIR/settings.json"
 readonly HW_SETTINGS_FILE="$SETTINGSDIR/hw_settings.json"
-: "${GENERAL_SETTINGS_FILE:=$SETTINGSDIR/general.json}"
 readonly OUT_FINAL="$RESULTDIR/vlan_clients.json"
 readonly VLAN_MANAGER="$FUNCDIR/mervlan_manager.sh"
 readonly SERVICE_EVENT="$FUNCDIR/heal_event.sh"

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: dropbear_sshkey_gen.sh || version="0.45"              #
+#                - File: dropbear_sshkey_gen.sh || version="0.46"              #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Generate SSH key pairs for MerVLAN and set the SSH key         #
 #               flag if not already set.                                       #
@@ -38,7 +38,7 @@ fi
 
 # ============================================================================ #
 # update_json_flag                                                             #
-# Update or create SSH_KEYS_INSTALLED flag in general.json settings. Sets      #
+# Update or create SSH_KEYS_INSTALLED flag in settings.json. Sets              #
 # flag to "1" (installed/ready) or "0" (failed/unavailable). Initializes       #
 # file if empty. Logs all changes with reason context.                         #
 # ============================================================================ #
@@ -53,7 +53,7 @@ update_json_flag() {
     fi
 
     # Fallback: direct write if lib_ssh isn't available for some reason.
-    if json_set_flag "SSH_KEYS_INSTALLED" "$value" >/dev/null 2>&1; then
+    if json_set_flag "SSH_KEYS_INSTALLED" "$value" "$SETTINGS_FILE" >/dev/null 2>&1; then
         info -c cli "✓ SSH_KEYS_INSTALLED set to $value${reason:+ ($reason)}"
         return 0
     fi

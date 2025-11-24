@@ -1,11 +1,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.45" -->
+  <!-- index.html version="0.49" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
   <link rel="stylesheet" href="vlan_form_style.css" />
+  <style>
+    .button_gen:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+  </style>
 </head>
 <body>
   <div class="container">
@@ -101,8 +107,8 @@
           <h2>Controls</h2>
       <div class="button-row button-row-main">
         <button type="button" class="button_gen" onclick="handleApplyClick(this)" title="Run vlan_manager locally">Apply VLAN</button>
-        <button type="button" class="button_gen" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
-        <button type="button" class="button_gen" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
+        <button type="button" class="button_gen" id="syncNodesBtn" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
+        <button type="button" class="button_gen" id="sshInstallBtn" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
       <div class="button-row button-row-service">
         <button type="button" class="button_gen" onclick="triggerAction('enableservice_vlanmgr', this, 'Enable Service')" title="Enable auto-start on boot">Enable Service</button>
         <button type="button" class="button_gen" onclick="triggerAction('disableservice_vlanmgr', this, 'Disable Service')" title="Disable auto-start on boot">Disable Service</button>
@@ -122,6 +128,18 @@
           </div>
         </div>
       </div>
+        <!-- Experimental toggle row -->
+        <div class="form-box form-box--experimental">
+          <label class="experimental-toggle">
+            <input
+              type="checkbox"
+              id="experimentalToggle"
+              name="EXPERIMENTAL"
+              title="Enable new features that may or may not be stable. You need to save after enabling this."
+            >
+            <span>Enable experimental features</span>
+          </label>
+        </div>
           <div id="leftPanelOverlay" class="overlay"></div>
           <div class="cli-container collapsed" id="cliPanel">
             <div class="cli-shell" aria-hidden="true">
@@ -306,15 +324,93 @@
           // build LAN port rows
           for (let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++) {
             lanTable.insertAdjacentHTML("beforeend", `
-              <tr>
-                <td>LAN ${i}</td>
-                <td><input class="input_6_table vlan-input" name="ETH${i}_VLAN" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited('LAN${i}')" title="${TOOLTIP.VLAN}"></td>
+              <tr data-lan-index="${i}">
+                <td class="lan-table__port">
+                  <div class="lan-label-wrap">
+                    <label class="lan-trunk-toggle experimental-only experimental-hidden">
+                      <input
+                        type="checkbox"
+                        class="trunk-toggle"
+                        name="TRUNK${i}"
+                        data-port="${i}"
+                        title="Mark this LAN port as a trunk port (experimental)"
+                      >
+                      <span>Trunk</span>
+                    </label>
+                    <span class="lan-label-main">LAN ${i}</span>
+                  </div>
+                </td>
+                <td>
+                  <div class="lan-config-wrap">
+                    <div class="lan-main-vlan" data-vlan-for="${i}">
+                      <input
+                        class="input_6_table vlan-input"
+                        name="ETH${i}_VLAN"
+                        maxlength="4"
+                        size="4"
+                        type="text"
+                        oninput="validateVlanField(this); markEdited('LAN${i}')"
+                        title="${TOOLTIP.VLAN}"
+                      >
+                    </div>
+                    <div class="lan-trunk-config experimental-only experimental-hidden" data-trunk-config="${i}">
+                      <div class="lan-trunk-inline">
+                        <div class="lan-trunk-field lan-trunk-field--tagged">
+                          <span class="lan-trunk-label">T</span>
+                          <div class="lan-trunk-select-wrap">
+                            <select
+                              name="TAGGED_TRUNK${i}"
+                              class="input_option lan-trunk-select lan-trunk-tagged"
+                              title="Tagged VLANs on trunk port ${i}"
+                              multiple
+                              size="1"
+                            >
+                              <option value="">(None)</option>
+                            </select>
+                            <textarea
+                              name="TAGGED_TRUNK_CUSTOM${i}"
+                              class="lan-trunk-custom lan-trunk-custom--tagged"
+                              placeholder="Custom VLAN list (e.g. 10,20)"
+                              rows="2"
+                              title="Enter comma-separated VLAN IDs not listed above"
+                              disabled
+                            ></textarea>
+                          </div>
+                        </div>
+                        <div class="lan-trunk-field lan-trunk-field--untagged">
+                          <span class="lan-trunk-label">U</span>
+                          <div class="lan-trunk-select-wrap">
+                            <select
+                              name="UNTAGGED_TRUNK${i}"
+                              class="input_option lan-trunk-select lan-trunk-untagged"
+                              title="Untagged/native VLAN on trunk port ${i}"
+                            >
+                              <option value="">(None)</option>
+                            </select>
+                            <input
+                              type="text"
+                              name="UNTAGGED_TRUNK_CUSTOM${i}"
+                              class="lan-trunk-custom lan-trunk-custom--untagged"
+                              placeholder="Custom VLAN"
+                              maxlength="4"
+                              title="Enter a VLAN ID not listed above"
+                              disabled
+                            >
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </td>
                 <td><span id="statusLAN${i}" class="status">❌</span></td>
               </tr>
             `);
           }
 
           scheduleFormPaneWidthUpdate();
+          setupTrunkRowHandlers();
+          rebuildTrunkVlanOptionsFromSettings({});
+          updateExperimentalVisibility();
         }
         </script>
 
@@ -379,10 +475,141 @@ function showTooltip() {
       STATUS_DUP: "🟡 Duplicate VLAN ID detected"
     };
     const statusTooltips = {"✅":TOOLTIP.STATUS_OK,"❎":TOOLTIP.STATUS_NOT,"🟩":TOOLTIP.STATUS_EDIT,"❌":TOOLTIP.STATUS_ERR,"🟡":TOOLTIP.STATUS_DUP};
+    const NODE_DISABLED_TOOLTIP = "Configure node(s) first!";
+    const nodeDependentButtons = [];
+    let CURRENT_SETTINGS_CACHE = null;
+    function initNodeDependentButtons(){
+      var syncBtn = document.getElementById("syncNodesBtn");
+      var sshBtn = document.getElementById("sshInstallBtn");
+      nodeDependentButtons.length = 0;
+      [syncBtn, sshBtn].forEach(function(btn){
+        if(!btn) return;
+        if(!btn.dataset.defaultTitle){
+          btn.dataset.defaultTitle = btn.title || "";
+        }
+        nodeDependentButtons.push(btn);
+      });
+      setNodeButtonsEnabled(hasConfiguredNodes(CURRENT_SETTINGS_CACHE));
+    }
+    function setNodeButtonsEnabled(enabled){
+      var active = enabled ? true : false;
+      nodeDependentButtons.forEach(function(btn){
+        if(!btn) return;
+        if(active){
+          btn.disabled = false;
+          if(btn.dataset.defaultTitle){
+            btn.title = btn.dataset.defaultTitle;
+          }else{
+            btn.removeAttribute("title");
+          }
+        }else{
+          btn.disabled = true;
+          btn.title = NODE_DISABLED_TOOLTIP;
+        }
+      });
+    }
+    function hasConfiguredNodes(settings){
+      if(!settings) return false;
+      for(var i=1;i<=5;i++){
+        var key = "NODE"+i;
+        var raw = settings[key];
+        if(typeof raw !== "string") continue;
+        var trimmed = raw.trim();
+        if(!trimmed || trimmed.toLowerCase() === "none") continue;
+        if(/^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(trimmed)) return true;
+      }
+      return false;
+    }
+    function updateNodeButtonsFromSettings(settings){
+      setNodeButtonsEnabled(hasConfiguredNodes(settings));
+    }
     function updateStatusTooltips(){ document.querySelectorAll(".status").forEach(el=>{ const i=el.textContent.trim(); if(statusTooltips[i]) el.title=statusTooltips[i]; else el.removeAttribute("title"); }); }
     function markEdited(index){ const el=document.getElementById("status"+index); if(el){ el.textContent="🟩"; updateStatusTooltips(); } }
 
     function toInt(s){ const n=parseInt(String(s).trim(),10); return Number.isFinite(n)?n:null; }
+
+    const CUSTOM_VLAN_OPTION_VALUE = "__custom__";
+
+    function isCustomOptionSelected(selectEl){
+      if(!selectEl) return false;
+      let selected = false;
+      Array.prototype.forEach.call(selectEl.options, opt => {
+        if(opt.selected && opt.value === CUSTOM_VLAN_OPTION_VALUE){
+          selected = true;
+        }
+      });
+      return selected;
+    }
+
+    function ensureCustomOption(selectEl, label){
+      if(!selectEl) return null;
+      let customOpt = null;
+      Array.prototype.forEach.call(selectEl.options, opt => {
+        if(opt.value === CUSTOM_VLAN_OPTION_VALUE){
+          customOpt = opt;
+        }
+      });
+      if(!customOpt){
+        customOpt = document.createElement("option");
+        customOpt.value = CUSTOM_VLAN_OPTION_VALUE;
+        customOpt.textContent = label || "Custom";
+        selectEl.appendChild(customOpt);
+      } else if(label) {
+        customOpt.textContent = label;
+      }
+      return customOpt;
+    }
+
+    function parseCustomVlanList(raw){
+      if(typeof raw !== "string") return [];
+      return raw.split(",")
+        .map(part => part.replace(/\s+/g, "").trim())
+        .filter(Boolean)
+        .map(part => {
+          if(!/^\d+$/.test(part)) return null;
+          const num = toInt(part);
+          if(num === null) return null;
+          if(num < 2 || num > 4096) return null;
+          return String(num);
+        })
+        .filter(Boolean);
+    }
+
+    function uniqueCompactList(values){
+      if(!values || !values.length) return [];
+      const seen = Object.create(null);
+      const ordered = [];
+      values.forEach(v => {
+        if(!v) return;
+        if(!seen[v]){
+          seen[v] = true;
+          ordered.push(v);
+        }
+      });
+      return ordered;
+    }
+
+    function updateTrunkCustomVisibility(portIndex){
+      const trunkCheck = document.querySelector(`input[name="TRUNK${portIndex}"]`);
+      const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${portIndex}"]`);
+      const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${portIndex}"]`);
+      const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${portIndex}"]`);
+      const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${portIndex}"]`);
+      const experimentalOn = isExperimentalEnabled();
+      const trunkActive = !!(trunkCheck && trunkCheck.checked && experimentalOn);
+
+      const taggedCustomVisible = trunkActive && isCustomOptionSelected(taggedSel);
+      if(taggedCustom){
+        taggedCustom.classList.toggle("is-visible", !!taggedCustomVisible);
+        taggedCustom.disabled = !taggedCustomVisible;
+      }
+
+      const untagCustomVisible = trunkActive && untagSel && untagSel.value === CUSTOM_VLAN_OPTION_VALUE;
+      if(untagCustom){
+        untagCustom.classList.toggle("is-visible", !!untagCustomVisible);
+        untagCustom.disabled = !untagCustomVisible;
+      }
+    }
 
     function validateSSIDField(input){
       const raw=input.value, cleaned=raw.replace(/\s+/g,"");
@@ -404,6 +631,367 @@ function showTooltip() {
       groups.forEach(list=>{ if(list.length>1) list.forEach(f=>{ f.classList.remove("valid"); f.classList.add("duplicate"); }); else list[0].classList.add("valid"); });
     }
     function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); }
+
+    function isExperimentalEnabled(){
+      const expToggle = document.getElementById("experimentalToggle");
+      return !!(expToggle && expToggle.checked);
+    }
+
+    function updateExperimentalVisibility(){
+      const enabled = isExperimentalEnabled();
+      document.querySelectorAll(".experimental-only").forEach(el => {
+        el.classList.toggle("experimental-hidden", !enabled);
+      });
+      document.querySelectorAll(".trunk-toggle").forEach(input => {
+        if(!input) return;
+        input.disabled = !enabled;
+      });
+      updateAllTrunkRows();
+    }
+
+    function getMultiSelectValues(selectEl){
+      if(!selectEl) return [];
+      const values = [];
+      Array.prototype.forEach.call(selectEl.options, opt => {
+        if(opt.selected && opt.value){
+          values.push(opt.value);
+        }
+      });
+      return values;
+    }
+
+    function setMultiSelectFromList(selectEl, values){
+      if(!selectEl) return;
+      const map = {};
+      values.forEach(v => { if(v){ map[v] = true; } });
+      Array.prototype.forEach.call(selectEl.options, opt => {
+        opt.selected = !!map[opt.value];
+      });
+    }
+
+    function collectTrunkValues(portIndex){
+      const trunkCheck = document.querySelector(`input[name="TRUNK${portIndex}"]`);
+      const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${portIndex}"]`);
+      const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${portIndex}"]`);
+      const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${portIndex}"]`);
+      const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${portIndex}"]`);
+      const checked = !!(trunkCheck && trunkCheck.checked);
+      const enabled = checked && isExperimentalEnabled();
+      if(!enabled){
+        return {
+          enabled: false,
+          taggedValue: "none",
+          untagValue: "none"
+        };
+      }
+      const taggedList = getMultiSelectValues(taggedSel).filter(v => v !== CUSTOM_VLAN_OPTION_VALUE);
+      let customTagged = [];
+      if(isCustomOptionSelected(taggedSel)){
+        const rawCustom = taggedCustom ? taggedCustom.value : "";
+        customTagged = parseCustomVlanList(rawCustom);
+        if(taggedCustom){
+          taggedCustom.value = customTagged.join(",");
+        }
+      }
+      const combinedTagged = uniqueCompactList(taggedList.concat(customTagged));
+      if(taggedSel && taggedSel.multiple){
+        const customOpt = ensureCustomOption(taggedSel, "Custom...");
+        if(customOpt){
+          customOpt.selected = customTagged.length > 0;
+        }
+      }
+      const taggedValue = combinedTagged.length ? combinedTagged.join(",") : "none";
+      let untagValue = "none";
+      if(untagSel){
+        const raw = String(untagSel.value || "").trim();
+        if(raw === CUSTOM_VLAN_OPTION_VALUE){
+          const customRaw = untagCustom ? untagCustom.value : "";
+          const parsed = parseCustomVlanList(customRaw);
+          if(parsed.length){
+            untagValue = parsed[0];
+            if(untagCustom){
+              untagCustom.value = untagValue;
+            }
+          } else if(untagCustom){
+            untagCustom.value = "";
+            if(untagSel.value === CUSTOM_VLAN_OPTION_VALUE){
+              untagSel.value = "";
+            }
+          }
+        } else if(raw){
+          untagValue = raw;
+        }
+      }
+      return {
+        enabled: true,
+        taggedValue,
+        untagValue
+      };
+    }
+
+    function updateSingleTrunkRow(portIndex){
+      const trunkCheck = document.querySelector(`input[name="TRUNK${portIndex}"]`);
+      const config = document.querySelector(`.lan-trunk-config[data-trunk-config="${portIndex}"]`);
+      const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${portIndex}"]`);
+      const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${portIndex}"]`);
+      const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${portIndex}"]`);
+      const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${portIndex}"]`);
+      if(!trunkCheck){
+        return;
+      }
+      const experimentalOn = isExperimentalEnabled();
+      const showConfig = experimentalOn && trunkCheck.checked;
+      const mainVlan = document.querySelector(`.lan-main-vlan[data-vlan-for="${portIndex}"]`);
+      if(config){
+        config.classList.toggle("experimental-hidden", !showConfig);
+      }
+      if(mainVlan){
+        mainVlan.classList.toggle("is-hidden", showConfig);
+      }
+      [taggedSel, untagSel].forEach(sel => {
+        if(sel){
+          sel.disabled = !showConfig;
+        }
+      });
+      if(!trunkCheck.checked){
+        if(taggedSel){
+          Array.prototype.forEach.call(taggedSel.options, opt => { opt.selected = false; });
+          taggedSel.selectedIndex = -1;
+          taggedSel.dataset.pendingValue = "";
+        }
+        if(untagSel){
+          untagSel.value = "";
+          untagSel.dataset.pendingValue = "";
+        }
+        if(taggedCustom){
+          taggedCustom.value = "";
+        }
+        if(untagCustom){
+          untagCustom.value = "";
+        }
+      }
+      updateTrunkCustomVisibility(portIndex);
+    }
+
+    function updateAllTrunkRows(){
+      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      for(let i = 1; i <= maxEth; i++){
+        updateSingleTrunkRow(i);
+      }
+    }
+
+    function setupTrunkRowHandlers(){
+      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      for(let i = 1; i <= maxEth; i++){
+        const trunkCheck = document.querySelector(`input[name="TRUNK${i}"]`);
+        const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
+        const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${i}"]`);
+        const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${i}"]`);
+        const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${i}"]`);
+        if(taggedSel){
+          ensureCustomOption(taggedSel, "Custom...");
+        }
+        if(untagSel){
+          ensureCustomOption(untagSel, "Custom...");
+        }
+        if(trunkCheck && !trunkCheck.dataset.handlerAttached){
+          trunkCheck.addEventListener("change", () => {
+            updateSingleTrunkRow(i);
+            markEdited(`LAN${i}`);
+          });
+          trunkCheck.dataset.handlerAttached = "1";
+        }
+        if(taggedSel && !taggedSel.dataset.handlerAttached){
+          taggedSel.addEventListener("change", () => {
+            updateTrunkCustomVisibility(i);
+            const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${i}"]`);
+            if(taggedCustom && isCustomOptionSelected(taggedSel)){
+              setTimeout(() => taggedCustom.focus(), 0);
+            }
+            markEdited(`LAN${i}`);
+          });
+          taggedSel.dataset.handlerAttached = "1";
+        }
+        if(untagSel && !untagSel.dataset.handlerAttached){
+          untagSel.addEventListener("change", () => {
+            updateTrunkCustomVisibility(i);
+            const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${i}"]`);
+            if(untagCustom && untagSel.value === CUSTOM_VLAN_OPTION_VALUE){
+              setTimeout(() => untagCustom.focus(), 0);
+            }
+            markEdited(`LAN${i}`);
+          });
+          untagSel.dataset.handlerAttached = "1";
+        }
+        if(taggedCustom && !taggedCustom.dataset.handlerAttached){
+          taggedCustom.addEventListener("input", () => {
+            if(taggedSel){
+              const hasValue = taggedCustom.value.trim().length > 0;
+              const customOpt = ensureCustomOption(taggedSel, "Custom...");
+              if(customOpt && taggedSel.multiple){
+                customOpt.selected = hasValue;
+              }
+              updateTrunkCustomVisibility(i);
+            }
+            markEdited(`LAN${i}`);
+          });
+          taggedCustom.dataset.handlerAttached = "1";
+        }
+        if(untagCustom && !untagCustom.dataset.handlerAttached){
+          untagCustom.addEventListener("input", () => {
+            if(untagSel){
+              const hasValue = untagCustom.value.trim().length > 0;
+              if(hasValue){
+                ensureCustomOption(untagSel, "Custom...");
+                untagSel.value = CUSTOM_VLAN_OPTION_VALUE;
+              } else if(untagSel.value === CUSTOM_VLAN_OPTION_VALUE){
+                untagSel.value = "";
+              }
+              updateTrunkCustomVisibility(i);
+            }
+            markEdited(`LAN${i}`);
+          });
+          untagCustom.dataset.handlerAttached = "1";
+        }
+        updateTrunkCustomVisibility(i);
+      }
+    }
+
+    function extractVlansFromFlatSettings(flat){
+      if(!flat) return [];
+      const collected = new Set();
+      const maxSsids = HW_SETTINGS?.MAX_SSIDS || 12;
+      for(let i = 1; i <= maxSsids; i++){
+        const idx = String(i).padStart(2, "0");
+        const value = flat[`VLAN_${idx}`];
+        const n = toInt(value);
+        if(n && n >= 2 && n <= 4096){
+          collected.add(String(n));
+        }
+      }
+      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      for(let i = 1; i <= maxEth; i++){
+        const value = flat[`ETH${i}_VLAN`];
+        const n = toInt(value);
+        if(n && n >= 2 && n <= 4096){
+          collected.add(String(n));
+        }
+      }
+      return Array.from(collected).sort((a,b) => Number(a) - Number(b));
+    }
+
+    function rebuildTrunkVlanOptionsFromSettings(flat){
+      const vlans = extractVlansFromFlatSettings(flat);
+      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      for(let i = 1; i <= maxEth; i++){
+        const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
+        const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${i}"]`);
+        if(taggedSel){
+          const pendingRaw = taggedSel.dataset.pendingValue || "";
+          let desiredValues = [];
+
+          if(pendingRaw && pendingRaw.toLowerCase() !== "none"){
+            desiredValues = pendingRaw.split(",").map(v => v.trim()).filter(Boolean);
+          } else {
+            desiredValues = getMultiSelectValues(taggedSel).filter(v => v !== CUSTOM_VLAN_OPTION_VALUE && v !== "");
+            if(isCustomOptionSelected(taggedSel) && taggedCustom){
+              desiredValues = desiredValues.concat(parseCustomVlanList(taggedCustom.value));
+            }
+          }
+
+          const knownSet = new Set(vlans);
+          const knownValues = [];
+          const customValues = [];
+
+          uniqueCompactList(desiredValues).forEach(v => {
+            if(knownSet.has(v)) knownValues.push(v);
+            else customValues.push(v);
+          });
+
+          while(taggedSel.firstChild){ taggedSel.removeChild(taggedSel.firstChild); }
+
+          const noneOpt = document.createElement("option");
+          noneOpt.value = "";
+          noneOpt.textContent = "(None)";
+          taggedSel.appendChild(noneOpt);
+
+          vlans.forEach(v => {
+            const opt = document.createElement("option");
+            opt.value = v;
+            opt.textContent = `VLAN ${v}`;
+            taggedSel.appendChild(opt);
+          });
+
+          const customOpt = ensureCustomOption(taggedSel, "Custom...");
+
+          setMultiSelectFromList(taggedSel, knownValues);
+
+          if(customOpt && taggedSel.multiple){
+            customOpt.selected = customValues.length > 0;
+          }
+
+          if(taggedCustom){
+            taggedCustom.value = customValues.join(",");
+          }
+
+          taggedSel.dataset.pendingValue = "";
+        }
+        const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${i}"]`);
+        const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${i}"]`);
+        if(untagSel){
+          const pendingRaw = untagSel.dataset.pendingValue || "";
+          let desiredValue = "";
+          if(pendingRaw && pendingRaw.toLowerCase() !== "none"){
+            desiredValue = pendingRaw;
+          } else {
+            const current = String(untagSel.value || "");
+            if(current && current !== CUSTOM_VLAN_OPTION_VALUE){
+              desiredValue = current;
+            } else if(current === CUSTOM_VLAN_OPTION_VALUE && untagCustom){
+              desiredValue = untagCustom.value;
+            }
+          }
+          while(untagSel.firstChild){ untagSel.removeChild(untagSel.firstChild); }
+          const noneOpt = document.createElement("option");
+          noneOpt.value = "";
+          noneOpt.textContent = "(None)";
+          untagSel.appendChild(noneOpt);
+          vlans.forEach(v => {
+            const opt = document.createElement("option");
+            opt.value = v;
+            opt.textContent = `VLAN ${v}`;
+            untagSel.appendChild(opt);
+          });
+          ensureCustomOption(untagSel, "Custom...");
+          let applied = false;
+          if(desiredValue){
+            if(vlans.includes(desiredValue)){
+              untagSel.value = desiredValue;
+              applied = true;
+            } else {
+              const parsed = parseCustomVlanList(desiredValue);
+              if(parsed.length){
+                untagSel.value = CUSTOM_VLAN_OPTION_VALUE;
+                if(untagCustom){
+                  untagCustom.value = parsed[0];
+                }
+                applied = true;
+              }
+            }
+          }
+          if(!applied){
+            if(untagSel.value === CUSTOM_VLAN_OPTION_VALUE){
+              untagSel.value = "";
+            }
+            if(untagCustom){
+              untagCustom.value = "";
+            }
+          }
+          untagSel.dataset.pendingValue = "";
+        }
+        updateSingleTrunkRow(i);
+      }
+    }
 
     const FORM_PANE_MIN_WIDTH = 440;
     const FORM_PANE_MAX_WIDTH = 720;
@@ -516,7 +1104,45 @@ function showTooltip() {
       document.querySelectorAll(".status").forEach(el=>{ el.textContent="❌"; });
       updateStatusTooltips();
       setNodeCollapse(false);
+      const experimentalToggle = document.getElementById("experimentalToggle");
+      if(experimentalToggle){
+        experimentalToggle.checked = false;
+      }
+      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      for(let i = 1; i <= maxEth; i++){
+        const trunkChk = document.querySelector(`input[name="TRUNK${i}"]`);
+        const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
+        const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${i}"]`);
+        const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${i}"]`);
+        const untagCustom = document.querySelector(`input[name="UNTAGGED_TRUNK_CUSTOM${i}"]`);
+        if(trunkChk){
+          trunkChk.checked = false;
+        }
+        if(taggedSel){
+          Array.prototype.forEach.call(taggedSel.options, opt => { opt.selected = false; });
+          taggedSel.selectedIndex = -1;
+          taggedSel.dataset.pendingValue = "";
+        }
+        if(untagSel){
+          untagSel.value = "";
+          untagSel.dataset.pendingValue = "";
+        }
+        if(taggedCustom){
+          taggedCustom.value = "";
+          taggedCustom.classList.remove("is-visible");
+          taggedCustom.disabled = true;
+        }
+        if(untagCustom){
+          untagCustom.value = "";
+          untagCustom.classList.remove("is-visible");
+          untagCustom.disabled = true;
+        }
+      }
+      rebuildTrunkVlanOptionsFromSettings({});
+      updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
+      CURRENT_SETTINGS_CACHE = null;
+      setNodeButtonsEnabled(false);
     }
 
     const CLI_WELCOME_HTML = `
@@ -528,6 +1154,7 @@ function showTooltip() {
     `;
 
     window.addEventListener("DOMContentLoaded", async () => {
+      initNodeDependentButtons();
       // ⬅️ NEW: build tables dynamically first
       await loadHwSettings(); 
       scheduleFormPaneWidthUpdate();
@@ -542,6 +1169,13 @@ function showTooltip() {
       document.querySelectorAll('input[name^="NODE"]').forEach(el =>
         el.addEventListener("input", () => validateNodeField(el))
       );
+
+      const experimentalToggleEl = document.getElementById("experimentalToggle");
+      if (experimentalToggleEl) {
+        experimentalToggleEl.addEventListener("change", () => {
+          updateExperimentalVisibility();
+        });
+      }
 
       // Show welcome screen only once on first load
       const cliBox = document.getElementById("cliOutput");
@@ -1076,28 +1710,26 @@ async function handleApplyClick(button) {
 
 // Check if any nodes are configured in settings.json
 async function checkForConfiguredNodes() {
-    try {
-        const response = await fetch(PATHS.SETTINGS + "?_=" + Date.now());
-        if (!response.ok) return false;
-        
-        const settings = await response.json();
-        
-        // Check NODE1 through NODE5 for valid IP addresses (not "none")
-        for (let i = 1; i <= 5; i++) {
-            const nodeValue = settings[`NODE${i}`];
-            if (nodeValue && nodeValue !== "none" && nodeValue.trim() !== "") {
-                // Basic IP validation
-                const ipRegex = /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
-                if (ipRegex.test(nodeValue.trim())) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    } catch (error) {
-        console.error("Error checking for configured nodes:", error);
-        return false;
+  if (hasConfiguredNodes(CURRENT_SETTINGS_CACHE)) {
+    return true;
+  }
+  try {
+    const response = await fetch(PATHS.SETTINGS + "?_=" + Date.now());
+    if (!response.ok) {
+      setNodeButtonsEnabled(false);
+      return false;
     }
+
+    const settings = await response.json();
+    CURRENT_SETTINGS_CACHE = settings;
+    updateNodeButtonsFromSettings(settings);
+
+    return hasConfiguredNodes(settings);
+  } catch (error) {
+    console.error("Error checking for configured nodes:", error);
+    setNodeButtonsEnabled(false);
+    return false;
+  }
 }
 
 // Run VLAN Manager locally only
@@ -1137,65 +1769,92 @@ async function runVlanManagerOnlyNodes() {
 
     /* --- Fills the form from flat settings.json --- */
     function fillFormFromSettings(flat){
-      // Ensure dynamic rows exist (if Load pressed early)
       ensureTablesReady();
       const f = document.getElementById("settingsForm");
 
-    // Nodes
-    for (let i = 1; i <= 5; i++) {
-      const k = "NODE" + i;
-      const raw = flat[k] ?? "";
-      const v = (String(raw).toLowerCase() === "none") ? "" : String(raw);
-      if (f[k]) f[k].value = v;
-      const s = document.getElementById("statusNODE" + i);
-      if (s) s.textContent = v ? "✅" : "❎";
+      const persistentToggle = document.getElementById("persistentToggle");
+      const dryRunToggle = document.getElementById("dryRunToggle");
+      const experimentalToggle = document.getElementById("experimentalToggle");
+
+      if (persistentToggle) persistentToggle.value = flat["PERSISTENT"] || "no";
+      if (dryRunToggle) dryRunToggle.value = flat["DRY_RUN"] || "yes";
+      if (experimentalToggle) experimentalToggle.checked = flat["EXPERIMENTAL"] === "1";
+
+      const persistentStatus = document.getElementById("statusPERSISTENT");
+      const dryRunStatus = document.getElementById("statusDRY_RUN");
+      if (persistentStatus) persistentStatus.textContent = "✅";
+      if (dryRunStatus) dryRunStatus.textContent = "✅";
+
+      for (let i = 1; i <= 5; i++) {
+        const k = "NODE" + i;
+        const raw = flat[k] ?? "";
+        const v = (String(raw).toLowerCase() === "none") ? "" : String(raw);
+        if (f[k]) f[k].value = v;
+        const s = document.getElementById("statusNODE" + i);
+        if (s) s.textContent = v ? "✅" : "❎";
+      }
+
+      for (let i = 1; i <= (HW_SETTINGS?.MAX_ETH_PORTS || 3); i++) {
+        const vVlanRaw = flat[`ETH${i}_VLAN`] ?? "";
+        const vVlan = (String(vVlanRaw).toLowerCase() === "none") ? "" : String(vVlanRaw);
+        if (f[`ETH${i}_VLAN`]) f[`ETH${i}_VLAN`].value = vVlan;
+        const s = document.getElementById("statusLAN" + i);
+        if (s) s.textContent = vVlan ? "✅" : "❎";
+
+        const trunkCheck = document.querySelector(`input[name="TRUNK${i}"]`);
+        const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
+        const untagSel = document.querySelector(`select[name="UNTAGGED_TRUNK${i}"]`);
+
+        if (trunkCheck) {
+          const rawTrunk = flat[`TRUNK${i}`] ?? flat[`trunk${i}`];
+          trunkCheck.checked = rawTrunk === "1" || rawTrunk === 1 || rawTrunk === true;
+        }
+        if (taggedSel) {
+          const rawTagged = flat[`TAGGED_TRUNK${i}`];
+          const normalizedTagged = typeof rawTagged === "string" ? rawTagged.trim() : "";
+          if (normalizedTagged && normalizedTagged.toLowerCase() !== "none") {
+            taggedSel.dataset.pendingValue = normalizedTagged;
+          } else {
+            taggedSel.dataset.pendingValue = "";
+          }
+        }
+        if (untagSel) {
+          const rawUntagged = flat[`UNTAGGED_TRUNK${i}`];
+          const normalizedUntagged = typeof rawUntagged === "string" ? rawUntagged.trim() : "";
+          if (normalizedUntagged && normalizedUntagged.toLowerCase() !== "none") {
+            untagSel.dataset.pendingValue = normalizedUntagged;
+          } else {
+            untagSel.dataset.pendingValue = "";
+          }
+        }
+      }
+
+      for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
+        const idx = String(i).padStart(2, "0");
+        const ssidRaw = flat[`SSID_${idx}`] ?? "";
+        const vlanRaw = flat[`VLAN_${idx}`] ?? "";
+        const apiso = String(flat[`APISO_${idx}`] ?? "0");
+
+        const ssid = (ssidRaw === "unused-placeholder") ? "" : String(ssidRaw);
+        const vlan = (String(vlanRaw).toLowerCase() === "none") ? "" : String(vlanRaw);
+
+        if (f[`SSID_${idx}`]) f[`SSID_${idx}`].value = ssid;
+        if (f[`VLAN_${idx}`]) f[`VLAN_${idx}`].value = vlan;
+        if (f[`APISO_${idx}`]) f[`APISO_${idx}`].value = apiso;
+
+        const s = document.getElementById("status" + i);
+        if (s) s.textContent = (ssid || vlan) ? "✅" : "❎";
+      }
+
+      validateAllVlans();
+      document.querySelectorAll('input[name^="NODE"]').forEach(el => validateNodeField(el));
+      document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
+      updateStatusTooltips();
+      syncNodeCollapseWithValues();
+      scheduleFormPaneWidthUpdate();
+      rebuildTrunkVlanOptionsFromSettings(flat);
+      updateExperimentalVisibility();
     }
-
-    // LAN ports (dynamic)
-    for (let i = 1; i <= (HW_SETTINGS?.MAX_ETH_PORTS || 3); i++) {
-      const vVlanRaw = flat[`ETH${i}_VLAN`] ?? "";
-      const vVlan = (String(vVlanRaw).toLowerCase() === "none") ? "" : String(vVlanRaw);
-      if (f[`ETH${i}_VLAN`])   f[`ETH${i}_VLAN`].value   = vVlan;
-      const s = document.getElementById("statusLAN" + i);
-      if (s) s.textContent = vVlan ? "✅" : "❎";
-    }
-
-    // SSIDs (dynamic)
-    for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
-      const idx = String(i).padStart(2, "0");
-      const ssidRaw = flat[`SSID_${idx}`] ?? "";
-      const vlanRaw = flat[`VLAN_${idx}`] ?? "";
-      const apiso   = String(flat[`APISO_${idx}`] ?? "0");
-
-      const ssid = (ssidRaw === "unused-placeholder") ? "" : String(ssidRaw);
-      const vlan = (String(vlanRaw).toLowerCase() === "none") ? "" : String(vlanRaw);
-
-      if (f[`SSID_${idx}`])  f[`SSID_${idx}`].value  = ssid;
-      if (f[`VLAN_${idx}`])  f[`VLAN_${idx}`].value  = vlan;
-      if (f[`APISO_${idx}`]) f[`APISO_${idx}`].value = apiso;
-
-      const s = document.getElementById("status" + i);
-      if (s) s.textContent = (ssid || vlan) ? "✅" : "❎";
-    }
-
-    // General settings
-    document.getElementById("persistentToggle").value = flat["PERSISTENT"] || "no";
-    document.getElementById("dryRunToggle").value = flat["DRY_RUN"] || "yes";
-
-    // Update general settings status icons to show loaded
-    const persistentStatus = document.getElementById("statusPERSISTENT");
-    const dryRunStatus = document.getElementById("statusDRY_RUN");
-    if (persistentStatus) persistentStatus.textContent = "✅";
-    if (dryRunStatus) dryRunStatus.textContent = "✅";
-
-    // Re-apply input ticks/validation and tooltips
-    validateAllVlans();
-  document.querySelectorAll('input[name^="NODE"]').forEach(el => validateNodeField(el));
-  document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
-  updateStatusTooltips();
-  syncNodeCollapseWithValues();
-  scheduleFormPaneWidthUpdate();
-  }
 
     function deepEqualObjects(a, b) {
       const keys1 = Object.keys(a);
@@ -1231,6 +1890,10 @@ async function runVlanManagerOnlyNodes() {
         const key = "ETH" + i + "_VLAN";
         const raw = f[key] ? f[key].value.trim() : "";
         out["vlanmgr_" + key] = raw === "" ? "none" : raw;
+        const trunkState = collectTrunkValues(i);
+        out["vlanmgr_TRUNK" + i] = trunkState.enabled ? "1" : "0";
+        out["vlanmgr_TAGGED_TRUNK" + i] = trunkState.taggedValue;
+        out["vlanmgr_UNTAGGED_TRUNK" + i] = trunkState.untagValue;
       }
 
       for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
@@ -1247,6 +1910,8 @@ async function runVlanManagerOnlyNodes() {
 
       out["vlanmgr_PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
       out["vlanmgr_DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
+      const experimentalToggle = document.getElementById("experimentalToggle");
+      out["vlanmgr_EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
 
       return out;
     }
@@ -1258,6 +1923,8 @@ async function runVlanManagerOnlyNodes() {
       const t = await r.text();
       if(!r.ok){ 
         appendCliText(`Error: cannot load settings.json (${r.status})\n${t}\n`,{scroll:'force'}); 
+        CURRENT_SETTINGS_CACHE = null;
+        setNodeButtonsEnabled(false);
         return; 
       }
       let data; 
@@ -1265,38 +1932,50 @@ async function runVlanManagerOnlyNodes() {
         data = JSON.parse(t); 
       } catch(e){ 
         appendCliText("settings.json is not valid JSON:\n\n"+t+"\n",{scroll:'force'}); 
+        CURRENT_SETTINGS_CACHE = null;
+        setNodeButtonsEnabled(false);
         return; 
       }
       // Ensure tables are ready before filling (handles early Load clicks)
       ensureTablesReady();
+      CURRENT_SETTINGS_CACHE = data;
+      updateNodeButtonsFromSettings(data);
       fillFormFromSettings(data);
       appendCliText("Loaded settings.json into the form.\n",{scroll:'force'});
     } catch(err){ 
       appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
+      CURRENT_SETTINGS_CACHE = null;
+      setNodeButtonsEnabled(false);
     }
   }
 
     function toNone(s){ const v=String(s||"").trim(); return v===""?"none":v; }
     function toSSIDPlaceholder(s){ const v=String(s||"").trim(); return v===""?"unused-placeholder":v; }
     function formToSettingsJSON(){
-    const f = document.getElementById("settingsForm"); 
-    const out = {};
-    for(let i=1;i<=5;i++){ out["NODE"+i] = toNone(f["NODE"+i]?.value||""); }
-    // LAN ports (dynamic)
-    for(let i=1;i<=(HW_SETTINGS?.MAX_ETH_PORTS||3);i++){
-      out[`ETH${i}_VLAN`] = toNone(f[`ETH${i}_VLAN`]?.value||""); 
+      const f = document.getElementById("settingsForm");
+      const out = {};
+      for(let i=1;i<=5;i++){
+        out["NODE"+i] = toNone(f["NODE"+i]?.value||"");
+      }
+      for(let i=1;i<=(HW_SETTINGS?.MAX_ETH_PORTS||3);i++){
+        out[`ETH${i}_VLAN`] = toNone(f[`ETH${i}_VLAN`]?.value||"");
+        const trunkState = collectTrunkValues(i);
+        out[`TRUNK${i}`] = trunkState.enabled ? "1" : "0";
+        out[`TAGGED_TRUNK${i}`] = trunkState.taggedValue;
+        out[`UNTAGGED_TRUNK${i}`] = trunkState.untagValue;
+      }
+      for(let i=1;i<=(HW_SETTINGS?.MAX_SSIDS||12);i++){
+        const idx = String(i).padStart(2,"0");
+        out[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||"");
+        out[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
+        out[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0");
+      }
+      out["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
+      out["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
+      const experimentalToggle = document.getElementById("experimentalToggle");
+      out["EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
+      return JSON.stringify(out);
     }
-    // SSIDs (dynamic)
-    for(let i=1;i<=(HW_SETTINGS?.MAX_SSIDS||12);i++){
-      const idx = String(i).padStart(2,"0"); 
-      out[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||""); 
-      out[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||""); 
-      out[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0"); 
-    }
-    out["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
-    out["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
-    return JSON.stringify(out);
-  }
 
 const MODAL_SAFE_MARGIN = 24;
 let activeCenteredModal = null;

@@ -1,6 +1,43 @@
-mervlan v0.48
+mervlan v0.49
 
 IMPORTANT! Scripts does not follow main version. Every script has its own version.
+
+mervlan v0.49
+
+NEW FILES:
+lib_debug.sh
+Centralized debugging functions. Are currently sparingly used but will be
+increasingly implemented to make debugging easier as the addon is getting
+more and more advanced.
+
+mervlan_trunk.sh
+experimental feature allowing the user to select passthrough VLANS 
+while also setting an untagged VLAN for traffic that is nott tagged.
+Should allow daisy-chaining for users that has that topology as well
+as isolating a full non-supported routed under a VLAN.
+
+UPDATED FILES:
+
+save_settings.sh
+1. Is no longer destructive and allows for all json settings to live inside
+settings.json instead of several places. 
+2. Will sort all keys inside of custom_settings.txt for easier readability.
+3. Fixed the sed to correctly parse the current version.
+
+mervlan_manager.sh
+wired in mervlan_trunk.sh to be executed if trunks are configured.
+
+sync_nodes.sh
+added dryrun and debug modes as a first step to toughen the debugging.
+
+UI CHANGES:
+added "experimental features" that can be turned on and off and allows
+users to test out the new trunk feature.
+
+All files that previously used general.json has been migrated to use
+settings.json exclusively.
+#############################################################
+previous version 0.48 changes
 
 NEW FILES:
 lib_json.sh

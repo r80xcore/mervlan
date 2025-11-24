@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_json.sh || version="0.47"                         #
+#                - File: lib_json.sh || version="0.48"                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -22,20 +22,12 @@
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 : "${SETTINGSDIR:=$MERV_BASE/settings}"
-: "${GENERAL_SETTINGS_FILE:=$SETTINGSDIR/general.json}"
-
-# Default template for the general settings store; keeps initial keys portable.
-DEFAULT_GENERAL_SETTINGS_CONTENT='{
-    "SSH_KEYS_INSTALLED": "0",
-    "BOOT_ENABLED": "0",
-    "NODE_SSH_PORT": "22",
-    "NODE_SSH_USER": "admin"
-}'
+: "${SETTINGS_FILE:=$SETTINGSDIR/settings.json}"
 
 ensure_json_store() {
     # ensure_json_store [file] [defaults]
     # Create the containing directory and seed the JSON file if missing/empty.
-    local file="${1:-$GENERAL_SETTINGS_FILE}" defaults="${2:-}" dir
+    local file="${1:-$SETTINGS_FILE}" defaults="${2:-}" dir
 
     dir=$(dirname "$file")
     mkdir -p "$dir" 2>/dev/null || return 1
@@ -51,6 +43,14 @@ ensure_json_store() {
     return 0
 }
 
+json_escape_string() {
+    # json_escape_string <value>
+    # Emit the input with JSON string-appropriate escaping for quotes and backslashes.
+    # Caller captures stdout; no trailing newline is emitted.
+    local value="$1"
+    printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'
+}
+
 json_set_flag() {
     # json_set_flag <key> <value> [file] [defaults]
     # Only change the value of "key": "value".
@@ -58,61 +58,55 @@ json_set_flag() {
     # If key does not exist: append a new row before the closing '}'.
     local key="$1"
     local value="$2"
-    local file="${3:-$GENERAL_SETTINGS_FILE}"
+    local file="${3:-$SETTINGS_FILE}"
     local defaults="${4:-}"
+    local json_value sed_value script tmp
 
     [ -n "$key" ] || return 1
 
-    # Seed file if missing/empty
     ensure_json_store "$file" "$defaults" || return 1
 
-    # 1) If the key already exists, replace ONLY the value portion.
-    #    Pattern: "KEY" : "anything" → "KEY": "value"
+    json_value=$(json_escape_string "$value")
+    sed_value=$(printf '%s' "$json_value" | sed 's/\\/\\\\/g; s/&/\\&/g')
+
     if grep -q "\"$key\""[[:space:]]*: "$file" 2>/dev/null; then
-        sed -i \
-            -e "s/\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"$key\": \"$value\"/" \
-            "$file" || return 1
+        script="${file}.sed.$$"
+        printf 's/"%s"[[:space:]]*:[[:space:]]*"[^"]*"/"%s": "%s"/\n' "$key" "$key" "$sed_value" > "$script" || {
+            rm -f "$script"
+            return 1
+        }
+        if ! sed -i -f "$script" "$file" 2>/dev/null; then
+            rm -f "$script"
+            return 1
+        fi
+        rm -f "$script"
         return 0
     fi
 
-    # 2) Key does not exist – append a new key/value row before final '}'.
-    #
-    # We do this in a line-oriented way:
-    # - Find the last property line before the closing brace.
-    # - Ensure that last property line ends with a comma.
-    # - Insert new '  "KEY": "VALUE"' row before the closing brace.
-    #
-    # This keeps all other rows intact and avoids re-serializing the object.
-
-    # Is there at least one existing key?
     if grep -q '"[^"]\+"' "$file" 2>/dev/null; then
-        # Non-empty object: patch last property + insert new row.
-        local tmp="${file}.tmp.$$"
-
-        awk -v key="$key" -v value="$value" '
+        tmp="${file}.tmp.$$"
+        JSON_SET_FLAG_VALUE="$json_value" \
+        awk -v key="$key" '
             BEGIN {
+                value = ENVIRON["JSON_SET_FLAG_VALUE"]
                 last_prop = -1
             }
             {
                 lines[NR] = $0
-                # Track candidate "  \"KEY\": \"VAL\"" style rows
-                if ($0 ~ /"[^\"]+"[[:space:]]*:[[:space:]]*"[^\"]*"[[:space:]]*(,)?[[:space:]]*$/) {
+                if ($0 ~ /"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*(,)?[[:space:]]*$/) {
                     last_prop = NR
                 }
             }
             END {
                 if (last_prop == -1) {
-                    # Fallback: weird content; rewrite minimal but valid object
                     printf "{\n  \"%s\": \"%s\"\n}\n", key, value
                     exit
                 }
 
-                # Print all rows up to the last property-1 unchanged
                 for (i = 1; i < last_prop; i++) {
                     print lines[i]
                 }
 
-                # Ensure last property has a trailing comma
                 line = lines[last_prop]
                 sub(/[[:space:]]*$/, "", line)
                 if (line !~ /,$/) {
@@ -120,10 +114,8 @@ json_set_flag() {
                 }
                 print line
 
-                # Insert new property row
                 printf "  \"%s\": \"%s\"\n", key, value
 
-                # Print the remaining rows (typically the closing brace)
                 for (i = last_prop + 1; i <= NR; i++) {
                     print lines[i]
                 }
@@ -134,8 +126,7 @@ json_set_flag() {
         return 0
     fi
 
-    # 3) Object is effectively empty: replace content with a minimal object.
-    printf '{\n  "%s": "%s"\n}\n' "$key" "$value" > "$file" || return 1
+    printf '{\n  "%s": "%s"\n}\n' "$key" "$json_value" > "$file" || return 1
     return 0
 }
 
@@ -143,7 +134,7 @@ json_get_flag() {
     # json_get_flag <key> [default] [file]
     local key="$1"
     local default_value="${2:-}"
-    local file="${3:-$GENERAL_SETTINGS_FILE}"
+    local file="${3:-$SETTINGS_FILE}"
 
     [ -n "$key" ] || { printf '%s\n' "$default_value"; return 1; }
 
@@ -152,35 +143,55 @@ json_get_flag() {
         return 0
     fi
 
-    awk -v target="$key" -v fallback="$default_value" '
-        BEGIN { found = 0 }
-        {
-            line = $0
-            # Scan all "KEY": "VAL" pairs on each row
-            while (match(line, /"([^\"]+)"[[:space:]]*:[[:space:]]*"([^\"]*)"/, m)) {
-                if (m[1] == target) {
-                    print m[2]
-                    found = 1
-                    exit
-                }
-                line = substr(line, RSTART + RLENGTH)
-            }
-        }
-        END {
-            if (!found) {
-                print fallback
-            }
-        }
-    ' "$file"
+    # Extract "VALUE" from a line like:  "KEY": "VALUE",
+    # - ignores leading spaces
+    # - allows spaces around colon
+    # - ignores trailing comma and spaces
+    local value
+    value="$(sed -n "s/^[[:space:]]*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\"[[:space:]]*,\{0,1\}[[:space:]]*$/\\1/p" "$file")"
+
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+    else
+        printf '%s\n' "$default_value"
+    fi
 }
+
+
+
+json_get_int() {
+    # json_get_int <key> <default> [file]
+    # Returns: sanitized integer or <default> if missing/invalid.
+    local key="$1"
+    local default_value="$2"
+    local file="${3:-$SETTINGS_FILE}"
+    local raw num
+
+    # Reuse json_get_flag to extract the raw string
+    raw="$(json_get_flag "$key" "$default_value" "$file")"
+
+    # Strip whitespace and quotes (handles "1", " 1 ", etc.)
+    num="$(printf '%s' "$raw" | tr -d '[:space:]"')"
+
+    case "$num" in
+        ''|*[!0-9]*)
+            printf '%s\n' "$default_value"
+            return 1
+            ;;
+        *)
+            printf '%s\n' "$num"
+            return 0
+            ;;
+    esac
+}
+
 
 json_ensure_flag() {
     # json_ensure_flag <key> <default> [file]
     local key="$1"
     local default_value="$2"
-    local file="${3:-$GENERAL_SETTINGS_FILE}"
+    local file="${3:-$SETTINGS_FILE}"
 
-    # If key already exists, do nothing.
     if [ "$(json_get_flag "$key" "__MISSING__" "$file")" != "__MISSING__" ]; then
         return 0
     fi
@@ -188,4 +199,26 @@ json_ensure_flag() {
     json_set_flag "$key" "$default_value" "$file"
 }
 
+json_apply_kv_file() {
+    # json_apply_kv_file <kv_file> [json_file] [defaults]
+    # Merge key\tvalue lines into the target JSON file without disturbing other keys.
+    local kv_file="$1"
+    local file="${2:-$SETTINGS_FILE}"
+    local defaults="${3:-}"
+
+    [ -n "$kv_file" ] || return 0
+    [ -f "$kv_file" ] || return 0
+
+    ensure_json_store "$file" "$defaults" || return 1
+
+    # shellcheck disable=SC2162
+    while IFS="$(printf '\t')" read -r key value || [ -n "$key" ]; do
+        [ -n "$key" ] || continue
+        json_set_flag "$key" "${value:-}" "$file" "$defaults" || return 1
+    done < "$kv_file"
+
+    return 0
+}
+
 LIB_JSON_LOADED=1
+
