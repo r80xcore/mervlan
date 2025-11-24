@@ -22,8 +22,6 @@
 
 read_only_templates=$(cat <<'EOF'
 %%TEMPLATE service-event 1
-#!/bin/sh
-
 # MerVLAN auto-redirect events to service-event-handler.sh
 MERV_BASE_PLACEHOLDER/functions/service-event-handler.sh "$@"
 %%END
@@ -34,8 +32,6 @@ MERV_BASE_PLACEHOLDER/functions/service-event-handler.sh "$@"
 %%END
 
 %%TEMPLATE services-start 1
-#!/bin/sh
-
 # MerVLAN auto-enable VLAN on boot
 sleep 10
 MERV_BASE_PLACEHOLDER/functions/mervlan_manager.sh
@@ -52,8 +48,6 @@ MERV_BASE_PLACEHOLDER/functions/mervlan_boot.sh cronenable
 %%END
 
 %%TEMPLATE services-start-addon 1
-#!/bin/sh
-
 # MerVLAN mount addon on boot
 sleep 5
 MERV_BASE_PLACEHOLDER/install.sh

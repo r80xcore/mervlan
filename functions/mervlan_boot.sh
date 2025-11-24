@@ -140,7 +140,7 @@ copy_inject() {
   local tmpl="$1" dest="$2"
   [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
 
-  local block_file md5 tplid destid start_tag end_tag start_base end_base
+  local block_file md5 tplid destid start_tag end_tag start_base end_base shebang_line tmp_sb first_line
 
   block_file="$(mktemp "${TMPDIR:-/tmp}/merv_inj_block.XXXXXX" 2>/dev/null || printf '%s/merv_inj_block.%s' "${TMPDIR:-/tmp}" "$$")"
 
@@ -152,14 +152,44 @@ copy_inject() {
   start_base="$MARKER_PREFIX $destid [tpl=$tplid "
   end_base="$MARKER_SUFFIX $destid [tpl=$tplid "
 
+  if IFS= read -r first_line < "$tmpl" 2>/dev/null; then
+    case "$first_line" in
+      '#!'*) shebang_line="$first_line" ;;
+    esac
+  fi
+
   {
     printf '%s\n' "$start_tag"
-    cat "$tmpl"
+    if [ -n "$shebang_line" ]; then
+      sed '1d' "$tmpl"
+    else
+      cat "$tmpl"
+    fi
     printf '%s\n' "$end_tag"
   } > "$block_file"
 
   mkdir -p "$(dirname "$dest")" 2>/dev/null || { rm -f "$block_file" 2>/dev/null || :; return 1; }
   [ -f "$dest" ] || : > "$dest"
+
+  case "$dest" in
+    /jffs/scripts/*)
+      [ -n "$shebang_line" ] || shebang_line='#!/bin/sh'
+      ;;
+  esac
+
+  if [ -n "$shebang_line" ]; then
+    if [ -s "$dest" ]; then
+      if ! head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
+        tmp_sb="${dest}.shebang.$$"
+        {
+          printf '%s\n' "$shebang_line"
+          cat "$dest"
+        } > "$tmp_sb" 2>/dev/null && mv -f "$tmp_sb" "$dest" 2>/dev/null || rm -f "$tmp_sb" 2>/dev/null || :
+      fi
+    else
+      printf '%s\n' "$shebang_line" > "$dest" 2>/dev/null || :
+    fi
+  fi
 
   if LC_ALL=C grep -Fq "$start_base" "$dest"; then
     if ! LC_ALL=C grep -Fq "$end_base" "$dest"; then
