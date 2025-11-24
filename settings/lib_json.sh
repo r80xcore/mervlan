@@ -22,7 +22,7 @@
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 : "${SETTINGSDIR:=$MERV_BASE/settings}"
-: "${SETTINGS_FILE:=$SETTINGSDIR/settings.json}"
+[ -n "${SETTINGS_FILE:-}" ] || SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 
 ensure_json_store() {
     # ensure_json_store [file] [defaults]

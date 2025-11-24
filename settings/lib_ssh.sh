@@ -23,7 +23,7 @@
 	fi
 }
 [ -n "${LIB_SSH_LOADED:-}" ] && return 0 2>/dev/null
-SETTINGS_FILE="$MERV_BASE/settings/settings.json"
+[ -n "${SETTINGS_FILE:-}" ] || SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 # ========================================================================== #
 # AUTO-DETECT NODES/AP - Auto-detect nodes and access points interactively   #
 # ========================================================================== #
