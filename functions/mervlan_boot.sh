@@ -42,9 +42,15 @@ ACTION="$1"
 # Marker format and lock helper
 MARKER_PREFIX="### >>> MERVLAN START:"
 MARKER_SUFFIX="### <<< MERVLAN END:"
-# Use basename of the template as a stable template id in markers
-_template_id() { basename -- "$1"; }
-_dest_id() { basename -- "$1"; }
+# Use basename of the template as a stable template id in markers without relying on GNU basename
+_template_id() {
+  local path="$1"
+  printf '%s\n' "${path##*/}"
+}
+_dest_id() {
+  local path="$1"
+  printf '%s\n' "${path##*/}"
+}
 
 _has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
@@ -340,6 +346,11 @@ test_ssh_connection() {
 run_ssh_command() {
     local node_ip="$1"
     local cmd="$2"
+
+  if is_node; then
+    info -c cli,vlan "Node context detected; refusing to SSH to $node_ip for '$cmd'"
+    return 0
+  fi
     
     # Validate SSH connectivity before attempting command execution
     if ! test_ssh_connection "$node_ip"; then
@@ -364,6 +375,11 @@ run_ssh_command() {
 # Context: Respects MERV_SKIP_NODE_SYNC=1 override flag for skipping propagation
 handle_nodes_via_ssh() {
   local cmd="$1"
+
+  if is_node; then
+    info -c cli,vlan "Node context detected; skipping node propagation for '$cmd'"
+    return 0
+  fi
 
   if [ "${MERV_SKIP_NODE_SYNC:-0}" = "1" ]; then
     info -c cli,vlan "Skipping node propagation for '$cmd' (MERV_SKIP_NODE_SYNC=1)"
@@ -398,6 +414,11 @@ handle_nodes_via_ssh() {
 # Returns: none (always succeeds, unreachable nodes marked as such)
 # Context: Used by status action to aggregate node state without verbose per-node logs
 collect_node_status() {
+  if is_node; then
+    NODE_STATUS_OUTPUT=""
+    return 0
+  fi
+
     local NODE_IPS
     NODE_IPS=$(get_node_ips)
     [ -z "$NODE_IPS" ] && return 0
@@ -572,6 +593,9 @@ case "$ACTION" in
     if [ "${MERV_FORCE_LOCAL:-0}" = "1" ]; then
       force_local=1
     fi
+    if is_node; then
+      force_local=1
+    fi
     # Execute locally on this node if MERV_NODE_CONTEXT=1 (SSH propagation) or force_local=1
     if [ "${MERV_NODE_CONTEXT:-0}" = "1" ] || [ "$force_local" = "1" ]; then
       if ! is_node; then
@@ -622,6 +646,9 @@ case "$ACTION" in
     esac
     # Check for MERV_FORCE_LOCAL override environment variable
     if [ "${MERV_FORCE_LOCAL:-0}" = "1" ]; then
+      force_local=1
+    fi
+    if is_node; then
       force_local=1
     fi
     # Execute locally on this node if MERV_NODE_CONTEXT=1 (SSH propagation) or force_local=1
