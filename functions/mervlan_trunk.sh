@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_trunk.sh || version="0.50"                     #
+#               - File: mervlan_trunk.sh || version="0.51"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # ───── MerVLAN environment bootstrap ─────
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -89,6 +89,15 @@ UPLINK_PORT="${UPLINK_PORT:-eth0}"
 DEFAULT_BRIDGE="${DEFAULT_BRIDGE:-$(json_get_flag "DEFAULT_UNTAGGED_BRIDGE" "br0" "$SETTINGS_FILE" 2>/dev/null)}"
 [ -n "$DEFAULT_BRIDGE" ] || DEFAULT_BRIDGE="br0"
 MAX_TRUNKS="${MAX_TRUNKS:-3}"
+
+# Global STP enable flag (0|1); default is 0 (off)
+STP_ENABLED_RAW="$(json_get_flag "ENABLE_STP" "0" "$SETTINGS_FILE" 2>/dev/null)"
+case "$STP_ENABLED_RAW" in
+  1) STP_ENABLED=1 ;;
+  *) STP_ENABLED=0 ;;
+esac
+
+dbg_var STP_ENABLED
 
 # Validate mandatory environment (manager should provide these)
 if [ -z "$UPLINK_PORT" ]; then
@@ -183,9 +192,16 @@ ensure_vlan_bridge() {
 
   dbg_log "ensure_vlan_bridge: $br ready with uplink $uplink_vlan"
 
-  # Ensure STP disabled and forwarding delay is zero (idempotent)
-  run_cmd brctl stp "$br" off || :
-  run_cmd brctl setfd "$br" 0 || :
+  # Apply STP behavior based on global ENABLE_STP flag
+  if [ "${STP_ENABLED:-0}" -eq 1 ]; then
+    # Classic STP ON; non-zero forwarding delay
+    run_cmd brctl stp "$br" on || :
+    run_cmd brctl setfd "$br" 15 || :
+  else
+    # Default behavior: STP off, zero forwarding delay
+    run_cmd brctl stp "$br" off || :
+    run_cmd brctl setfd "$br" 0 || :
+  fi
 }
 
 bridge_add_if() {

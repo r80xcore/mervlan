@@ -3,6 +3,7 @@
     "_description": "Global addon flags and behavior toggles",
     "BOOT_ENABLED": "0",
     "DRY_RUN": "yes",
+    "ENABLE_STP": "0",
     "EXPERIMENTAL": "0",
     "PERSISTENT": "no"
   },

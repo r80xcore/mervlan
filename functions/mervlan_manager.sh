@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.48"                   #
+#               - File: mervlan_manager.sh || version="0.49"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -174,6 +174,7 @@ WAN_IF=$(read_json WAN_IF "$HW_SETTINGS_FILE")
 TOPOLOGY="switch"
 PERSISTENT=$(read_json PERSISTENT "$SETTINGS_FILE")
 DRY_RUN=$(read_json DRY_RUN "$SETTINGS_FILE")
+ENABLE_STP=$(read_json ENABLE_STP "$SETTINGS_FILE")
 
 # Apply defaults for unconfigured values
 [ -z "$MAX_SSIDS" ] && MAX_SSIDS=12
@@ -181,6 +182,12 @@ DRY_RUN=$(read_json DRY_RUN "$SETTINGS_FILE")
 [ -z "$PERSISTENT" ] && PERSISTENT="no"
 [ -z "$DRY_RUN" ] && DRY_RUN="yes"
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
+[ -z "$ENABLE_STP" ] && ENABLE_STP="0"
+
+case "$ENABLE_STP" in
+  1) ENABLE_STP=1 ;;
+  *) ENABLE_STP=0 ;;
+esac
 
 # Temporarily force non-persistent mode until feature is fixed
 if [ "$PERSISTENT" != "no" ]; then
@@ -380,8 +387,13 @@ ensure_vlan_bridge() {
       echo "[DRY-RUN] brctl addbr br${VID}"
       echo "[DRY-RUN] brctl addif br${VID} ${UPLINK_PORT}.${VID}"
       echo "[DRY-RUN] ip link set br${VID} up"
-      echo "[DRY-RUN] brctl stp br${VID} off"
-      echo "[DRY-RUN] brctl setfd br${VID} 0"
+      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
+        echo "[DRY-RUN] brctl stp br${VID} on"
+        echo "[DRY-RUN] brctl setfd br${VID} 15"
+      else
+        echo "[DRY-RUN] brctl stp br${VID} off"
+        echo "[DRY-RUN] brctl setfd br${VID} 0"
+      fi
     else
       # Create bridge interface
       brctl addbr "br${VID}" 2>/dev/null || {
@@ -392,18 +404,33 @@ ensure_vlan_bridge() {
       brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null
       # Bring bridge up (enter active state)
       ip link set "br${VID}" up 2>/dev/null
-      brctl stp "br${VID}" off 2>/dev/null
-      brctl setfd "br${VID}" 0 2>/dev/null
+      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
+        brctl stp "br${VID}" on 2>/dev/null
+        brctl setfd "br${VID}" 15 2>/dev/null
+      else
+        brctl stp "br${VID}" off 2>/dev/null
+        brctl setfd "br${VID}" 0 2>/dev/null
+      fi
       info -c cli,vlan "Created bridge br${VID}"
       track_change "Created bridge br${VID}"
     fi
   else
     if [ "$DRY_RUN" = "yes" ]; then
-      echo "[DRY-RUN] brctl stp br${VID} off"
-      echo "[DRY-RUN] brctl setfd br${VID} 0"
+      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
+        echo "[DRY-RUN] brctl stp br${VID} on"
+        echo "[DRY-RUN] brctl setfd br${VID} 15"
+      else
+        echo "[DRY-RUN] brctl stp br${VID} off"
+        echo "[DRY-RUN] brctl setfd br${VID} 0"
+      fi
     else
-      brctl stp "br${VID}" off 2>/dev/null
-      brctl setfd "br${VID}" 0 2>/dev/null
+      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
+        brctl stp "br${VID}" on 2>/dev/null
+        brctl setfd "br${VID}" 15 2>/dev/null
+      else
+        brctl stp "br${VID}" off 2>/dev/null
+        brctl setfd "br${VID}" 0 2>/dev/null
+      fi
     fi
   fi
 }
