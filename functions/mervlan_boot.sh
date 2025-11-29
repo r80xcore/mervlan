@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.49"                     #
+#                - File: mervlan_boot.sh || version="0.50"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -440,7 +440,7 @@ handle_nodes_via_ssh() {
 
 # collect_node_status — Quietly poll all nodes via report action for status aggregation
 # Args: none (reads NODE_IPS from get_node_ips)
-# Sets: $NODE_STATUS_OUTPUT global (space-separated "ip:status" pairs)
+# Sets: $NODE_STATUS_OUTPUT global (newline-separated "ip:status" pairs)
 # Returns: none (always succeeds, unreachable nodes marked as such)
 # Context: Used by status action to aggregate node state without verbose per-node logs
 collect_node_status() {
@@ -455,14 +455,18 @@ collect_node_status() {
 
     NODE_STATUS_OUTPUT=""
     for node_ip in $NODE_IPS; do
-        if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null; then
-            local ns
-            ns=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
-            [ -n "$ns" ] || ns="REPORT error=empty"
-            NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:${ns#REPORT }"
-        else
-            NODE_STATUS_OUTPUT="$NODE_STATUS_OUTPUT $node_ip:unreachable"
-        fi
+      # Single SSH invocation per node; grab the last line from remote's report
+      ns=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+      if [ -n "$ns" ]; then
+        # Normalize empty reply
+        [ -n "$ns" ] || ns="REPORT error=empty"
+        # store one entry per-line for robust parsing later
+        NODE_STATUS_OUTPUT="${NODE_STATUS_OUTPUT}
+      ${node_ip}:${ns#REPORT }"
+      else
+        NODE_STATUS_OUTPUT="${NODE_STATUS_OUTPUT}
+      ${node_ip}:unreachable"
+      fi
     done
 }
 
@@ -748,22 +752,83 @@ case "$ACTION" in
       fi
     fi
 
+    # Node-specific addon state: do not rely on install.sh on nodes
+    if is_node; then
+      if [ -f "$VLAN_MANAGER" ]; then
+        case "$event_state" in
+          active)
+            addon_state="node-on"
+            ;;
+          custom)
+            addon_state="node-custom"
+            ;;
+          disabled|missing|*)
+            addon_state="node-off"
+            ;;
+        esac
+      else
+        addon_state="missing"
+      fi
+    fi
+
     if [ -n "$CRU_BIN" ]; then
       if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
         cron_state=present
       fi
     fi
 
+    # Local hardware label (main router)
+    local hw_label
+    hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
+
     # Get list of configured nodes for status aggregation
     NODE_IPS=$(get_node_ips)
     if [ -n "$NODE_IPS" ]; then
       # Query nodes for their status via report action
       collect_node_status
-      # Output combined status with node results
-      info -c vlan,cli "Status: boot=$boot_state addon=$addon_state service-event=$event_state cron=$cron_state nodes:${NODE_STATUS_OUTPUT:- none}"
+
+      info -c vlan,cli "Status:"
+      info -c vlan,cli "<--- Main Unit --->"
+      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state}"
+      info -c vlan,cli "<--- Configured Nodes --->"
+
+      # NODE_STATUS_OUTPUT is newline-separated entries: ip:hw=LABEL boot=1 addon=.. event=.. cron=..
+      printf '%s
+    ' "$NODE_STATUS_OUTPUT" | sed 's/^[[:space:]]*//; /^$/d' | while IFS= read -r entry; do
+        node_ip="${entry%%:*}"
+        rest="${entry#*:}"
+
+        # Default values
+        node_hw="Unknown"
+        node_boot_raw=""
+        node_addon=""
+        node_event=""
+        node_cron=""
+
+        # Parse key=value pairs
+        for kv in $rest; do
+          case "$kv" in
+            hw=*)    node_hw="${kv#hw=}" ;;
+            boot=*)  node_boot_raw="${kv#boot=}" ;;
+            addon=*) node_addon="${kv#addon=}" ;;
+            event=*) node_event="${kv#event=}" ;;
+            cron=*)  node_cron="${kv#cron=}" ;;
+          esac
+        done
+
+        case "$node_boot_raw" in
+          1) node_boot="enabled"  ;;
+          0) node_boot="disabled" ;;
+          *) node_boot="$node_boot_raw" ;;
+        esac
+
+        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} addon=${node_addon} event=${node_event} cron=${node_cron}"
+      done
     else
       # No nodes configured; output local status only
-      info -c vlan,cli "Status: boot=$boot_state addon=$addon_state service-event=$event_state cron=$cron_state (no nodes configured)"
+      info -c vlan,cli "Status:"
+      info -c vlan,cli "<--- Main Unit --->"
+      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state}"
     fi
     ;;
 
@@ -790,14 +855,36 @@ case "$ACTION" in
         event_state=custom
       fi
     fi
+
+    # Node-specific addon state for machine-readable report
+    if is_node; then
+      if [ -f "$VLAN_MANAGER" ]; then
+        case "$event_state" in
+          active)
+            addon_state="node-on"
+            ;;
+          custom)
+            addon_state="node-custom"
+            ;;
+          disabled|missing|*)
+            addon_state="node-off"
+            ;;
+        esac
+      else
+        addon_state="missing"
+      fi
+    fi
     if [ -n "$CRU_BIN" ]; then
       if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
         cron_state=present
       fi
     fi
-    # Output terse report line: REPORT boot=0/1 addon=<state> event=<state> cron=<state>
+    # Output terse report line: REPORT hw=<PRODUCTID> boot=0/1 addon=<state> event=<state> cron=<state>
     # Used by collect_node_status() for remote aggregation via SSH
-    echo "REPORT boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state"
+    # Hardware label from hw_settings.json (per-device)
+    hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
+
+    echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state"
     exit 0
     ;;
 
