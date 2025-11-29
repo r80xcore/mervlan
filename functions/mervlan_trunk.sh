@@ -35,6 +35,19 @@ DBG_CHANNEL="vlan,cli"
 DRY_RUN_FORCED=0
 DEBUG_FORCED=0
 ERROR_SEEN=0
+TRUNK_SUMMARY=""
+
+append_summary() {
+  # Append a line to TRUNK_SUMMARY, preserving actual newlines.
+  # Avoid leading blank line when TRUNK_SUMMARY was empty.
+  local line="$1"
+  if [ -z "$TRUNK_SUMMARY" ]; then
+    TRUNK_SUMMARY="$line"
+  else
+    TRUNK_SUMMARY="${TRUNK_SUMMARY}
+${line}"
+  fi
+}
 
 ORIGINAL_ARGS="$*"
 
@@ -132,7 +145,9 @@ ensure_vlan_iface() {
 }
 
 ensure_vlan_bridge() {
-  local vid="$1" uplink_vlan="${UPLINK_PORT}.${vid}" br="br${vid}"
+  local vid="$1"
+  local uplink_vlan="${UPLINK_PORT}.${vid}"
+  local br="br${vid}"
 
   # Validate uplink port present
   iface_exists "$UPLINK_PORT" || { error -c vlan,cli "ensure_vlan_bridge: uplink $UPLINK_PORT missing"; return 1; }
@@ -175,6 +190,12 @@ ensure_vlan_bridge() {
 
 bridge_add_if() {
   local br="$1" ifc="$2"
+  # In DRY-RUN, do not depend on kernel state for just-created subinterfaces.
+  # Print what would happen and succeed to make dry-run output clean.
+  if [ "${DRY_RUN:-}" = "yes" ]; then
+    info -c vlan,cli "[DRY-RUN] brctl addif $br $ifc"
+    return 0
+  fi
   iface_exists "$ifc" || return 1
   ensure_port_up "$ifc"
   brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}' | grep -qx "$ifc" && return 0
@@ -260,7 +281,9 @@ get_trunk_port() {
 
 
 get_trunk_config() {
-  local idx="$1" tagged_key="TAGGED_TRUNK${idx}" untagged_key="UNTAGGED_TRUNK${idx}"
+  local idx="$1"
+  local tagged_key="TAGGED_TRUNK${idx}"
+  local untagged_key="UNTAGGED_TRUNK${idx}"
   local tagged_raw untagged_raw
 
   tagged_raw="$(json_get_flag "$tagged_key" "none" "$SETTINGS_FILE" 2>/dev/null)"
@@ -277,12 +300,14 @@ configure_trunk() {
 
   port="$(get_trunk_port "$idx")" || {
     info -c vlan,cli "trunk${idx}: disabled"
+    append_summary "trunk${idx}: disabled"
     return 0
   }
 
   ensure_port_up "$port" || {
     warn -c vlan,cli "trunk${idx}: $port missing"
     ERROR_SEEN=1
+    append_summary "trunk${idx}: port=${port} missing"
     return 1
   }
 
@@ -303,6 +328,8 @@ configure_trunk() {
     # Keep physical port attached to default bridge
     bridge_add_if "$DEFAULT_BRIDGE" "$port" || warn -c vlan,cli "trunk${idx}: failed to ensure $port on $DEFAULT_BRIDGE"
     info -c vlan,cli "trunk${idx}: $port stays on $DEFAULT_BRIDGE for untagged"
+    # Summarize: no untagged mapping, record tagged list below
+    u_summary="none"
   else
     case "$untagged_raw" in
       *[!0-9]*)
@@ -311,6 +338,7 @@ configure_trunk() {
           warn -c vlan,cli "trunk${idx}: failed to ensure $port on $DEFAULT_BRIDGE after invalid untagged"
         fi
         untagged_raw="none"
+        u_summary="invalid"
         ;;
       *)
         uvid="$untagged_raw"
@@ -318,6 +346,7 @@ configure_trunk() {
         if ! ensure_vlan_bridge "$uvid"; then
           warn -c vlan,cli "trunk${idx}: failed preparing br${uvid}; keeping $port on $DEFAULT_BRIDGE"
           ERROR_SEEN=1
+          append_summary "trunk${idx}: port=${port} failed to prepare br${uvid} (keeps on ${DEFAULT_BRIDGE})"
           return 1
         fi
 
@@ -325,6 +354,7 @@ configure_trunk() {
         if ! ensure_vlan_iface "$port" "$uvid"; then
           warn -c vlan,cli "trunk${idx}: failed creating ${port}.${uvid}; keeping $port on $DEFAULT_BRIDGE"
           ERROR_SEEN=1
+          append_summary "trunk${idx}: port=${port} failed to create ${port}.${uvid} (keeps on ${DEFAULT_BRIDGE})"
           return 1
         fi
 
@@ -332,6 +362,7 @@ configure_trunk() {
         if ! bridge_add_if "br${uvid}" "${port}.${uvid}"; then
           warn -c vlan,cli "trunk${idx}: failed adding ${port}.${uvid} to br${uvid}; keeping $port on $DEFAULT_BRIDGE"
           ERROR_SEEN=1
+          append_summary "trunk${idx}: port=${port} failed to add ${port}.${uvid} to br${uvid} (keeps on ${DEFAULT_BRIDGE})"
           return 1
         fi
 
@@ -341,36 +372,48 @@ configure_trunk() {
         fi
 
         info -c vlan,cli "trunk${idx}: $port untagged mapped to VLAN $uvid"
+        u_summary="$uvid"
         ;;
     esac
   fi
 
+  # Build tagged list and ensure membership; skip if none
+  tagged_list=""
   for vid in $(parse_vlan_list "$tagged_raw"); do
     [ "$vid" = "$untagged_raw" ] && continue
 
     if ! ensure_vlan_bridge "$vid"; then
       warn -c vlan,cli "trunk${idx}: failed preparing br${vid}; skipping tag $vid"
       ERROR_SEEN=1
+      tagged_list="${tagged_list}${tagged_list:+,}${vid}:skipped"
       continue
     fi
 
     if ! ensure_vlan_iface "$port" "$vid"; then
       warn -c vlan,cli "trunk${idx}: failed creating ${port}.${vid}; skipping tag $vid"
       ERROR_SEEN=1
+      tagged_list="${tagged_list}${tagged_list:+,}${vid}:iface-failed"
       continue
     fi
 
     if ! bridge_add_if "br${vid}" "${port}.${vid}"; then
       warn -c vlan,cli "trunk${idx}: failed adding ${port}.${vid} to br${vid}; skipping tag $vid"
       ERROR_SEEN=1
+      tagged_list="${tagged_list}${tagged_list:+,}${vid}:bridge-failed"
       continue
     fi
 
     info -c vlan,cli "trunk${idx}: tagged VLAN $vid active"
+    tagged_list="${tagged_list}${tagged_list:+,}${vid}"
   done
 
   # After operations, log membership for debugging
   log_bridge_membership "$port"
+
+  # Append trunk summary (show untagged + tagged planned/actual)
+  [ -z "${u_summary:-}" ] && u_summary="none"
+  [ -z "${tagged_list:-}" ] && tagged_list="none"
+  append_summary "trunk${idx}: port=${port} untagged=${u_summary} tagged=${tagged_list}"
 }
 
 main() {
@@ -408,6 +451,16 @@ main() {
     configure_trunk "$idx"
     idx=$((idx + 1))
   done
+
+  # Print compact trunk summary (what was applied or would be applied)
+  if [ -n "$TRUNK_SUMMARY" ]; then
+    info -c vlan,cli "=== Trunk summary ==="
+    printf '%s
+' "$TRUNK_SUMMARY" | while IFS= read -r l; do
+      [ -z "$l" ] && continue
+      info -c vlan,cli "  $l"
+    done
+  fi
 
   if [ "$DRY_RUN" = "yes" ]; then
     info -c vlan,cli "Trunk configuration DRY-RUN complete (no changes applied)"
