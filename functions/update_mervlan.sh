@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.50"                   #
+#                - File: update_mervlan.sh || version="0.50a"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -340,26 +340,30 @@ if ! cp -a "$STAGE_DIR"/. "$NEW_DIR"/ 2>/dev/null; then
 	exit 1
 fi
 
+# CHMOD: normalize script permissions in new tree
+info -c cli,vlan "Normalizing script permissions in new tree"
 
-# Adjust permissions to match installer expectations
-find "$NEW_DIR" -type f -name '*.sh' -exec chmod 755 '{}' + 2>/dev/null || :
+# 1) Default: make all .sh files under NEW_DIR executable (755)
+for depth in "" "*/" "*/*/"; do
+    for f in "$NEW_DIR"/${depth}*.sh; do
+        [ -f "$f" ] 2>/dev/null || continue
+        chmod 755 "$f" 2>/dev/null || :
+    done
+done
 
-NON_EXEC_SH_FILES=$(cat <<'EOF'
-settings/var_settings.sh
-settings/log_settings.sh
-templates/mervlan_templates.sh
-EOF
-)
-
-set -f
-for rel_path in $NON_EXEC_SH_FILES; do
+# 2) Override: specific .sh files that must *not* be executable → 644
+for rel_path in \
+    "settings/var_settings.sh" \
+    "settings/log_settings.sh" \
+    "templates/mervlan_templates.sh" \
+    "settings/lib_debug.sh" \
+    "settings/lib_json.sh" \
+    "settings/lib_ssh.sh"
+do
     target="$NEW_DIR/$rel_path"
     [ -f "$target" ] && chmod 644 "$target" 2>/dev/null || :
 done
-set +f
 
-find "$NEW_DIR/settings" -maxdepth 1 -type f -name 'lib_*.sh' \
-    -exec chmod 644 '{}' + 2>/dev/null || :
 
 # ========================================================================== #
 # RESTORE USER DATA                                                          #
