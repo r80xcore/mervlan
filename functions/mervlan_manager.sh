@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.49"                   #
+#               - File: mervlan_manager.sh || version="0.50"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -27,6 +27,15 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+unset LIB_JSON_LOADED
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+# Optional CLI override: "mervlan_manager.sh dryrun" (forces dry-run regardless of settings.json)
+CLI_DRY_RUN="no"
+case "$1" in
+  dryrun|--dry-run|-n)
+    CLI_DRY_RUN="yes"
+    ;;
+esac
 # =========================================== End of MerVLAN environment setup #
 
 # ========================================================================== #
@@ -37,7 +46,8 @@ fi
 # Args: $1=key_name
 # Returns: escaped key suitable for embedding in sed patterns
 esc_key() {
-  printf '%s' "$1" | sed 's/[][\\.^$*]/\\&/g'
+  # Backwards-compatible wrapper: delegate to centralized json_escape_key
+  json_escape_key "$@"
 }
 
 # read_json — Extract scalar value from JSON file by key name
@@ -46,17 +56,37 @@ esc_key() {
 # Explanation: Uses sed with enhanced regex to handle escaped quotes. Prefers
 #   quoted strings; falls back to bare values for numbers. Trims whitespace.
 read_json() {
-  local key file key_re
-  key="$1"; file="$2"
-  key_re=$(esc_key "$key")
-  sed -n "s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p; s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$file" | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+  # Backwards-compatible wrapper: delegate to centralized json_get_scalar
+  json_get_scalar "$1" "$2"
 }
 
 # read_json_number — Extract numeric value from JSON key (grep only digits)
 # Args: $1=key_name, $2=file_path
 # Returns: stdout numeric value, or empty if not found or non-numeric
 read_json_number() {
-  read_json "$1" "$2" | grep -o '^[0-9]\+'
+  # Backwards-compatible wrapper: reuse json_get_int
+  json_get_int "$1" "" "$2"
+}
+
+# read_json_section_value — Extract a string value from a nested JSON object
+# Args: <section> <key> <file>
+# Returns: matching string value or empty
+read_json_section_value() {
+  # Backwards-compatible wrapper: delegate to centralized json_get_section_value
+  json_get_section_value "$1" "$2" "$3"
+}
+
+# read_json_section_number — Similar to read_json_section_value but returns numeric digits only
+read_json_section_number() {
+  # Backwards-compatible wrapper: delegate to centralized json_get_section_int
+  json_get_section_int "$1" "$2" "$3"
+}
+
+# read_json_section_array — Extract a nested JSON array or fallback to a string
+# Returns: space-separated list (quotes removed)
+read_json_section_array() {
+  # Backwards-compatible wrapper: delegate to centralized json_get_section_array
+  json_get_section_array "$1" "$2" "$3"
 }
 
 # read_json_array — Extract JSON array and flatten to space-separated values
@@ -64,11 +94,8 @@ read_json_number() {
 # Returns: stdout space-separated values (quotes and commas removed)
 # Explanation: Extracts [a,b,c] bracket content, removes whitespace/quotes/commas
 read_json_array() {
-  local key file key_re
-  key="$1"; file="$2"
-  key_re=$(esc_key "$key")
-  sed -n "s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p" "$file" \
-    | sed 's/[[:space:]]//g; s/"//g; s/,/ /g'
+  # Backwards-compatible wrapper: delegate to centralized json_get_array
+  json_get_array "$1" "$2"
 }
 
 detect_trunk_ports() {
@@ -163,12 +190,37 @@ TRUNK_APPLIED=0
 [ -f "$HW_SETTINGS_FILE" ] || error -c cli,vlan "Missing $HW_SETTINGS_FILE"
 [ -f "$SETTINGS_FILE" ] || error -c cli,vlan "Missing $SETTINGS_FILE"
 
-# Extract hardware profile from hw_settings.json
+# Extract hardware profile from hardware settings. Supports both a standalone
+# hw_settings.json (legacy) as well as the consolidated Hardware block inside
+# settings.json. We try top-level reads first for backward compatibility, then
+# probe the nested Hardware object when present.
 MODEL=$(read_json MODEL "$HW_SETTINGS_FILE")
+if [ -z "$MODEL" ]; then
+  MODEL=$(read_json_section_value "Hardware" "MODEL" "$HW_SETTINGS_FILE")
+fi
+
 PRODUCTID=$(read_json PRODUCTID "$HW_SETTINGS_FILE")
+if [ -z "$PRODUCTID" ]; then
+  PRODUCTID=$(read_json_section_value "Hardware" "PRODUCTID" "$HW_SETTINGS_FILE")
+fi
+
 MAX_SSIDS=$(read_json_number MAX_SSIDS "$HW_SETTINGS_FILE")
+if [ -z "$MAX_SSIDS" ]; then
+  MAX_SSIDS=$(read_json_section_number "Hardware" "MAX_SSIDS" "$HW_SETTINGS_FILE")
+fi
+
+# ETH_PORTS is an array in the legacy format, but may be stored either as a
+# JSON array or as a space-separated string inside the Hardware block. Try
+# both extraction methods and normalize to space-separated values.
 ETH_PORTS=$(read_json_array ETH_PORTS "$HW_SETTINGS_FILE")
+if [ -z "$ETH_PORTS" ]; then
+  ETH_PORTS=$(read_json_section_array "Hardware" "ETH_PORTS" "$HW_SETTINGS_FILE")
+fi
+
 WAN_IF=$(read_json WAN_IF "$HW_SETTINGS_FILE")
+if [ -z "$WAN_IF" ]; then
+  WAN_IF=$(read_json_section_value "Hardware" "WAN_IF" "$HW_SETTINGS_FILE")
+fi
 
 # Extract user configuration from settings.json
 TOPOLOGY="switch"
@@ -183,6 +235,12 @@ ENABLE_STP=$(read_json ENABLE_STP "$SETTINGS_FILE")
 [ -z "$DRY_RUN" ] && DRY_RUN="yes"
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
 [ -z "$ENABLE_STP" ] && ENABLE_STP="0"
+
+# CLI "dryrun" forces DRY_RUN=yes regardless of settings.json
+if [ "$CLI_DRY_RUN" = "yes" ]; then
+  DRY_RUN="yes"
+  info -c cli,vlan "Dry-run forced by CLI argument; ignoring DRY_RUN setting"
+fi
 
 case "$ENABLE_STP" in
   1) ENABLE_STP=1 ;;
@@ -204,20 +262,31 @@ DEFAULT_BRIDGE="br0"
 # ========================================================================== #
 
 # Fail fast if critical directories are unset to avoid writing to /
-[ -n "$CHANGES" ] || { error -c cli,vlan "CHANGES not set"; exit 1; }
-[ -n "$LOCKDIR" ] || { error -c cli,vlan "LOCKDIR not set"; exit 1; }
+# In dry-run mode we intentionally avoid creating or touching state/log folders
+if [ "$DRY_RUN" != "yes" ]; then
+  [ -n "$CHANGES" ] || { error -c cli,vlan "CHANGES not set"; exit 1; }
+  [ -n "$LOCKDIR" ] || { error -c cli,vlan "LOCKDIR not set"; exit 1; }
 
-# Ensure change-tracking and lock directories exist before use
-[ -d "$CHANGES" ] || mkdir -p "$CHANGES" 2>/dev/null || :
-[ -d "$LOCKDIR" ] || mkdir -p "$LOCKDIR" 2>/dev/null || :
+  # Ensure change-tracking and lock directories exist before use
+  [ -d "$CHANGES" ] || mkdir -p "$CHANGES" 2>/dev/null || :
+  [ -d "$LOCKDIR" ] || mkdir -p "$LOCKDIR" 2>/dev/null || :
 
-# Per-execution change log (cleaned up on exit via trap)
-CHANGE_LOG="$CHANGES/vlan_changes.$$"
-LOCK_PATH="$LOCKDIR/mervlan_manager.lock"
+  # Per-execution change log (cleaned up on exit via trap)
+  CHANGE_LOG="$CHANGES/vlan_changes.$$"
+  LOCK_PATH="$LOCKDIR/mervlan_manager.lock"
+else
+  # Dry-run: keep these unset or empty so helpers are no-op
+  CHANGE_LOG=""
+  LOCK_PATH=""
+fi
+
 LOCK_ACQUIRED=0
 
 acquire_script_lock() {
   # Prevent concurrent runs from stomping on bridges/interfaces (mkdir-based lock)
+  # Skip lock acquisition in dry-run mode
+  [ "$DRY_RUN" = "yes" ] && return 0
+  [ -n "$LOCK_PATH" ] || return 0
   attempts=0
   while ! mkdir "$LOCK_PATH" 2>/dev/null; do
     if [ $attempts -ge 30 ]; then
@@ -232,6 +301,8 @@ acquire_script_lock() {
 }
 
 release_script_lock() {
+  # No-op in dry-run
+  [ "$DRY_RUN" = "yes" ] && return 0
   [ "$LOCK_ACQUIRED" -eq 1 ] || return
   rmdir "$LOCK_PATH" 2>/dev/null || :
   LOCK_ACQUIRED=0
@@ -248,6 +319,9 @@ trap cleanup_on_exit EXIT INT TERM
 # Args: $1=change_description (string)
 # Returns: none (appends to $CHANGE_LOG)
 track_change() {
+  # Skip writing change-log in dry-run mode
+  [ "$DRY_RUN" = "yes" ] && return 0
+  [ -n "$CHANGE_LOG" ] || return 0
   # Append change with ISO timestamp and shell PID for tracking
   echo "$(date '+%Y-%m-%d %H:%M:%S'): $1" >> "$CHANGE_LOG"
 }
@@ -1176,7 +1250,9 @@ main() {
 
   info -c cli,vlan "VLAN manager run completed at $(date '+%H:%M:%S')"
 
-  if [ -x "$FUNCDIR/collect_clients.sh" ]; then
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "Dry-run mode; skipping VLAN client list refresh (collect_clients.sh)"
+  elif [ -x "$FUNCDIR/collect_clients.sh" ]; then
     info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
     sleep 5
     info -c cli,vlan "Refreshing VLAN client list via collect_clients.sh"

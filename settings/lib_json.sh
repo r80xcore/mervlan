@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_json.sh || version="0.48"                         #
+#                - File: lib_json.sh || version="0.49"                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -220,5 +220,233 @@ json_apply_kv_file() {
     return 0
 }
 
-LIB_JSON_LOADED=1
+json_escape_key() {
+    # json_escape_key <key>
+    # Escape special regex characters in a JSON key so it can be used safely
+    # inside sed/awk patterns.
+    printf '%s' "$1" | sed 's/[][\\.^$*]/\\&/g'
+}
 
+
+json_get_scalar() {
+    # json_get_scalar <key> <file>
+    # Read a scalar value for "KEY" from a JSON file. Handles quoted
+    # strings and bare numeric/boolean tokens and trims whitespace.
+    local key="$1" file="$2" key_re
+    [ -n "$key" ] || return 1
+    [ -f "$file" ] || return 1
+
+    key_re=$(json_escape_key "$key")
+
+    # 1) Try quoted string
+    sed -n "s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' && return 0
+
+    # 2) Fallback to unquoted token (numbers, true, false, null)
+    sed -n "s/.*\"$key_re\"[[:space:]]*:[[:space:]]*\([^,}[:space:]]*\).*/\1/p" "$file" | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+
+json_get_section_value() {
+    # json_get_section_value <section> <key> <file>
+    # Extract string value from a nested JSON object: "Section": { "KEY": "VALUE" }
+    local section="$1" key="$2" file="$3"
+    [ -n "$section" ] || return 1
+    [ -n "$key" ] || return 1
+    [ -f "$file" ] || return 1
+
+    awk -v sec="$section" -v key="$key" '
+        BEGIN { in_section=0; depth=0 }
+            {
+                if (!in_section) {
+                    if ($0 ~ ("\""sec"\"[[:space:]]*:[[:space:]]*{")) {
+                        in_section=1
+                        gsub(/[^{}]/, "", $0)
+                        depth += gsub(/\{/, "&") - gsub(/\}/, "&")
+                    }
+                } else {
+                    gsub(/[^{}]/, "", $0); depth += gsub(/\{/, "&") - gsub(/\}/, "&");
+                    if ($0 ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
+                        if (match($0, "\""key"\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"", arr)) { print arr[1]; exit }
+                    }
+                    if (depth <= 0) exit
+                }
+            }
+    ' "$file" | head -1
+}
+
+
+json_get_section_int() {
+    # json_get_section_int <section> <key> <file>
+    # Returns digits-only numeric extraction from a nested section value.
+    local val
+    val=$(json_get_section_value "$1" "$2" "$3") || return 1
+    echo "$val" | grep -o '^[0-9]\+' || :
+}
+
+
+json_get_array() {
+    # json_get_array <key> <file>
+    # Extract a top-level JSON array and return elements as space-separated list
+    local key="$1" file="$2"
+    [ -n "$key" ] || return 1
+    [ -f "$file" ] || return 1
+
+    awk -v key="$key" '
+        BEGIN { in_section=0; content="" }
+        {
+            if (!in_section) {
+                # Look for the key and then ensure the line actually contains an array start
+                if ($0 ~ ("\""key"\"[[:space:]]*:[[:space:]]*")) {
+                    if (index($0, "[") == 0) {
+                        next
+                    }
+                    in_section=1
+                    sub(/.*\[/, "")
+                    content = $0
+                    if (index(content, "]") > 0) {
+                        sub(/\].*/, "", content)
+                        print content
+                        exit
+                    }
+                    next
+                }
+            } else {
+                if (index($0, "]") > 0) {
+                    sub(/\].*/, "", $0)
+                    content = content " " $0
+                    print content
+                    exit
+                }
+                content = content " " $0
+            }
+        }
+    ' "$file" | head -1 | sed 's/[[:space:]]//g; s/"//g; s/,/ /g'
+}
+
+
+json_get_section_array() {
+    # json_get_section_array <section> <key> <file>
+    # Extract a nested array Section.KEY as space-separated list (quotes removed)
+    local section="$1" key="$2" file="$3"
+    [ -n "$section" ] || return 1
+    [ -n "$key" ] || return 1
+    [ -f "$file" ] || return 1
+
+    awk -v sec="$section" -v key="$key" '
+        BEGIN { in_section=0; depth=0 }
+        {
+            if (!in_section) {
+                # Look for the section start and begin tracking brace depth
+                if ($0 ~ ("\""sec"\"[[:space:]]*:[[:space:]]*{")) {
+                    in_section=1
+                    tmp=$0
+                    gsub(/[^{}]/, "", tmp)
+                    depth += gsub(/\{/, "&", tmp) - gsub(/\}/, "&", tmp)
+                }
+            } else {
+                line=$0
+                # Use tmp copy for brace 
+                tmp=line
+                gsub(/[^{}]/, "", tmp)
+                depth += gsub(/\{/, "&", tmp) - gsub(/\}/, "&", tmp)
+
+                # Search the original line for the key and then ensure the array start is present
+                if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*")) {
+                    if (index(line, "[") == 0) {
+                        if (depth <= 0) exit
+                        next
+                    }
+
+                    sub(/.*\[/, "", line)
+                    content = line
+                    if (index(content, "]") > 0) {
+                        sub(/\].*/, "", content)
+                        print content
+                        exit
+                    }
+                    # Continue reading subsequent lines until the closing bracket
+                    while (getline) {
+                        line=$0
+                        if (index(line, "]") > 0) {
+                            sub(/\].*/, "", line)
+                            content = content " " line
+                            print content
+                            exit
+                        }
+                        content = content " " line
+                    }
+                }
+
+                if (depth <= 0) exit
+            }
+        }
+    ' "$file" | head -1 | sed 's/[[:space:]]//g; s/"//g; s/,/ /g'
+}
+
+_json_build_array_literal() {
+    # _json_build_array_literal <items...>
+    # Emit a JSON array literal ["a","b",...] with proper escaping.
+    local first=1 out="[" v esc
+    for v in "$@"; do
+        esc=$(printf '%s' "$v" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        if [ "$first" -eq 1 ]; then
+            out="$out\"$esc\""
+            first=0
+        else
+            out="$out, \"$esc\""
+        fi
+    done
+    out="$out]"
+    printf '%s' "$out"
+}
+
+
+json_set_array() {
+    # json_set_array <key> <space-separated-values> [file] [defaults]
+    # Write "KEY": [ "v1", "v2", ... ] non-destructively.
+    local key="$1"
+    local vals="$2"
+    local file="${3:-$SETTINGS_FILE}"
+    local defaults="${4:-}"
+    local array_json script tmp
+
+    [ -n "$key" ] || return 1
+
+    ensure_json_store "$file" "$defaults" || return 1
+
+    # Build array literal from whitespace-separated values.
+    # shellcheck disable=SC2086
+    array_json=$(_json_build_array_literal $vals)
+
+    # If key exists in any form (string/number/array/object), replace its value
+    if grep -q "\"$key\"" "$file" 2>/dev/null; then
+        script="${file}.sed.$$"
+        # Replace any value after the colon for this key (covers arrays, strings, numbers)
+        # Pattern matches: [ ... ] or "..." or unquoted token until comma or closing brace
+        printf 's@"%s"[[:space:]]*:[[:space:]]*\(\[[^]]*\]\|"[^"]*"\|[^,}]*\)@"%s": %s@g\n' "$key" "$key" "$array_json" >"$script" || { rm -f "$script"; return 1; }
+        if ! sed -i -f "$script" "$file" 2>/dev/null; then
+            rm -f "$script"
+            return 1
+        fi
+        rm -f "$script"
+        return 0
+    fi
+
+    # Fallback: append a new "key": [ ... ] property near the end of the file.
+    tmp="${file}.tmp.$$"
+    awk -v k="$key" -v v="$array_json" '
+        BEGIN { inserted = 0 }
+        /\}/ {
+            if (!inserted) {
+                print "  \"" k "\": " v
+                inserted = 1
+            }
+        }
+        { print }
+    ' "$file" >"$tmp" || { rm -f "$tmp"; return 1; }
+
+    mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    return 0
+}
+
+LIB_JSON_LOADED=1

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                    - File: install.sh || version="0.45"                      #
+#                    - File: install.sh || version="0.46"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1007,7 +1007,9 @@ cp -p "$ADDON_DIR/$ADDON/www/vlan_form_style.css"   "$PUBLIC_DIR/vlan_form_style
 cp -p "$ADDON_DIR/$ADDON/www/help.html"             "$PUBLIC_DIR/help.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/view_logs.html"        "$PUBLIC_DIR/view_logs.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/settings/settings.json"    "$PUBLIC_DIR/settings/settings.json" 2>/dev/null
-cp -p "$ADDON_DIR/$ADDON/settings/hw_settings.json" "$PUBLIC_DIR/settings/hw_settings.json" 2>/dev/null
+# Note: hw_settings.json has been consolidated into settings/settings.json.
+# The SPA now reads the Hardware block from settings/settings.json directly;
+# keep the consolidated settings.json published for the UI.
 
 # 3c. Publish SSH public key for UI if it already exists (rename to .json for compatibility)
 if [ -f "$ADDON_DIR/$ADDON/.ssh/vlan_manager.pub" ]; then

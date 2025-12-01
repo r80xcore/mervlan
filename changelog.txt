@@ -1,8 +1,55 @@
-mervlan v0.49
+mervlan v0.50
 
 IMPORTANT! Scripts does not follow main version. Every script has its own version.
+NEW FILES:
 
-mervlan v0.49
+UPDATED FILES:
+
+mervlan_boot.sh
+* fixed bug preventing proper injection on a system without a services-start
+or a service-event file.
+* fixed probing of node/ap specific features that was reported as missing,
+will now report the current state and also report a cleaner output.
+
+mervlan_manager.sh 
+* moved json functions to lib_json.sh.
+* hardened the dry-run to include all functions that could be
+system-alterning, like lock and vlan collection.
+* added a dryrun mode in cli.
+
+mervlan_trunk.sh
+* hardened version with a lot of work going into the creating of bridges
+capable of T/U traffic without destroying previously created bridges.
+Still experimental but ready for testing.
+
+settings.json
+* structured the json and merged hw_settings into it.
+* changed Hardware section to array instead of string.
+
+var_settings.sh
+* added missing (previously not needed) sync_nodes.sh reference
+* change HW_SETTINGS_FILE to point to settings.json for compatibility.
+
+update_mervlan.sh
+* hardened curl and verification of extracted files.
+* added the ability to choose branch. Will be used more later on
+when addon is getting closer to stable, to enable the use of a 
+dev branch and also specific branches if needed.
+* ensure that public dir gets refreshed after an update.
+* force a hw_probe refresh after an update to ensure compatibility.
+
+index.html 
+* changed hardware reading to settings.json
+* fixed bug making load not loading the correct values due to the
+updated structure in settings.json.
+* added version counter.
+
+hw_probe.sh
+* changed the default saving file to settings.json and made the
+changed needed for that to work.
+
+#############################################################
+previous mervlan v0.49 changes
 
 NEW FILES:
 lib_debug.sh
@@ -36,6 +83,7 @@ users to test out the new trunk feature.
 
 All files that previously used general.json has been migrated to use
 settings.json exclusively.
+
 #############################################################
 previous version 0.48 changes
 

@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: var_settings.sh || version="0.47"                     #
+#                - File: var_settings.sh || version="0.48"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -44,10 +44,15 @@ readonly SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
 readonly SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 readonly DROPBEARKEY="/usr/bin/dropbearkey"
 readonly SETTINGS_FILE="$SETTINGSDIR/settings.json"
-readonly HW_SETTINGS_FILE="$SETTINGSDIR/hw_settings.json"
+## Hardware settings are now stored in the consolidated settings.json under
+## the "Hardware" block. Keep `HW_SETTINGS_FILE` as a compatibility alias
+## so existing callers (that expect a path) continue to resolve to a file
+## path while the new storage remains a sub-block inside the same JSON.
+readonly HW_SETTINGS_FILE="$SETTINGSDIR/settings.json"
 readonly OUT_FINAL="$RESULTDIR/vlan_clients.json"
 readonly VLAN_MANAGER="$FUNCDIR/mervlan_manager.sh"
 readonly SERVICE_EVENT="$FUNCDIR/heal_event.sh"
+readonly SYNC_NODES="$FUNCDIR/sync_nodes.sh"
 readonly CUSTOM_SETTINGS_FILE="/jffs/addons/custom_settings.txt"
 readonly SERVICE_EVENT_HANDLER="$FUNCDIR/service-event-handler.sh"
 readonly TEMPLATE_LIB="$MERV_BASE/templates/mervlan_templates.sh"

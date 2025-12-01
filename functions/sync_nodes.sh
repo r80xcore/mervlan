@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.48"                        #
+#               - File: sync_nodes.sh || version="0.49"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -95,7 +95,6 @@ dbg_var SSH_NODE_USER SSH_NODE_PORT
 # Includes settings, shell helpers, and service templates required for MerVLAN
 FILES_TO_COPY="
 settings/settings.json 
-settings/hw_settings.json 
 settings/var_settings.sh 
 settings/log_settings.sh 
 settings/lib_json.sh

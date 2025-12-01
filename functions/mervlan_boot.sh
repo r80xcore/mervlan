@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.50"                     #
+#                - File: mervlan_boot.sh || version="0.51"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -881,7 +881,9 @@ case "$ACTION" in
     fi
     # Output terse report line: REPORT hw=<PRODUCTID> boot=0/1 addon=<state> event=<state> cron=<state>
     # Used by collect_node_status() for remote aggregation via SSH
-    # Hardware label from hw_settings.json (per-device)
+    # Hardware label from settings.json (PRODUCTID may be stored top-level or in
+    # the Hardware block; json_get_flag handles legacy top-level keys while
+    # var_settings.sh exposes HW_SETTINGS_FILE alias.)
     hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
 
     echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state"

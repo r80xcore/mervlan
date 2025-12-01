@@ -12,9 +12,12 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                   - File: hw_probe.sh || version="0.45"                      #
+#                   - File: hw_probe.sh || version="0.46"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
-# - Purpose:    Probe system hardware and generate hw_settings.json            #
+# - Purpose:    Probe system hardware and record hardware keys in the central
+#                settings store (settings.json). Writes non-destructively via
+#                json_set_flag so values remain compatible with legacy top-level
+#                keys and the newer Hardware block in settings.json.
 # ──────────────────────────────────────────────────────────────────────────── #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
@@ -25,6 +28,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -203,49 +207,38 @@ esac
 [ ! -d "/sys/class/net/$WAN_IF" ] && WAN_IF=$(nvram get wan_ifname 2>/dev/null)
 
 # ============================================================================ #
-#                     GENERATE & WRITE hw_settings.json                        #
-# Format all detected hardware parameters as JSON and write to output file.    #
-# JSON includes model, radios, SSID counts, ethernet ports, labels, and WAN.   #
+#                     RECORD hardware into settings.json (Hardware block)      #
+# Use json_set_flag to update the consolidated `settings.json` file non-       #
+# destructively. Hardware keys are stored under the "Hardware" section in    #
+# `settings.json`.                                                            #
 # ============================================================================ #
-{
-    # JSON header and model/product info
-    echo "{"
-    echo "  \"MODEL\": \"$MODEL\","
-    echo "  \"PRODUCTID\": \"$PRODUCTID\","
-    echo "  \"MAX_SSIDS\": $MAX_SSIDS,"
 
-    # RADIOS array: convert space-separated list to JSON array
-    echo -n "  \"RADIOS\": ["
-    first=1
-    for radio in $RADIOS; do
-        [ $first -eq 1 ] && echo -n "\"$radio\"" && first=0 || echo -n ", \"$radio\""
-    done
-    echo "],"
+# determine target JSON file (HW_SETTINGS_FILE is an alias to settings.json)
+HW_TARGET="${HW_SETTINGS_FILE:-${SETTINGS_FILE}}"
 
-    # Guest slots per radio
-    echo "  \"GUEST_SLOTS\": $GUEST_SLOTS,"
+info "Writing hardware profile into: $HW_TARGET (Hardware section)"
 
-    # ETH_PORTS array: convert space-separated list to JSON array
-    echo -n "  \"ETH_PORTS\": ["
-    first=1
-    for port in $ETH_PORTS; do
-        [ $first -eq 1 ] && echo -n "\"$port\"" && first=0 || echo -n ", \"$port\""
-    done
-    echo "],"
+# Ensure the store exists before attempting changes
+ensure_json_store "$HW_TARGET" || {
+    error "Unable to create or access $HW_TARGET"
+    exit 1
+}
 
-    # LAN_PORT_LABELS array: convert space-separated list to JSON array
-    echo -n "  \"LAN_PORT_LABELS\": ["
-    first=1
-    for label in $LAN_PORT_LABELS; do
-        [ $first -eq 1 ] && echo -n "\"$label\"" && first=0 || echo -n ", \"$label\""
-    done
-    echo "],"
+# --- helper: write array values safely into JSON ---
+# JSON array writing delegated to lib_json.sh via json_set_array
 
-  # WAN interface and max port count
-  echo "  \"WAN_IF\": \"$WAN_IF\","
-  echo "  \"MAX_ETH_PORTS\": $MAX_ETH_PORTS"
-    echo "}"
-} > "$HW_SETTINGS_FILE"
+# Scalars -> stored as strings for compatibility
+json_set_flag "MODEL" "$MODEL" "$HW_TARGET" || warn "Failed to write MODEL"
+json_set_flag "PRODUCTID" "$PRODUCTID" "$HW_TARGET" || warn "Failed to write PRODUCTID"
+json_set_flag "MAX_SSIDS" "${MAX_SSIDS}" "$HW_TARGET" || warn "Failed to write MAX_SSIDS"
+json_set_flag "GUEST_SLOTS" "${GUEST_SLOTS}" "$HW_TARGET" || warn "Failed to write GUEST_SLOTS"
+json_set_flag "WAN_IF" "$WAN_IF" "$HW_TARGET" || warn "Failed to write WAN_IF"
+json_set_flag "MAX_ETH_PORTS" "${MAX_ETH_PORTS}" "$HW_TARGET" || warn "Failed to write MAX_ETH_PORTS"
+
+# Lists: store as space-separated strings for later parsing
+json_set_array "RADIOS" "$RADIOS" "$HW_TARGET" || warn "Failed to write RADIOS"
+json_set_array "ETH_PORTS" "$ETH_PORTS" "$HW_TARGET" || warn "Failed to write ETH_PORTS"
+json_set_array "LAN_PORT_LABELS" "$LAN_PORT_LABELS" "$HW_TARGET" || warn "Failed to write LAN_PORT_LABELS"
 
 # ============================================================================ #
 #                           REPORT & DEBUG OUTPUT                              #
@@ -262,7 +255,7 @@ echo "  Max SSIDs: $MAX_SSIDS"
 echo "  Ethernet ports: $ETH_PORTS"
 echo "  Labels: $LAN_PORT_LABELS"
 echo "  WAN interface: $WAN_IF"
-echo "  Output: $HW_SETTINGS_FILE"
+echo "  Output: $HW_TARGET (Hardware section in settings.json)"
 
 echo ""
 # Debug output: list all detected ethernet interfaces for verification

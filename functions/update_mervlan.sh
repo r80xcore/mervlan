@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.49"                   #
+#                - File: update_mervlan.sh || version="0.50"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -32,19 +32,57 @@ cd /tmp 2>/dev/null || cd / || :
 . /usr/sbin/helper.sh
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+
+# find curl binary in PATH or fallback to /usr/sbin/curl
+find_curl() {
+	if command -v curl >/dev/null 2>&1; then
+		printf '%s\n' "$(command -v curl)"
+	elif [ -x /usr/sbin/curl ]; then
+		printf '%s\n' "/usr/sbin/curl"
+	else
+		return 1
+	fi
+}
+
+# resolve curl once, fail with a helpful error if missing
+CURL_BIN="$(find_curl)" || {
+	error -c cli,vlan "curl not found (tried PATH and /usr/sbin/curl); cannot update MerVLAN."
+	exit 1
+}
+# channel/ref selection (default: main). Examples:
+#   update_mervlan.sh           -> refs/heads/main
+#   update_mervlan.sh dev       -> refs/heads/dev
+#   update_mervlan.sh refs/tags/v1.0.0 -> explicit ref
+CHANNEL="${1:-main}"
+
+case "$CHANNEL" in
+	""|main)
+		GITHUB_REF="refs/heads/main"
+		;;
+	dev)
+		GITHUB_REF="refs/heads/dev"
+		;;
+	refs/*)
+		GITHUB_REF="$CHANNEL"
+		;;
+	*)
+		GITHUB_REF="refs/heads/$CHANNEL"
+		;;
+esac
+
+info -c cli,vlan "Using Git ref: $GITHUB_REF"
 # ========================================================================== #
 # PATHS & CONSTANTS                                                          #
 # ========================================================================== #
 
-readonly GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/main"
+readonly GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$GITHUB_REF"
 readonly TMP_BASE="/tmp/mervlan_update.$$"
 readonly ARCHIVE="$TMP_BASE/mervlan.tar.gz"
 readonly STAGE_DIR="$TMP_BASE/stage"
 readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
 
-BACKUP_LIST="settings/settings.json
-settings/hw_settings.json"
+BACKUP_LIST="settings/settings.json"
 
 SSH_KEY_RELATIVE=""
 # Preserve the configured private key so we can restore it after the swap
@@ -67,7 +105,8 @@ if [ -n "$SSH_PUBKEY_RELATIVE" ]; then
 $SSH_PUBKEY_RELATIVE"
 fi
 
-REQUIRED_STAGE_FILES="changelog.txt
+REQUIRED_STAGE_FILES="install.sh
+changelog.txt
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh
 functions/heal_event.sh
@@ -78,6 +117,9 @@ settings/lib_json.sh
 settings/lib_ssh.sh
 templates/mervlan_templates.sh
 www/index.html"
+
+# required directories in a valid package
+REQUIRED_STAGE_DIRS="functions settings templates www"
 
 # ========================================================================== #
 # CLEANUP HANDLER                                                            #
@@ -180,8 +222,8 @@ fi
 # DOWNLOAD LATEST SNAPSHOT                                                   #
 # ========================================================================== #
 
-info -c cli,vlan "Downloading latest MerVLAN snapshot"
-/usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$ARCHIVE"
+info -c cli,vlan "Downloading latest MerVLAN snapshot using: $CURL_BIN"
+"$CURL_BIN" -fsL --retry 3 --connect-timeout 15 --max-time 300 "$GITHUB_URL" -o "$ARCHIVE"
 if [ ! -s "$ARCHIVE" ]; then
 	error -c cli,vlan "Download failed or archive empty"
 	exit 1
@@ -233,8 +275,17 @@ for required in $REQUIRED_STAGE_FILES; do
 		missing=1
 	fi
 done
+
+# ensure required top-level directories are present too (clearer messages)
+for d in $REQUIRED_STAGE_DIRS; do
+	if [ ! -d "$STAGE_DIR/$d" ]; then
+		warn -c cli,vlan "Missing required directory in stage: $d/"
+		missing=1
+	fi
+done
+
 if [ "$missing" -ne 0 ]; then
-	error -c cli,vlan "Validation failed; aborting update"
+	error -c cli,vlan "Validation failed; downloaded archive does not look like a valid MerVLAN package"
 	exit 1
 fi
 # Temporarily tear down boot/service-event hooks so refreshed templates can be applied cleanly
@@ -289,18 +340,26 @@ if ! cp -a "$STAGE_DIR"/. "$NEW_DIR"/ 2>/dev/null; then
 	exit 1
 fi
 
+
 # Adjust permissions to match installer expectations
-for depth in "" "*/" "*/*/"; do
-	for f in $NEW_DIR/${depth}*.sh; do
-		[ -f "$f" ] 2>/dev/null || continue
-		base="$(basename "$f")"
-		if [ "$base" = "log_settings.sh" ] || [ "$base" = "var_settings.sh" ]; then
-			chmod 644 "$f" 2>/dev/null || :
-		else
-			chmod 755 "$f" 2>/dev/null || :
-		fi
-	done
+find "$NEW_DIR" -type f -name '*.sh' -exec chmod 755 '{}' + 2>/dev/null || :
+
+NON_EXEC_SH_FILES=$(cat <<'EOF'
+settings/var_settings.sh
+settings/log_settings.sh
+templates/mervlan_templates.sh
+EOF
+)
+
+set -f
+for rel_path in $NON_EXEC_SH_FILES; do
+    target="$NEW_DIR/$rel_path"
+    [ -f "$target" ] && chmod 644 "$target" 2>/dev/null || :
 done
+set +f
+
+find "$NEW_DIR/settings" -maxdepth 1 -type f -name 'lib_*.sh' \
+    -exec chmod 644 '{}' + 2>/dev/null || :
 
 # ========================================================================== #
 # RESTORE USER DATA                                                          #
@@ -345,6 +404,45 @@ fi
 # OPTIONAL POST-UPDATE TASKS                                                 #
 # ========================================================================== #
 
+refresh_public_install() {
+	local uninstall_script="$MERV_BASE/uninstall.sh"
+	local install_script="$MERV_BASE/install.sh"
+
+	info -c cli,vlan "Refreshing public install directory via uninstall/install"
+
+	if [ ! -x "$uninstall_script" ]; then
+		warn -c cli,vlan "Skipping public refresh: $uninstall_script not executable"
+		return 1
+	fi
+	if [ ! -x "$install_script" ]; then
+		warn -c cli,vlan "Skipping public refresh: $install_script not executable"
+		return 1
+	fi
+
+	if ! sh "$uninstall_script" >/dev/null 2>&1; then
+		warn -c cli,vlan "Public uninstall failed; install may be stale"
+		return 1
+	fi
+
+	if ! sh "$install_script" >/dev/null 2>&1; then
+		warn -c cli,vlan "Public install refresh failed"
+		return 1
+	fi
+
+	info -c cli,vlan "Public install refreshed"
+}
+
+
+# Optionally refresh hardware profile on the upgraded installation
+if [ -x "$HW_PROBE" ]; then
+	info -c cli,vlan "Refreshing hardware profile via hw_probe.sh"
+	if ! sh "$HW_PROBE" >/dev/null 2>&1; then
+		warn -c cli,vlan "hw_probe.sh reported errors; hardware profile may be stale"
+	fi
+else
+	warn -c cli,vlan "hw_probe.sh not executable; skipping hardware probe refresh"
+fi
+
 # Refresh node files when SSH keys and nodes are configured
 if ssh_keys_effectively_installed && has_configured_nodes; then
 	clean_remote_addon_dirs
@@ -376,6 +474,9 @@ if [ -x "$BOOT_SCRIPT" ]; then
 else
 	warn -c cli,vlan "mervlan_boot.sh not executable; skipping post-update hook setup"
 fi
+
+refresh_public_install
+
 
 # ========================================================================== #
 # FINALIZATION                                                               #

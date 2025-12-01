@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.49" -->
+  <!-- index.html version="0.50" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -10,6 +10,40 @@
     .button_gen:disabled {
       opacity: 0.45;
       cursor: not-allowed;
+    }
+
+    .form-box--experimental {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .experimental-version {
+      font-size: 0.9rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: lowercase;
+      color: #c0c0c0;
+      background: rgba(108, 186, 245, 0.158);
+      border: 1px solid rgba(245, 193, 108, 0.4);
+      border-radius: 4px;
+      padding: 0px 10px;
+      min-width: 90px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .experimental-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0;
+    }
+
+    .experimental-toggle input[type="checkbox"] {
+      margin: 4;
+      align-self: center;
     }
   </style>
 </head>
@@ -139,6 +173,7 @@
             >
             <span>Enable experimental features</span>
           </label>
+          <span class="experimental-version" id="experimentalVersionBadge" aria-live="polite"></span>
         </div>
           <div id="leftPanelOverlay" class="overlay"></div>
           <div class="cli-container collapsed" id="cliPanel">
@@ -255,20 +290,211 @@
   <!-- ======== Status & validation (SSID/VLAN/NODE ticks) ======== -->
 
 <script>
+        function getIndexHtmlVersion() {
+          const head = document.head;
+          if (!head || typeof head.innerHTML !== "string") {
+            return "";
+          }
+          const match = head.innerHTML.match(/index\.html version="([^"]+)"/i);
+          return match && match[1] ? match[1].trim() : "";
+        }
+
+        function updateExperimentalVersionBadge() {
+          const badge = document.getElementById("experimentalVersionBadge");
+          if (!badge) {
+            return;
+          }
+          const version = getIndexHtmlVersion();
+          badge.textContent = version ? `beta v${version}` : "beta";
+        }
+
+        function isStructuredSettingsPayload(data) {
+          if (!data || typeof data !== "object") {
+            return false;
+          }
+          return ["General", "Nodes", "WiFi", "VLAN", "Hardware"].some(key => typeof data[key] === "object");
+        }
+
+        function ensurePlainObject(value) {
+          return value && typeof value === "object" ? value : {};
+        }
+
+        function stringOrDefault(value, fallback) {
+          return value == null ? fallback : String(value);
+        }
+
+        function flattenStructuredSettingsPayload(data) {
+          const flat = {};
+          const general = ensurePlainObject(data.General);
+          flat.PERSISTENT = stringOrDefault(general.PERSISTENT ?? general.Persistent, "no");
+          flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
+          flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
+
+          const nodes = ensurePlainObject(data.Nodes);
+          for (let i = 1; i <= 5; i++) {
+            const key = `NODE${i}`;
+            flat[key] = stringOrDefault(nodes[key], "none");
+          }
+
+          const wifi = ensurePlainObject(data.WiFi);
+          const ssids = ensurePlainObject(wifi.SSIDs);
+          const apiso = ensurePlainObject(wifi.APISO);
+          const vlan = ensurePlainObject(data.VLAN);
+          const pool = ensurePlainObject(vlan.Pool);
+          const ethPorts = ensurePlainObject(vlan.Ethernet_ports);
+          const trunks = ensurePlainObject(vlan.Trunks);
+          for (let i = 1; i <= 12; i++) {
+            const idx = String(i).padStart(2, "0");
+            flat[`SSID_${idx}`] = stringOrDefault(ssids[`SSID_${idx}`], "unused-placeholder");
+            flat[`APISO_${idx}`] = stringOrDefault(apiso[`APISO_${idx}`], "0");
+            flat[`VLAN_${idx}`] = stringOrDefault(pool[`VLAN_${idx}`], "none");
+          }
+          for (let i = 1; i <= 8; i++) {
+            flat[`ETH${i}_VLAN`] = stringOrDefault(ethPorts[`ETH${i}_VLAN`], "none");
+            flat[`TRUNK${i}`] = stringOrDefault(trunks[`TRUNK${i}`] ?? trunks[`trunk${i}`], "0");
+            flat[`TAGGED_TRUNK${i}`] = stringOrDefault(trunks[`TAGGED_TRUNK${i}`], "none");
+            flat[`UNTAGGED_TRUNK${i}`] = stringOrDefault(trunks[`UNTAGGED_TRUNK${i}`], "none");
+          }
+
+          return flat;
+        }
+
+        function cloneStructuredSettingsPayload(source) {
+          if (!source || typeof source !== "object") {
+            return null;
+          }
+          try {
+            return JSON.parse(JSON.stringify(source));
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function structuredSettingsDefaultsTemplate() {
+          const ssids = {};
+          const apiso = {};
+          const vlanPool = {};
+          for (let i = 1; i <= 12; i++) {
+            const idx = String(i).padStart(2, "0");
+            ssids[`SSID_${idx}`] = "unused-placeholder";
+            apiso[`APISO_${idx}`] = "0";
+            vlanPool[`VLAN_${idx}`] = "none";
+          }
+
+          const ethPorts = {};
+          const trunks = {
+            _description: "Per-port trunk enable plus tagged/untagged membership"
+          };
+          for (let i = 1; i <= 8; i++) {
+            ethPorts[`ETH${i}_VLAN`] = "none";
+            trunks[`TRUNK${i}`] = "0";
+            trunks[`TAGGED_TRUNK${i}`] = "none";
+            trunks[`UNTAGGED_TRUNK${i}`] = "none";
+          }
+
+          return {
+            General: {
+              _description: "Global addon flags and behavior toggles",
+              BOOT_ENABLED: "0",
+              DRY_RUN: "yes",
+              ENABLE_STP: "0",
+              EXPERIMENTAL: "0",
+              PERSISTENT: "no"
+            },
+            SSH: {
+              _description: "SSH settings for main router and nodes",
+              SSH_USER: "admin",
+              SSH_PORT: "22",
+              NODE_SSH_USER: "admin",
+              NODE_SSH_PORT: "22",
+              SSH_KEYS_INSTALLED: "0"
+            },
+            Nodes: {
+              _description: "Configured node IPs (used for sync and remote execution)",
+              NODE1: "none",
+              NODE2: "none",
+              NODE3: "none",
+              NODE4: "none",
+              NODE5: "none"
+            },
+            WiFi: {
+              _description: "SSID slots and per-SSID AP isolation flags (APISO)",
+              SSIDs: ssids,
+              APISO: apiso
+            },
+            VLAN: {
+              _description: "All VLAN-related configuration: pool, per-port mapping, trunks",
+              Pool: vlanPool,
+              Ethernet_ports: ethPorts,
+              Trunks: trunks
+            },
+            Hardware: {
+              _description: "Detected hardware profile (auto-generated by hw_probe.sh; do not edit)",
+              MODEL: "",
+              PRODUCTID: "",
+              MAX_SSIDS: "0",
+              RADIOS: [],
+              GUEST_SLOTS: "0",
+              ETH_PORTS: [],
+              LAN_PORT_LABELS: [],
+              WAN_IF: "",
+              MAX_ETH_PORTS: "0"
+            }
+          };
+        }
+
+        function expandFlatSettingsToStructured(flat, source) {
+          const target = cloneStructuredSettingsPayload(source) || structuredSettingsDefaultsTemplate();
+          const general = target.General = ensurePlainObject(target.General);
+          general.PERSISTENT = stringOrDefault(flat.PERSISTENT, general.PERSISTENT ?? "no");
+          general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
+          general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
+
+          const nodes = target.Nodes = ensurePlainObject(target.Nodes);
+          for (let i = 1; i <= 5; i++) {
+            const key = `NODE${i}`;
+            nodes[key] = stringOrDefault(flat[key], nodes[key] ?? "none");
+          }
+
+          const wifi = target.WiFi = ensurePlainObject(target.WiFi);
+          const ssids = wifi.SSIDs = ensurePlainObject(wifi.SSIDs);
+          const apiso = wifi.APISO = ensurePlainObject(wifi.APISO);
+          const vlan = target.VLAN = ensurePlainObject(target.VLAN);
+          const pool = vlan.Pool = ensurePlainObject(vlan.Pool);
+
+          for (let i = 1; i <= 12; i++) {
+            const idx = String(i).padStart(2, "0");
+            ssids[`SSID_${idx}`] = stringOrDefault(flat[`SSID_${idx}`], ssids[`SSID_${idx}`] ?? "unused-placeholder");
+            apiso[`APISO_${idx}`] = stringOrDefault(flat[`APISO_${idx}`], apiso[`APISO_${idx}`] ?? "0");
+            pool[`VLAN_${idx}`] = stringOrDefault(flat[`VLAN_${idx}`], pool[`VLAN_${idx}`] ?? "none");
+          }
+
+          const ethPorts = vlan.Ethernet_ports = ensurePlainObject(vlan.Ethernet_ports);
+          const trunks = vlan.Trunks = ensurePlainObject(vlan.Trunks);
+          for (let i = 1; i <= 8; i++) {
+            ethPorts[`ETH${i}_VLAN`] = stringOrDefault(flat[`ETH${i}_VLAN`], ethPorts[`ETH${i}_VLAN`] ?? "none");
+            trunks[`TRUNK${i}`] = stringOrDefault(flat[`TRUNK${i}`], trunks[`TRUNK${i}`] ?? "0");
+            trunks[`TAGGED_TRUNK${i}`] = stringOrDefault(flat[`TAGGED_TRUNK${i}`], trunks[`TAGGED_TRUNK${i}`] ?? "none");
+            trunks[`UNTAGGED_TRUNK${i}`] = stringOrDefault(flat[`UNTAGGED_TRUNK${i}`], trunks[`UNTAGGED_TRUNK${i}`] ?? "none");
+          }
+
+          return target;
+        }
+
         /* ================== HW SETTINGS + TABLE GENERATION ================== */
         let HW_SETTINGS = {
           MAX_SSIDS: 12,
           MAX_ETH_PORTS: 3
         };
 
-        // Load hardware configuration from settings/hw_settings.json
+        // Load hardware configuration from settings/settings.json (Hardware block)
         async function loadHwSettings() {
           try {
-            const response = await fetch("settings/hw_settings.json?_=" + Date.now());
+            const response = await fetch("settings/settings.json?_=" + Date.now());
 
             if (!response.ok) {
               // If 404 or server error, use defaults
-              console.warn(`⚠️ hw_settings.json not found (HTTP ${response.status}) — using default values.`);
+                console.warn(`⚠️ settings.json or Hardware block not found (HTTP ${response.status}) — using default values.`);
               
               // ✅ Changed from 3 → 4 here so you can see it working when file missing
               HW_SETTINGS = { MAX_SSIDS: 12, MAX_ETH_PORTS: 4 };
@@ -276,17 +502,19 @@
               return;
             }
 
-            // Try to parse JSON
+            // Try to parse JSON and read the Hardware block (backwards-compatible)
             const json = await response.json();
+            // Prefer the consolidated Hardware block if present
+            const hw = (json && typeof json === 'object' && json.Hardware && typeof json.Hardware === 'object') ? json.Hardware : json;
             HW_SETTINGS = {
-              MAX_SSIDS: json.MAX_SSIDS ?? 12,
-              MAX_ETH_PORTS: json.MAX_ETH_PORTS ?? 3
+              MAX_SSIDS: parseInt(hw.MAX_SSIDS, 10) || 12,
+              MAX_ETH_PORTS: parseInt(hw.MAX_ETH_PORTS, 10) || 3
             };
             console.log(`✅ Loaded HW config: ${HW_SETTINGS.MAX_SSIDS} SSIDs, ${HW_SETTINGS.MAX_ETH_PORTS} LAN ports`);            generateDynamicTables();
 
           } catch (e) {
             // Handle missing file, parse errors, or local file:// load errors
-            console.warn("⚠️ Failed to load hw_settings.json, using defaults.", e);
+            console.warn("⚠️ Failed to load settings.json or parse Hardware block, using defaults.", e);
             
             // ✅ Add this explicit fallback here as well
             HW_SETTINGS = { MAX_SSIDS: 12, MAX_ETH_PORTS: 4 };
@@ -478,6 +706,8 @@ function showTooltip() {
     const NODE_DISABLED_TOOLTIP = "Configure node(s) first!";
     const nodeDependentButtons = [];
     let CURRENT_SETTINGS_CACHE = null;
+    let CURRENT_SETTINGS_STRUCTURED = null;
+    let CURRENT_SETTINGS_SHAPE = "flat";
     function initNodeDependentButtons(){
       var syncBtn = document.getElementById("syncNodesBtn");
       var sshBtn = document.getElementById("sshInstallBtn");
@@ -1142,6 +1372,8 @@ function showTooltip() {
       updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
       CURRENT_SETTINGS_CACHE = null;
+      CURRENT_SETTINGS_STRUCTURED = null;
+      CURRENT_SETTINGS_SHAPE = "flat";
       setNodeButtonsEnabled(false);
     }
 
@@ -1155,6 +1387,7 @@ function showTooltip() {
 
     window.addEventListener("DOMContentLoaded", async () => {
       initNodeDependentButtons();
+      updateExperimentalVersionBadge();
       // ⬅️ NEW: build tables dynamically first
       await loadHwSettings(); 
       scheduleFormPaneWidthUpdate();
@@ -1924,6 +2157,8 @@ async function runVlanManagerOnlyNodes() {
       if(!r.ok){ 
         appendCliText(`Error: cannot load settings.json (${r.status})\n${t}\n`,{scroll:'force'}); 
         CURRENT_SETTINGS_CACHE = null;
+        CURRENT_SETTINGS_STRUCTURED = null;
+        CURRENT_SETTINGS_SHAPE = "flat";
         setNodeButtonsEnabled(false);
         return; 
       }
@@ -1933,18 +2168,30 @@ async function runVlanManagerOnlyNodes() {
       } catch(e){ 
         appendCliText("settings.json is not valid JSON:\n\n"+t+"\n",{scroll:'force'}); 
         CURRENT_SETTINGS_CACHE = null;
+        CURRENT_SETTINGS_STRUCTURED = null;
+        CURRENT_SETTINGS_SHAPE = "flat";
         setNodeButtonsEnabled(false);
         return; 
       }
       // Ensure tables are ready before filling (handles early Load clicks)
       ensureTablesReady();
-      CURRENT_SETTINGS_CACHE = data;
-      updateNodeButtonsFromSettings(data);
-      fillFormFromSettings(data);
+      if (isStructuredSettingsPayload(data)) {
+        CURRENT_SETTINGS_STRUCTURED = data;
+        CURRENT_SETTINGS_SHAPE = "sectioned";
+        CURRENT_SETTINGS_CACHE = flattenStructuredSettingsPayload(data);
+      } else {
+        CURRENT_SETTINGS_STRUCTURED = null;
+        CURRENT_SETTINGS_SHAPE = "flat";
+        CURRENT_SETTINGS_CACHE = data;
+      }
+      updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
+      fillFormFromSettings(CURRENT_SETTINGS_CACHE);
       appendCliText("Loaded settings.json into the form.\n",{scroll:'force'});
     } catch(err){ 
       appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
       CURRENT_SETTINGS_CACHE = null;
+      CURRENT_SETTINGS_STRUCTURED = null;
+      CURRENT_SETTINGS_SHAPE = "flat";
       setNodeButtonsEnabled(false);
     }
   }
@@ -1953,28 +2200,37 @@ async function runVlanManagerOnlyNodes() {
     function toSSIDPlaceholder(s){ const v=String(s||"").trim(); return v===""?"unused-placeholder":v; }
     function formToSettingsJSON(){
       const f = document.getElementById("settingsForm");
-      const out = {};
+      const flat = {};
       for(let i=1;i<=5;i++){
-        out["NODE"+i] = toNone(f["NODE"+i]?.value||"");
+        flat["NODE"+i] = toNone(f["NODE"+i]?.value||"");
       }
       for(let i=1;i<=(HW_SETTINGS?.MAX_ETH_PORTS||3);i++){
-        out[`ETH${i}_VLAN`] = toNone(f[`ETH${i}_VLAN`]?.value||"");
+        flat[`ETH${i}_VLAN`] = toNone(f[`ETH${i}_VLAN`]?.value||"");
         const trunkState = collectTrunkValues(i);
-        out[`TRUNK${i}`] = trunkState.enabled ? "1" : "0";
-        out[`TAGGED_TRUNK${i}`] = trunkState.taggedValue;
-        out[`UNTAGGED_TRUNK${i}`] = trunkState.untagValue;
+        flat[`TRUNK${i}`] = trunkState.enabled ? "1" : "0";
+        flat[`TAGGED_TRUNK${i}`] = trunkState.taggedValue;
+        flat[`UNTAGGED_TRUNK${i}`] = trunkState.untagValue;
       }
       for(let i=1;i<=(HW_SETTINGS?.MAX_SSIDS||12);i++){
         const idx = String(i).padStart(2,"0");
-        out[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||"");
-        out[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
-        out[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0");
+        flat[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||"");
+        flat[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
+        flat[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0");
       }
-      out["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
-      out["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
+      flat["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
+      flat["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
-      out["EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
-      return JSON.stringify(out);
+      flat["EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
+
+      if (CURRENT_SETTINGS_SHAPE === "sectioned") {
+        return JSON.stringify(
+          expandFlatSettingsToStructured(flat, CURRENT_SETTINGS_STRUCTURED),
+          null,
+          2
+        );
+      }
+
+      return JSON.stringify(flat);
     }
 
 const MODAL_SAFE_MARGIN = 24;
