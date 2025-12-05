@@ -476,17 +476,17 @@ enable_cron_now() {
     return 0
   fi
 
-  info -c vlan,cli "Enabling cron: $CRON_NAME (*/5) -> $INJ_BASE/heal_event.sh cron"
+  info -c vlan,cli "Enabling cron: $CRON_NAME (*/5) -> $INJ_BASE/functions/heal_event.sh cron"
   "$CRU_BIN" d "$CRON_NAME" 2>/dev/null
 
-  if "$CRU_BIN" a "$CRON_NAME" "*/5 * * * * $INJ_BASE/heal_event.sh cron >/dev/null 2>&1"; then
+  if "$CRU_BIN" a "$CRON_NAME" "*/5 * * * * $INJ_BASE/functions/heal_event.sh cron"; then
     info -c vlan,cli "Cron job $CRON_NAME added"
   else
     error -c vlan,cli "Failed to add cron job $CRON_NAME"
     return 1
   fi
 
-  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
     info -c vlan,cli "Cron confirmed for $CRON_NAME"
   else
     warn -c vlan,cli "Cron verification failed: $CRON_NAME not listed"

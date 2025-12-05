@@ -23,12 +23,25 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
+
+# Bootstrap hardware layout (MAX_SSIDS, ETH_PORTS) similar to mervlan_manager.sh
+: "${HW_SETTINGS_FILE:=$SETTINGS_FILE}"
+
+if [ -z "${MAX_SSIDS:-}" ]; then
+  MAX_SSIDS=$(json_get_int MAX_SSIDS 12 "$HW_SETTINGS_FILE")
+fi
+
+if [ -z "${ETH_PORTS:-}" ]; then
+  ETH_PORTS=$(json_get_section_array "Hardware" "ETH_PORTS" "$HW_SETTINGS_FILE")
+  [ -z "$ETH_PORTS" ] && ETH_PORTS=$(json_get_array ETH_PORTS "$HW_SETTINGS_FILE")
+fi
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -48,14 +61,6 @@ trim_spaces() {
 
 to_lower() {
   printf '%s' "$1" | tr 'A-Z' 'a-z'
-}
-
-read_json() {
-  key="$1"; file="$2"
-  [ -n "$key" ] && [ -f "$file" ] || return 1
-  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p; s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$file" \
-    | head -1 \
-    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
 is_number() {
@@ -86,10 +91,10 @@ any_vlan_configured() {
   max_ssids=$(sanitize_epoch "$MAX_SSIDS")
   [ "$max_ssids" -ge 1 ] 2>/dev/null || max_ssids=12
 
-  # Check Ethernet port VLANs
+  # Check Ethernet port VLANs (VLAN.Ethernet_ports.ETHx_VLAN)
   local idx=1 vlan token
   for eth in $ETH_PORTS; do
-    vlan=$(read_json "ETH${idx}_VLAN" "$SETTINGS_FILE")
+    vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
     vlan=$(trim_spaces "$vlan")
     token=$(to_lower "$vlan")
     # Ignore unconfigured, trunk, or non-numeric entries
@@ -102,20 +107,14 @@ any_vlan_configured() {
     idx=$((idx+1))
   done
 
-  # Check SSID VLANs (only count if SSID is actually set)
-  local i=1 ssid ssid_token
+  # Check SSID VLANs from VLAN pool (VLAN_01..VLAN_NN)
+  # We only care if any VLAN_NN is a valid VLAN ID.
+  local i=1 vlan
   while [ $i -le "$max_ssids" ]; do
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
-    ssid=$(trim_spaces "$ssid")
+    vlan=$(json_get_flag "$(printf "VLAN_%02d" $i)" "" "$SETTINGS_FILE")
     vlan=$(trim_spaces "$vlan")
-    ssid_token=$(to_lower "$ssid")
-    # Only consider SSID if it has a valid name (not unused placeholder)
-    if [ -n "$ssid_token" ] && [ "$ssid_token" != "unused-placeholder" ]; then
-      # Check if VLAN is numeric and within valid range
-      if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
-        return 0
-      fi
+    if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+      return 0
     fi
     i=$((i+1))
   done
@@ -169,7 +168,7 @@ VLAN_SETTLE_DELAY=$(sanitize_epoch "$VLAN_SETTLE_DELAY")
 
 # Health heartbeat and mismatch tracking for cron-based monitoring
 HEALTH_OK_FILE="$LOCKDIR/vlan_health_ok.last"
-HEALTH_LOG_INTERVAL_SEC=$((12 * 3600))
+HEALTH_LOG_INTERVAL_SEC=$((12 * 3600)) # 12 hours
 LAST_MISMATCH_FILE="$LOCKDIR/vlan_last_mismatch.last"
 
 # ============================================================================ #
@@ -319,15 +318,39 @@ wait_for_rc_quiet() {
 # numeric VLAN IDs (2–4094 range). Returns deduplicated sorted list.           #
 # ============================================================================ #
 expected_vlans_from_settings() {
-  {
-    # Extract all VLAN_NN entries from settings.json
-    grep -Eo '"VLAN_[0-9][0-9]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null
-    # Extract all ETH*_VLAN entries from settings.json
-    grep -Eo '"ETH[0-9]+_VLAN"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null
-  } | sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -E '^[0-9]+$' \
-    | awk '{n=$1+0; if (n>=2 && n<=4094) print n}' \
+  # Pull VLAN IDs from VLAN.Pool (VLAN_01..NN) and VLAN.Ethernet_ports (ETHx_VLAN)
+  # using section-aware JSON helpers.
+  local vids tmp i idx vlan
+
+  # SSID VLAN pool
+  i=1
+  while :; do
+    tmp=$(printf 'VLAN_%02d' "$i")
+    vlan=$(json_get_flag "$tmp" "" "$SETTINGS_FILE")
+    [ -z "$vlan" ] && break
+    vlan=$(trim_spaces "$vlan")
+    if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+      vids="$vids
+$vlan"
+    fi
+    i=$((i+1))
+  done
+
+  # Access‑port VLANs
+  idx=1
+  for eth in $ETH_PORTS; do
+    vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
+    vlan=$(trim_spaces "$vlan")
+    if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+      vids="$vids
+$vlan"
+    fi
+    idx=$((idx+1))
+  done
+
+  printf '%s
+' "$vids" \
+    | sed '/^[[:space:]]*$/d' \
     | sort -n \
     | uniq
 }
