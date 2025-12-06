@@ -1,7 +1,21 @@
-mervlan v0.50
+mervlan v0.51
 
-IMPORTANT! Scripts does not follow main version. Every script has its own version.
-NEW FILES:
+UPDATED FILES:
+update_mervlan.sh – v0.51
+
+Added full backup system + rotation (keeps newest 3 archives).
+Added interactive restore mode (update_mervlan.sh restore).
+Unified temp workspace under /tmp/mervlan_tmp/updates.$$.
+Hardened GitHub download + validation of required files/dirs.
+Normalized script permissions (auto-755 for scripts, libs forced to 644).
+Preserves settings.json and SSH keys automatically.
+Boot hooks are safely disabled before update and restored afterwards.
+Improved node sync, remote cleanup, and hardware probe refresh.
+Clean final swap-in of updated tree with rollback if activation fails.
+Added version comparison when updating addon or restoring backups.
+
+################ IMPORTANT! Scripts does not follow main version.
+previous mervlan v0.50 changes
 
 UPDATED FILES:
 

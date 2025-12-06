@@ -993,6 +993,12 @@ else
     logger -t "$ADDON" "ERROR: Failed to initialize directories or logs"
     exit 1
 fi
+if mkdir -p "${MERV_BASE%/*}/mervlan_backups" 2>/dev/null; then
+    logger -t "$ADDON" "Backup directory created successfully"
+else
+    logger -t "$ADDON" "ERROR: Failed to create backup directory"
+    exit 1
+fi
 
 # Only ask for SSH credentials during a full install
 if [ "$MODE" = "full" ]; then

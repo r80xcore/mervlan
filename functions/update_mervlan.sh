@@ -46,7 +46,8 @@ readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
 
 # Persistent backup root on flash (for rollback archives)
-MERVLAN_BACKUP_DIR="$MERV_BASE/backup"
+# Example (default): /jffs/addons/mervlan_backups
+MERVLAN_BACKUP_DIR="${MERV_BASE%/*}/mervlan_backups"
 
 BACKUP_LIST="settings/settings.json"
 
@@ -72,17 +73,34 @@ $SSH_PUBKEY_RELATIVE"
 fi
 
 REQUIRED_STAGE_FILES="install.sh
+uninstall.sh
 changelog.txt
+README.md
+mervlan.asp
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh
 functions/heal_event.sh
 functions/service-event-handler.sh
 functions/sync_nodes.sh
+functions/collect_clients.sh
+functions/collect_local_clients.sh
+functions/dropbear_sshkey_gen.sh
+functions/hw_probe.sh
+functions/mervlan_trunk.sh
+functions/save_settings.sh
+functions/update_mervlan.sh
 settings/settings.json
+settings/var_settings.sh
+settings/log_settings.sh
+settings/lib_debug.sh
 settings/lib_json.sh
 settings/lib_ssh.sh
 templates/mervlan_templates.sh
-www/index.html"
+www/index.html
+www/help.html
+www/view_logs.html
+www/vlan_form_style.css
+www/vlan_index_style.css"
 
 # required directories in a valid package
 REQUIRED_STAGE_DIRS="functions settings templates www"
@@ -143,6 +161,11 @@ if [ "$MODE" = "restore" ]; then
 	fi
 	restore_mervlan() {
 		info -c cli,vlan "MerVLAN restore mode: restoring from on-device backups"
+
+		RESTORE_CURRENT_VERSION=""
+		if [ -f "$MERV_BASE/changelog.txt" ]; then
+			RESTORE_CURRENT_VERSION=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
+		fi
 
 		if [ ! -d "$MERVLAN_BACKUP_DIR" ]; then
 			warning_msg="No backup directory found at $MERVLAN_BACKUP_DIR"
@@ -260,6 +283,11 @@ if [ "$MODE" = "restore" ]; then
 			return 1
 		fi
 
+		RESTORE_TARGET_VERSION=""
+		if [ -f "$RESTORE_TREE/changelog.txt" ]; then
+			RESTORE_TARGET_VERSION=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$RESTORE_TREE/changelog.txt" 2>/dev/null)
+		fi
+
 		info -c cli,vlan "Swapping current MerVLAN installation with selected backup"
 		if [ -d "$MERV_BASE" ]; then
 			if ! rm -rf "$MERV_BASE" 2>/dev/null; then
@@ -289,6 +317,11 @@ if [ "$MODE" = "restore" ]; then
 
 		info -c cli,vlan "Restore completed successfully from $(basename "$chosen")"
 		info -c cli,vlan "Current installation now matches the selected backup archive"
+		if [ -n "$RESTORE_CURRENT_VERSION" ] || [ -n "$RESTORE_TARGET_VERSION" ]; then
+			info -c cli,vlan "MerVLAN version summary (restore):"
+			[ -n "$RESTORE_CURRENT_VERSION" ] && info -c cli,vlan "  From: $RESTORE_CURRENT_VERSION"
+			[ -n "$RESTORE_TARGET_VERSION" ] && info -c cli,vlan "  To:   $RESTORE_TARGET_VERSION"
+		fi
 		return 0
 	}
 
@@ -349,6 +382,15 @@ mkdir -p "$TMP_BASE" "$STAGE_DIR" "$BACKUP_DIR" 2>/dev/null || {
 	error -c cli,vlan "Failed to prepare temporary workspace at $TMP_BASE"
 	exit 1
 }
+
+# ========================================================================== #
+# CAPTURE CURRENT VERSION (BEFORE UPDATE)                                    #
+# ========================================================================== #
+
+OLD_VERSION=""
+if [ -f "$MERV_BASE/changelog.txt" ]; then
+	OLD_VERSION=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
+fi
 
 # ========================================================================== #
 # NODE/SSH HELPERS                                                           #
@@ -491,6 +533,7 @@ if [ "$missing" -ne 0 ]; then
 	error -c cli,vlan "Validation failed; downloaded archive does not look like a valid MerVLAN package"
 	exit 1
 fi
+info -c cli,vlan "Staged content validated successfully"
 # Temporarily tear down boot/service-event hooks so refreshed templates can be applied cleanly
 if [ -x "$BOOT_SCRIPT" ]; then
 	if [ "$BOOT_WAS_ENABLED" -eq 1 ]; then
@@ -729,11 +772,25 @@ fi
 # FINALIZATION                                                               #
 # ========================================================================== #
 
+NEW_VERSION=""
+if [ -f "$MERV_BASE/changelog.txt" ]; then
+	NEW_VERSION=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
+fi
+
+if [ -n "$OLD_VERSION" ] || [ -n "$NEW_VERSION" ]; then
+	info -c cli,vlan "MerVLAN version summary (update):"
+	[ -n "$OLD_VERSION" ] && info -c cli,vlan "  From: $OLD_VERSION"
+	[ -n "$NEW_VERSION" ] && info -c cli,vlan "  To:   $NEW_VERSION"
+fi
+
 info -c cli,vlan "MerVLAN update completed successfully"
 
 if [ -f "$MERV_BASE/changelog.txt" ]; then
-	info -c cli "changelog.txt contents:"
-	cat "$MERV_BASE/changelog.txt"
+	info -c cli "Changelog (current version):"
+	awk '
+		/^#####/ { exit }
+		{ print }
+	' "$MERV_BASE/changelog.txt"
 fi
 
 exit 0
