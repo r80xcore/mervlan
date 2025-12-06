@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.50a"                   #
+#                - File: update_mervlan.sh || version="0.51"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -32,55 +32,21 @@ cd /tmp 2>/dev/null || cd / || :
 . /usr/sbin/helper.sh
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
-
-# find curl binary in PATH or fallback to /usr/sbin/curl
-find_curl() {
-	if command -v curl >/dev/null 2>&1; then
-		printf '%s\n' "$(command -v curl)"
-	elif [ -x /usr/sbin/curl ]; then
-		printf '%s\n' "/usr/sbin/curl"
-	else
-		return 1
-	fi
-}
-
-# resolve curl once, fail with a helpful error if missing
-CURL_BIN="$(find_curl)" || {
-	error -c cli,vlan "curl not found (tried PATH and /usr/sbin/curl); cannot update MerVLAN."
-	exit 1
-}
-# channel/ref selection (default: main). Examples:
-#   update_mervlan.sh           -> refs/heads/main
-#   update_mervlan.sh dev       -> refs/heads/dev
-#   update_mervlan.sh refs/tags/v1.0.0 -> explicit ref
-CHANNEL="${1:-main}"
-
-case "$CHANNEL" in
-	""|main)
-		GITHUB_REF="refs/heads/main"
-		;;
-	dev)
-		GITHUB_REF="refs/heads/dev"
-		;;
-	refs/*)
-		GITHUB_REF="$CHANNEL"
-		;;
-	*)
-		GITHUB_REF="refs/heads/$CHANNEL"
-		;;
-esac
-
-info -c cli,vlan "Using Git ref: $GITHUB_REF"
 # ========================================================================== #
 # PATHS & CONSTANTS                                                          #
 # ========================================================================== #
 
-readonly GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$GITHUB_REF"
-readonly TMP_BASE="/tmp/mervlan_update.$$"
+# Central temporary root for MerVLAN operations (RAM)
+readonly TMP_DIR="/tmp/mervlan_tmp"
+readonly TMP_BASE="$TMP_DIR/updates.$$"
+
 readonly ARCHIVE="$TMP_BASE/mervlan.tar.gz"
 readonly STAGE_DIR="$TMP_BASE/stage"
 readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
+
+# Persistent backup root on flash (for rollback archives)
+MERVLAN_BACKUP_DIR="$MERV_BASE/backup"
 
 BACKUP_LIST="settings/settings.json"
 
@@ -131,8 +97,247 @@ cleanup_tmp() {
 
 trap cleanup_tmp EXIT
 
+
 # ========================================================================== #
-# BASIC VALIDATION                                                           #
+# MODE / CHANNEL PARSING                                                     #
+# ========================================================================== #
+
+#
+#   update_mervlan.sh                  -> MODE=update, CHANNEL=main
+#   update_mervlan.sh dev              -> MODE=update, CHANNEL=dev
+#   update_mervlan.sh update dev       -> MODE=update, CHANNEL=dev
+#   update_mervlan.sh restore          -> MODE=restore
+#   update_mervlan.sh refs/tags/vX.Y.Z -> MODE=update, CHANNEL=refs/tags/vX.Y.Z
+#
+
+MODE="update"
+CHANNEL="main"
+
+case "$1" in
+	""|main|dev|refs/*)
+		# old/simple usage: first arg is the channel directly
+		if [ -n "$1" ]; then
+			CHANNEL="$1"
+		fi
+		;;
+	restore)
+		MODE="restore"
+		;;
+	update)
+		MODE="update"
+		CHANNEL="${2:-main}"
+		;;
+	*)
+		error -c cli,vlan "Unknown mode/channel: $1"
+		echo "Usage: $0 [update [branch]|restore|main|dev|refs/<ref>]" >&2
+		exit 1
+		;;
+esac
+
+# For restore, we do not need curl or temp download setup
+if [ "$MODE" = "restore" ]; then
+	# BASIC VALIDATION (for restore path as well)
+	if [ ! -d "$MERV_BASE" ]; then
+		error -c cli,vlan "MerVLAN base directory missing at $MERV_BASE"
+		exit 1
+	fi
+	restore_mervlan() {
+		info -c cli,vlan "MerVLAN restore mode: restoring from on-device backups"
+
+		if [ ! -d "$MERVLAN_BACKUP_DIR" ]; then
+			warning_msg="No backup directory found at $MERVLAN_BACKUP_DIR"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			return 1
+		fi
+
+		set -- "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz
+		if [ ! -e "$1" ]; then
+			warning_msg="No backup archives found in $MERVLAN_BACKUP_DIR"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			return 1
+		fi
+
+		BACKUPS_LIST="$(ls "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz 2>/dev/null | sort -r)"
+		idx=0
+		echo "Available restore points:"
+		for b in $BACKUPS_LIST; do
+			idx=$((idx + 1))
+			base="$(basename "$b")"
+			printf '  %d) %s\n' "$idx" "$base"
+			eval "BACKUP_$idx=\"$b\""
+			[ "$idx" -ge 3 ] && break
+		done
+
+		if [ "$idx" -eq 0 ]; then
+			warning_msg="No backup archives available to restore"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			return 1
+		fi
+
+		printf "Select backup to restore [1-%d]: " "$idx"
+		read sel
+
+		case "$sel" in
+			1|2|3)
+				eval "chosen=\$BACKUP_$sel"
+				;;
+			*)
+				info -c cli,vlan "Restore aborted: invalid selection"
+				return 1
+				;;
+		esac
+
+		if [ -z "$chosen" ]; then
+			warning_msg="No backup selected"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			return 1
+		fi
+
+		echo ""
+		echo "WARNING: This will replace the current MerVLAN installation and settings with:" 
+		echo "  $(basename "$chosen")"
+		echo ""
+		printf "Continue? [y/N]: "
+		read ans
+
+		case "$ans" in
+			y|Y|yes|YES) ;;
+			*)
+				info -c cli,vlan "Restore aborted by user"
+				return 0
+				;;
+		esac
+
+		RESTORE_BASE="$TMP_DIR/restore.$$"
+		mkdir -p "$RESTORE_BASE" 2>/dev/null || {
+			warning_msg="Failed to create restore workdir: $RESTORE_BASE"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			return 1
+		}
+
+		BACKUP_BASENAME="$(basename "$chosen" .tar.gz)"
+		info -c cli,vlan "Extracting backup $BACKUP_BASENAME"
+		if ! tar -xzf "$chosen" -C "$RESTORE_BASE" 2>/dev/null; then
+			warning_msg="Failed to extract backup archive"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			rm -rf "$RESTORE_BASE" 2>/dev/null
+			return 1
+		fi
+
+		RESTORE_TREE="$RESTORE_BASE/$BACKUP_BASENAME"
+		if [ ! -d "$RESTORE_TREE" ]; then
+			warning_msg="Restore tree not found at $RESTORE_TREE"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			rm -rf "$RESTORE_BASE" 2>/dev/null
+			return 1
+		fi
+
+		info -c cli,vlan "Swapping current MerVLAN installation with selected backup"
+		if [ -d "$MERV_BASE" ]; then
+			if ! rm -rf "$MERV_BASE" 2>/dev/null; then
+				warning_msg="Failed to remove existing MerVLAN directory"
+				if command -v error >/dev/null 2>&1; then
+					error -c cli,vlan "$warning_msg"
+				else
+					echo "$warning_msg" >&2
+				fi
+				rm -rf "$RESTORE_BASE" 2>/dev/null
+				return 1
+			fi
+		fi
+
+		if ! mv "$RESTORE_TREE" "$MERV_BASE" 2>/dev/null; then
+			warning_msg="Failed to move restored tree into place"
+			if command -v error >/dev/null 2>&1; then
+				error -c cli,vlan "$warning_msg"
+			else
+				echo "$warning_msg" >&2
+			fi
+			rm -rf "$RESTORE_BASE" 2>/dev/null
+			return 1
+		fi
+
+		rm -rf "$RESTORE_BASE" 2>/dev/null || :
+
+		info -c cli,vlan "Restore completed successfully from $(basename "$chosen")"
+		info -c cli,vlan "Current installation now matches the selected backup archive"
+		return 0
+	}
+
+	restore_mervlan
+	exit $?
+fi
+
+# ========================================================================== #
+# CURL RESOLUTION (update mode only)                                         #
+# ========================================================================== #
+
+# find curl binary in PATH or fallback to /usr/sbin/curl
+find_curl() {
+	if command -v curl >/dev/null 2>&1; then
+		printf '%s\n' "$(command -v curl)"
+	elif [ -x /usr/sbin/curl ]; then
+		printf '%s\n' "/usr/sbin/curl"
+	else
+		return 1
+	fi
+}
+
+# resolve curl once, fail with a helpful error if missing
+CURL_BIN="$(find_curl)" || {
+	error -c cli,vlan "curl not found (tried PATH and /usr/sbin/curl); cannot update MerVLAN."
+	exit 1
+}
+
+# channel/ref selection
+case "$CHANNEL" in
+	""|main)
+		GITHUB_REF="refs/heads/main"
+		;;
+	dev)
+		GITHUB_REF="refs/heads/dev"
+		;;
+	refs/*)
+		GITHUB_REF="$CHANNEL"
+		;;
+	*)
+		GITHUB_REF="refs/heads/$CHANNEL"
+		;;
+esac
+
+readonly GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$GITHUB_REF"
+info -c cli,vlan "Using Git ref: $GITHUB_REF"
+
+# ========================================================================== #
+# BASIC VALIDATION (update mode)                                             #
 # ========================================================================== #
 
 if [ ! -d "$MERV_BASE" ]; then
@@ -218,8 +423,6 @@ elif [ -f "$BACKUP_DIR/settings/settings.json" ]; then
 	fi
 fi
 
-# ========================================================================== #
-# DOWNLOAD LATEST SNAPSHOT                                                   #
 # ========================================================================== #
 
 info -c cli,vlan "Downloading latest MerVLAN snapshot using: $CURL_BIN"
@@ -309,59 +512,67 @@ fi
 # REPLACE INSTALLATION                                                       #
 # ========================================================================== #
 
-OLD_DIR=""
-timestamp="$(date +%s 2>/dev/null | tr -d '\n')"
-[ -n "$timestamp" ] || timestamp="backup"
-
-OLD_DIR="$MERV_BASE.backup.$timestamp"
-NEW_DIR="$TMP_BASE/new_install"
-
-info -c cli,vlan "Creating snapshot backup at $OLD_DIR"
-if [ -d "$OLD_DIR" ]; then
-	rm -rf "$OLD_DIR" 2>/dev/null || :
+# ensure persistent backup root exists
+if [ ! -d "$MERVLAN_BACKUP_DIR" ]; then
+	if ! mkdir -p "$MERVLAN_BACKUP_DIR" 2>/dev/null; then
+		error -c cli,vlan "Failed to create backup root: $MERVLAN_BACKUP_DIR"
+		exit 1
+	fi
 fi
 
-if ! cp -pR "$MERV_BASE" "$OLD_DIR" 2>/dev/null; then
-	error -c cli,vlan "Failed to copy current installation to $OLD_DIR"
+timestamp="$(date +%Y%m%d-%H%M%S 2>/dev/null | tr -d '\n')"
+[ -n "$timestamp" ] || timestamp="backup"
+
+CURRENT_BACKUP_NAME="mervlan.backup.$timestamp"
+CURRENT_BACKUP_DIR="$MERVLAN_BACKUP_DIR/$CURRENT_BACKUP_NAME"
+MERVLAN_UPDATED_TREE_DIR="$TMP_BASE/updated_tree"
+
+info -c cli,vlan "Creating backup of current installation at $CURRENT_BACKUP_DIR"
+if [ -d "$CURRENT_BACKUP_DIR" ]; then
+	rm -rf "$CURRENT_BACKUP_DIR" 2>/dev/null || :
+fi
+
+if ! cp -pR "$MERV_BASE" "$CURRENT_BACKUP_DIR" 2>/dev/null; then
+	error -c cli,vlan "Failed to copy current installation to $CURRENT_BACKUP_DIR"
 	exit 1
 fi
 
-info -c cli,vlan "Building updated tree at $NEW_DIR"
-rm -rf "$NEW_DIR" 2>/dev/null || :
+info -c cli,vlan "Building updated tree at $MERVLAN_UPDATED_TREE_DIR"
+rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
 
-mkdir -p "$NEW_DIR" 2>/dev/null || {
+mkdir -p "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || {
 	error -c cli,vlan "Failed to create temporary install directory"
 	exit 1
 }
 
-if ! cp -a "$STAGE_DIR"/. "$NEW_DIR"/ 2>/dev/null; then
-	error -c cli,vlan "Failed to copy staged files into $NEW_DIR"
-	rm -rf "$NEW_DIR" 2>/dev/null
+if ! cp -a "$STAGE_DIR"/. "$MERVLAN_UPDATED_TREE_DIR"/ 2>/dev/null; then
+	error -c cli,vlan "Failed to copy staged files into $MERVLAN_UPDATED_TREE_DIR"
+	rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null
 	exit 1
 fi
 
 # CHMOD: normalize script permissions in new tree
 info -c cli,vlan "Normalizing script permissions in new tree"
 
-# 1) Default: make all .sh files under NEW_DIR executable (755)
+# 1) Default: make all .sh files under MERVLAN_UPDATED_TREE_DIR executable (755)
 for depth in "" "*/" "*/*/"; do
-    for f in "$NEW_DIR"/${depth}*.sh; do
-        [ -f "$f" ] 2>/dev/null || continue
-        chmod 755 "$f" 2>/dev/null || :
-    done
+	for f in "$MERVLAN_UPDATED_TREE_DIR"/${depth}*.sh; do
+		[ -f "$f" ] 2>/dev/null || continue
+		chmod 755 "$f" 2>/dev/null || :
+	done
 done
 
 # 2) Override: specific .sh files that must *not* be executable → 644
 for rel_path in \
-    "settings/var_settings.sh" \
-    "settings/log_settings.sh" \
-    "templates/mervlan_templates.sh" \
-    "settings/lib_debug.sh" \
-    "settings/lib_json.sh" \
-    "settings/lib_ssh.sh"
+	"settings/var_settings.sh" \
+	"settings/log_settings.sh" \
+	"templates/mervlan_templates.sh" \
+	"settings/lib_debug.sh" \
+	"settings/lib_json.sh" \
+	"settings/lib_ssh.sh"
 do
-    target="$NEW_DIR/$rel_path"
-    [ -f "$target" ] && chmod 644 "$target" 2>/dev/null || :
+	target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
+	[ -f "$target" ] && chmod 644 "$target" 2>/dev/null || :
 done
 
 
@@ -372,16 +583,16 @@ done
 info -c cli,vlan "Restoring preserved files"
 for rel_path in $BACKUP_LIST; do
 	backup_file="$BACKUP_DIR/$rel_path"
-	target="$NEW_DIR/$rel_path"
+	target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
 	if [ -f "$backup_file" ]; then
 		mkdir -p "$(dirname "$target")" 2>/dev/null || {
 			error -c cli,vlan "Failed to recreate directory for $rel_path"
-			rm -rf "$NEW_DIR" 2>/dev/null
+			rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null
 			exit 1
 		}
 		cp -p "$backup_file" "$target" 2>/dev/null || {
 			error -c cli,vlan "Failed to restore $rel_path"
-			rm -rf "$NEW_DIR" 2>/dev/null
+			rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null
 			exit 1
 		}
 		if [ -n "$SSH_KEY_RELATIVE" ] && [ "$rel_path" = "$SSH_KEY_RELATIVE" ]; then
@@ -398,9 +609,9 @@ rm -rf "$MERV_BASE" 2>/dev/null || {
 	exit 1
 }
 
-if ! mv "$NEW_DIR" "$MERV_BASE" 2>/dev/null; then
+if ! mv "$MERVLAN_UPDATED_TREE_DIR" "$MERV_BASE" 2>/dev/null; then
 	error -c cli,vlan "Failed to activate new installation"
-	mv "$OLD_DIR" "$MERV_BASE" 2>/dev/null
+	mv "$CURRENT_BACKUP_DIR" "$MERV_BASE" 2>/dev/null
 	exit 1
 fi
 
@@ -483,11 +694,40 @@ refresh_public_install
 
 
 # ========================================================================== #
-# FINALIZATION                                                               #
+# COMPRESS BACKUP AND PRUNE OLD ARCHIVES                                     #
 # ========================================================================== #
 
-# Remove old directory after successful update
-rm -rf "$OLD_DIR" 2>/dev/null
+# Compress the just-created backup directory to save space
+if [ -d "$CURRENT_BACKUP_DIR" ]; then
+	info -c cli,vlan "Compressing backup $CURRENT_BACKUP_NAME (gzip)"
+	if tar -czf "$MERVLAN_BACKUP_DIR/$CURRENT_BACKUP_NAME.tar.gz" \
+		-C "$MERVLAN_BACKUP_DIR" "$CURRENT_BACKUP_NAME" 2>/dev/null; then
+		rm -rf "$CURRENT_BACKUP_DIR" 2>/dev/null || :
+	else
+		warn -c cli,vlan "Failed to compress backup $CURRENT_BACKUP_DIR; leaving directory uncompressed"
+	fi
+fi
+
+# Keep only the 3 newest compressed backups
+if [ -d "$MERVLAN_BACKUP_DIR" ]; then
+	set -- "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz
+	if [ -e "$1" ]; then
+		BACKUPS_LIST="$(ls "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz 2>/dev/null | sort -r)"
+		count=0
+		for b in $BACKUPS_LIST; do
+			count=$((count + 1))
+			if [ "$count" -le 3 ]; then
+				continue
+			fi
+			info -c cli,vlan "Removing old backup: $b"
+			rm -f "$b" 2>/dev/null || :
+		done
+	fi
+fi
+
+# ========================================================================== #
+# FINALIZATION                                                               #
+# ========================================================================== #
 
 info -c cli,vlan "MerVLAN update completed successfully"
 
