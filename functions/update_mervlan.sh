@@ -453,18 +453,6 @@ for rel_path in $BACKUP_LIST; do
 	fi
 done
 
-# Track previous boot state from backed-up settings.json snapshot
-BOOT_WAS_ENABLED=0
-if command -v json_get_flag >/dev/null 2>&1; then
-	if [ "$(json_get_flag "BOOT_ENABLED" "0" "$BACKUP_DIR/settings/settings.json" 2>/dev/null)" = "1" ]; then
-		BOOT_WAS_ENABLED=1
-	fi
-elif [ -f "$BACKUP_DIR/settings/settings.json" ]; then
-	if grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$BACKUP_DIR/settings/settings.json" 2>/dev/null; then
-		BOOT_WAS_ENABLED=1
-	fi
-fi
-
 # ========================================================================== #
 
 info -c cli,vlan "Downloading latest MerVLAN snapshot using: $CURL_BIN"
@@ -534,18 +522,28 @@ if [ "$missing" -ne 0 ]; then
 	exit 1
 fi
 info -c cli,vlan "Staged content validated successfully"
+
 # Temporarily tear down boot/service-event hooks so refreshed templates can be applied cleanly
 if [ -x "$BOOT_SCRIPT" ]; then
-	if [ "$BOOT_WAS_ENABLED" -eq 1 ]; then
-		info -c cli,vlan "Temporarily disabling MerVLAN hooks before swap"
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
-			warn -c cli,vlan "mervlan_boot.sh disable returned non-zero (continuing)"
+	info -c cli,vlan "Disabling MerVLAN hooks on main router before swap"
+
+	# Always tear down hooks on the main router
+	if ! sh "$BOOT_SCRIPT" setupdisable >/dev/null 2>&1; then
+		warn -c cli,vlan "mervlan_boot.sh setupdisable returned non-zero (continuing)"
+	fi
+
+	if ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+		warn -c cli,vlan "mervlan_boot.sh disable returned non-zero (continuing)"
+	fi
+
+	# Optionally tear down hooks on nodes when SSH + nodes are configured
+	if ssh_keys_effectively_installed && has_configured_nodes; then
+		info -c cli,vlan "Disabling MerVLAN hooks on nodes before swap"
+		if ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then
+			warn -c cli,vlan "mervlan_boot.sh nodedisable returned non-zero (continuing)"
 		fi
 	else
-		info -c cli,vlan "Boot already disabled; skipping disable step"
-	fi
-	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupdisable >/dev/null 2>&1; then
-		warn -c cli,vlan "mervlan_boot.sh setupdisable returned non-zero (continuing)"
+		info -c cli,vlan "nodedisable skipped (no nodes configured or SSH keys absent)"
 	fi
 else
 	warn -c cli,vlan "mervlan_boot.sh not executable; skipping pre-update teardown"
@@ -717,17 +715,37 @@ else
 fi
 
 # Reapply boot/service-event hooks from the refreshed installation
+BOOT_ENABLED_NOW="0"
+if [ -f "$MERV_BASE/settings/settings.json" ] && \
+   command -v json_get_section_value >/dev/null 2>&1; then
+	BOOT_ENABLED_NOW="$(json_get_section_value "General" "BOOT_ENABLED" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
+fi
+
 if [ -x "$BOOT_SCRIPT" ]; then
 	info -c cli,vlan "Re-applying MerVLAN hooks on the main router"
-	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
+
+	# Always refresh the setup hooks on the main router
+	if ! sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
 		warn -c cli,vlan "mervlan_boot.sh setupenable returned non-zero (continuing)"
 	fi
-	if [ "$BOOT_WAS_ENABLED" -eq 1 ]; then
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
+
+	if [ "$BOOT_ENABLED_NOW" = "1" ]; then
+		info -c cli,vlan "BOOT_ENABLED=1 in settings; enabling MerVLAN boot on main router"
+		if ! sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
 			warn -c cli,vlan "mervlan_boot.sh enable returned non-zero (continuing)"
 		fi
+
+		# Optionally re-enable hooks on nodes when SSH + nodes are configured
+		if ssh_keys_effectively_installed && has_configured_nodes; then
+			info -c cli,vlan "Enabling MerVLAN boot on nodes"
+			if ! sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then
+				warn -c cli,vlan "mervlan_boot.sh nodeenable returned non-zero (continuing)"
+			fi
+		else
+			info -c cli,vlan "Node enable skipped (no nodes configured or SSH keys absent)"
+		fi
 	else
-		info -c cli,vlan "Boot was disabled before update; leaving MerVLAN boot disabled"
+		info -c cli,vlan "BOOT_ENABLED is 0 in settings; leaving MerVLAN boot disabled"
 	fi
 else
 	warn -c cli,vlan "mervlan_boot.sh not executable; skipping post-update hook setup"
