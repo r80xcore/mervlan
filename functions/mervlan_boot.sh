@@ -501,7 +501,7 @@ disable_cron_now() {
 
   "$CRU_BIN" d "$CRON_NAME" 2>/dev/null
 
-  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
     warn -c vlan,cli "Cron disable verification failed; entry still present"
   else
     info -c vlan,cli "Cron disabled: $CRON_NAME"
@@ -772,7 +772,7 @@ case "$ACTION" in
     fi
 
     if [ -n "$CRU_BIN" ]; then
-      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
         cron_state=present
       fi
     fi
@@ -875,7 +875,7 @@ case "$ACTION" in
       fi
     fi
     if [ -n "$CRU_BIN" ]; then
-      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/heal_event.sh cron"; then
+      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
         cron_state=present
       fi
     fi
