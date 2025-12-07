@@ -1,8 +1,9 @@
 mervlan v0.51
 
 UPDATED FILES:
-update_mervlan.sh – v0.51
-
+update_mervlan.sh – v0.51a
+Hook teardown/reapply overhaul – update_mervlan.sh always disables hooks (main + nodes) before swapping, stores BOOT_ENABLED from the restored JSON, then re-applies hooks (including cron) based strictly on that saved value, ensuring boot state survives upgrades.
+Persistent backup root fix – backups now live under /jffs/addons/mervlan_backups, preventing recursive cp failures when snapshotting the current install.
 Added full backup system + rotation (keeps newest 3 archives).
 Added interactive restore mode (update_mervlan.sh restore).
 Unified temp workspace under /tmp/mervlan_tmp/updates.$$.
@@ -12,7 +13,11 @@ Preserves settings.json and SSH keys automatically.
 Boot hooks are safely disabled before update and restored afterwards.
 Improved node sync, remote cleanup, and hardware probe refresh.
 Clean final swap-in of updated tree with rollback if activation fails.
-Added version comparison when updating addon or restoring backups.
+Added version comparison when updating addon or restoring backups or updating.
+
+mervlan_boot.sh v0.51a
+Cron verification bugfix – mervlan_boot.sh now checks the same cron path ($INJ_BASE/functions/heal_event.sh cron) in enable/disable/status so cron state is reported and toggled correctly.
+
 
 ################ IMPORTANT! Scripts does not follow main version.
 previous mervlan v0.50 changes
