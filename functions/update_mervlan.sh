@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.51"                   #
+#                - File: update_mervlan.sh || version="0.51a"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -656,6 +656,24 @@ if ! mv "$MERVLAN_UPDATED_TREE_DIR" "$MERV_BASE" 2>/dev/null; then
 	exit 1
 fi
 
+# Capture boot state before any install scripts can modify settings
+BOOT_ENABLED_FROM_RESTORE="0"
+if [ -f "$MERV_BASE/settings/settings.json" ]; then
+	if command -v json_get_section_value >/dev/null 2>&1; then
+		BOOT_ENABLED_FROM_RESTORE="$(json_get_section_value "General" "BOOT_ENABLED" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
+	elif command -v json_get_flag >/dev/null 2>&1; then
+		BOOT_ENABLED_FROM_RESTORE="$(json_get_flag "BOOT_ENABLED" "0" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
+	elif grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$MERV_BASE/settings/settings.json" 2>/dev/null; then
+		BOOT_ENABLED_FROM_RESTORE="1"
+	fi
+fi
+
+if [ "$BOOT_ENABLED_FROM_RESTORE" != "1" ]; then
+	BOOT_ENABLED_FROM_RESTORE="0"
+fi
+
+info -c cli,vlan "Detected BOOT_ENABLED in restored settings: $BOOT_ENABLED_FROM_RESTORE"
+
 # ========================================================================== #
 # OPTIONAL POST-UPDATE TASKS                                                 #
 # ========================================================================== #
@@ -714,13 +732,10 @@ else
 	info -c cli,vlan "Node sync skipped (no nodes configured or SSH keys absent)"
 fi
 
-# Reapply boot/service-event hooks from the refreshed installation
-BOOT_ENABLED_NOW="0"
-if [ -f "$MERV_BASE/settings/settings.json" ] && \
-   command -v json_get_section_value >/dev/null 2>&1; then
-	BOOT_ENABLED_NOW="$(json_get_section_value "General" "BOOT_ENABLED" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
-fi
+# Ensure the public install view reflects the refreshed files before re-adding hooks
+refresh_public_install
 
+# Reapply boot/service-event hooks from the refreshed installation
 if [ -x "$BOOT_SCRIPT" ]; then
 	info -c cli,vlan "Re-applying MerVLAN hooks on the main router"
 
@@ -729,8 +744,8 @@ if [ -x "$BOOT_SCRIPT" ]; then
 		warn -c cli,vlan "mervlan_boot.sh setupenable returned non-zero (continuing)"
 	fi
 
-	if [ "$BOOT_ENABLED_NOW" = "1" ]; then
-		info -c cli,vlan "BOOT_ENABLED=1 in settings; enabling MerVLAN boot on main router"
+	if [ "$BOOT_ENABLED_FROM_RESTORE" = "1" ]; then
+		info -c cli,vlan "BOOT_ENABLED_FROM_RESTORE=1; enabling MerVLAN boot on main router"
 		if ! sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
 			warn -c cli,vlan "mervlan_boot.sh enable returned non-zero (continuing)"
 		fi
@@ -745,14 +760,11 @@ if [ -x "$BOOT_SCRIPT" ]; then
 			info -c cli,vlan "Node enable skipped (no nodes configured or SSH keys absent)"
 		fi
 	else
-		info -c cli,vlan "BOOT_ENABLED is 0 in settings; leaving MerVLAN boot disabled"
+		info -c cli,vlan "BOOT_ENABLED_FROM_RESTORE!=1; leaving MerVLAN boot disabled"
 	fi
 else
 	warn -c cli,vlan "mervlan_boot.sh not executable; skipping post-update hook setup"
 fi
-
-refresh_public_install
-
 
 # ========================================================================== #
 # COMPRESS BACKUP AND PRUNE OLD ARCHIVES                                     #
