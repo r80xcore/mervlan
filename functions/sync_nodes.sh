@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.49"                        #
+#               - File: sync_nodes.sh || version="0.50"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -104,6 +104,7 @@ functions/mervlan_boot.sh
 functions/mervlan_manager.sh 
 functions/collect_local_clients.sh 
 functions/heal_event.sh  
+functions/service-event-handler.sh
 templates/mervlan_templates.sh
 "
 
@@ -113,6 +114,7 @@ functions/mervlan_boot.sh
 functions/mervlan_manager.sh
 functions/collect_local_clients.sh
 functions/heal_event.sh
+functions/service-event-handler.sh
 "
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
 FILES_TO_COPY_CHMOD_644="
@@ -571,45 +573,45 @@ set_remote_permissions_644() {
     fi
 }
 
-# mark_node_remote — Create node sentinel flag to enable node-only flows
-mark_node_remote() {
+# set_node_flag_remote — Mark remote device as MerVLAN node via settings.json
+set_node_flag_remote() {
     local node_ip="$1"
-    local remote_cmd="mkdir -p '$MERV_BASE' && : > '$MERV_BASE/.is_node' && chmod 644 '$MERV_BASE/.is_node'"
+    local node_flag_value=""
+    local remote_cmd="
+        SETTINGS_FILE='$MERV_BASE/settings/settings.json';
+        if [ ! -f \"\$SETTINGS_FILE\" ]; then
+            echo 'settings-missing' >&2
+            exit 1
+        fi
+        if [ ! -f '$MERV_BASE/settings/lib_json.sh' ]; then
+            echo 'lib-json-missing' >&2
+            exit 1
+        fi
+        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null || {
+            echo 'lib-json-load-failed' >&2
+            exit 1
+        }
+        json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
+        json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
+    "
 
-    dbg_log "Setting node sentinel remotely"
+    dbg_log "Setting IS_NODE flag remotely"
     dbg_var node_ip remote_cmd
 
-    if run_cmd dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "$remote_cmd"; then
-        if [ "$DRY_RUN" = "yes" ]; then
-            info -c cli,vlan "[DRY-RUN] Would mark $node_ip as MerVLAN node"
-        else
-            info -c cli,vlan "✓ Marked $node_ip as MerVLAN node (.is_node)"
-        fi
-        return 0
-    fi
-
-    local rc=$?
     if [ "$DRY_RUN" = "yes" ]; then
-        info -c cli,vlan "[DRY-RUN] Simulated failure creating .is_node on $node_ip (exit $rc)"
-    else
-        error -c cli,vlan "✗ Failed to write .is_node sentinel on $node_ip"
-    fi
-    return 1
-}
-
-# unmark_node_remote — Remove node sentinel during teardown (unused but available)
-unmark_node_remote() {
-    local node_ip="$1"
-    if [ "$DRY_RUN" = "yes" ]; then
-        info -c cli,vlan "[DRY-RUN] Would remove node sentinel on $node_ip"
+        info -c cli,vlan "[DRY-RUN] Would set IS_NODE=1 in settings.json on $node_ip"
         return 0
     fi
 
-    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "rm -f '$MERV_BASE/.is_node'" 2>/dev/null; then
-        info -c cli,vlan "✓ Cleared node sentinel on $node_ip"
+    node_flag_value=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+        "$SSH_NODE_USER@$node_ip" "$remote_cmd" 2>/dev/null | tail -n 1 | tr -d '\r\n')
+
+    if [ "$node_flag_value" = "1" ]; then
+        info -c cli,vlan "✓ Set IS_NODE=1 in settings.json on $node_ip"
         return 0
     fi
-    warn -c cli,vlan "⚠️  Could not remove .is_node sentinel on $node_ip"
+
+    error -c cli,vlan "✗ Failed to set IS_NODE=1 on $node_ip (read back '$node_flag_value')"
     return 1
 }
 
@@ -755,15 +757,10 @@ for node_ip in $NODE_IPS; do
                 fi
             done
 
-            if ! mark_node_remote "$node_ip"; then
+            # Mark remote device as MerVLAN node via IS_NODE flag
+            if ! set_node_flag_remote "$node_ip"; then
                 overall_success=false
                 continue
-            fi
-
-            if [ "$DRY_RUN" != "yes" ]; then
-                if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "[ -f '$MERV_BASE/.is_node' ]" 2>/dev/null; then
-                    warn -c cli,vlan "⚠️  .is_node sentinel missing on $node_ip after mark"
-                fi
             fi
 
             if [ "$DRY_RUN" = "yes" ]; then

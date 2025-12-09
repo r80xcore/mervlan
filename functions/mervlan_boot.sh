@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.51a"                    #
+#                - File: mervlan_boot.sh || version="0.52"                    #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -119,8 +119,21 @@ remove_template_block() {
 }
 
 is_node() {
+  # SSH-triggered context from main router overrides local flag
   [ "${MERV_NODE_CONTEXT:-0}" = "1" ] && return 0
-  [ -f "$MERV_BASE/.is_node" ] && return 0
+
+  # Primary source of truth is IS_NODE flag in settings.json
+  if [ -f "$SETTINGS_FILE" ]; then
+    if [ "$(json_get_flag "IS_NODE" "0" "$SETTINGS_FILE" 2>/dev/null)" = "1" ]; then
+      return 0
+    fi
+  fi
+
+  # Legacy fallback while migrating away from .is_node sentinels
+  if [ -f "$MERV_BASE/.is_node" ]; then
+    return 0
+  fi
+
   return 1
 }
 
@@ -634,22 +647,27 @@ case "$ACTION" in
     if [ "${MERV_NODE_CONTEXT:-0}" = "1" ] || [ "$force_local" = "1" ]; then
       if ! is_node; then
         error -c vlan,cli "Refusing nodeenable on this device (not marked as node)"
-        error -c vlan,cli "Create $MERV_BASE/.is_node or run via SSH with MERV_NODE_CONTEXT=1"
+        error -c vlan,cli "Ensure IS_NODE is 1 in settings.json or run via SSH with MERV_NODE_CONTEXT=1"
         exit 1
       fi
       mkdir -p "$SCRIPTS_DIR"
-      # Install node service-event handler (mervlan_boot.sh for nodes)
-      inject_template "$TEMPLATE_SERVICE_EVENT_NODES" "$SERVICE_EVENT_HANDLER" || { error -c vlan,cli "Failed to install node mervlan_boot.sh"; exit 1; }
-  chmod 755 "$SERVICE_EVENT_HANDLER" 2>/dev/null || { warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_HANDLER"; exit 1; }
-      # Install node service-event wrapper
+      # Shared handler now lives under functions/ and is synced from main
+      if [ -n "${SERVICE_EVENT_HANDLER:-}" ] && [ -f "$SERVICE_EVENT_HANDLER" ]; then
+        chmod 755 "$SERVICE_EVENT_HANDLER" 2>/dev/null || \
+          warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_HANDLER"
+      else
+        warn -c vlan,cli "service-event-handler missing at $SERVICE_EVENT_HANDLER"
+      fi
+
+      # Install node service-event wrapper (shared template)
       inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
-      # Set executable permissions on installed scripts
-      chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || { warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"; exit 1; }
+      chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || \
+        warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"
       if [ -n "$BOOT_SCRIPT" ]; then
         chmod 755 "$BOOT_SCRIPT" 2>/dev/null || warn -c vlan,cli "Could not chmod 755 $BOOT_SCRIPT"
       fi
 
-      info -c vlan,cli "Installed node mervlan_boot.sh, service-event, services-start with MERV_BASE=$MERV_BASE"
+      info -c vlan,cli "Installed node service-event wrapper with shared handler (MERV_BASE=$MERV_BASE)"
       exit 0
     fi
 
@@ -777,9 +795,14 @@ case "$ACTION" in
       fi
     fi
 
-    # Local hardware label (main router)
+    # Local hardware label (main router) and node flag
     local hw_label
     hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
+    if is_node; then
+      is_node_state=yes
+    else
+      is_node_state=no
+    fi
 
     # Get list of configured nodes for status aggregation
     NODE_IPS=$(get_node_ips)
@@ -789,7 +812,7 @@ case "$ACTION" in
 
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
-      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state}"
+      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state}"
       info -c vlan,cli "<--- Configured Nodes --->"
 
       # NODE_STATUS_OUTPUT is newline-separated entries: ip:hw=LABEL boot=1 addon=.. event=.. cron=..
@@ -804,15 +827,17 @@ case "$ACTION" in
         node_addon=""
         node_event=""
         node_cron=""
+        node_is_node=""
 
         # Parse key=value pairs
         for kv in $rest; do
           case "$kv" in
-            hw=*)    node_hw="${kv#hw=}" ;;
-            boot=*)  node_boot_raw="${kv#boot=}" ;;
-            addon=*) node_addon="${kv#addon=}" ;;
-            event=*) node_event="${kv#event=}" ;;
-            cron=*)  node_cron="${kv#cron=}" ;;
+            hw=*)       node_hw="${kv#hw=}" ;;
+            boot=*)     node_boot_raw="${kv#boot=}" ;;
+            addon=*)    node_addon="${kv#addon=}" ;;
+            event=*)    node_event="${kv#event=}" ;;
+            cron=*)     node_cron="${kv#cron=}" ;;
+            is_node=*)  node_is_node="${kv#is_node=}" ;;
           esac
         done
 
@@ -822,13 +847,13 @@ case "$ACTION" in
           *) node_boot="$node_boot_raw" ;;
         esac
 
-        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} addon=${node_addon} event=${node_event} cron=${node_cron}"
+        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} addon=${node_addon} event=${node_event} cron=${node_cron} is_node=${node_is_node}"
       done
     else
       # No nodes configured; output local status only
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
-      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state}"
+      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state}"
     fi
     ;;
 
@@ -841,6 +866,7 @@ case "$ACTION" in
     addon_state=missing
     event_state=missing
     cron_state=absent
+    is_node_state=no
     # Check persisted boot state and set boot_state to 1 if enabled
     if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE")" = "1" ]; then boot_state=1; fi
     # Check for addon install.sh entry in services-start
@@ -879,14 +905,19 @@ case "$ACTION" in
         cron_state=present
       fi
     fi
-    # Output terse report line: REPORT hw=<PRODUCTID> boot=0/1 addon=<state> event=<state> cron=<state>
+
+        # Determine node state using the same helper as the rest of the script
+    if is_node; then
+      is_node_state=yes
+    fi
+    # Output terse report line: REPORT hw=<PRODUCTID> boot=0/1 addon=<state> event=<state> cron=<state> is_node=0/1
     # Used by collect_node_status() for remote aggregation via SSH
     # Hardware label from settings.json (PRODUCTID may be stored top-level or in
     # the Hardware block; json_get_flag handles legacy top-level keys while
     # var_settings.sh exposes HW_SETTINGS_FILE alias.)
     hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
 
-    echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state"
+    echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state is_node=$is_node_state"
     exit 0
     ;;
 

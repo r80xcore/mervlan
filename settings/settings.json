@@ -5,6 +5,7 @@
     "DRY_RUN": "yes",
     "ENABLE_STP": "0",
     "EXPERIMENTAL": "0",
+    "IS_NODE": "0",
     "PERSISTENT": "no"
   },
 

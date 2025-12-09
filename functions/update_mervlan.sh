@@ -816,7 +816,7 @@ fi
 info -c cli,vlan "MerVLAN update completed successfully"
 
 if [ -f "$MERV_BASE/changelog.txt" ]; then
-	info -c cli "Changelog (current version):"
+	info -c cli,vlan "Changelog (current version):"
 	awk '
 		/^#####/ { exit }
 		{ print }
