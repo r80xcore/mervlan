@@ -289,8 +289,7 @@ const MVM_NO_REFRESH = new Set([
   "updatedev_vlanmgr",
   "enableservice_vlanmgr",
   "disableservice_vlanmgr",
-  "checkservice_vlanmgr",
-  "collectclients_vlanmgr"
+  "checkservice_vlanmgr"
 ]);
 
 const MVM_NO_LOADING = new Set([
