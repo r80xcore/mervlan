@@ -813,8 +813,6 @@ if [ -n "$OLD_VERSION" ] || [ -n "$NEW_VERSION" ]; then
 	[ -n "$NEW_VERSION" ] && info -c cli,vlan "  To:   $NEW_VERSION"
 fi
 
-info -c cli,vlan "MerVLAN update completed successfully"
-
 if [ -f "$MERV_BASE/changelog.txt" ]; then
 	info -c cli,vlan "Changelog (current version):"
 	awk '
@@ -822,5 +820,7 @@ if [ -f "$MERV_BASE/changelog.txt" ]; then
 		{ print }
 	' "$MERV_BASE/changelog.txt"
 fi
+
+info -c cli,vlan "MerVLAN update completed successfully"
 
 exit 0
