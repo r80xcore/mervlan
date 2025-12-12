@@ -13,7 +13,7 @@ UPDATED FILES:
 - Boot hooks are safely disabled before update and restored afterwards.
 - Improved node sync, remote cleanup, and hardware probe refresh.
 - Clean final swap-in of updated tree with rollback if activation fails.
-- Added version comparison when updating addon or restoring backups or updating.
+- Added version comparison when updating addon or restoring backups.
 
 mervlan_boot.sh v0.52
 - Cron verification bugfix – mervlan_boot.sh now checks the same cron path ($INJ_BASE/functions/heal_event.sh cron) in enable/disable/status so cron state is reported and toggled correctly.
