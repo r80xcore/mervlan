@@ -122,7 +122,8 @@ APP_EVENT=0
 case "${TYPE}_${EVENT}" in
   save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
   executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
-  disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr)
+  disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr|\
+  update_vlanmgr|updatedev_vlanmgr)
     APP_EVENT=1
     ;;
 esac
