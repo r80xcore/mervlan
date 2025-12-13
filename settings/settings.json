@@ -6,7 +6,10 @@
     "ENABLE_STP": "0",
     "EXPERIMENTAL": "0",
     "IS_NODE": "0",
-    "PERSISTENT": "no"
+    "PERSISTENT": "no",
+    "BACKUP_1": ["none", "none", "none"],
+    "BACKUP_2": ["none", "none", "none"],
+    "BACKUP_3": ["none", "none", "none"]
   },
 
   "SSH": {
