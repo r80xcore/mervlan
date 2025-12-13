@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                    - File: install.sh || version="0.46"                      #
+#                    - File: install.sh || version="0.47"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -991,6 +991,12 @@ if create_dirs && create_logs; then
     logger -t "$ADDON" "Logs & folder structure complete!"
 else
     logger -t "$ADDON" "ERROR: Failed to initialize directories or logs"
+    exit 1
+fi
+if mkdir -p "${MERV_BASE%/*}/mervlan_backups" 2>/dev/null; then
+    logger -t "$ADDON" "Backup directory created successfully"
+else
+    logger -t "$ADDON" "ERROR: Failed to create backup directory"
     exit 1
 fi
 

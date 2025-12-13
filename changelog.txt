@@ -1,7 +1,72 @@
-mervlan v0.50
+mervlan v0.51
 
-IMPORTANT! Scripts does not follow main version. Every script has its own version.
-NEW FILES:
+UPDATED FILES:
+
+update_mervlan.sh – v0.51A
+- Hook teardown/reapply overhaul – update_mervlan.sh always disables hooks (main + nodes) before swapping, stores BOOT_ENABLED from the restored JSON, then re-applies hooks (including cron) based strictly on that saved value, ensuring boot state survives upgrades.
+- Persistent backup root fix – backups now live under /jffs/addons/mervlan_backups, preventing recursive cp failures when snapshotting the current install.
+- Added full backup system + rotation (keeps newest 3 archives).
+- Added interactive restore mode (update_mervlan.sh restore).
+- Unified temp workspace under /tmp/mervlan_tmp/updates.$$.
+- Hardened GitHub download + validation of required files/dirs.
+- Normalized script permissions (auto-755 for scripts, libs forced to 644).
+- Preserves settings.json and SSH keys automatically.
+- Boot hooks are safely disabled before update and restored afterwards.
+- Improved node sync, remote cleanup, and hardware probe refresh.
+- Clean final swap-in of updated tree with rollback if activation fails.
+- Added version comparison when updating addon or restoring backups.
+
+- update_mervlan.sh - 0.51B
+- robust rollback handler using DESTRUCTIVE_TOUCHED + BACKUP_READY
+- automatic restoration of pre-update hook state after failure
+- cleanup of temporary user-data backup dir on failure paths
+- extraction of per-backup version via changelog.txt without full untar
+- persistent JSON metadata for 3 most recent backups (version/date/time)
+- update_backup_metadata() routine with sorted tar.gz discovery
+- JSON slot reset logic to ensure stable structure on each run
+- timestamp parsing (YYYYMMDD-HHMMSS → YYYY-MM-DD + HH:MM)
+- BACKUP version no longer tied only to the latest run; extracted per backup
+- incorrect array population due to whitespace arg passing
+- potential stale metadata entries by enforcing pre-clear of BACKUP_1–3
+- restore hook reapplication only when teardown actually executed
+- backups now stored exclusively as compressed tar.gz archives
+- keep only newest 3 backups; prune older ones automatically
+- improved log messages for backup state, restore state, and validation
+
+
+mervlan_boot.sh v0.52
+- Cron verification bugfix – mervlan_boot.sh now checks the same cron path ($INJ_BASE/functions/heal_event.sh cron) in enable/disable/status so cron state is reported and toggled correctly.
+- Read json value IS_NODE instead of the file .is_node for better reliability.
+- Now also reports is_node state when user calls "Service Status"
+
+sync_nodes.sh v0.50
+- Writes IS_NODE value to node settings.json instead of creating a file for checking if node. This gives more reliability. 
+- Now copies the full shared service-event-handler.sh
+
+service-event-handler.sh v0.48
+- Reads IS_NODE from settings.json to block certain events on nodes.
+
+settings.json
+- Added new key "IS_NODE" under General.
+- Added new keys BACKUP_1–3 (prep for GUI restore feature)
+
+mervlan_templates.sh v0.50
+- Removed old service-event-handler template that is obsolete.
+
+install.sh v0.47
+- Now creates backup directory.
+
+index.html
+- Version badge now opens an update modal that checks both main/dev changelog streams.
+- Shows whether a newer build exists and enables an "Update now" action when it does.
+- Runs updates through the existing queue so CLI mirrors progress and completion.
+
+mervlan.asp
+- Cleaned up duplicates in blocking function.
+- Added update_vlanmgr and updateDev_vlanmgr flags/calls
+
+################ IMPORTANT! Scripts does not follow main version.
+previous mervlan v0.50 changes
 
 UPDATED FILES:
 

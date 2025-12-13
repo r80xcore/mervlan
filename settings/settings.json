@@ -5,7 +5,11 @@
     "DRY_RUN": "yes",
     "ENABLE_STP": "0",
     "EXPERIMENTAL": "0",
-    "PERSISTENT": "no"
+    "IS_NODE": "0",
+    "PERSISTENT": "no",
+    "BACKUP_1": ["none", "none", "none"],
+    "BACKUP_2": ["none", "none", "none"],
+    "BACKUP_3": ["none", "none", "none"]
   },
 
   "SSH": {

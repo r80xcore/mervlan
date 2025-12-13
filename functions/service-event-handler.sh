@@ -12,10 +12,16 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#          - File: service-event-handler.sh || version="0.47"                  #
+#          - File: service-event-handler.sh || version="0.48"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Event handler for http and service events                      #
 # ──────────────────────────────────────────────────────────────────────────── #
+
+# ========================================================================== #
+# BASIC INITIALIZATION                                                       #
+# ========================================================================== #
+
+: "${MERV_BASE:=/jffs/addons/mervlan}"
 
 # ========================================================================== #
 # PARAMETER EXTRACTION & VALIDATION — Parse event action from arguments      #
@@ -81,6 +87,51 @@ COMBINED_NORM=$(printf '%s' "$COMBINED_NORM" | tr -s '_' '_' | sed 's/^_//; s/_$
 
 # Log parsed event details for audit trail (helps with debugging)
 logger -t "VLANMgr" "handler: RAW='${RAW}' TYPE='${TYPE}' EVENT='${EVENT}' (args: '$1' '$2' '$3')"
+
+# ========================================================================== #
+# NODE GUARD — Block MerVLAN UI/API events on nodes                          #
+# ========================================================================== #
+
+SETTINGS_FILE="/jffs/addons/mervlan/settings/settings.json"
+
+json_get_flag() {
+    key="$1"
+    def="$2"
+    file="${3:-$SETTINGS_FILE}"
+
+    [ -n "$key" ] || { printf '%s\n' "$def"; return 0; }
+    [ -s "$file" ] || { printf '%s\n' "$def"; return 0; }
+
+    # Very simple: grab VALUE from "KEY": "VALUE"
+    val="$(sed -n "s/^[[:space:]]*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | head -n 1)"
+
+    [ -n "$val" ] || val="$def"
+    printf '%s\n' "$val"
+}
+
+IS_NODE_FLAG=0
+if [ -s "$SETTINGS_FILE" ]; then
+  case "$(json_get_flag IS_NODE 0 "$SETTINGS_FILE" 2>/dev/null)" in
+    1|yes|on|true)
+      IS_NODE_FLAG=1
+      ;;
+  esac
+fi
+
+APP_EVENT=0
+case "${TYPE}_${EVENT}" in
+  save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
+  executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
+  disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr|\
+  update_vlanmgr|updatedev_vlanmgr)
+    APP_EVENT=1
+    ;;
+esac
+
+if [ "$IS_NODE_FLAG" -eq 1 ] && [ "$APP_EVENT" -eq 1 ]; then
+  logger -t "VLANMgr" "handler: ignoring ${TYPE}_${EVENT} on node (IS_NODE=1)"
+  exit 0
+fi
 
 # ========================================================================== #
 # DEBOUNCE & LOCK SETUP — Initialize locking for concurrent execution        #
@@ -238,6 +289,14 @@ case "${TYPE}_${EVENT}" in
   collectclients_vlanmgr)
     # Collect client list from router and nodes (triggered by refresh request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/collect_clients.sh"
+    ;;
+  update_vlanmgr)
+    # Update MerVLAN addon from stable channel (triggered by update request)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update main
+    ;;
+  updatedev_vlanmgr)
+    # Update MerVLAN addon from development channel (triggered by update request)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update dev
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
   # Wildcard patterns catch restart_* and service events (httpd, wireless, WAN, LAN, NET, FW, NAT, DNS)
