@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.50"                   #
+#               - File: mervlan_manager.sh || version="0.52"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -355,8 +355,8 @@ wait_for_interface() {
   while [ $attempt -lt $max_attempts ]; do
     # Check if interface exists in /sys/class/net
     iface_exists "$iface" && return 0
-    # Exponential backoff: 2^attempt seconds
-    sleep $((2 ** attempt))
+    # Exponential backoff: 1<<attempt seconds (BusyBox-safe)
+    sleep $((1 << attempt))
     attempt=$((attempt + 1))
   done
   # Timeout: interface never appeared
@@ -378,14 +378,55 @@ iface_exists() { [ -d "/sys/class/net/$1" ]; }
 # Returns: 0 if integer, 1 otherwise
 is_number()    { expr "$1" + 0 >/dev/null 2>&1; }
 
-# is_internal_vap — Detect if interface is internal VAP (non-user-facing)
-# Args: $1=interface_name (e.g., wl0, wl0.4, wl0.5)
-# Returns: 0 if internal, 1 if user-facing
-# Explanation: Internal VAPs are slots 4-9 on each band (slots 0-3 are user-facing)
+# ssid_configured_for_iface — true if nvram has a non-empty SSID for this wl iface
+# Args: $1=iface_name like wl0.1
+# Returns: 0 if configured, 1 otherwise
+ssid_configured_for_iface() {
+  local ifn ssid
+  ifn="$1"
+
+  ssid="$(nvram get "${ifn}_ssid" 2>/dev/null)"
+  ssid="$(printf '%s' "$ssid" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//')"
+
+  [ -n "$ssid" ] || return 1
+  case "$ssid" in
+    ''|0|null|NULL) return 1 ;;
+  esac
+
+  return 0
+}
+
+# is_internal_vap — Detect VAPs that are not user SSIDs
+# Rule: wlX.Y is internal only if nvram key wlX.Y_ssid is missing/empty.
+# Never block wlX base radios or eth*.
 is_internal_vap() {
-  # Match pattern wl[0-2].[4-9] (internal slots on any band)
-  case "$1" in wl[0-2].[4-9]) return 0;; esac
+  local ifn
+  ifn="$1"
+
+  [ -n "$ifn" ] || return 1
+
+  case "$ifn" in
+    eth*) return 1 ;;
+    wl[0-9]) return 1 ;;
+    wl[0-9].[0-9]*)
+      ssid_configured_for_iface "$ifn" && return 1
+      return 0
+      ;;
+  esac
+
+  # Unknown interface types: treat as non-internal by default
   return 1
+}
+
+# is_wl_iface — Check if interface is a Broadcom wireless interface usable by wl
+# Args: $1=interface_name
+# Returns: 0 if wl -i IF status succeeds, 1 otherwise
+is_wl_iface() {
+  local ifn
+  ifn="$1"
+  [ -n "$ifn" ] || return 1
+  iface_exists "$ifn" || return 1
+  wl -i "$ifn" status >/dev/null 2>&1
 }
 
 # validate_vlan_id — Check if VLAN ID is valid (1-4094 reserved range)
@@ -416,8 +457,14 @@ validate_vlan_id() {
 # Args: $1=interface_name
 # Returns: none (best-effort, ignores errors)
 remove_from_all_bridges() {
+  local iface br
   iface="$1"
-  # List all bridges (unique names) and remove this interface from each
+
+  [ "$DRY_RUN" = "yes" ] && {
+    info -c cli,vlan "[DRY-RUN] would detach $iface from all bridges"
+    return 0
+  }
+
   brctl show 2>/dev/null \
     | awk 'NR>1 && $1!="" {print $1}' \
     | sort -u \
@@ -433,7 +480,9 @@ remove_from_all_bridges() {
 ensure_vlan_bridge() {
   VID="$1"
   # Skip special cases: "none" and "trunk" don't need infrastructure
-  [ "$VID" = "none" ] || [ "$VID" = "trunk" ] && return 0
+  if [ "$VID" = "none" ] || [ "$VID" = "trunk" ]; then
+    return 0
+  fi
 
   # Check if VLAN interface already exists (eth0.VID, for example)
   if ! iface_exists "${UPLINK_PORT}.${VID}"; then
@@ -565,7 +614,7 @@ attach_to_bridge() {
   # Validate VLAN ID before attempting attachment
   validate_vlan_id "$VID" || { warn -c cli,vlan "Invalid VLAN $VID for $LABEL, skipping"; return; }
 
-  # Skip internal VAPs (e.g., wl0.4-9 are internal; wl0, wl0.1-3 are user-facing)
+  # Skip VAPs flagged as internal (those without a configured SSID)
   is_internal_vap "$IF" && { warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"; return; }
   # Verify interface exists in kernel before attachment
   iface_exists "$IF" || { warn -c cli,vlan "$LABEL ($IF) - not present, skipping"; return; }
@@ -664,7 +713,7 @@ iface_bound() {
 # find_if_by_ssid — Locate interface on specific band by SSID name
 # Args: $1=band (0|1|2), $2=ssid_name
 # Returns: stdout interface_name (e.g., wl0, wl0.1), or empty if not found
-# Explanation: Tries base radio first (main SSID), then guest slots 1-3
+# Explanation: Tries base radio first (main SSID), then guest slots 1-9
 find_if_by_ssid() {
   BAND="$1"
   TARGET="$2"
@@ -694,7 +743,7 @@ find_if_by_ssid() {
     fi
   fi
 
-  for slot in 1 2 3; do
+  for slot in 1 2 3 4 5 6 7 8 9; do
     SSID="$(nvram get wl${BAND}.${slot}_ssid 2>/dev/null)"
     IFN="$(nvram get wl${BAND}.${slot}_ifname 2>/dev/null)"
     IFN=$(normalize_iface "$IFN")
@@ -747,20 +796,31 @@ find_if_by_ssid_any() {
 
   while IFS= read -r entry; do
     case "$entry" in
-      *_ssid=*)
-        key=${entry%%=*}
-        raw=${entry#*=}
-        base=${key%_ssid}
-        iface=$(nvram get ${base}_ifname 2>/dev/null)
+      wl*_ssid=*)
+        key=${entry%%=*}      # e.g. wl0_ssid or wl2.1_ssid
+        raw=${entry#*=}       # SSID string
+        base=${key%_ssid}     # e.g. wl0 or wl2.1
+
+        case "$base" in
+          wl[0-9]*) : ;;
+          *) continue ;;
+        esac
+
+        iface=$(nvram get "${base}_ifname" 2>/dev/null)
         iface=$(normalize_iface "$iface")
         [ -n "$iface" ] || continue
-        echo "$iface" | grep -q '^wl' || continue
-        iface_exists "$iface" || continue
+        is_internal_vap "$iface" && continue
+        case "$iface" in
+          eth*) is_wl_iface "$iface" || continue ;;
+        esac
+
         ssid_norm=$(normalize_ssid "$raw")
+
         if [ "$ssid_norm" = "$TARGET_NORM" ]; then
           echo "$iface"
           return 0
         fi
+
         if [ -n "$ssid_norm" ] && [ "$(to_lower "$ssid_norm")" = "$TARGET_LOWER" ]; then
           if [ "$FALLBACK_COUNT" -eq 0 ]; then
             FALLBACK_IFACE="$iface"
@@ -773,7 +833,7 @@ find_if_by_ssid_any() {
         ;;
     esac
   done <<EOF
-$(nvram show 2>/dev/null | grep '_ssid=')
+$(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ssid=')
 EOF
 
   if [ "$FALLBACK_COUNT" -eq 1 ]; then
@@ -797,6 +857,25 @@ EOF
 # Args: $1=interface, $2=value (0=off, 1=on)
 # Returns: none (logs errors on failure, continues)
 # Explanation: Uses wl command for immediate effect; persists via NVRAM if requested
+nvram_base_for_ifname() {
+  local ifn line key val base
+  ifn="$1"
+  [ -n "$ifn" ] || return 1
+
+  while IFS= read -r line; do
+    key=${line%%=*}
+    val=${line#*=}
+    [ "$val" = "$ifn" ] || continue
+    base=${key%_ifname}
+    echo "$base"
+    return 0
+  done <<EOF
+$(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ifname=')
+EOF
+
+  return 1
+}
+
 set_ap_isolation() {
   IFN="$1"; VAL="$2"  # 0 or 1
   case "$VAL" in
@@ -812,8 +891,13 @@ set_ap_isolation() {
         info -c cli,vlan "Set AP isolation=$VAL for $IFN"
         # Persist in NVRAM for specific bands/slots (wl0, wl0.1, etc.)
         if [ "$PERSISTENT" = "yes" ]; then
-          case "$IFN" in wl[0-2]|wl[0-2].[1-3]) nvram set "${IFN}_ap_isolate=$VAL" ;; esac
-          nvram commit
+          base="$(nvram_base_for_ifname "$IFN")"
+          if [ -n "$base" ]; then
+            nvram set "${base}_ap_isolate=$VAL"
+            nvram commit
+          else
+            warn -c cli,vlan "Persistent AP isolation: could not map ifname '$IFN' to nvram wl base; skipping nvram set"
+          fi
         fi
         track_change "Set AP isolation=$VAL for $IFN"
       fi
@@ -861,17 +945,19 @@ bind_configured_ssids() {
   done
 
   BOUND_SET=" $BOUND_IFACES "
-  for iface in $(nvram show 2>/dev/null | grep '_ifname=' | awk -F= '{print $2}' \
-    | grep -E '^(wl[0-2](\.[123])?$|eth[456])' | sort -u); do
-      iface=$(normalize_iface "$iface")
-      [ -n "$iface" ] || continue
-      iface_exists "$iface" || continue
-      is_internal_vap "$iface" && continue
-      case "$BOUND_SET" in
-        *" $iface "*) continue ;;
-      esac
-      attach_to_bridge "$iface" "none" "Unconfigured IF $iface"
-    done
+  for iface in $(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ifname=' | awk -F= '{print $2}' | sort -u); do
+        iface=$(normalize_iface "$iface")
+        [ -n "$iface" ] || continue
+        iface_exists "$iface" || continue
+        is_internal_vap "$iface" && continue
+        is_wl_iface "$iface" || continue
+
+        case "$BOUND_SET" in
+          *" $iface "*) continue ;;
+        esac
+
+        attach_to_bridge "$iface" "none" "Unconfigured IF $iface"
+      done
 }
 
 # --------------------------
@@ -894,10 +980,7 @@ resolve_and_attach() {
   # Try up to 5 times to allow interfaces to appear
   for _ in 1 2 3 4 5; do
     if [ "$BAND" = "auto" ] || [ "$BAND" = "any" ] || [ -z "$BAND" ]; then
-      for b in 0 1 2; do
-        IFN="$(find_if_by_ssid "$b" "$SSID")"
-        [ -n "$IFN" ] && break
-      done
+      IFN="$(find_if_by_ssid_any "$SSID")"
     else
       IFN="$(find_if_by_ssid "$BAND" "$SSID")"
     fi
@@ -1110,8 +1193,15 @@ restart_services() {
 }
 
 post_rc_watchdog() {
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "watchdog: dry-run mode; skipping verification"
+    return 0
+  fi
   case "$WATCH_IFACES" in
-    "" ) return 0 ;;
+    "" )
+      info -c cli,vlan "watchdog: no interfaces queued; skipping"
+      return 0
+      ;;
   esac
   (
     sleep "${WATCHDOG_DELAY_SEC:-25}"
