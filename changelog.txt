@@ -1,4 +1,14 @@
-mervlan v0.52
+mervlan v0.52.1
+
+UPDATED FILES:
+
+hw_probe.sh
+- Added the m0del category "TUF Series"
+- Added support for TUF-AX5400
+
+Previous mervlan mervlan v0.52 changes
+
+################ IMPORTANT! Scripts does not follow main version.
 
 mervlan_manager.sh – v0.52
 - Improved SSID/VAP handling: internal VAP detection based on configured NVRAM SSID presence.
