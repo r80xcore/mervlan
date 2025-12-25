@@ -1,3 +1,4 @@
 .github/copilot-instructions.md
 functions/sync_nodes.sh.bak
+functions/wireless_backhaul.sh
 roadmap.txt
