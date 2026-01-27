@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_json.sh || version="0.49"                         #
+#                - File: lib_json.sh || version="0.50"                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -280,6 +280,70 @@ json_get_section_int() {
     # Returns digits-only numeric extraction from a nested section value.
     local val
     val=$(json_get_section_value "$1" "$2" "$3") || return 1
+    echo "$val" | grep -o '^[0-9]\+' || :
+}
+
+
+json_get_section2_value() {
+    # json_get_section2_value <section1> <section2> <key> <file>
+    # Extract string value from a 2-level nested object: "Section1": { "Section2": { "KEY": "VALUE" } }
+    local section1="$1" section2="$2" key="$3" file="$4"
+    [ -n "$section1" ] || return 1
+    [ -n "$section2" ] || return 1
+    [ -n "$key" ] || return 1
+    [ -f "$file" ] || return 1
+
+    awk -v sec1="$section1" -v sec2="$section2" -v key="$key" '
+        BEGIN { in1=0; in2=0; depth1=0; depth2=0 }
+        {
+            line=$0
+            if (!in1) {
+                if (line ~ ("\""sec1"\"[[:space:]]*:[[:space:]]*{")) {
+                    in1=1
+                    tmp=line
+                    gsub(/[^{}]/, "", tmp)
+                    depth1 += gsub(/\{/, "&", tmp) - gsub(/\}/, "&", tmp)
+                }
+                next
+            }
+
+            if (in1 && !in2) {
+                tmp=line
+                gsub(/[^{}]/, "", tmp)
+                depth1 += gsub(/\{/, "&", tmp) - gsub(/\}/, "&", tmp)
+
+                if (line ~ ("\""sec2"\"[[:space:]]*:[[:space:]]*{")) {
+                    in2=1
+                    tmp2=line
+                    gsub(/[^{}]/, "", tmp2)
+                    depth2 += gsub(/\{/, "&", tmp2) - gsub(/\}/, "&", tmp2)
+                }
+
+                if (depth1 <= 0) exit
+                next
+            }
+
+            if (in2) {
+                tmp=line
+                gsub(/[^{}]/, "", tmp)
+                depth2 += gsub(/\{/, "&", tmp) - gsub(/\}/, "&", tmp)
+
+                if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
+                    if (match(line, "\""key"\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"", arr)) { print arr[1]; exit }
+                }
+
+                if (depth2 <= 0) exit
+            }
+        }
+    ' "$file" | head -1
+}
+
+
+json_get_section2_int() {
+    # json_get_section2_int <section1> <section2> <key> <file>
+    # Returns digits-only numeric extraction from a 2-level nested section value.
+    local val
+    val=$(json_get_section2_value "$1" "$2" "$3" "$4") || return 1
     echo "$val" | grep -o '^[0-9]\+' || :
 }
 
