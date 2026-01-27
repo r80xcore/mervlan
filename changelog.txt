@@ -1,4 +1,26 @@
-mervlan v0.51
+mervlan v0.52.1
+
+UPDATED FILES:
+
+hw_probe.sh
+- Added the m0del category "TUF Series"
+- Added support for TUF-AX5400
+
+Previous mervlan mervlan v0.52 changes
+
+################ IMPORTANT! Scripts does not follow main version.
+
+mervlan_manager.sh – v0.52
+- Improved SSID/VAP handling: internal VAP detection based on configured NVRAM SSID presence.
+- Robust SSID resolution: stronger trimming/normalization, guest slots widened to 1–9, auto/any uses all-band resolver with ambiguity warnings.
+- Safer VLAN binding: clearer none/trunk behavior, stronger bridge membership verification (sysfs + brctl fallback), and post-restart second-pass + watchdog rebind.
+- Safer operations: dry-run now avoids system changes (locks/state/changelog + command echoing), and service restarts use rc/proc busy detection + timeouts.
+- AP isolation: immediate wl apply plus persistent mapping via ifname→nvram base key.
+- JSON config parsing: delegated to shared lib_json helpers; supports legacy + nested Hardware layout.
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.51 changes.
 
 UPDATED FILES:
 
