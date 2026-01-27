@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_trunk.sh || version="0.51"                     #
+#               - File: mervlan_trunk.sh || version="0.52"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # ───── MerVLAN environment bootstrap ─────
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -138,6 +138,32 @@ log_bridge_membership() {
 # ───── Low level helpers ─────
 iface_exists() { [ -d "/sys/class/net/$1" ]; }
 
+list_bridge_members() {
+  local br="$1" path
+  [ -n "$br" ] || return 0
+
+  if [ -d "/sys/class/net/$br/brif" ]; then
+    for path in "/sys/class/net/$br/brif"/*; do
+      [ -e "$path" ] || continue
+      printf '%s\n' "${path##*/}"
+    done
+    return 0
+  fi
+
+  brctl show "$br" 2>/dev/null | awk '
+    NR==1 { next }
+    NF>=4 { for (i=4;i<=NF;i++) print $i; next }
+    NF==1 { print $1 }
+  '
+}
+
+bridge_has_if() {
+  local br="$1" ifc="$2"
+  [ -n "$br" ] || return 1
+  [ -n "$ifc" ] || return 1
+  list_bridge_members "$br" | grep -qx "$ifc"
+}
+
 ensure_port_up() {
   local ifc="$1"
   iface_exists "$ifc" || return 1
@@ -181,12 +207,15 @@ ensure_vlan_bridge() {
   fi
 
   # Ensure uplink vlan is a member of the bridge (single brctl call for membership)
-  members=$(brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}')
-  if ! printf '%s
 ' "$members" | grep -qx "$uplink_vlan"; then
+  if ! bridge_has_if "$br" "$uplink_vlan"; then
     if ! run_cmd brctl addif "$br" "$uplink_vlan"; then
-      error -c vlan,cli "ensure_vlan_bridge: failed to add $uplink_vlan to $br"
-      return 1
+      if bridge_has_if "$br" "$uplink_vlan"; then
+        warn -c vlan,cli "ensure_vlan_bridge: $uplink_vlan already on $br (continuing)"
+      else
+        error -c vlan,cli "ensure_vlan_bridge: failed to add $uplink_vlan to $br"
+        return 1
+      fi
     fi
   fi
 
@@ -214,8 +243,12 @@ bridge_add_if() {
   fi
   iface_exists "$ifc" || return 1
   ensure_port_up "$ifc"
-  brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}' | grep -qx "$ifc" && return 0
+  bridge_has_if "$br" "$ifc" && return 0
   if ! run_cmd brctl addif "$br" "$ifc"; then
+    if bridge_has_if "$br" "$ifc"; then
+      warn -c vlan,cli "bridge_add_if: $ifc already on $br (continuing)"
+      return 0
+    fi
     error -c vlan,cli "bridge_add_if: failed to add $ifc to $br"
     return 1
   fi
@@ -223,8 +256,11 @@ bridge_add_if() {
 
 bridge_del_if() {
   local br="$1" ifc="$2"
-  brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}' | grep -qx "$ifc" || return 0
+  bridge_has_if "$br" "$ifc" || return 0
   if ! run_cmd brctl delif "$br" "$ifc"; then
+    if ! bridge_has_if "$br" "$ifc"; then
+      return 0
+    fi
     warn -c vlan,cli "bridge_del_if: failed to remove $ifc from $br"
     return 1
   fi
@@ -259,6 +295,21 @@ get_trunk_port() {
     # Fallback to lowercase key if that ever appears
     raw="$(json_get_int "trunk${idx}" -1 "$SETTINGS_FILE" 2>/dev/null)"
     dbg_log "trunk${idx}: lowercase fallback returned '${raw}'"
+    dbg_var raw
+  fi
+
+  if [ "$raw" -lt 0 ] 2>/dev/null; then
+    # Fallback to nested settings: VLAN -> Trunks -> TRUNKx
+    raw="$(json_get_section2_int "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)"
+    [ -n "$raw" ] || raw=-1
+    dbg_log "trunk${idx}: nested TRUNK lookup returned '${raw}'"
+    dbg_var raw
+  fi
+
+  if [ "$raw" -lt 0 ] 2>/dev/null; then
+    raw="$(json_get_section2_int "VLAN" "Trunks" "trunk${idx}" "$SETTINGS_FILE" 2>/dev/null)"
+    [ -n "$raw" ] || raw=-1
+    dbg_log "trunk${idx}: nested lowercase fallback returned '${raw}'"
     dbg_var raw
   fi
 
@@ -302,8 +353,18 @@ get_trunk_config() {
   local untagged_key="UNTAGGED_TRUNK${idx}"
   local tagged_raw untagged_raw
 
-  tagged_raw="$(json_get_flag "$tagged_key" "none" "$SETTINGS_FILE" 2>/dev/null)"
-  untagged_raw="$(json_get_flag "$untagged_key" "none" "$SETTINGS_FILE" 2>/dev/null)"
+  tagged_raw="$(json_get_flag "$tagged_key" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)"
+  untagged_raw="$(json_get_flag "$untagged_key" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)"
+
+  if [ -z "$tagged_raw" ] || [ "$tagged_raw" = "__MISSING__" ]; then
+    tagged_raw="$(json_get_section2_value "VLAN" "Trunks" "$tagged_key" "$SETTINGS_FILE" 2>/dev/null)"
+  fi
+  if [ -z "$untagged_raw" ] || [ "$untagged_raw" = "__MISSING__" ]; then
+    untagged_raw="$(json_get_section2_value "VLAN" "Trunks" "$untagged_key" "$SETTINGS_FILE" 2>/dev/null)"
+  fi
+
+  [ -n "$tagged_raw" ] || tagged_raw="none"
+  [ -n "$untagged_raw" ] || untagged_raw="none"
 
   dbg_log "trunk${idx}: resolved tagged/untagged payloads"
   dbg_var tagged_raw untagged_raw
