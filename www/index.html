@@ -983,9 +983,8 @@ function showTooltip() {
     }
 
     function validateSSIDField(input){
-      const raw=input.value, cleaned=raw.replace(/\s+/g,"");
-      if(raw!==cleaned){ const d=raw.length-cleaned.length; const st=(input.selectionStart||cleaned.length)-d; const en=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(st,en);}catch(_){} }
-      const v=cleaned; input.classList.remove("valid","invalid"); if(v==="") return; if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
+      const raw=input.value;
+      const v=raw; input.classList.remove("valid","invalid"); if(v.trim()==="") return; if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
     }
     function validateNodeField(input){
       const raw=input.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned){ const d=raw.length-cleaned.length; const s=(input.selectionStart||cleaned.length)-d; const e=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(s,e);}catch{} }
