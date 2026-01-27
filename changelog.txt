@@ -1,4 +1,34 @@
-mervlan v0.52.1
+mervlan v0.52.2
+
+UPDATED FILES:
+
+index.html - v0.52.2
+- Updated version header.
+
+mervlan.asp - v0.46
+- Switched MerVLAN UI rendering to a static-height iframe to ensure consistency.
+- Disabled iframe scrolling so scrolling is handled exclusively by the main ASUS page (prevents double-scroll issues).
+- Set a default iframe height of 1300px to accommodate maximum expanded UI sections (nodes, SSIDs, LAN ports).
+- Defensive JavaScript to re-apply iframe scroll and overflow settings on load
+- Defensive JavaScripts to guard against ASUS skin overrides that may reset iframe attributes
+
+mervlan_manager.sh – v0.53
+- Added nested VLAN.Trunks fallback reads for trunk detection when settings are not flattened.
+
+mervlan_trunk.sh – v0.52
+- Fixed bridge membership detection to handle brctl continuation lines and sysfs brif.
+- Treated already-member add/del as idempotent success to avoid false trunk failures.
+- Added nested VLAN.Trunks fallback reads for TRUNK/TAGGED/UNTAGGED keys.
+
+collect_clients.sh – v0.47
+- Added bounded retry for ping/SSH/fetch to reduce transient node boot timing misses.
+
+lib_json.sh – v0.50
+- Added two-level nested JSON getters (section1.section2.key) for VLAN.Trunks access.
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.52.1 changes
 
 UPDATED FILES:
 
