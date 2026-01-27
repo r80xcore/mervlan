@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.52"                   #
+#               - File: mervlan_manager.sh || version="0.53"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -107,6 +107,12 @@ detect_trunk_ports() {
     val=$(read_json_number "TRUNK${idx}" "$SETTINGS_FILE")
     if [ -z "$val" ]; then
       val=$(read_json_number "trunk${idx}" "$SETTINGS_FILE")
+    fi
+    if [ -z "$val" ]; then
+      val=$(json_get_section2_int "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+    if [ -z "$val" ]; then
+      val=$(json_get_section2_int "VLAN" "Trunks" "trunk${idx}" "$SETTINGS_FILE" 2>/dev/null)
     fi
     case "$val" in
       ''|0) ;;
