@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: collect_clients.sh || version="0.46"                  #
+#                - File: collect_clients.sh || version="0.47"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -44,6 +44,9 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 
 # Timeout (seconds) for remote SSH commands; prevents hanging on slow nodes
 TIMEOUT=10
+# Retry controls for transient node boot/SSH delays
+RETRY_MAX="${COLLECT_RETRY_MAX:-2}"
+RETRY_DELAY="${COLLECT_RETRY_DELAY:-3}"
 
 info -c cli,vlan "=== VLAN Client Collection Started ==="
 
@@ -95,51 +98,74 @@ test_ssh_connection() {
 collect_from_node() {
   local node_ip="$1"
   local output_file="$2"
+  local attempt=1
 
   info -c cli,vlan "→ Collecting from node $node_ip"
 
-  # Test ping reachability; if unreachable, write error JSON and return
-  if ! ping -c 1 -W 3 "$node_ip" >/dev/null 2>&1; then
-    warn -c cli,vlan "Node $node_ip is not reachable via ping"
-    printf '{"router":"%s","error":"unreachable","vlans":[]}' "$node_ip" > "$output_file"
-    return 1
-  fi
-
-  # Test SSH connectivity; if failed, write error JSON and return
-  if ! test_ssh_connection "$node_ip"; then
-    warn -c cli,vlan "SSH connection failed to $node_ip"
-    printf '{"router":"%s","error":"ssh-failed","vlans":[]}' "$node_ip" > "$output_file"
-    return 1
-  fi
-
-  # Run remote collector and fetch JSON in one shot via SSH
-  # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
-  # Prefer 'timeout' command if available to prevent hangs; otherwise rely on db-client timeout
-  if command -v timeout >/dev/null 2>&1; then
-    # timeout command available: use it to enforce TIMEOUT seconds limit
-  if timeout "$TIMEOUT" dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" \
-         "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
-         > "$output_file" 2>/dev/null; then
-      info -c cli,vlan "✓ Successfully collected from $node_ip"
-      return 0
-    else
-      warn -c cli,vlan "Failed to fetch results from $node_ip"
-      printf '{"router":"%s","error":"fetch-failed","vlans":[]}' "$node_ip" > "$output_file"
+  while [ $attempt -le "$RETRY_MAX" ]; do
+    # Test ping reachability; if unreachable, retry before writing error JSON
+    if ! ping -c 1 -W 3 "$node_ip" >/dev/null 2>&1; then
+      warn -c cli,vlan "Node $node_ip is not reachable via ping (attempt $attempt/$RETRY_MAX)"
+      if [ $attempt -lt "$RETRY_MAX" ]; then
+        sleep "$RETRY_DELAY"
+        attempt=$((attempt + 1))
+        continue
+      fi
+      printf '{"router":"%s","error":"unreachable","vlans":[]}' "$node_ip" > "$output_file"
       return 1
     fi
-  else
-    # timeout not available; run without explicit timeout (db-client has built-in ConnectTimeout)
-  if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" \
-         "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
-         > "$output_file" 2>/dev/null; then
-      info -c cli,vlan "✓ Successfully collected from $node_ip"
-      return 0
-    else
-      warn -c cli,vlan "Failed to fetch results from $node_ip"
-      printf '{"router":"%s","error":"fetch-failed","vlans":[]}' "$node_ip" > "$output_file"
+
+    # Test SSH connectivity; if failed, retry before writing error JSON
+    if ! test_ssh_connection "$node_ip"; then
+      warn -c cli,vlan "SSH connection failed to $node_ip (attempt $attempt/$RETRY_MAX)"
+      if [ $attempt -lt "$RETRY_MAX" ]; then
+        sleep "$RETRY_DELAY"
+        attempt=$((attempt + 1))
+        continue
+      fi
+      printf '{"router":"%s","error":"ssh-failed","vlans":[]}' "$node_ip" > "$output_file"
       return 1
     fi
-  fi
+
+    # Run remote collector and fetch JSON in one shot via SSH
+    # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
+    # Prefer 'timeout' command if available to prevent hangs; otherwise rely on db-client timeout
+    if command -v timeout >/dev/null 2>&1; then
+      # timeout command available: use it to enforce TIMEOUT seconds limit
+      if timeout "$TIMEOUT" dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" \
+           "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
+           > "$output_file" 2>/dev/null; then
+        info -c cli,vlan "✓ Successfully collected from $node_ip"
+        return 0
+      else
+        warn -c cli,vlan "Failed to fetch results from $node_ip (attempt $attempt/$RETRY_MAX)"
+        if [ $attempt -lt "$RETRY_MAX" ]; then
+          sleep "$RETRY_DELAY"
+          attempt=$((attempt + 1))
+          continue
+        fi
+        printf '{"router":"%s","error":"fetch-failed","vlans":[]}' "$node_ip" > "$output_file"
+        return 1
+      fi
+    else
+      # timeout not available; run without explicit timeout (db-client has built-in ConnectTimeout)
+      if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" \
+           "$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json" \
+           > "$output_file" 2>/dev/null; then
+        info -c cli,vlan "✓ Successfully collected from $node_ip"
+        return 0
+      else
+        warn -c cli,vlan "Failed to fetch results from $node_ip (attempt $attempt/$RETRY_MAX)"
+        if [ $attempt -lt "$RETRY_MAX" ]; then
+          sleep "$RETRY_DELAY"
+          attempt=$((attempt + 1))
+          continue
+        fi
+        printf '{"router":"%s","error":"fetch-failed","vlans":[]}' "$node_ip" > "$output_file"
+        return 1
+      fi
+    fi
+  done
 }
 
 # ============================================================================ #
