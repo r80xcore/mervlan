@@ -1,7 +1,7 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <!-- view_logs.html version="0.45" -->
+  <!-- mervlan.asp version="0.46" -->
 <meta http-equiv="X-UA-Compatible" content="IE=Edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <meta http-equiv="Pragma" content="no-cache">
@@ -413,20 +413,46 @@ function MVM_save_quiet(settingsObj) {
             <div class="formfonttitle">Merlin VLAN Manager</div>
             <div style="margin:10px 0 10px 5px;" class="splitLine"></div>
 
-            <!-- THE IFRAME -->
+            <!-- THE IFRAME (STATIC HEIGHT + SINGLE SCROLL) -->
             <iframe
               id="vlan_iframe"
               src="/user/mervlan/index.html"
               style="
                 width:100%;
-                min-height: 950px;
+                height:1300px;          /* <-- change this number to tune */
                 border:0;
                 background:transparent;
-                overflow:visible;
+                overflow:hidden;        /* no inner scrollbar */
+                display:block;
               "
               frameborder="0"
-              scrolling="auto">
+              scrolling="no">
             </iframe>
+
+            <!-- Re-apply iframe scroll settings defensively (some skins override) -->
+            <script type="text/javascript">
+            (function(){
+              var f = document.getElementById("vlan_iframe");
+              if(!f) return;
+
+              function apply(){
+                try{
+                  f.setAttribute("scrolling","no");
+                  f.style.overflow = "hidden";
+                  f.style.display = "block";
+                  // height is static; you tune it above
+                }catch(e){}
+              }
+
+              // apply now + after iframe load
+              apply();
+              if(f.addEventListener){
+                f.addEventListener("load", apply, false);
+              }else if(f.attachEvent){
+                f.attachEvent("onload", apply);
+              }
+            })();
+            </script>
 
           </td>
         </tr>
