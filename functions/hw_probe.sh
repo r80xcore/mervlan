@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                   - File: hw_probe.sh || version="0.46"                      #
+#                   - File: hw_probe.sh || version="0.46.1"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Probe system hardware and record hardware keys in the central
 #                settings store (settings.json). Writes non-destructively via
@@ -116,9 +116,10 @@ RT-ET8)   MODEL="ET8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LA
 
 # === AX86 / AX68 Series (Premium AX models) ===
 # AX86U/AX86S: Gig WAN + 4x LAN + 2.5G multi-gig port (configurable WAN/LAN)
-RT-AX86U|RT-AX86S) MODEL="AX86"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+RT-AX86S) MODEL="AX86S"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+RT-AX86U) MODEL="AX86U"; ETH_PORTS="eth5 eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 # AX68U: Standard AX with 4 LAN + Gig WAN
-RT-AX68U)          MODEL="AX68"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+RT-AX68U) MODEL="AX68"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 
 # === AX58 / AX3000 (Mid-range AX models) ===
 # AX58U and AX3000v1 share same port layout: 4x LAN + Gig WAN
@@ -142,7 +143,7 @@ DSL-AX82U|DSL-AX5400) MODEL="DSL-AX82/5400"; ETH_PORTS="eth1 eth2 eth3 eth4"; LA
 
 # === AC Series (Legacy, pre-AX WiFi) ===
 # AC86U: Standard AC with 4 LAN + Gig WAN
-RT-AC86U)  MODEL="AC86U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+RT-AC86U)  MODEL="AC86U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 # AC88U: High-port count model with 8 LAN ports (enterprise/prosumer)
 RT-AC88U)  MODEL="AC88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8"; MAX_ETH_PORTS=8; WAN_IF="eth0" ;;
 # AC5300: Triple-band with 4 LAN + Gig WAN
@@ -155,7 +156,7 @@ TUF-AX5400) MODEL="TUF-AX5400"; ETH_PORTS="eth0 eth1 eth2 eth3"; LAN_PORT_LABELS
 
 # === Pro / Multi-Gig Models ===
 # AX88U: 8× LAN + 1× WAN
-RT-AX88U) MODEL="AX88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8"; MAX_ETH_PORTS=8; WAN_IF="eth0" ;;
+RT-AX88U) MODEL="AX88U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 # GT-AX11000: 4× GbE LAN + 1× 2.5G WAN/LAN (max 5 LAN when 1G is WAN)
 GT-AX11000) MODEL="GT-AX11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 # GT-AXE11000: 4× GbE LAN + 1× 2.5G WAN/LAN (max 5 LAN when 1G is WAN)
@@ -168,10 +169,10 @@ XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"
 GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 # GT-AXE16000: two 10G WAN/LAN + 4× GbE LAN + 2.5G WAN (max 6 LAN)
 GT-AXE16000) MODEL="GT-AXE16000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
-# RT-AX86U_PRO: 4× GbE LAN + 1× 2.5G WAN/LAN + 1× GbE WAN (max 5 LAN using 1G as WAN)
-RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+# RT-AX86U_PRO/RT-AX86U: 4× GbE LAN + 1× 2.5G WAN/LAN + 1× GbE WAN (max 5 LAN using 1G as WAN)
+RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth5 eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 # RT-AX88U_PRO: 4× GbE LAN + two 2.5G WAN/LAN (one used as WAN → 5 LAN)
-RT-AX88U_PRO) MODEL="RT-AX88U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+RT-AX88U_PRO) MODEL="RT-AX88U_PRO"; ETH_PORTS="eth5 eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 # RT-BE96U: 10G WAN/LAN + 1G WAN/LAN + 3× 1G LAN + 10G LAN (one WAN/LAN used → 5 LAN)
 RT-BE96U) MODEL="RT-BE96U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 # GT-BE98_PRO: 10G WAN/LAN + 2.5G WAN/LAN + 10G LAN + 3× 2.5G LAN + 1× 1G LAN (one WAN/LAN used → 6 LAN)
@@ -187,6 +188,8 @@ RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LA
 # GT-BE98: 10G WAN/LAN + 2.5G WAN/LAN + 10G LAN + 3× 2.5G LAN + 1× 1G LAN (one WAN/LAN used → 6 LAN)
 GT-BE98) MODEL="GT-BE98"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
 
+# === Custom Support Mapper ===
+# DEVICE_SUPPORT_MAPPER_PLACEHOLDER
 
 # === Fallback for Unknown Models ===
 # Attempt to auto-detect ethernet ports by scanning /sys/class/net. If fewer
