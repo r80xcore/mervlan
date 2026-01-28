@@ -1,7 +1,7 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <!-- mervlan.asp version="0.46" -->
+  <!-- mervlan.asp version="0.47" -->
 <meta http-equiv="X-UA-Compatible" content="IE=Edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <meta http-equiv="Pragma" content="no-cache">
@@ -14,6 +14,13 @@
 <!-- Keep the stock ASUSWRT-Merlin CSS so the shell looks normal -->
 <link rel="stylesheet" type="text/css" href="index_style.css">
 <link rel="stylesheet" type="text/css" href="form_style.css">
+
+<!-- Ensure jQuery is present before ASUS core scripts -->
+<script type="text/javascript">
+if (typeof window.jQuery === "undefined" && typeof window.$ === "undefined") {
+  document.write('<script src="/js/jquery.js"><\/script>');
+}
+</script>
 
 <!-- Core ASUS scripts that build the chrome/menu -->
 <script type="text/javascript" src="/state.js"></script>
@@ -30,7 +37,11 @@ function SetCurrentPage() {
 
 function initial(){
   SetCurrentPage();
-  show_menu(); // fills TopBanner, mainMenu, tabMenu, etc
+  if (typeof show_menu === "function") {
+    show_menu(); // fills TopBanner, mainMenu, tabMenu, etc
+  } else if (window.console && typeof console.error === "function") {
+    console.error("show_menu() not available");
+  }
 }
 </script>
 <script type="text/javascript">
