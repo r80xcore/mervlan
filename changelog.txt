@@ -1,4 +1,35 @@
-mervlan v0.52.2
+mervlan v0.52.3
+
+NEW FILES:
+- device_support_mapper.sh
+    This new script will help users to map the ETH/LAN-ports on
+    their current device. It will also generate a link to an already
+    filled in support ticket request to MerVLAN github.
+    In addition to this, the script can generate a working template
+    that allows MerVLAN to function as intended, unless there is already
+    an faulty template created and will in that case be patched.
+    run the script with:
+    /jffs/addons/mervlan/functions/device_support_mapper.sh
+    Then follow the instructions.
+
+UPDATED FILES:
+
+mervlan.asp - v0.47
+- Fix UI shell crash on some firmware by loading jQuery before state.js (root cause: $ undefined).
+
+index.html - v0.52.3
+- Updated version header.
+
+hw_probe.sh - 0.46.1
+- Added support for:
+    RT-AC86U
+    RT-AX86U (with 2.5gbps port configured as LAN)
+    RT-AX86S
+    RT-AX88U (but reduced to 4 VLAN active ports until a user can run the mapper)
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.52.2 changes
 
 UPDATED FILES:
 
