@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.3" -->
+  <!-- index.html version="0.52.4" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -77,6 +77,27 @@
     .update-log-line--error {
       color: #ff8a8a;
     }
+
+    #unsupportedModelModal .modal__actions {
+      justify-content: center;
+      gap: 12px;
+    }
+
+    #unsupportedModelModal .modal__actions .button_gen {
+      min-width: 220px;
+    }
+
+    #unsupportedModelModal .support-thanks {
+      margin-top: 10px;
+      color: #7bd77b;
+      font-weight: 600;
+      text-align: center;
+      display: none;
+    }
+
+    #unsupportedModelModal .support-thanks.is-visible {
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -103,7 +124,7 @@
   <div class="node-section">
     <h2 class="node-section__header">Node Configuration</h2>
     <div class="node-row node-row--primary">
-      <label for="node1Field">Node 1</label>
+      <label for="node1Field"><span class="node-label" data-node-index="1" title="Double-click to rename this node">Node 1</span></label>
       <div class="node-input-wrap">
         <input id="node1Field" class="input_15_table vlan-input" name="NODE1" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE1')" title="Enter node IP (format: 192.168.x.x)">
         <span id="statusNODE1" class="status node-status" title="❌ Missing/invalid value">❌</span>
@@ -115,28 +136,28 @@
     </div>
     <div id="nodeAdditional" class="node-additional" hidden>
       <div class="node-row">
-        <label for="node2Field">Node 2</label>
+        <label for="node2Field"><span class="node-label" data-node-index="2" title="Double-click to rename this node">Node 2</span></label>
         <div class="node-input-wrap">
           <input id="node2Field" class="input_15_table vlan-input" name="NODE2" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE2')" title="Enter node IP (format: 192.168.x.x)">
           <span id="statusNODE2" class="status node-status" title="❌ Missing/invalid value">❌</span>
         </div>
       </div>
       <div class="node-row">
-        <label for="node3Field">Node 3</label>
+        <label for="node3Field"><span class="node-label" data-node-index="3" title="Double-click to rename this node">Node 3</span></label>
         <div class="node-input-wrap">
           <input id="node3Field" class="input_15_table vlan-input" name="NODE3" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE3')" title="Enter node IP (format: 192.168.x.x)">
           <span id="statusNODE3" class="status node-status" title="❌ Missing/invalid value">❌</span>
         </div>
       </div>
       <div class="node-row">
-        <label for="node4Field">Node 4</label>
+        <label for="node4Field"><span class="node-label" data-node-index="4" title="Double-click to rename this node">Node 4</span></label>
         <div class="node-input-wrap">
           <input id="node4Field" class="input_15_table vlan-input" name="NODE4" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE4')" title="Enter node IP (format: 192.168.x.x)">
           <span id="statusNODE4" class="status node-status" title="❌ Missing/invalid value">❌</span>
         </div>
       </div>
       <div class="node-row">
-        <label for="node5Field">Node 5</label>
+        <label for="node5Field"><span class="node-label" data-node-index="5" title="Double-click to rename this node">Node 5</span></label>
         <div class="node-input-wrap">
           <input id="node5Field" class="input_15_table vlan-input" name="NODE5" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE5')" title="Enter node IP (format: 192.168.x.x)">
           <span id="statusNODE5" class="status node-status" title="❌ Missing/invalid value">❌</span>
@@ -144,6 +165,11 @@
       </div>
     </div>
   </div>
+      <input type="hidden" name="NODE1_ALIAS" id="node1AliasField" value="Node 1">
+      <input type="hidden" name="NODE2_ALIAS" id="node2AliasField" value="Node 2">
+      <input type="hidden" name="NODE3_ALIAS" id="node3AliasField" value="Node 3">
+      <input type="hidden" name="NODE4_ALIAS" id="node4AliasField" value="Node 4">
+      <input type="hidden" name="NODE5_ALIAS" id="node5AliasField" value="Node 5">
       </form>
 
       <!-- General Settings Panel -->
@@ -248,6 +274,35 @@
             </div>
           </div>
     </div>
+                <!-- Unsupported Model Modal -->
+        <div id="unsupportedModelModal" class="modal">
+          <div class="modal__header">
+            <h3 class="modal__title">Unsupported ASUS Model</h3>
+            <button class="modal__close" onclick="closeUnsupportedModelModal()">×</button>
+          </div>
+
+          <div class="modal__body">
+            <p>
+              This ASUS model is currently not officially supported.
+            </p>
+            <p>
+              The MerVLAN UI will still load and you may try using it at your own discretion.
+            </p>
+            <p>
+              If you want to add temporary support for this installation and help add
+              official support in the next MerVLAN update, visit the link below.
+            </p>
+            <p>
+              Want to help add official support? Use the button below.
+            </p>
+            <div id="supportThanksText" class="support-thanks" aria-live="polite"></div>
+          </div>
+          <div class="modal__actions">
+            <button class="button_gen" onclick="openSupportModelLink()">OK, support my model</button>
+            <button class="button_gen" onclick="closeUnsupportedModelModal()">OK, continue (not recommended)</button>
+          </div>
+        </div>
+
                 <!-- SSH Key Modal -->
         <div id="sshKeyModal" class="modal">
           <div class="modal__header">
@@ -475,6 +530,8 @@
           for (let i = 1; i <= 5; i++) {
             const key = `NODE${i}`;
             flat[key] = stringOrDefault(nodes[key], "none");
+            const aliasKey = `NODE${i}_ALIAS`;
+            flat[aliasKey] = stringOrDefault(nodes[aliasKey], getDefaultNodeAlias(i));
           }
 
           const wifi = ensurePlainObject(data.WiFi);
@@ -556,7 +613,12 @@
               NODE2: "none",
               NODE3: "none",
               NODE4: "none",
-              NODE5: "none"
+              NODE5: "none",
+              NODE1_ALIAS: "Node 1",
+              NODE2_ALIAS: "Node 2",
+              NODE3_ALIAS: "Node 3",
+              NODE4_ALIAS: "Node 4",
+              NODE5_ALIAS: "Node 5"
             },
             WiFi: {
               _description: "SSID slots and per-SSID AP isolation flags (APISO)",
@@ -595,6 +657,8 @@
           for (let i = 1; i <= 5; i++) {
             const key = `NODE${i}`;
             nodes[key] = stringOrDefault(flat[key], nodes[key] ?? "none");
+            const aliasKey = `NODE${i}_ALIAS`;
+            nodes[aliasKey] = stringOrDefault(flat[aliasKey], nodes[aliasKey] ?? getDefaultNodeAlias(i));
           }
 
           const wifi = target.WiFi = ensurePlainObject(target.WiFi);
@@ -624,51 +688,87 @@
 
         /* ================== HW SETTINGS + TABLE GENERATION ================== */
         let HW_SETTINGS = {
-          MAX_SSIDS: 12,
-          MAX_ETH_PORTS: 3
+          MAX_SSIDS: 0,
+          MAX_ETH_PORTS: 0,
+          LOADED: false
         };
+
+        function showUnsupportedModelModal() {
+          const modal = document.getElementById("unsupportedModelModal");
+          if (!modal) return;
+          const overlay = document.getElementById("leftPanelOverlay");
+          const cliLatch = document.getElementById("cliLatch");
+
+          modal.style.display = "block";
+          anchorModalToForm(modal);
+          if (overlay) {
+            overlay.classList.add("is-active");
+            overlay.style.display = "block";
+            overlay.style.pointerEvents = "auto";
+          }
+          if (cliLatch) {
+            if (cliLatch.dataset.prevDisplay === undefined) {
+              cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
+            }
+            cliLatch.style.display = "none";
+          }
+        }
 
         // Load hardware configuration from settings/settings.json (Hardware block)
         async function loadHwSettings() {
+          if (HW_SETTINGS.LOADED) return true;
+
+          let json;
+          let unsupported = false;
           try {
             const response = await fetch("settings/settings.json?_=" + Date.now());
-
             if (!response.ok) {
-              // If 404 or server error, use defaults
-                console.warn(`⚠️ settings.json or Hardware block not found (HTTP ${response.status}) — using default values.`);
-              
-              // ✅ Changed from 3 → 4 here so you can see it working when file missing
-              HW_SETTINGS = { MAX_SSIDS: 12, MAX_ETH_PORTS: 4 };
-              generateDynamicTables();
-              return;
+              throw new Error("settings.json not readable");
             }
-
-            // Try to parse JSON and read the Hardware block (backwards-compatible)
-            const json = await response.json();
-            // Prefer the consolidated Hardware block if present
-            const hw = (json && typeof json === 'object' && json.Hardware && typeof json.Hardware === 'object') ? json.Hardware : json;
-            HW_SETTINGS = {
-              MAX_SSIDS: parseInt(hw.MAX_SSIDS, 10) || 12,
-              MAX_ETH_PORTS: parseInt(hw.MAX_ETH_PORTS, 10) || 3
-            };
-            console.log(`✅ Loaded HW config: ${HW_SETTINGS.MAX_SSIDS} SSIDs, ${HW_SETTINGS.MAX_ETH_PORTS} LAN ports`);            generateDynamicTables();
-
+            json = await response.json();
           } catch (e) {
-            // Handle missing file, parse errors, or local file:// load errors
-            console.warn("⚠️ Failed to load settings.json or parse Hardware block, using defaults.", e);
-            
-            // ✅ Add this explicit fallback here as well
-            HW_SETTINGS = { MAX_SSIDS: 12, MAX_ETH_PORTS: 4 };
-
-            generateDynamicTables();
+            unsupported = true;
+            json = null;
           }
+
+          const hw = (json && typeof json === "object") ? json.Hardware : null;
+
+          const productId = hw && typeof hw.PRODUCTID === "string"
+            ? hw.PRODUCTID.trim().toUpperCase()
+            : "";
+
+          if (!hw || productId === "UNSUPPORTED") {
+            unsupported = true;
+          }
+
+          const maxEth = parseInt(hw?.MAX_ETH_PORTS, 10);
+          const maxSsids = parseInt(hw?.MAX_SSIDS, 10);
+
+          if (!Number.isInteger(maxEth) || maxEth < 1 || !Number.isInteger(maxSsids) || maxSsids < 1) {
+            unsupported = true;
+          }
+
+          HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
+          HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+          HW_SETTINGS.LOADED = true;
+
+          generateDynamicTables();
+
+          if (unsupported) {
+            showUnsupportedModelModal();
+          }
+
+          return true;
         }
 
 
         function generateDynamicTables() {
+          if (!HW_SETTINGS.LOADED || HW_SETTINGS.TABLES_READY) return;
           const ssidTable = document.getElementById("ssidTable");
           const lanTable  = document.getElementById("lanTable");
           if (!ssidTable || !lanTable) return;
+
+          HW_SETTINGS.TABLES_READY = true;
 
           // clear existing dynamic rows
           ssidTable.querySelectorAll("tr:not(:first-child)").forEach(tr => tr.remove());
@@ -845,6 +945,83 @@ function showTooltip() {
     };
     const statusTooltips = {"✅":TOOLTIP.STATUS_OK,"❎":TOOLTIP.STATUS_NOT,"🟩":TOOLTIP.STATUS_EDIT,"❌":TOOLTIP.STATUS_ERR,"🟡":TOOLTIP.STATUS_DUP};
     const NODE_DISABLED_TOOLTIP = "Configure node(s) first!";
+    function getDefaultNodeAlias(index){
+      return "Node " + index;
+    }
+    function sanitizeNodeAlias(value, index){
+      const cleaned = String(value || "").replace(/\s+/g, " ").trim();
+      return cleaned || getDefaultNodeAlias(index);
+    }
+    function setNodeAlias(index, value, opts = {}){
+      const alias = sanitizeNodeAlias(value, index);
+      const label = document.querySelector(`.node-label[data-node-index="${index}"]`);
+      const input = document.getElementById(`node${index}AliasField`);
+      if(label){
+        label.textContent = alias;
+      }
+      if(input){
+        input.value = alias;
+      }
+      if(opts.markEdited !== false){
+        markEdited(`NODE${index}`);
+      }
+      scheduleFormPaneWidthUpdate();
+      return alias;
+    }
+    function beginNodeAliasEdit(labelEl, index){
+      if(!labelEl || labelEl.dataset.editing === "1") return;
+      labelEl.dataset.editing = "1";
+      labelEl.dataset.originalText = labelEl.textContent;
+      labelEl.setAttribute("contenteditable", "true");
+      labelEl.focus();
+      const sel = window.getSelection && window.getSelection();
+      if(sel && document.createRange){
+        const range = document.createRange();
+        range.selectNodeContents(labelEl);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+    function finishNodeAliasEdit(labelEl, index, revert){
+      if(!labelEl) return;
+      const nextText = revert ? labelEl.dataset.originalText : labelEl.textContent;
+      labelEl.textContent = sanitizeNodeAlias(nextText, index);
+      labelEl.removeAttribute("contenteditable");
+      labelEl.dataset.editing = "0";
+      delete labelEl.dataset.originalText;
+      delete labelEl.dataset.revertOnBlur;
+      setNodeAlias(index, labelEl.textContent, { markEdited: true });
+    }
+    function setupNodeAliasEditors(){
+      document.querySelectorAll(".node-label").forEach(label => {
+        const index = parseInt(label.dataset.nodeIndex, 10);
+        if(!Number.isFinite(index) || index < 1) return;
+        if(label.dataset.aliasHandlerAttached === "1") return;
+
+        label.addEventListener("dblclick", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          beginNodeAliasEdit(label, index);
+        });
+        label.addEventListener("keydown", event => {
+          if(event.key === "Enter"){
+            event.preventDefault();
+            label.blur();
+          } else if(event.key === "Escape"){
+            event.preventDefault();
+            label.dataset.revertOnBlur = "1";
+            label.blur();
+          }
+        });
+        label.addEventListener("blur", () => {
+          if(label.getAttribute("contenteditable") !== "true") return;
+          const revert = label.dataset.revertOnBlur === "1";
+          finishNodeAliasEdit(label, index, revert);
+        });
+
+        label.dataset.aliasHandlerAttached = "1";
+      });
+    }
     const nodeDependentButtons = [];
     let CURRENT_SETTINGS_CACHE = null;
     let CURRENT_SETTINGS_STRUCTURED = null;
@@ -1144,14 +1321,14 @@ function showTooltip() {
     }
 
     function updateAllTrunkRows(){
-      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         updateSingleTrunkRow(i);
       }
     }
 
     function setupTrunkRowHandlers(){
-      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         const trunkCheck = document.querySelector(`input[name="TRUNK${i}"]`);
         const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
@@ -1230,7 +1407,7 @@ function showTooltip() {
     function extractVlansFromFlatSettings(flat){
       if(!flat) return [];
       const collected = new Set();
-      const maxSsids = HW_SETTINGS?.MAX_SSIDS || 12;
+      const maxSsids = HW_SETTINGS.MAX_SSIDS;
       for(let i = 1; i <= maxSsids; i++){
         const idx = String(i).padStart(2, "0");
         const value = flat[`VLAN_${idx}`];
@@ -1239,7 +1416,7 @@ function showTooltip() {
           collected.add(String(n));
         }
       }
-      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         const value = flat[`ETH${i}_VLAN`];
         const n = toInt(value);
@@ -1252,7 +1429,7 @@ function showTooltip() {
 
     function rebuildTrunkVlanOptionsFromSettings(flat){
       const vlans = extractVlansFromFlatSettings(flat);
-      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
         const taggedCustom = document.querySelector(`textarea[name="TAGGED_TRUNK_CUSTOM${i}"]`);
@@ -1478,7 +1655,10 @@ function showTooltip() {
       if(experimentalToggle){
         experimentalToggle.checked = false;
       }
-      const maxEth = HW_SETTINGS?.MAX_ETH_PORTS || 3;
+      for(let i = 1; i <= 5; i++){
+        setNodeAlias(i, getDefaultNodeAlias(i), { markEdited: false });
+      }
+      const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         const trunkChk = document.querySelector(`input[name="TRUNK${i}"]`);
         const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
@@ -1533,7 +1713,8 @@ function showTooltip() {
         expBadge.addEventListener("click", openVersionModal);
       }
       // ⬅️ NEW: build tables dynamically first
-      await loadHwSettings(); 
+      await loadHwSettings();
+      setupNodeAliasEditors();
       scheduleFormPaneWidthUpdate();
 
       // bind listeners AFTER tables exist
@@ -1625,6 +1806,19 @@ function showTooltip() {
           if(label) label.textContent = 'CLOSE';
         }
       }
+      function isModalVisibleById(id){
+        const el = document.getElementById(id);
+        if(!el || !window.getComputedStyle) return false;
+        return window.getComputedStyle(el).display !== 'none';
+      }
+      function shouldKeepLeftPanelOverlay(){
+        if(cliPanel && cliPanel.classList.contains('expanded')) return true;
+        return (
+          isModalVisibleById('sshKeyModal') ||
+          isModalVisibleById('versionModal') ||
+          isModalVisibleById('unsupportedModelModal')
+        );
+      }
       function setCliState(expand){
         if(!cliPanel) return;
         updateCliOverlayPosition();
@@ -1648,9 +1842,11 @@ function showTooltip() {
           stopPolling();
           const overlay = document.getElementById('leftPanelOverlay');
           if(overlay){
-            overlay.classList.remove('is-active');
-            overlay.style.display = 'none';
-            overlay.style.pointerEvents = 'none';
+            if(!shouldKeepLeftPanelOverlay()){
+              overlay.classList.remove('is-active');
+              overlay.style.display = 'none';
+              overlay.style.pointerEvents = 'none';
+            }
           }
         }
         if(cliLatch) cliLatch.setAttribute('aria-expanded', expand ? 'true' : 'false');
@@ -2284,9 +2480,12 @@ async function runVlanManagerOnlyNodes() {
         if (f[k]) f[k].value = v;
         const s = document.getElementById("statusNODE" + i);
         if (s) s.textContent = v ? "✅" : "❎";
+        const aliasKey = `NODE${i}_ALIAS`;
+        const aliasRaw = flat[aliasKey];
+        setNodeAlias(i, aliasRaw, { markEdited: false });
       }
 
-      for (let i = 1; i <= (HW_SETTINGS?.MAX_ETH_PORTS || 3); i++) {
+      for (let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++) {
         const vVlanRaw = flat[`ETH${i}_VLAN`] ?? "";
         const vVlan = (String(vVlanRaw).toLowerCase() === "none") ? "" : String(vVlanRaw);
         if (f[`ETH${i}_VLAN`]) f[`ETH${i}_VLAN`].value = vVlan;
@@ -2321,7 +2520,7 @@ async function runVlanManagerOnlyNodes() {
         }
       }
 
-      for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
+      for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
         const idx = String(i).padStart(2, "0");
         const ssidRaw = flat[`SSID_${idx}`] ?? "";
         const vlanRaw = flat[`VLAN_${idx}`] ?? "";
@@ -2376,9 +2575,19 @@ async function runVlanManagerOnlyNodes() {
       for (let i = 1; i <= 5; i++) {
         const raw = f["NODE" + i] ? f["NODE" + i].value.trim() : "";
         out["vlanmgr_NODE" + i] = raw === "" ? "none" : raw;
+        const aliasInput = document.getElementById(`node${i}AliasField`);
+        const aliasLabel = document.querySelector(`.node-label[data-node-index="${i}"]`);
+        const aliasValue = sanitizeNodeAlias(
+          aliasInput ? aliasInput.value : (aliasLabel ? aliasLabel.textContent : ""),
+          i
+        );
+        out[`vlanmgr_NODE${i}_ALIAS`] = aliasValue;
+        if (aliasInput) {
+          aliasInput.value = aliasValue;
+        }
       }
 
-      for (let i = 1; i <= (HW_SETTINGS?.MAX_ETH_PORTS || 3); i++) {
+      for (let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++) {
         const key = "ETH" + i + "_VLAN";
         const raw = f[key] ? f[key].value.trim() : "";
         out["vlanmgr_" + key] = raw === "" ? "none" : raw;
@@ -2388,7 +2597,7 @@ async function runVlanManagerOnlyNodes() {
         out["vlanmgr_UNTAGGED_TRUNK" + i] = trunkState.untagValue;
       }
 
-      for (let i = 1; i <= (HW_SETTINGS?.MAX_SSIDS || 12); i++) {
+      for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
         const idx = String(i).padStart(2, "0");
 
         const ssidRaw = f["SSID_" + idx] ? f["SSID_" + idx].value.trim() : "";
@@ -2462,15 +2671,25 @@ async function runVlanManagerOnlyNodes() {
       const flat = {};
       for(let i=1;i<=5;i++){
         flat["NODE"+i] = toNone(f["NODE"+i]?.value||"");
+        const aliasInput = document.getElementById(`node${i}AliasField`);
+        const aliasLabel = document.querySelector(`.node-label[data-node-index="${i}"]`);
+        const aliasValue = sanitizeNodeAlias(
+          aliasInput ? aliasInput.value : (aliasLabel ? aliasLabel.textContent : ""),
+          i
+        );
+        flat[`NODE${i}_ALIAS`] = aliasValue;
+        if(aliasInput){
+          aliasInput.value = aliasValue;
+        }
       }
-      for(let i=1;i<=(HW_SETTINGS?.MAX_ETH_PORTS||3);i++){
+      for(let i=1;i<=HW_SETTINGS.MAX_ETH_PORTS;i++){
         flat[`ETH${i}_VLAN`] = toNone(f[`ETH${i}_VLAN`]?.value||"");
         const trunkState = collectTrunkValues(i);
         flat[`TRUNK${i}`] = trunkState.enabled ? "1" : "0";
         flat[`TAGGED_TRUNK${i}`] = trunkState.taggedValue;
         flat[`UNTAGGED_TRUNK${i}`] = trunkState.untagValue;
       }
-      for(let i=1;i<=(HW_SETTINGS?.MAX_SSIDS||12);i++){
+      for(let i=1;i<=HW_SETTINGS.MAX_SSIDS;i++){
         const idx = String(i).padStart(2,"0");
         flat[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||"");
         flat[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
@@ -2605,6 +2824,46 @@ function closeSSHKeyModal() {
     const previous = cliLatch.dataset.prevDisplay;
     cliLatch.style.display = previous !== undefined ? previous : '';
     if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
+  }
+}
+
+function closeUnsupportedModelModal() {
+  const modal = document.getElementById("unsupportedModelModal");
+  if (!modal) return;
+  modal.style.display = "none";
+  releaseModalCentering(modal);
+  releaseAnchoredModal(modal);
+
+  const overlay = document.getElementById("leftPanelOverlay");
+  if (overlay) {
+    const cliPanel = document.getElementById('cliPanel');
+    const keepOverlay = cliPanel && cliPanel.classList.contains('expanded');
+    if (!keepOverlay) {
+      overlay.classList.remove("is-active");
+      overlay.style.display = "none";
+      overlay.style.pointerEvents = "none";
+    }
+  }
+
+  const cliLatch = document.getElementById("cliLatch");
+  if (cliLatch) {
+    const previous = cliLatch.dataset.prevDisplay;
+    cliLatch.style.display = previous !== undefined ? previous : "";
+    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
+  }
+}
+
+function openSupportModelLink() {
+  const url = "https://www.snbforums.com/threads/help-wanted-mapping-lan-eth-ports-for-mervlan-device-support.96646/";
+  try {
+    window.open(url, "_blank", "noopener");
+  } catch (e) {
+    window.location.href = url;
+  }
+  const thanks = document.getElementById("supportThanksText");
+  if (thanks) {
+    thanks.textContent = "Thank you for supporting MerVLAN!";
+    thanks.classList.add("is-visible");
   }
 }
 

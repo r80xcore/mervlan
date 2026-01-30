@@ -1,4 +1,35 @@
-mervlan v0.52.3
+mervlan v0.52.4
+
+UPDATED FILES:
+
+device_support_mapper.sh - v0.50.1
+- Fixed auto-press on buttons during the mapper flow.
+
+README.md 
+- Added information on how to use the device_support_mapper.sh
+
+hw_probe.sh - v0.46.3
+- Added support for the following devices: 
+    RT-AX88U (can map VLAN ID on port 1-4 individually. Port 5-8 (seen as LAN 5) can only be tagged as a group.)
+    RT-AX88U_PRO
+    GT-AX6000
+    RT-AX58U
+
+save_settings.sh - v0.47
+- Preserve structured settings.json when publishing to the public UI copy.
+
+index.html - v0.52.4
+- Unsupported model modal. An informational popup with link to add support or continue as-is.
+- Added node alias editing (double-click to rename) with alias persistence on save/load.
+- Version header update.
+- Fixed race on load that could reset HW settings by ensuring hardware is initialized once before dependent UI binds.
+
+vlan_index_style.css
+- Adjusted node label spacing to accommodate friendly names.
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.52.3 changes
 
 NEW FILES:
 - device_support_mapper.sh

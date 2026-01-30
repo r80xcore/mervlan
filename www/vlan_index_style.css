@@ -366,9 +366,17 @@ body {
         background-color:#475A5F;
 }
 .node-row label {
-        min-width:72px;
+        min-width:120px;
         font-weight:400;
         color:#FFFFFF;
+}
+.node-label {
+        display:inline-block;
+        min-width:120px;
+        cursor:text;
+}
+.node-label:focus {
+        outline:none;
 }
 .node-row--primary {
         position:relative;

@@ -27,7 +27,12 @@
     "NODE2": "none",
     "NODE3": "none",
     "NODE4": "none",
-    "NODE5": "none"
+    "NODE5": "none",
+    "NODE1_ALIAS": "Node 1",
+    "NODE2_ALIAS": "Node 2",
+    "NODE3_ALIAS": "Node 3",
+    "NODE4_ALIAS": "Node 4",
+    "NODE5_ALIAS": "Node 5"
   },
 
   "WiFi": {

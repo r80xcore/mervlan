@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: device_support_mapper.sh || version="0.50"            #
+#                - File: device_support_mapper.sh || version="0.50.1"            #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:  Creates a map template by detecting physical LAN/WAN port order  #
 #             to enable MerVLAN support with correct device mapping.           #
@@ -75,7 +75,16 @@ fi
 # -----------------------------
 say() { printf "%s\n" "$*"; }
 
-prompt_line() { printf "%s" "$*"; read REPLY; }
+DRAINED_TTY=0
+drain_tty_input() {
+  [ "$DRAINED_TTY" -eq 1 ] && return 0
+  if [ -r /dev/tty ]; then
+    while IFS= read -r -t 1 _ </dev/tty; do :; done
+  fi
+  DRAINED_TTY=1
+}
+
+prompt_line() { printf "%s" "$*"; read -r REPLY </dev/tty; }
 
 ask_enter_or_q() {
   prompt_line "$1"
@@ -93,7 +102,7 @@ yesno() {
     else
       printf "%s [y/N] (or q): " "$prompt"
     fi
-    read ans
+    read -r ans </dev/tty
     [ -z "$ans" ] && ans="$def"
     case "$ans" in
       Y|y) return 0 ;;
@@ -361,6 +370,7 @@ say ""
 # Step 1: WAN detection
 say "Step 1/2: WAN detection"
 say "Unplug ALL Ethernet cables except the WAN/uplink cable."
+drain_tty_input
 if ! ask_enter_or_q "Press Enter when ready (or 'q' to quit)... "; then
   say "Quit."
   exit 0
