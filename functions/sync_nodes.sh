@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.50"                        #
+#               - File: sync_nodes.sh || version="0.51"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -211,8 +211,8 @@ info -c cli,vlan "✓ SSH key verification passed"
 # get_node_ips — Pull NODE1..NODE5 entries, filter placeholders/invalid IPs
 get_node_ips() {
     grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-    grep -v "none" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
+    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
 }
 
 NODE_IPS=$(get_node_ips)
@@ -224,7 +224,7 @@ if [ -z "$NODE_IPS" ]; then
     exit 0
 fi
 
-info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
+info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' ' ')"
 echo ""
 
 # ========================================================================== #
@@ -576,7 +576,10 @@ set_remote_permissions_644() {
 # set_node_flag_remote — Mark remote device as MerVLAN node via settings.json
 set_node_flag_remote() {
     local node_ip="$1"
+    local node_id="$2"
+    local node_flags=""
     local node_flag_value=""
+    local node_id_value=""
     local remote_cmd="
         SETTINGS_FILE='$MERV_BASE/settings/settings.json';
         if [ ! -f \"\$SETTINGS_FILE\" ]; then
@@ -592,26 +595,30 @@ set_node_flag_remote() {
             exit 1
         }
         json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
+        json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
         json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
+        json_get_flag NODE_ID "none" \"\$SETTINGS_FILE\"
     "
 
     dbg_log "Setting IS_NODE flag remotely"
     dbg_var node_ip remote_cmd
 
     if [ "$DRY_RUN" = "yes" ]; then
-        info -c cli,vlan "[DRY-RUN] Would set IS_NODE=1 in settings.json on $node_ip"
+        info -c cli,vlan "[DRY-RUN] Would set IS_NODE=1 and NODE_ID=$node_id in settings.json on $node_ip"
         return 0
     fi
 
-    node_flag_value=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-        "$SSH_NODE_USER@$node_ip" "$remote_cmd" 2>/dev/null | tail -n 1 | tr -d '\r\n')
+    node_flags=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+        "$SSH_NODE_USER@$node_ip" "$remote_cmd" 2>/dev/null)
+    node_flag_value=$(echo "$node_flags" | tail -n 2 | head -n 1 | tr -d '\r\n')
+    node_id_value=$(echo "$node_flags" | tail -n 1 | tr -d '\r\n')
 
-    if [ "$node_flag_value" = "1" ]; then
-        info -c cli,vlan "✓ Set IS_NODE=1 in settings.json on $node_ip"
+    if [ "$node_flag_value" = "1" ] && [ "$node_id_value" = "$node_id" ]; then
+        info -c cli,vlan "✓ Set IS_NODE=1 and NODE_ID=$node_id in settings.json on $node_ip"
         return 0
     fi
 
-    error -c cli,vlan "✗ Failed to set IS_NODE=1 on $node_ip (read back '$node_flag_value')"
+    error -c cli,vlan "✗ Failed to set IS_NODE/NODE_ID on $node_ip (IS_NODE='$node_flag_value', NODE_ID='$node_id_value')"
     return 1
 }
 
@@ -642,8 +649,9 @@ debug_remote_files() {
 info -c cli,vlan "Starting file synchronization..."
 overall_success=true
 
-for node_ip in $NODE_IPS; do
-    info -c cli,vlan "Processing node: $node_ip"
+while read -r node_id node_ip; do
+    [ -n "$node_id" ] || continue
+    info -c cli,vlan "Processing node: $node_ip (NODE${node_id})"
     dbg_log "Beginning node synchronization"
     dbg_var node_ip DRY_RUN
     
@@ -758,7 +766,7 @@ for node_ip in $NODE_IPS; do
             done
 
             # Mark remote device as MerVLAN node via IS_NODE flag
-            if ! set_node_flag_remote "$node_ip"; then
+            if ! set_node_flag_remote "$node_ip" "$node_id"; then
                 overall_success=false
                 continue
             fi
@@ -792,9 +800,11 @@ for node_ip in $NODE_IPS; do
         overall_success=false
     fi
     
-    info -c cli,vlan "--- Completed node: $node_ip ---"
+    info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
     echo ""
-done
+done <<EOF
+$NODE_IPS
+EOF
 # Global nodeenable sweep removed; handled per-node in loop above
 
 # ========================================================================== #

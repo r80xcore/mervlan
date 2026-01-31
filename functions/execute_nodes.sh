@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: execute_nodes.sh || version="0.46"                    #
+#                - File: execute_nodes.sh || version="0.47"                    #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -112,8 +112,8 @@ info -c cli,vlan "✓ SSH key verification passed"
 get_node_ips() {
     # Extract NODE entries matching JSON "NODE[1-5]": "IP" format
     grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-    grep -v "none" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
+    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
 }
 
 NODE_IPS=$(get_node_ips)
@@ -124,7 +124,7 @@ if [ -z "$NODE_IPS" ]; then
     exit 0
 fi
 
-info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | tr '\n' ' ')"
+info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' ' ')"
 echo ""
 
 # ============================================================================ #
@@ -358,6 +358,47 @@ sync_settings_conf_for_node() {
     return 0
 }
 
+# set_node_flags_remote — Set IS_NODE=1 and NODE_ID on remote settings.json
+set_node_flags_remote() {
+    local node_ip="$1"
+    local node_id="$2"
+    local node_flags=""
+    local node_flag_value=""
+    local node_id_value=""
+    local remote_cmd="
+        SETTINGS_FILE='$MERV_BASE/settings/settings.json';
+        if [ ! -f \"\$SETTINGS_FILE\" ]; then
+            echo 'settings-missing' >&2
+            exit 1
+        fi
+        if [ ! -f '$MERV_BASE/settings/lib_json.sh' ]; then
+            echo 'lib-json-missing' >&2
+            exit 1
+        fi
+        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null || {
+            echo 'lib-json-load-failed' >&2
+            exit 1
+        }
+        json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
+        json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
+        json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
+        json_get_flag NODE_ID "none" \"\$SETTINGS_FILE\"
+    "
+
+    node_flags=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+        "$SSH_NODE_USER@$node_ip" "$remote_cmd" 2>/dev/null)
+    node_flag_value=$(echo "$node_flags" | tail -n 2 | head -n 1 | tr -d '\r\n')
+    node_id_value=$(echo "$node_flags" | tail -n 1 | tr -d '\r\n')
+
+    if [ "$node_flag_value" = "1" ] && [ "$node_id_value" = "$node_id" ]; then
+        info -c cli,vlan "✓ Set IS_NODE=1 and NODE_ID=$node_id on $node_ip"
+        return 0
+    fi
+
+    error -c cli,vlan "✗ Failed to set IS_NODE/NODE_ID on $node_ip (IS_NODE='$node_flag_value', NODE_ID='$node_id_value')"
+    return 1
+}
+
 # Verify local settings.json exists before proceeding with any node operations
 if ! ensure_settings_conf_exists; then
     exit 1
@@ -411,8 +452,9 @@ execute_vlan_manager_on_node() {
 info -c cli,vlan "Starting VLAN manager execution on nodes..."
 overall_success=true
 
-for node_ip in $NODE_IPS; do
-    info -c cli,vlan "Processing node: $node_ip"
+while read -r node_id node_ip; do
+    [ -n "$node_id" ] || continue
+    info -c cli,vlan "Processing node: $node_ip (NODE${node_id})"
     
     # Test ping reachability; skip node if unreachable
     if ! ping -c 1 -W 2 "$node_ip" >/dev/null 2>&1; then
@@ -436,15 +478,23 @@ for node_ip in $NODE_IPS; do
         overall_success=false
         continue
     fi
+
+    # Set IS_NODE and NODE_ID on the remote node before execution
+    if ! set_node_flags_remote "$node_ip" "$node_id"; then
+        overall_success=false
+        continue
+    fi
     
     # Execute VLAN manager on the remote node
     if ! execute_vlan_manager_on_node "$node_ip"; then
         overall_success=false
     fi
     
-    info -c cli,vlan "--- Completed node: $node_ip ---"
+    info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
     echo ""
-done
+done <<EOF
+$NODE_IPS
+EOF
 
 # ============================================================================ #
 #                     EXECUTE ON MAIN ROUTER                                   #

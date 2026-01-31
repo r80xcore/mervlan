@@ -1,4 +1,52 @@
-mervlan v0.52.4
+mervlan v0.52.5
+
+- This update adds support for per-node/AP ethernet VLAN overrides so 
+  LAN VLANs can be configured individually across all connected nodes/APs.
+- Adds a default profile for unsupported devices.
+
+UPDATED FILES:
+
+execute_nodes.sh
+- Parse NODE1..NODE5 with index and IP for per-node context.
+- Set IS_NODE=1 and NODE_ID=<node index> on the remote settings.json before execution.
+- Preserve overall success tracking by avoiding subshell loop.
+
+mervlan_manager.sh
+- Added read_json_raw + early read_json alias, then node-aware read_json remap for ETH1-ETH8 VLAN keys.
+- NODE_ID normalization and startup log for node override mode.
+- POSIX-safe verify_interface_binding() guard for none/trunk.
+
+sync_nodes.sh
+- Parse NODE1..NODE5 with index and IP for per-node context.
+- Set IS_NODE=1 and NODE_ID=<node index> in the remote settings.json after sync.
+- Preserve overall success tracking by avoiding subshell loop.
+
+settings.json
+- Node_overrides now uses fully qualified per-node keys (NODE{n}_Ethernet_ports/NODE{n}_ETH{p}_VLAN).
+
+index.html
+- Added tabs for ethernet ports on main unit and NODE1..NODE5 (1-5)
+- Node VLAN defaults and templates now use NODE{n}_Ethernet_ports and NODE{n}_ETH{p}_VLAN keys.
+- Flatten/expand logic updated to read/write per-node VLAN keys.
+- LAN validation handles node-aware keys and global VLAN checks.
+- Added support for changing the default node names. You can rename a node by
+  double-clicking its name, allowing you to assign friendlier labels to
+  identify your units instead of relying on remembering which IP address
+  belongs to which device.
+
+vlan_index_style.css
+- Updated for the ethernet tab buttons
+
+hw_probe.sh
+- Added a default "UNSUPPORTED" mapping profile. This profile restricts the
+  device to 3 SSID VLANs and 3 Ethernet VLANs, to reduce the risk of
+  misconfiguration when the hardware is not correctly mapped.
+  A popup will appear with options to either temporarily map support and
+  submit the mapping to GitHub, or continue and test whether it works.
+  
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.4 changes
 
 UPDATED FILES:
 

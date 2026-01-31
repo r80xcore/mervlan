@@ -254,6 +254,46 @@ body {
         width: var(--table-col-width-name);
 }
 
+.lan-header-wrap {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:8px;
+        width:100%;
+}
+
+.lan-node-toggle {
+        display:inline-flex;
+        align-items:center;
+        gap:4px;
+}
+
+.lan-node-btn {
+        background:#1F2D35;
+        border:1px solid #569AC7;
+        color:#FFFFFF;
+        font-size:11px;
+        line-height:1;
+        padding:3px 6px;
+        border-radius:4px;
+        cursor:pointer;
+        min-width:26px;
+        text-align:center;
+        transition:background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.lan-node-btn:hover,
+.lan-node-btn:focus {
+        background:#569AC7;
+        color:#FFFFFF;
+}
+
+.lan-node-btn.is-active {
+        background:#569AC7;
+        color:#FFFFFF;
+        border-color:#6cbaf5;
+}
+
 /* Fourth header (Status) in SSID table - right-align the header text */
 #ssidTable th:nth-child(4) {
         text-align: center;

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.53"                   #
+#               - File: mervlan_manager.sh || version="0.54"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -50,14 +50,21 @@ esc_key() {
   json_escape_key "$@"
 }
 
-# read_json — Extract scalar value from JSON file by key name
+# read_json_raw — Extract scalar value from JSON file by key name (no NODE_ID remapping)
 # Args: $1=key_name, $2=file_path
 # Returns: stdout value (quoted string or bare number), or empty if not found
 # Explanation: Uses sed with enhanced regex to handle escaped quotes. Prefers
 #   quoted strings; falls back to bare values for numbers. Trims whitespace.
-read_json() {
+read_json_raw() {
   # Backwards-compatible wrapper: delegate to centralized json_get_scalar
   json_get_scalar "$1" "$2"
+}
+
+# read_json — Early alias for read_json_raw (pre-NODE_ID wrapper)
+# Args: $1=key_name, $2=file_path
+# Returns: stdout value from json_get_scalar
+read_json() {
+  read_json_raw "$@"
 }
 
 # read_json_number — Extract numeric value from JSON key (grep only digits)
@@ -230,9 +237,22 @@ fi
 
 # Extract user configuration from settings.json
 TOPOLOGY="switch"
-PERSISTENT=$(read_json PERSISTENT "$SETTINGS_FILE")
-DRY_RUN=$(read_json DRY_RUN "$SETTINGS_FILE")
-ENABLE_STP=$(read_json ENABLE_STP "$SETTINGS_FILE")
+PERSISTENT=$(read_json_raw PERSISTENT "$SETTINGS_FILE")
+DRY_RUN=$(read_json_raw DRY_RUN "$SETTINGS_FILE")
+ENABLE_STP=$(read_json_raw ENABLE_STP "$SETTINGS_FILE")
+
+# Extract NODE_ID early (before node-aware read_json wrapper is defined)
+NODE_ID=$(read_json_raw NODE_ID "$SETTINGS_FILE")
+if [ -z "$NODE_ID" ]; then
+  NODE_ID=$(read_json_section_value "General" "NODE_ID" "$SETTINGS_FILE")
+fi
+[ -z "$NODE_ID" ] && NODE_ID="none"
+
+# Normalize invalid NODE_IDs to prevent unexpected behavior
+case "$NODE_ID" in
+  none|1|2|3|4|5) : ;;
+  *) NODE_ID="none" ;;
+esac
 
 # Apply defaults for unconfigured values
 [ -z "$MAX_SSIDS" ] && MAX_SSIDS=12
@@ -262,6 +282,45 @@ PERSISTENT="no"
 # Resolve bridge and WAN interface
 UPLINK_PORT="$WAN_IF"
 DEFAULT_BRIDGE="br0"
+
+# ========================================================================== #
+# NODE-AWARE read_json WRAPPER — Intercept ETH VLAN reads for node overrides #
+# ========================================================================== #
+
+# read_json — Smart wrapper that redirects ETH*_VLAN reads based on NODE_ID
+# Args: $1=key_name, $2=file_path
+# Returns: stdout value from appropriate pool (node override or main)
+# Explanation: When NODE_ID is 1-5, intercepts ETH1_VLAN..ETH8_VLAN reads
+#   and redirects to NODE{n}_ETH{idx}_VLAN. No fallback to main pool.
+#   All other keys pass through to read_json_raw unchanged.
+read_json() {
+  local key="$1"
+  local file="$2"
+  local idx okey val
+
+  # Only redirect ETH port VLAN reads, only for settings.json, only on nodes
+  case "$NODE_ID" in
+    1|2|3|4|5)
+      if [ "$file" = "$SETTINGS_FILE" ]; then
+        case "$key" in
+          ETH[1-8]_VLAN)
+            idx="${key#ETH}"      # "1_VLAN"
+            idx="${idx%_VLAN}"    # "1"
+            okey="NODE${NODE_ID}_ETH${idx}_VLAN"
+
+            val="$(read_json_raw "$okey" "$file")"
+            [ -z "$val" ] && val="none"   # strict modular: no fallback to main
+            printf '%s' "$val"
+            return 0
+            ;;
+        esac
+      fi
+      ;;
+  esac
+
+  # Main unit (NODE_ID=none) or non-ETH keys: normal read
+  read_json_raw "$key" "$file"
+}
 
 # ========================================================================== #
 # STATE TRACKING & AUDIT — Change log, cleanup on exit, change tracking      #
@@ -604,7 +663,9 @@ member_of_bridge() {
 verify_interface_binding() {
   iface="$1"
   vid="$2"
-  [ "$vid" = "none" ] || [ "$vid" = "trunk" ] && return 0
+  case "$vid" in
+    none|trunk) return 0 ;;
+  esac
   member_of_bridge "br${vid}" "$iface"
 }
 
@@ -1260,6 +1321,16 @@ main() {
   info -c cli,vlan "Starting VLAN manager on $MODEL ($PRODUCTID)"
   info -c cli,vlan "WAN: $WAN_IF, Topology: $TOPOLOGY"
   info -c cli,vlan "Dry Run: $DRY_RUN, Persistent: $PERSISTENT"
+  
+  # Log NODE_ID mode
+  case "$NODE_ID" in
+    1|2|3|4|5)
+      info -c cli,vlan "Node Mode: Using NODE${NODE_ID} Ethernet port overrides"
+      ;;
+    *)
+      info -c cli,vlan "Node Mode: Using main Ethernet port configuration"
+      ;;
+  esac
 
   # Validation phase 1: check all VLAN IDs for syntax errors before any changes
   info -c cli,vlan "Validating VLAN settings..."

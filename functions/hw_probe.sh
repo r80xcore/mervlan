@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ---------------------------------------------------------------------------- #
-#                   - File: hw_probe.sh || version="0.46.3"                    #
+#                   - File: hw_probe.sh || version="0.46.4"                    #
 # ---------------------------------------------------------------------------- #
 # - Purpose:    Probe system hardware and record hardware keys in the central
 #                settings store (settings.json). Writes non-destructively via
@@ -155,12 +155,12 @@ RT-AX88U) MODEL="AX88U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="
 # Attempt to auto-detect ethernet ports by scanning /sys/class/net. If fewer
 # than 4 ports found, default to 4 ports (common minimum). Cap SSID count.
     *)
-        MODEL="$PRODUCTID"
+        MODEL="UNSUPPORTED"
         ETH_PORTS="eth1 eth2 eth3"
         LAN_PORT_LABELS="LAN1 LAN2 LAN3"
         MAX_ETH_PORTS=3
         # Default SSID cap for unknown models
-        MAX_SSIDS=6
+        MAX_SSIDS=3
         WAN_IF="eth0"
         ;;
 esac
