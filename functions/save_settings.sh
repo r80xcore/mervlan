@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: save_settings.sh || version="0.47"                     #
+#               - File: save_settings.sh || version="0.48"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -152,15 +152,19 @@ sort_vlanmgr_block_in_custom_settings() {
 
 info -c vlan "save_settings.sh: start"
 
+# Detect ETH port capacity from Hardware section if not already set
+if [ -z "${MAX_ETH_PORTS:-}" ]; then
+    if [ -f "$HW_SETTINGS_FILE" ]; then
+        MAX_ETH_PORTS="$(json_get_hw_int "MAX_ETH_PORTS" "" "$HW_SETTINGS_FILE" 2>/dev/null)"
+    fi
+fi
+
 # Detect TRUNK port capacity (mirrors ETH/LAN unless overridden)
 if [ -z "${MAX_TRUNK_PORTS:-}" ]; then
     if [ -n "${MAX_ETH_PORTS:-}" ]; then
         MAX_TRUNK_PORTS="$MAX_ETH_PORTS"
     else
-        if [ -f "$HW_SETTINGS_FILE" ]; then
-            MAX_TRUNK_PORTS="$(json_get_int "MAX_ETH_PORTS" 8 "$HW_SETTINGS_FILE" 2>/dev/null)"
-        fi
-        [ -n "$MAX_TRUNK_PORTS" ] || MAX_TRUNK_PORTS=8
+        MAX_TRUNK_PORTS=8
     fi
 fi
 

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.54"                   #
+#               - File: mervlan_manager.sh || version="0.55"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -29,14 +29,33 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 unset LIB_JSON_LOADED
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
-# Optional CLI override: "mervlan_manager.sh dryrun" (forces dry-run regardless of settings.json)
+# Optional CLI overrides:
+#   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
+#   --no-collect         → skip collect_clients.sh (for parallel execution)
 CLI_DRY_RUN="no"
-case "$1" in
-  dryrun|--dry-run|-n)
-    CLI_DRY_RUN="yes"
-    ;;
-esac
+SKIP_COLLECT="no"
+for arg in "$@"; do
+  case "$arg" in
+    dryrun|--dry-run|-n)
+      CLI_DRY_RUN="yes"
+      ;;
+    --no-collect)
+      SKIP_COLLECT="yes"
+      ;;
+  esac
+done
 # =========================================== End of MerVLAN environment setup #
+
+# ============================================================================ #
+# NODE DETECTION — Check if running on a node (satellite) vs main router      #
+# ============================================================================ #
+# Read IS_NODE and NODE_ID from settings.json (set by execute_nodes.sh)
+MERV_IS_NODE="$(json_get_flag IS_NODE 0 "$SETTINGS_FILE")"
+MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
+
+# Completion marker directory and file (used by main router to verify node execution)
+MERV_COMPLETION_DIR="/tmp/mervlan_tmp/results/node_complete"
+MERV_COMPLETION_MARKER="$MERV_COMPLETION_DIR/node_${MERV_NODE_ID}.marker"
 
 # ========================================================================== #
 # JSON HELPERS — BusyBox-safe parsing for settings and hardware JSON files    #
@@ -1240,6 +1259,14 @@ restart_services() {
   # Skip if dry-run mode
   [ "$DRY_RUN" = "yes" ] && return
 
+  # Create self-restart marker with expiry timestamp to prevent heal_event.sh from
+  # triggering event loops when our service restarts fire service-event callbacks.
+  # We write the expiry time (now + window) so heal_event.sh can check: now < expiry.
+  SELF_RESTART_MARKER="$LOCKDIR/self_restart.marker"
+  SELF_RESTART_WINDOW="${MERV_SELF_RESTART_WINDOW:-45}"
+  now=$(date +%s)
+  printf '%s\n' $((now + SELF_RESTART_WINDOW)) > "$SELF_RESTART_MARKER" 2>/dev/null || :
+
   if is_ap_mode; then
     # Prefer a lighter touch in AP mode to avoid rc race conditions
     safe_service_restart "switch restart" "switch" 30
@@ -1314,6 +1341,19 @@ post_rc_watchdog() {
 # Returns: none (exit code via mervlan_manager.sh script)
 main() {
   acquire_script_lock
+
+  # Clean up stale self-restart markers (older than 60s past expiry)
+  # These markers prevent heal_event.sh loops but should not persist forever
+  _stale_marker="$LOCKDIR/self_restart.marker"
+  if [ -f "$_stale_marker" ]; then
+    _expiry=$(cat "$_stale_marker" 2>/dev/null || echo 0)
+    case "$_expiry" in ''|*[!0-9]*) _expiry=0 ;; esac
+    _now=$(date +%s)
+    if [ $((_now - 60)) -gt "$_expiry" ]; then
+      rm -f "$_stale_marker" 2>/dev/null || :
+    fi
+  fi
+
   # Pre-flight validation: verify required files and settings exist
   validate_configuration
   
@@ -1417,8 +1457,19 @@ main() {
 
   info -c cli,vlan "VLAN manager run completed at $(date '+%H:%M:%S')"
 
+  # On nodes: write completion marker for main router to verify
+  if [ "$MERV_IS_NODE" = "1" ]; then
+    mkdir -p "$MERV_COMPLETION_DIR" 2>/dev/null
+    echo "$(date +%s) NODE$MERV_NODE_ID" > "$MERV_COMPLETION_MARKER"
+    info -c cli,vlan "Node execution complete - marker written"
+  fi
+
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "Dry-run mode; skipping VLAN client list refresh (collect_clients.sh)"
+  elif [ "$MERV_IS_NODE" = "1" ]; then
+    info -c cli,vlan "Running on node; skipping client refresh (handled by main router)"
+  elif [ "$SKIP_COLLECT" = "yes" ]; then
+    info -c cli,vlan "Parallel mode; skipping client refresh (will be run after node verification)"
   elif [ -x "$FUNCDIR/collect_clients.sh" ]; then
     info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
     sleep 5
@@ -1430,7 +1481,7 @@ main() {
       warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
     fi
   else
-    info -c cli,vlan "this is a node; skipping client refresh"
+    info -c cli,vlan "collect_clients.sh not available; skipping client refresh"
   fi
 }
 

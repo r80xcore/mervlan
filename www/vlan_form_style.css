@@ -422,11 +422,13 @@
         justify-content:center;
         min-height:30px;
         padding-left:60px;
+        padding-right:60px;
+        position:relative;
 }
 
 .lan-label-wrap .lan-trunk-toggle {
         position:absolute;
-        left:0;
+        right:0;
         display:flex;
         align-items:center;
         gap:6px;
@@ -471,8 +473,9 @@
 
 .lan-trunk-inline {
         display:flex;
-        gap:12px;
-        align-items:flex-start;
+        flex-direction:column;
+        gap:8px;
+        align-items:stretch;
 }
 
 .lan-trunk-field {

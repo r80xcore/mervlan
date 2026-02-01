@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.5" -->
+  <!-- index.html version="0.52.6" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -755,6 +755,17 @@
         let HW_SETTINGS = {
           MAX_SSIDS: 0,
           MAX_ETH_PORTS: 0,
+          PRODUCTID: "",
+          PRODUCTID_NODE1: "",
+          PRODUCTID_NODE2: "",
+          PRODUCTID_NODE3: "",
+          PRODUCTID_NODE4: "",
+          PRODUCTID_NODE5: "",
+          MAX_ETH_PORTS_NODE1: 0,
+          MAX_ETH_PORTS_NODE2: 0,
+          MAX_ETH_PORTS_NODE3: 0,
+          MAX_ETH_PORTS_NODE4: 0,
+          MAX_ETH_PORTS_NODE5: 0,
           LOADED: false
         };
 
@@ -816,11 +827,24 @@
             unsupported = true;
           }
 
+          HW_SETTINGS.PRODUCTID = productId;
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+
+          // Load node hardware values
+          for (let i = 1; i <= 5; i++) {
+            const pidKey = "PRODUCTID_NODE" + i;
+            const ethKey = "MAX_ETH_PORTS_NODE" + i;
+            const pidVal = hw && typeof hw[pidKey] === "string" ? hw[pidKey].trim().toUpperCase() : "";
+            const ethVal = parseInt(hw?.[ethKey], 10);
+            HW_SETTINGS[pidKey] = pidVal;
+            HW_SETTINGS[ethKey] = Number.isInteger(ethVal) && ethVal > 0 ? ethVal : 0;
+          }
+
           HW_SETTINGS.LOADED = true;
 
           generateDynamicTables();
+          updateLanNodeButtonStates();
 
           if (unsupported) {
             showUnsupportedModelModal();
@@ -829,12 +853,117 @@
           return true;
         }
 
+        /**
+         * Refresh HW_SETTINGS from cached settings (after save/load).
+         * Returns true if any hardware values changed.
+         */
+        function refreshHwSettingsFromCache() {
+          const hw = CURRENT_SETTINGS_STRUCTURED?.Hardware ?? null;
+          if (!hw) return false;
+
+          const oldVals = {
+            MAX_ETH_PORTS: HW_SETTINGS.MAX_ETH_PORTS,
+            MAX_SSIDS: HW_SETTINGS.MAX_SSIDS,
+            PRODUCTID: HW_SETTINGS.PRODUCTID
+          };
+          for (let i = 1; i <= 5; i++) {
+            oldVals["MAX_ETH_PORTS_NODE" + i] = HW_SETTINGS["MAX_ETH_PORTS_NODE" + i];
+            oldVals["PRODUCTID_NODE" + i] = HW_SETTINGS["PRODUCTID_NODE" + i];
+          }
+
+          // Update main router values
+          const maxEth = parseInt(hw.MAX_ETH_PORTS, 10);
+          const maxSsids = parseInt(hw.MAX_SSIDS, 10);
+          HW_SETTINGS.PRODUCTID = typeof hw.PRODUCTID === "string" ? hw.PRODUCTID.trim().toUpperCase() : "";
+          HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
+          HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+
+          // Update node values
+          for (let i = 1; i <= 5; i++) {
+            const pidKey = "PRODUCTID_NODE" + i;
+            const ethKey = "MAX_ETH_PORTS_NODE" + i;
+            const pidVal = typeof hw[pidKey] === "string" ? hw[pidKey].trim().toUpperCase() : "";
+            const ethVal = parseInt(hw[ethKey], 10);
+            HW_SETTINGS[pidKey] = pidVal;
+            HW_SETTINGS[ethKey] = Number.isInteger(ethVal) && ethVal > 0 ? ethVal : 0;
+          }
+
+          // Check if anything changed
+          let changed = false;
+          if (oldVals.MAX_ETH_PORTS !== HW_SETTINGS.MAX_ETH_PORTS ||
+              oldVals.MAX_SSIDS !== HW_SETTINGS.MAX_SSIDS ||
+              oldVals.PRODUCTID !== HW_SETTINGS.PRODUCTID) {
+            changed = true;
+          }
+          for (let i = 1; i <= 5; i++) {
+            if (oldVals["MAX_ETH_PORTS_NODE" + i] !== HW_SETTINGS["MAX_ETH_PORTS_NODE" + i] ||
+                oldVals["PRODUCTID_NODE" + i] !== HW_SETTINGS["PRODUCTID_NODE" + i]) {
+              changed = true;
+            }
+          }
+
+          return changed;
+        }
+
+        /**
+         * If HW values changed, force table regeneration and re-fill form.
+         * Note: This is now mainly used for explicit rebuild requests.
+         * loadSettings() handles the normal post-load refresh internally.
+         */
+        function rebuildTablesIfHwChanged() {
+          const hwChanged = refreshHwSettingsFromCache();
+          if (!hwChanged) return false;
+
+          // Force regeneration by clearing the "already built" flags
+          HW_SETTINGS.TABLES_READY = false;
+          HW_SETTINGS.LAST_MAX_SSIDS = null;
+          HW_SETTINGS.LAST_MAX_ETH_PORTS = null;
+
+          generateDynamicTables();
+          updateLanNodeButtonStates();
+          updateLanRowVisibility(CURRENT_LAN_TARGET);
+          updateLanProductIdBadge(CURRENT_LAN_TARGET);
+
+          // Re-fill form with cached settings (tables were just rebuilt)
+          if (CURRENT_SETTINGS_CACHE) {
+            fillFormFromSettings(CURRENT_SETTINGS_CACHE);
+          }
+
+          return true;
+        }
+
+        /**
+         * Get the max LAN ports for a given target ("main" or "NODE1".."NODE5").
+         */
+        function getMaxEthPortsForTarget(target) {
+          if (!target || target === "main") {
+            return HW_SETTINGS.MAX_ETH_PORTS || 0;
+          }
+          const match = target.match(/^NODE(\d+)$/);
+          if (!match) return 0;
+          const n = parseInt(match[1], 10);
+          return HW_SETTINGS["MAX_ETH_PORTS_NODE" + n] || 0;
+        }
+
+        /**
+         * Compute the maximum LAN port count across main + all configured nodes.
+         */
+        function getOverallMaxEthPorts() {
+          let max = HW_SETTINGS.MAX_ETH_PORTS || 0;
+          for (let i = 1; i <= 5; i++) {
+            const v = HW_SETTINGS["MAX_ETH_PORTS_NODE" + i] || 0;
+            if (v > max) max = v;
+          }
+          return max;
+        }
+
 
         function generateDynamicTables() {
           if (!HW_SETTINGS.LOADED) return;
+          const overallMax = getOverallMaxEthPorts();
           if (HW_SETTINGS.TABLES_READY &&
               HW_SETTINGS.LAST_MAX_SSIDS === HW_SETTINGS.MAX_SSIDS &&
-              HW_SETTINGS.LAST_MAX_ETH_PORTS === HW_SETTINGS.MAX_ETH_PORTS) {
+              HW_SETTINGS.LAST_MAX_ETH_PORTS === overallMax) {
             return;
           }
           const ssidTable = document.getElementById("ssidTable");
@@ -862,11 +991,15 @@
           }
 
           // build LAN port rows
-          for (let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++) {
+          for (let i = 1; i <= overallMax; i++) {
+            const isFirstRow = (i === 1);
+            const productIdBadge = isFirstRow ? '<span class="lan-product-id-badge" id="lanProductIdBadge"></span>' : '';
             lanTable.insertAdjacentHTML("beforeend", `
               <tr data-lan-index="${i}">
                 <td class="lan-table__port">
                   <div class="lan-label-wrap">
+                    ${productIdBadge}
+                    <span class="lan-label-main">LAN ${i}</span>
                     <label class="lan-trunk-toggle experimental-only experimental-hidden">
                       <input
                         type="checkbox"
@@ -877,7 +1010,6 @@
                       >
                       <span>Trunk</span>
                     </label>
-                    <span class="lan-label-main">LAN ${i}</span>
                   </div>
                 </td>
                 <td>
@@ -952,9 +1084,11 @@
           setupTrunkRowHandlers();
           rebuildTrunkVlanOptionsFromSettings({});
           updateExperimentalVisibility();
+          updateLanRowVisibility(CURRENT_LAN_TARGET);
+          updateLanProductIdBadge(CURRENT_LAN_TARGET);
           HW_SETTINGS.TABLES_READY = true;
           HW_SETTINGS.LAST_MAX_SSIDS = HW_SETTINGS.MAX_SSIDS;
-          HW_SETTINGS.LAST_MAX_ETH_PORTS = HW_SETTINGS.MAX_ETH_PORTS;
+          HW_SETTINGS.LAST_MAX_ETH_PORTS = overallMax;
         }
         </script>
 
@@ -1121,7 +1255,8 @@ function showTooltip() {
       if(!CURRENT_SETTINGS_CACHE){
         CURRENT_SETTINGS_CACHE = {};
       }
-      for(let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++){
+      const maxPorts = getOverallMaxEthPorts();
+      for(let i = 1; i <= maxPorts; i++){
         const input = document.querySelector(`.lan-vlan-input[data-lan-port="${i}"]`);
         const value = input ? input.value : "";
         CURRENT_SETTINGS_CACHE[getLanFlatKey(target, i)] = toNone(value);
@@ -1132,7 +1267,8 @@ function showTooltip() {
       const f = document.getElementById("settingsForm");
       if(!f) return;
       const cache = CURRENT_SETTINGS_CACHE || {};
-      for(let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++){
+      const maxPorts = getOverallMaxEthPorts();
+      for(let i = 1; i <= maxPorts; i++){
         const key = getLanFlatKey(target, i);
         const raw = cache[key] ?? "";
         const value = (String(raw).toLowerCase() === "none") ? "" : String(raw);
@@ -1151,6 +1287,87 @@ function showTooltip() {
       });
     }
 
+    /**
+     * Show/hide LAN port rows based on the target's port count.
+     * Rows with data-lan-index > targetMaxPorts are hidden.
+     */
+    function updateLanRowVisibility(target) {
+      const maxPorts = getMaxEthPortsForTarget(target);
+      const lanTable = document.getElementById("lanTable");
+      if (!lanTable) return;
+      lanTable.querySelectorAll("tr[data-lan-index]").forEach(tr => {
+        const idx = parseInt(tr.dataset.lanIndex, 10);
+        if (idx <= maxPorts) {
+          tr.style.display = "";
+        } else {
+          tr.style.display = "none";
+        }
+      });
+    }
+
+    /**
+     * Get the PRODUCTID for a given target ("main" or "NODE1".."NODE5").
+     */
+    function getProductIdForTarget(target) {
+      if (!target || target === "main") {
+        return HW_SETTINGS.PRODUCTID || "";
+      }
+      const match = target.match(/^NODE(\d+)$/);
+      if (!match) return "";
+      const n = parseInt(match[1], 10);
+      return HW_SETTINGS["PRODUCTID_NODE" + n] || "";
+    }
+
+    /**
+     * Update the product ID badge in the LAN table's first row.
+     */
+    function updateLanProductIdBadge(target) {
+      const badge = document.getElementById("lanProductIdBadge");
+      if (!badge) return;
+      const pid = getProductIdForTarget(target);
+      if (pid) {
+        badge.textContent = pid;
+        badge.style.display = "";
+      } else {
+        badge.textContent = "";
+        badge.style.display = "none";
+      }
+    }
+
+    /**
+     * Disable/grey-out node tabs if MAX_ETH_PORTS_NODEx is 0 or empty.
+     * Main tab always remains enabled.
+     */
+    function updateLanNodeButtonStates() {
+      if (!HW_SETTINGS.LOADED) return;
+      document.querySelectorAll(".lan-node-btn").forEach(btn => {
+        const target = btn.dataset.lanTarget || "";
+        if (target === "main") {
+          btn.disabled = false;
+          btn.classList.remove("is-disabled");
+          btn.title = "Edit main router LAN VLANs";
+          return;
+        }
+        // Extract node number (NODE1 -> 1)
+        const match = target.match(/^NODE(\d+)$/);
+        if (!match) return;
+        const n = parseInt(match[1], 10);
+        const ethKey = "MAX_ETH_PORTS_NODE" + n;
+        const maxPorts = HW_SETTINGS[ethKey] || 0;
+        const pidKey = "PRODUCTID_NODE" + n;
+        const pid = HW_SETTINGS[pidKey] || "";
+        if (maxPorts > 0) {
+          btn.disabled = false;
+          btn.classList.remove("is-disabled");
+          btn.title = pid ? `Edit ${pid} LAN VLANs (${maxPorts} ports)` : `Edit Node ${n} LAN VLANs (${maxPorts} ports)`;
+        } else {
+          btn.disabled = true;
+          btn.classList.add("is-disabled");
+          btn.title = "Node hardware not detected – run Sync Nodes first";
+        }
+      });
+    }
+
     function setLanTarget(target, opts = {}){
       if(!target) return;
       if (!opts.skipSync) {
@@ -1160,6 +1377,8 @@ function showTooltip() {
       updateLanTargetButtons();
       updateLanInputNames(CURRENT_LAN_TARGET);
       loadLanFieldsFromCache(CURRENT_LAN_TARGET);
+      updateLanRowVisibility(CURRENT_LAN_TARGET);
+      updateLanProductIdBadge(CURRENT_LAN_TARGET);
       scheduleFormPaneWidthUpdate();
     }
 
@@ -2481,11 +2700,61 @@ function renderClientsOverview(data){
     el.innerHTML = `<div class="muted">No client data available yet. Configure the VLAN Manager to generate this data.</div>`;
     return;
   }
+  
+  // Helper to get friendly node name with alias
+  function getNodeDisplayName(routerValue) {
+    if(!routerValue) return 'Node';
+    if(routerValue === 'Main Router') return 'Main Router';
+    
+    // Check if this router IP matches any configured node
+    const settings = typeof CURRENT_SETTINGS_CACHE === 'object' ? CURRENT_SETTINGS_CACHE : {};
+    for(let i = 1; i <= 5; i++) {
+      const nodeIp = settings['NODE' + i] || '';
+      if(nodeIp && nodeIp !== 'none' && nodeIp === routerValue) {
+        const alias = settings['NODE' + i + '_ALIAS'] || ('Node ' + i);
+        return `${alias} (${routerValue})`;
+      }
+    }
+    // If no match found, just return the router value (IP or hostname)
+    return routerValue;
+  }
+  
+  // Helper to format interface badges
+  function formatInterface(iface) {
+    const name = iface.name || '?';
+    const type = iface.type || 'unknown';
+    let badge = '';
+    let tooltip = name;
+    
+    switch(type) {
+      case 'ssid':
+        badge = `<span class="iface-badge iface-ssid" title="Wireless SSID: ${name}">📶 ${name}</span>`;
+        break;
+      case 'access':
+        badge = `<span class="iface-badge iface-access" title="Access Port: ${name}">🔌 ${name}</span>`;
+        break;
+      case 'trunk-tagged':
+        const port = iface.port || name;
+        const tagged = iface.tagged || '';
+        const native = iface.native || '';
+        tooltip = `Trunk Port: ${port}\\nTagged VLANs: ${tagged || 'none'}\\nNative: ${native || 'none'}`;
+        badge = `<span class="iface-badge iface-trunk" title="${tooltip}">🔀 ${port} <small class="trunk-info">T[${tagged}]${native ? ' U['+native+']' : ''}</small></span>`;
+        break;
+      case 'vlan-if':
+        badge = `<span class="iface-badge iface-vlan" title="VLAN Interface: ${name}">📡 ${name}</span>`;
+        break;
+      default:
+        badge = `<span class="iface-badge iface-unknown" title="${name}">❓ ${name}</span>`;
+    }
+    return badge;
+  }
+  
   let html = '';
   data.nodes.forEach(node=>{
+    const displayName = getNodeDisplayName(node.router);
     const right = node.error ? `<span class=\"err\">${node.error}</span>` : `<span class=\"node-meta\">${formatDate(node.generated)}</span>`;
     html += `<div class=\"client-node\">`+
-            `  <h3><span>${node.router || 'Node'}</span>${right}</h3>`;
+            `  <h3><span>${displayName}</span>${right}</h3>`;
     const vlans = Array.isArray(node.vlans) ? node.vlans.slice().sort((a,b)=>(a.id||0)-(b.id||0)) : [];
     if(vlans.length===0){
       html += `<div class=\"muted\" style=\"margin-bottom:6px;\">No VLAN clients reported.</div>`;
@@ -2493,8 +2762,17 @@ function renderClientsOverview(data){
       html += `<div class=\"vlan-grid\">`;
       vlans.forEach(v=>{
         const clients = Array.isArray(v.clients) ? v.clients : [];
+        const interfaces = Array.isArray(v.interfaces) ? v.interfaces : [];
+        
+        // Build interfaces display
+        let ifaceHtml = '';
+        if (interfaces.length > 0) {
+          ifaceHtml = `<div class="vlan-interfaces">` + interfaces.map(formatInterface).join('') + `</div>`;
+        }
+        
         html += `<div class=\"vlan-card\">`+
                 `  <div class=\"vlan-title\"><span>VLAN ${v.id ?? '?'}</span><span class=\"chip\">${clients.length} clients</span></div>`+
+                ifaceHtml +
                 `  <div class=\"client-list\">`;
         clients.forEach(c=>{
           const mac = c.mac || '';
@@ -2887,7 +3165,14 @@ async function runVlanManagerOnlyNodes() {
     const { deferFill = false } = opts;
     try{
       appendCliText("Loading settings.json...\n",{scroll:'force'});
-      const r = await fetch(PATHS.SETTINGS+"?_="+Date.now(),{headers:{Accept:"application/json"}});
+      const r = await fetch(PATHS.SETTINGS+"?_="+Date.now(),{
+        cache: "no-store",
+        headers:{
+          Accept:"application/json",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache"
+        }
+      });
       const t = await r.text();
       if(!r.ok){ 
         appendCliText(`Error: cannot load settings.json (${r.status})\n${t}\n`,{scroll:'force'}); 
@@ -2921,11 +3206,27 @@ async function runVlanManagerOnlyNodes() {
         updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
         return;
       }
+      // Update HW_SETTINGS from loaded data before generating tables
+      const hwChanged = refreshHwSettingsFromCache();
+      if (hwChanged) {
+        // Force table regeneration with new HW values
+        HW_SETTINGS.TABLES_READY = false;
+        HW_SETTINGS.LAST_MAX_SSIDS = null;
+        HW_SETTINGS.LAST_MAX_ETH_PORTS = null;
+      }
       // Ensure tables are ready before filling (handles early Load clicks)
       ensureTablesReady();
       updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
+      if (hwChanged) {
+        updateLanNodeButtonStates();
+        updateLanRowVisibility(CURRENT_LAN_TARGET);
+        updateLanProductIdBadge(CURRENT_LAN_TARGET);
+      }
       fillFormFromSettings(CURRENT_SETTINGS_CACHE);
       appendCliText("Loaded settings.json into the form.\n",{scroll:'force'});
+      if (hwChanged) {
+        appendCliText("UI refreshed: hardware values changed.\n", { scroll: "force" });
+      }
     } catch(err){ 
       appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
       CURRENT_SETTINGS_CACHE = null;
@@ -3366,6 +3667,80 @@ function fetchSSHKey() {
 
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// Save Verification Helpers - poll until settings.json matches expected values
+// ════════════════════════════════════════════════════════════════════════════
+
+function normalizeToFlatSettings(obj) {
+  if (!obj || typeof obj !== "object") return {};
+  return isStructuredSettingsPayload(obj) ? flattenStructuredSettingsPayload(obj) : obj;
+}
+
+// Only compare keys MerVLAN actually manages (ignore Hardware, timestamps, etc)
+function extractManagedKeys(flat) {
+  const out = {};
+  const re = /^(PERSISTENT|DRY_RUN|EXPERIMENTAL|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  Object.keys(flat || {}).forEach(k => {
+    if (re.test(k)) out[k] = String(flat[k] ?? "");
+  });
+  return out;
+}
+
+function shallowEqual(a, b) {
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (let i = 0; i < ak.length; i++) {
+    const k = ak[i];
+    if (a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
+async function fetchSettingsObjNoStore() {
+  const r = await fetch(PATHS.SETTINGS + "?_=" + Date.now(), {
+    cache: "no-store",
+    headers: {
+      Accept: "application/json",
+      "Cache-Control": "no-cache",
+      Pragma: "no-cache"
+    }
+  });
+  const t = await r.text();
+  if (!r.ok) throw new Error("HTTP " + r.status + " " + t);
+  return JSON.parse(t);
+}
+
+async function waitForSettingsToMatch(expectedManaged, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 20000;
+  const intervalMs = opts.intervalMs ?? 700;
+
+  const start = Date.now();
+  let lastErr = null;
+
+  while ((Date.now() - start) < timeoutMs) {
+    try {
+      const obj = await fetchSettingsObjNoStore();
+      const flat = normalizeToFlatSettings(obj);
+      const managed = extractManagedKeys(flat);
+
+      if (shallowEqual(managed, expectedManaged)) {
+        return true;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+    await new Promise(res => setTimeout(res, intervalMs));
+  }
+
+  if (lastErr) {
+    appendCliText("Save verify: last fetch error: " + lastErr + "\n", { scroll: "force" });
+  }
+  return false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+
 async function uploadSettingsAndSave(btn) {
   return withActionLock("save", async () => {
     stopPolling();
@@ -3409,8 +3784,39 @@ async function uploadSettingsAndSave(btn) {
 
       appendCliText("Saving settings via Merlin...\n", {scroll: 'force'});
 
+      // Compute expected managed keys for verification polling
+      const expectedFlat = normalizeToFlatSettings(newObj);
+      const expectedManaged = extractManagedKeys(expectedFlat);
+
       if (window.parent && typeof window.parent.MVM_save === "function") {
         window.parent.MVM_save(merlinPayload);
+
+        // Clear form at 0.5s to show we're doing something
+        setTimeout(() => {
+          appendCliText("Clearing form fields...\n", {scroll: 'force'});
+          clearFields();
+        }, 500);
+
+        // Start polling at 0.8s - wait until settings.json actually matches
+        setTimeout(async () => {
+          appendCliText("Waiting for settings to persist...\n", { scroll: "force" });
+
+          // Wait until the router actually wrote the new settings.json
+          const ok = await waitForSettingsToMatch(expectedManaged, {
+            timeoutMs: 25000,
+            intervalMs: 700
+          });
+
+          appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+          await loadSettings();
+
+          appendCliText(
+            ok ? "Save verification complete.\n"
+               : "Save verification: settings.json did not match yet (may still be writing). Loaded latest available.\n",
+            { scroll: "force" }
+          );
+        }, 800);
+
       } else {
         appendCliText("Save error: parent page handler not available.\n", {scroll: 'force'});
         return;
@@ -3423,15 +3829,17 @@ async function uploadSettingsAndSave(btn) {
 </script>
 
 <script>
-// Size clients panel to fit viewport when CLI overlay is open
+// Size clients panel to fill remaining viewport when CLI overlay is open
 function adjustClientsPanelHeight(){
   const cliPanel = document.getElementById('cliPanel');
   const cliShell = cliPanel ? cliPanel.querySelector('.cli-shell') : null;
   const clientsPanel = cliPanel ? cliPanel.querySelector('.clients-panel') : null;
+  const cliScrollWrap = cliPanel ? cliPanel.querySelector('.cli-scroll-wrap') : null;
   if(!cliPanel || !cliShell || !clientsPanel) return;
 
   if(!cliPanel.classList.contains('expanded')){
     clientsPanel.style.maxHeight = '';
+    if(cliScrollWrap) cliScrollWrap.style.maxHeight = '';
     return;
   }
 
@@ -3439,11 +3847,34 @@ function adjustClientsPanelHeight(){
   if(!shellRect || !isFinite(shellRect.top)) return;
 
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
-  let available = viewportHeight - shellRect.top - 120;
-  if(!isFinite(available)) return;
-
-  available = Math.max(200, Math.floor(available));
-  clientsPanel.style.maxHeight = Math.min(360, available) + 'px';
+  const bottomPadding = 24; // margin from viewport bottom
+  
+  // Calculate total available height for the entire cli-shell
+  let totalAvailable = viewportHeight - shellRect.top - bottomPadding;
+  if(!isFinite(totalAvailable) || totalAvailable < 400) totalAvailable = 400;
+  
+  // Get heights of fixed elements (header, footer, clients-header)
+  const cliHeader = cliShell.querySelector('.cli-header');
+  const cliFooter = cliShell.querySelector('.cli-footer');
+  const clientsHeader = clientsPanel.querySelector('.clients-header');
+  
+  const headerH = cliHeader ? cliHeader.offsetHeight : 40;
+  const footerH = cliFooter ? cliFooter.offsetHeight : 40;
+  const clientsHeaderH = clientsHeader ? clientsHeader.offsetHeight : 40;
+  const marginsAndBorders = 30; // margins between elements + borders
+  
+  // CLI box gets ~40% of remaining space, clients panel gets ~60%
+  const contentArea = totalAvailable - headerH - footerH - marginsAndBorders;
+  const cliBoxHeight = Math.max(180, Math.floor(contentArea * 0.35));
+  const clientsPanelHeight = Math.max(200, contentArea - cliBoxHeight - clientsHeaderH - 12);
+  
+  // Apply calculated heights
+  if(cliScrollWrap) {
+    cliScrollWrap.style.maxHeight = cliBoxHeight + 'px';
+    cliScrollWrap.style.minHeight = Math.min(180, cliBoxHeight) + 'px';
+  }
+  clientsPanel.style.maxHeight = clientsPanelHeight + 'px';
+  clientsPanel.style.minHeight = Math.min(180, clientsPanelHeight) + 'px';
 }
 
 // Re-align when expanding/collapsing CLI

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: execute_nodes.sh || version="0.47"                    #
+#                - File: execute_nodes.sh || version="0.48"                    #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -27,6 +27,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
@@ -133,20 +134,21 @@ echo ""
 # status string "jffs2_on jffs2_scripts" or error code 2 on SSH failure.       #
 # ============================================================================ #
 check_remote_jffs_status() {
-    local node_ip="$1"
-    local output
+    node_id="$1"
+    node_ip="$2"
+    output=""
 
     # Execute remote nvram queries and capture output
-    output=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null" 2>/dev/null)
-    local exit_code=$?
+    output=$(merv_ssh_exec "$node_id" "$node_ip" "nvram get jffs2_on 2>/dev/null; nvram get jffs2_scripts 2>/dev/null")
+    exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo ""
         return 2
     fi
 
     # Extract first line (jffs2_on) and second line (jffs2_scripts); strip carriage returns
-    local jffs_on
-    local jffs_scripts
+    jffs_on=""
+    jffs_scripts=""
     jffs_on=$(echo "$output" | sed -n '1p' | tr -d '\r')
     jffs_scripts=$(echo "$output" | sed -n '2p' | tr -d '\r')
 
@@ -170,9 +172,10 @@ check_remote_jffs_status() {
 # command with timeout. Returns 0 if successful, 1 if connection fails.        #
 # ============================================================================ #
 test_ssh_connection() {
-    local node_ip="$1"
-    # Attempt to SSH and run echo; grep for success string to verify connection
-    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "echo connected" 2>/dev/null | grep -q "connected"; then
+    node_id="$1"
+    node_ip="$2"
+    # Use wrapper-based SSH test with precheck and timeout
+    if merv_ssh_test "$node_id" "$node_ip"; then
         return 0
     else
         return 1
@@ -185,17 +188,18 @@ test_ssh_connection() {
 # fully enabled (indicates "Sync Nodes" must be run first).                    #
 # ============================================================================ #
 ensure_jffs_ready() {
-    local node_ip="$1"
-    local jffs_status
+    node_id="$1"
+    node_ip="$2"
+    jffs_status=""
 
     # Query JFFS status; success means both jffs2_on and jffs2_scripts are 1
-    if jffs_status=$(check_remote_jffs_status "$node_ip"); then
+    if jffs_status=$(check_remote_jffs_status "$node_id" "$node_ip"); then
         info -c cli,vlan "✓ JFFS already enabled on $node_ip"
         return 0
     else
-        local status=$?
-        local jffs_on
-        local jffs_scripts
+        status=$?
+        jffs_on=""
+        jffs_scripts=""
         jffs_on=$(echo "$jffs_status" | awk '{print $1}')
         jffs_scripts=$(echo "$jffs_status" | awk '{print $2}')
         [ -z "$jffs_on" ] && jffs_on="0"
@@ -232,11 +236,12 @@ ensure_settings_conf_exists() {
 # settings.json to node. Fails if directory creation fails.                    #
 # ============================================================================ #
 ensure_remote_settings_dir() {
-    local node_ip="$1"
-    local remote_dir="$SETTINGSDIR"
+    node_id="$1"
+    node_ip="$2"
+    remote_dir="$SETTINGSDIR"
 
     # Attempt to create settings directory on remote node
-    if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "mkdir -p '$remote_dir'" 2>/dev/null; then
+    if merv_ssh_exec "$node_id" "$node_ip" "mkdir -p '$remote_dir'" >/dev/null; then
         info -c cli,vlan "✓ Ensured directory $remote_dir on $node_ip"
         return 0
     else
@@ -248,22 +253,67 @@ ensure_remote_settings_dir() {
 # ============================================================================ #
 # copy_settings_conf_to_node                                                   #
 # Transfer local settings.json to remote node's settings directory via SSH.    #
-# Uses atomic rename to avoid partial file reads. Logs all steps.              #
+# Uses atomic rename to avoid partial file reads. Preserves node's Hardware    #
+# section to avoid overwriting device-specific hardware detection values.      #
 # ============================================================================ #
 copy_settings_conf_to_node() {
-    local node_ip="$1"
-    local file_rel="settings/settings.json"
-    local remote_path="$MERV_BASE/$file_rel"
+    node_id="$1"
+    node_ip="$2"
+    file_rel="settings/settings.json"
+    remote_path="$MERV_BASE/$file_rel"
 
     info -c cli,vlan "Copying $file_rel to $node_ip"
 
     # Ensure remote directory exists before copying
-    if ! ensure_remote_settings_dir "$node_ip"; then
+    if ! ensure_remote_settings_dir "$node_id" "$node_ip"; then
         return 1
     fi
 
+    # Fetch node's current Hardware section (if exists) to preserve it
+    _cstn_tmp="$TMPDIR/settings_merged_node${node_id}.$$"
+    _cstn_node_hw=""
+
+    _cstn_node_hw=$(merv_ssh_exec "$node_id" "$node_ip" "
+        if [ -f '$remote_path' ]; then
+            . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
+            json_extract_hardware_section '$remote_path' 2>/dev/null
+        fi
+    " 2>/dev/null)
+
+    if [ -n "$_cstn_node_hw" ] && echo "$_cstn_node_hw" | grep -q '"Hardware"'; then
+        # Node has Hardware section - create merged file
+        cp "$SETTINGS_FILE" "$_cstn_tmp" 2>/dev/null || {
+            error -c cli,vlan "✗ Failed to create temp file for settings merge"
+            rm -f "$_cstn_tmp" 2>/dev/null
+            return 1
+        }
+
+        # Write node's Hardware to temp file, then replace in the copy
+        _cstn_hw_file="$TMPDIR/node_hw_${node_id}.$$"
+        printf '%s\n' "$_cstn_node_hw" > "$_cstn_hw_file"
+
+        if json_replace_hardware_section "$_cstn_hw_file" "$_cstn_tmp"; then
+            info -c cli,vlan "✓ Merged settings.json preserving NODE${node_id} Hardware section"
+            # Copy the merged file
+            if cat "$_cstn_tmp" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+                info -c cli,vlan "✓ Copied $file_rel (merged) to $node_ip:$remote_path"
+                rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
+                return 0
+            else
+                error -c cli,vlan "✗ Failed to copy merged $file_rel to $node_ip:$remote_path"
+                rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
+                return 1
+            fi
+        else
+            warn -c cli,vlan "⚠️ Hardware merge failed, copying settings.json as-is"
+            rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
+        fi
+        rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
+    fi
+
+    # No existing Hardware section on node, or merge wasn't needed - copy as-is
     # Use cat pipe through SSH with atomic rename (write to .tmp then mv)
-    if cat "$SETTINGS_FILE" | dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+    if cat "$SETTINGS_FILE" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
         info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
         return 0
     else
@@ -278,18 +328,19 @@ copy_settings_conf_to_node() {
 # compare file sizes, and validate MD5 checksums if available.                 #
 # ============================================================================ #
 verify_settings_conf_on_node() {
-    local node_ip="$1"
-    local remote_file="$MERV_BASE/settings/settings.json"
+    node_id="$1"
+    node_ip="$2"
+    remote_file="$MERV_BASE/settings/settings.json"
 
     # Verify file exists on remote node
-    if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null | grep -q "exists"; then
+    if ! merv_ssh_exec "$node_id" "$node_ip" "test -f '$remote_file' && echo 'exists'" | grep -q "exists"; then
         error -c cli,vlan "✗ settings.json not found on $node_ip at $remote_file"
         return 1
     fi
 
     # Compare file sizes (local vs remote)
-    local remote_size=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
-    local local_size=$(stat -c%s "$SETTINGS_FILE" 2>/dev/null || wc -c < "$SETTINGS_FILE" 2>/dev/null || echo 0)
+    remote_size=$(merv_ssh_exec "$node_id" "$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0")
+    local_size=$(stat -c%s "$SETTINGS_FILE" 2>/dev/null || wc -c < "$SETTINGS_FILE" 2>/dev/null || echo 0)
 
     # Extract numeric values; strip any non-digit characters
     remote_size=$(echo "$remote_size" | tr -cd '0-9')
@@ -302,8 +353,8 @@ verify_settings_conf_on_node() {
     fi
 
     # Attempt MD5 checksum verification if md5sum/md5 available
-    local local_md5=""
-    local remote_md5=""
+    local_md5=""
+    remote_md5=""
 
     if command -v md5sum >/dev/null 2>&1; then
         local_md5=$(md5sum "$SETTINGS_FILE" 2>/dev/null | awk '{print $1}')
@@ -313,7 +364,7 @@ verify_settings_conf_on_node() {
 
     # If we have a local MD5, fetch remote MD5 and compare
     if [ -n "$local_md5" ]; then
-        remote_md5=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi" 2>/dev/null)
+        remote_md5=$(merv_ssh_exec "$node_id" "$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi")
         remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
 
         # Compare MD5s if remote MD5 was successfully computed
@@ -338,20 +389,21 @@ verify_settings_conf_on_node() {
 # copy settings.json, and verify successful transfer.                          #
 # ============================================================================ #
 sync_settings_conf_for_node() {
-    local node_ip="$1"
+    node_id="$1"
+    node_ip="$2"
 
     # Verify JFFS is enabled on node (abort if not)
-    if ! ensure_jffs_ready "$node_ip"; then
+    if ! ensure_jffs_ready "$node_id" "$node_ip"; then
         return 1
     fi
 
     # Copy local settings.json to remote node
-    if ! copy_settings_conf_to_node "$node_ip"; then
+    if ! copy_settings_conf_to_node "$node_id" "$node_ip"; then
         return 1
     fi
 
     # Verify that settings.json transferred correctly
-    if ! verify_settings_conf_on_node "$node_ip"; then
+    if ! verify_settings_conf_on_node "$node_id" "$node_ip"; then
         return 1
     fi
 
@@ -360,12 +412,12 @@ sync_settings_conf_for_node() {
 
 # set_node_flags_remote — Set IS_NODE=1 and NODE_ID on remote settings.json
 set_node_flags_remote() {
-    local node_ip="$1"
-    local node_id="$2"
-    local node_flags=""
-    local node_flag_value=""
-    local node_id_value=""
-    local remote_cmd="
+    node_id="$1"
+    node_ip="$2"
+    node_flags=""
+    node_flag_value=""
+    node_id_value=""
+    remote_cmd="
         SETTINGS_FILE='$MERV_BASE/settings/settings.json';
         if [ ! -f \"\$SETTINGS_FILE\" ]; then
             echo 'settings-missing' >&2
@@ -382,11 +434,10 @@ set_node_flags_remote() {
         json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
         json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
         json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
-        json_get_flag NODE_ID "none" \"\$SETTINGS_FILE\"
+        json_get_flag NODE_ID \"none\" \"\$SETTINGS_FILE\"
     "
 
-    node_flags=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-        "$SSH_NODE_USER@$node_ip" "$remote_cmd" 2>/dev/null)
+    node_flags=$(merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd")
     node_flag_value=$(echo "$node_flags" | tail -n 2 | head -n 1 | tr -d '\r\n')
     node_id_value=$(echo "$node_flags" | tail -n 1 | tr -d '\r\n')
 
@@ -405,28 +456,65 @@ if ! ensure_settings_conf_exists; then
 fi
 
 # ============================================================================ #
+# verify_node_completion                                                       #
+# Check if a node has completed mervlan_manager execution by reading its       #
+# completion marker file. Returns 0 if complete, 1 if not.                     #
+# ============================================================================ #
+verify_node_completion() {
+    node_id="$1"
+    node_ip="$2"
+    marker_file="/tmp/mervlan_tmp/results/node_complete/node_${node_id}.marker"
+    
+    # Read the completion marker from the node
+    marker_content=$(merv_ssh_exec "$node_id" "$node_ip" "cat '$marker_file' 2>/dev/null")
+    
+    if [ -n "$marker_content" ]; then
+        info -c cli,vlan "✓ Node $node_ip (NODE${node_id}) completed: $marker_content"
+        return 0
+    else
+        warn -c cli,vlan "✗ Node $node_ip (NODE${node_id}) completion marker not found"
+        return 1
+    fi
+}
+
+# ============================================================================ #
+# clear_node_completion_marker                                                 #
+# Remove the completion marker on a node before execution starts.              #
+# ============================================================================ #
+clear_node_completion_marker() {
+    node_id="$1"
+    node_ip="$2"
+    marker_dir="/tmp/mervlan_tmp/results/node_complete"
+    marker_file="$marker_dir/node_${node_id}.marker"
+    
+    # Ensure directory exists and clear any old marker
+    merv_ssh_exec "$node_id" "$node_ip" "mkdir -p '$marker_dir' && rm -f '$marker_file'" >/dev/null 2>&1
+}
+
+# ============================================================================ #
 # execute_vlan_manager_on_node                                                 #
 # Invoke mervlan_manager.sh on a remote node via SSH. Logs all steps and       #
 # captures output. Returns 0 on success, 1 on failure.                         #
 # ============================================================================ #
 execute_vlan_manager_on_node() {
-    local node_ip="$1"
-    local remote_vlan_manager
+    node_id="$1"
+    node_ip="$2"
+    remote_vlan_manager=""
     remote_vlan_manager="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
     
     info -c cli,vlan "Executing VLAN manager on $node_ip..."
 
     # Ensure the script exists on the remote node before attempting execution
-    if ! dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "test -f '$remote_vlan_manager'" 2>/dev/null; then
+    if ! merv_ssh_exec "$node_id" "$node_ip" "test -f '$remote_vlan_manager'" >/dev/null 2>&1; then
         error -c cli,vlan "✗ VLAN manager script missing on $node_ip at $remote_vlan_manager"
         warn  -c cli,vlan "   Run 'Sync Nodes' to deploy the addon before executing nodes"
         return 1
     fi
 
     # Execute the remote script and capture its output for logging/diagnostics
-    local output
-    output=$(dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
-    local rc=$?
+    output=""
+    output=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
+    rc=$?
 
     if [ $rc -eq 0 ]; then
         info -c cli,vlan "✓ Successfully executed VLAN manager on $node_ip"
@@ -445,28 +533,37 @@ execute_vlan_manager_on_node() {
 
 # ============================================================================ #
 #                      MAIN NODE EXECUTION LOOP                                #
-# Iterate through all configured nodes. For each node, test connectivity,      #
-# verify SSH, synchronize settings, and execute VLAN manager remotely.         #
+# Phase 1: Prepare nodes (connectivity, sync settings, set flags)              #
+# Phase 2: Execute VLAN manager on all nodes in parallel                       #
+# Phase 3: Verify completion of all nodes before proceeding                    #
 # ============================================================================ #
 
 info -c cli,vlan "Starting VLAN manager execution on nodes..."
 overall_success=true
+local_success=true
+
+# Track which nodes are ready for execution
+READY_NODES=""
+
+# ============================================================================ #
+# PHASE 1: Prepare all nodes (sequential - required before parallel exec)     #
+# ============================================================================ #
+info -c cli,vlan "--- Phase 1: Preparing nodes ---"
 
 while read -r node_id node_ip; do
     [ -n "$node_id" ] || continue
-    info -c cli,vlan "Processing node: $node_ip (NODE${node_id})"
+    info -c cli,vlan "Preparing node: $node_ip (NODE${node_id})"
     
-    # Test ping reachability; skip node if unreachable
-    if ! ping -c 1 -W 2 "$node_ip" >/dev/null 2>&1; then
-        error -c cli,vlan "✗ Node $node_ip is not reachable via ping"
+    # Use wrapper precheck (validates IP, keys, and ping in one call)
+    if ! merv_ssh_precheck "$node_id" "$node_ip"; then
+        merv_ssh_skip_log "$node_id" "$node_ip" "execute"
         overall_success=false
         continue
     fi
     
     # Test SSH connectivity; skip node if SSH fails
-    if ! test_ssh_connection "$node_ip"; then
-        error -c cli,vlan "✗ SSH connection failed to $node_ip"
-        info -c cli,vlan "   Check if SSH key is properly installed on the node"
+    if ! test_ssh_connection "$node_id" "$node_ip"; then
+        merv_ssh_skip_log "$node_id" "$node_ip" "execute"
         overall_success=false
         continue
     fi
@@ -474,56 +571,117 @@ while read -r node_id node_ip; do
     info -c cli,vlan "✓ SSH connection successful to $node_ip"
 
     # Verify JFFS and copy settings.json to node
-    if ! sync_settings_conf_for_node "$node_ip"; then
+    if ! sync_settings_conf_for_node "$node_id" "$node_ip"; then
         overall_success=false
         continue
     fi
 
     # Set IS_NODE and NODE_ID on the remote node before execution
-    if ! set_node_flags_remote "$node_ip" "$node_id"; then
+    if ! set_node_flags_remote "$node_id" "$node_ip"; then
         overall_success=false
         continue
     fi
     
-    # Execute VLAN manager on the remote node
-    if ! execute_vlan_manager_on_node "$node_ip"; then
-        overall_success=false
-    fi
+    # Clear any old completion marker before execution
+    clear_node_completion_marker "$node_id" "$node_ip"
     
-    info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
-    echo ""
+    # Add to ready list
+    READY_NODES="$READY_NODES
+$node_id $node_ip"
 done <<EOF
 $NODE_IPS
 EOF
 
-# ============================================================================ #
-#                     EXECUTE ON MAIN ROUTER                                   #
-# After all nodes have been configured, run VLAN manager on main router        #
-# to apply the final consolidated settings.                                    #
-# ============================================================================ #
+# Trim leading newline
+READY_NODES=$(echo "$READY_NODES" | sed '/^$/d')
 
-local_success=true
-
-if [ "$MODE" = "nodesonly" ]; then
-    info -c cli,vlan "Skipping VLAN manager execution on main router (nodes-only mode)"
+if [ -z "$READY_NODES" ]; then
+    warn -c cli,vlan "No nodes ready for execution"
+    
+    # Still run main router if not in nodesonly mode
+    if [ "$MODE" != "nodesonly" ]; then
+        info -c cli,vlan "Executing VLAN manager on main router (no nodes)..."
+        local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
+        if [ -f "$local_script" ]; then
+            # No nodes, so run with collect_clients included
+            sh "$local_script" >>"$CLI_LOG" 2>&1
+            local_success=$?
+        fi
+    fi
 else
-    info -c cli,vlan "Executing VLAN manager on main router..."
-    local local_script
-    local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
-
-    if [ ! -f "$local_script" ]; then
-        error -c cli,vlan "✗ Local VLAN manager script missing at $local_script"
-        local_success=false
-    else
-        if sh "$local_script" >>"$CLI_LOG" 2>&1; then
-            info -c cli,vlan "✓ Successfully executed VLAN manager on main router"
+    # ============================================================================ #
+    # PHASE 2: Execute VLAN manager on ALL in parallel (nodes + main router)     #
+    # ============================================================================ #
+    info -c cli,vlan "--- Phase 2: Executing on all routers in parallel ---"
+    
+    # Launch node executions in background
+    while read -r node_id node_ip; do
+        [ -n "$node_id" ] || continue
+        info -c cli,vlan "Launching execution on $node_ip (NODE${node_id})..."
+        execute_vlan_manager_on_node "$node_id" "$node_ip" &
+    done <<EOF2
+$READY_NODES
+EOF2
+    
+    # Launch main router execution in background (with --no-collect flag)
+    if [ "$MODE" != "nodesonly" ]; then
+        info -c cli,vlan "Launching execution on main router..."
+        local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
+        if [ -f "$local_script" ]; then
+            sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 &
+            main_pid=$!
+        fi
+    fi
+    
+    # Wait for all background executions to complete
+    info -c cli,vlan "Waiting for all executions to complete..."
+    wait
+    info -c cli,vlan "All executions finished"
+    
+    # Check if main router succeeded (if we ran it)
+    if [ "$MODE" != "nodesonly" ]; then
+        # wait already completed, check if script ran
+        if [ -f "$local_script" ]; then
+            info -c cli,vlan "✓ Main router execution completed"
             local_success=true
         else
-            error -c cli,vlan "✗ Failed to execute VLAN manager on main router"
+            error -c cli,vlan "✗ Local VLAN manager script missing"
             local_success=false
         fi
     fi
+    
+    # ============================================================================ #
+    # PHASE 3: Verify completion markers on all nodes                            #
+    # ============================================================================ #
+    info -c cli,vlan "--- Phase 3: Verifying node completions ---"
+    
+    while read -r node_id node_ip; do
+        [ -n "$node_id" ] || continue
+        if ! verify_node_completion "$node_id" "$node_ip"; then
+            overall_success=false
+        fi
+    done <<EOF3
+$READY_NODES
+EOF3
+    
+    # ============================================================================ #
+    # PHASE 4: Run collect_clients.sh after all nodes verified                   #
+    # ============================================================================ #
+    if [ "$MODE" != "nodesonly" ] && [ -x "$FUNCDIR/collect_clients.sh" ]; then
+        info -c cli,vlan "--- Phase 4: Collecting clients ---"
+        info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
+        sleep 5
+        info -c cli,vlan "Refreshing VLAN client list via collect_clients.sh"
+        if "$FUNCDIR/collect_clients.sh"; then
+            info -c cli,vlan "✓ VLAN client list refresh completed"
+        else
+            rc=$?
+            warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
+        fi
+    fi
 fi
+
+echo ""
 
 # ============================================================================ #
 #                        EXECUTION SUMMARY                                     #
@@ -532,6 +690,17 @@ fi
 # ============================================================================ #
 
 info -c cli,vlan "=== Execution Summary ==="
+
+# Final cleanup: clear all node completion markers to prevent false positives
+if [ -n "$READY_NODES" ]; then
+    info -c cli,vlan "Cleaning up node completion markers..."
+    while read -r node_id node_ip; do
+        [ -n "$node_id" ] || continue
+        clear_node_completion_marker "$node_id" "$node_ip"
+    done <<EOFCLEAN
+$READY_NODES
+EOFCLEAN
+fi
 
 if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then
     if [ "$MODE" = "nodesonly" ]; then

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_json.sh || version="0.50"                         #
+#                - File: lib_json.sh || version="0.51"                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -256,22 +256,85 @@ json_get_section_value() {
 
     awk -v sec="$section" -v key="$key" '
         BEGIN { in_section=0; depth=0 }
-            {
-                if (!in_section) {
-                    if ($0 ~ ("\""sec"\"[[:space:]]*:[[:space:]]*{")) {
-                        in_section=1
-                        gsub(/[^{}]/, "", $0)
-                        depth += gsub(/\{/, "&") - gsub(/\}/, "&")
-                    }
-                } else {
-                    gsub(/[^{}]/, "", $0); depth += gsub(/\{/, "&") - gsub(/\}/, "&");
-                    if ($0 ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
-                        if (match($0, "\""key"\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"", arr)) { print arr[1]; exit }
-                    }
-                    if (depth <= 0) exit
+        {
+            line = $0
+            if (!in_section) {
+                if (line ~ ("\""sec"\"[[:space:]]*:[[:space:]]*\\{")) {
+                    in_section=1
+                    t = line; gsub(/[^{}]/, "", t)
+                    depth += gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                }
+            } else {
+                # Update depth using temp variable (preserve original line)
+                t = line; gsub(/[^{}]/, "", t)
+                depth += gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+
+                # Match the key and extract value using dynamic pattern
+                key_pattern = "\"" key "\"[[:space:]]*:[[:space:]]*\""
+                if (line ~ key_pattern) {
+                    # Build dynamic sub patterns (variables not interpolated in /regex/)
+                    sub_pattern = ".*\"" key "\"[[:space:]]*:[[:space:]]*\""
+                    sub(sub_pattern, "", line)
+                    sub(/".*/, "", line)
+                    print line
+                    exit
+                }
+                if (depth <= 0) exit
+            }
+        }
+    ' "$file" | head -1
+}
+
+
+json_set_section_value() {
+    # json_set_section_value <section> <key> <value> [file]
+    # Update a key inside a one-level nested section without touching other keys.
+    section="$1"
+    key="$2"
+    value="$3"
+    file="${4:-$SETTINGS_FILE}"
+    tmp="${file}.tmp.$$"
+    esc_value=""
+
+    [ -n "$section" ] || return 1
+    [ -n "$key" ] || return 1
+    ensure_json_store "$file" || return 1
+
+    esc_value=$(json_escape_string "$value")
+
+    awk -v sec="$section" -v key="$key" -v val="$esc_value" '
+        function count_braces(s,   t){
+            t=s
+            gsub(/[^{}]/, "", t)
+            return gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+        }
+        BEGIN { in_sec=0; depth=0; sec_depth=0; replaced=0 }
+        {
+            line=$0
+
+            if (!in_sec && line ~ ("\""sec"\"[[:space:]]*:[[:space:]]*\{")) {
+                in_sec=1
+                sec_depth=depth + count_braces(line)
+            }
+
+            if (in_sec && !replaced) {
+                if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
+                    gsub("\""key"\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\""key"\": \""val"\"", line)
+                    replaced=1
                 }
             }
-    ' "$file" | head -1
+
+            print line
+
+            depth += count_braces($0)
+            if (in_sec && depth < sec_depth) {
+                in_sec=0
+            }
+        }
+    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+    mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    return 0
 }
 
 
@@ -336,6 +399,68 @@ json_get_section2_value() {
             }
         }
     ' "$file" | head -1
+}
+
+
+json_set_section2_value() {
+    # json_set_section2_value <section1> <section2> <key> <value> [file]
+    # Update a key inside a two-level nested section without touching other keys.
+    section1="$1"
+    section2="$2"
+    key="$3"
+    value="$4"
+    file="${5:-$SETTINGS_FILE}"
+    tmp="${file}.tmp.$$"
+    esc_value=""
+
+    [ -n "$section1" ] || return 1
+    [ -n "$section2" ] || return 1
+    [ -n "$key" ] || return 1
+    ensure_json_store "$file" || return 1
+
+    esc_value=$(json_escape_string "$value")
+
+    awk -v sec1="$section1" -v sec2="$section2" -v key="$key" -v val="$esc_value" '
+        function count_braces(s,   t){
+            t=s
+            gsub(/[^{}]/, "", t)
+            return gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+        }
+        BEGIN { in1=0; in2=0; depth=0; depth1=0; depth2=0; replaced=0 }
+        {
+            line=$0
+
+            if (!in1 && line ~ ("\""sec1"\"[[:space:]]*:[[:space:]]*\{")) {
+                in1=1
+                depth1=depth + count_braces(line)
+            }
+
+            if (in1 && !in2 && line ~ ("\""sec2"\"[[:space:]]*:[[:space:]]*\{")) {
+                in2=1
+                depth2=depth + count_braces(line)
+            }
+
+            if (in2 && !replaced) {
+                if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
+                    gsub("\""key"\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\""key"\": \""val"\"", line)
+                    replaced=1
+                }
+            }
+
+            print line
+
+            depth += count_braces($0)
+            if (in2 && depth < depth2) {
+                in2=0
+            }
+            if (in1 && depth < depth1) {
+                in1=0
+            }
+        }
+    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+    mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    return 0
 }
 
 
@@ -511,6 +636,163 @@ json_set_array() {
 
     mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
     return 0
+}
+
+
+# ============================================================================ #
+#                      HARDWARE SECTION EXTRACTION                             #
+# Extract and inject the Hardware section for node sync (preserve node HW)     #
+# ============================================================================ #
+
+# json_extract_hardware_section — Extract the entire "Hardware": {...} block
+# Args: $1=json_file
+# Outputs: The Hardware section JSON block (including "Hardware": { ... })
+# Returns: 0 on success, 1 if not found
+json_extract_hardware_section() {
+    _jeh_file="$1"
+    [ -f "$_jeh_file" ] || return 1
+
+    awk '
+        BEGIN { in_hw=0; depth=0; hw_depth=0; started=0 }
+        {
+            line = $0
+
+            # Detect start of Hardware section
+            if (!in_hw && line ~ /"Hardware"[[:space:]]*:[[:space:]]*\{/) {
+                in_hw = 1
+                started = 1
+                # Count braces on this line
+                t = line; gsub(/[^{}]/, "", t)
+                hw_depth = gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                depth = hw_depth
+                print line
+                next
+            }
+
+            if (in_hw) {
+                print line
+                # Update depth
+                t = line; gsub(/[^{}]/, "", t)
+                depth += gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                # Exit when depth returns to 0
+                if (depth <= 0) {
+                    exit 0
+                }
+            }
+        }
+        END { if (!started) exit 1 }
+    ' "$_jeh_file"
+}
+
+# json_replace_hardware_section — Replace Hardware section in target with source's
+# Args: $1=source_file (with Hardware to keep), $2=target_file (to update)
+# Returns: 0 on success, 1 on failure
+json_replace_hardware_section() {
+    _jrh_src="$1"
+    _jrh_tgt="$2"
+    _jrh_tmp="${_jrh_tgt}.hw_merge.$$"
+
+    [ -f "$_jrh_src" ] || return 1
+    [ -f "$_jrh_tgt" ] || return 1
+
+    # Extract Hardware section from source
+    _jrh_hw_block=$(json_extract_hardware_section "$_jrh_src") || return 1
+    [ -n "$_jrh_hw_block" ] || return 1
+
+    # Replace Hardware section in target
+    awk -v hw_block="$_jrh_hw_block" '
+        BEGIN { in_hw=0; depth=0; hw_depth=0; printed_hw=0 }
+        {
+            line = $0
+
+            # Detect start of Hardware section in target
+            if (!in_hw && line ~ /"Hardware"[[:space:]]*:[[:space:]]*\{/) {
+                in_hw = 1
+                t = line; gsub(/[^{}]/, "", t)
+                hw_depth = gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                depth = hw_depth
+                # Print the new Hardware block instead
+                if (!printed_hw) {
+                    print hw_block
+                    printed_hw = 1
+                }
+                next
+            }
+
+            if (in_hw) {
+                # Update depth
+                t = line; gsub(/[^{}]/, "", t)
+                depth += gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                # Skip lines until we exit Hardware section
+                if (depth <= 0) {
+                    in_hw = 0
+                }
+                next
+            }
+
+            # Print all non-Hardware lines
+            print line
+        }
+    ' "$_jrh_tgt" > "$_jrh_tmp" || { rm -f "$_jrh_tmp"; return 1; }
+
+    mv "$_jrh_tmp" "$_jrh_tgt" 2>/dev/null || { rm -f "$_jrh_tmp"; return 1; }
+    return 0
+}
+
+# ============================================================================ #
+# json_get_hw_value — Get a value from the Hardware section                    #
+# Args: $1=key, $2=default, $3=file (optional, defaults to SETTINGS_FILE)      #
+# Outputs: The value if found, otherwise the default                           #
+# ============================================================================ #
+json_get_hw_value() {
+    _jghv_key="$1"
+    _jghv_default="${2:-}"
+    _jghv_file="${3:-$SETTINGS_FILE}"
+
+    [ -n "$_jghv_key" ] || { printf '%s\n' "$_jghv_default"; return 1; }
+    [ -f "$_jghv_file" ] || { printf '%s\n' "$_jghv_default"; return 1; }
+
+    # Extract Hardware section, then parse the key within it
+    _jghv_hw_block=$(json_extract_hardware_section "$_jghv_file" 2>/dev/null)
+    if [ -z "$_jghv_hw_block" ]; then
+        printf '%s\n' "$_jghv_default"
+        return 1
+    fi
+
+    # Parse the key from within the Hardware block
+    _jghv_value=$(printf '%s\n' "$_jghv_hw_block" | \
+        sed -n "s/^[[:space:]]*\"$_jghv_key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\"[[:space:]]*,\\{0,1\\}[[:space:]]*$/\\1/p")
+
+    if [ -n "$_jghv_value" ]; then
+        printf '%s\n' "$_jghv_value"
+    else
+        printf '%s\n' "$_jghv_default"
+    fi
+}
+
+# json_get_hw_int — Get an integer value from the Hardware section
+# Args: $1=key, $2=default, $3=file (optional)
+# Outputs: The sanitized integer or default
+json_get_hw_int() {
+    _jghi_key="$1"
+    _jghi_default="$2"
+    _jghi_file="${3:-$SETTINGS_FILE}"
+
+    _jghi_raw=$(json_get_hw_value "$_jghi_key" "$_jghi_default" "$_jghi_file")
+
+    # Strip whitespace and quotes
+    _jghi_num=$(printf '%s' "$_jghi_raw" | tr -d '[:space:]"')
+
+    case "$_jghi_num" in
+        ''|*[!0-9]*)
+            printf '%s\n' "$_jghi_default"
+            return 1
+            ;;
+        *)
+            printf '%s\n' "$_jghi_num"
+            return 0
+            ;;
+    esac
 }
 
 LIB_JSON_LOADED=1

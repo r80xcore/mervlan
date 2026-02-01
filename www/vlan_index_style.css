@@ -294,6 +294,39 @@ body {
         border-color:#6cbaf5;
 }
 
+.lan-node-btn.is-disabled,
+.lan-node-btn:disabled {
+        background:#2a3a44;
+        border-color:#555;
+        color:#777;
+        cursor:not-allowed;
+        opacity:0.6;
+}
+
+.lan-node-btn.is-disabled:hover,
+.lan-node-btn:disabled:hover {
+        background:#2a3a44;
+        color:#777;
+}
+
+/* PRODUCTID badge in first LAN port row */
+.lan-product-id-badge {
+        position:absolute;
+        left:4px;
+        top:50%;
+        transform:translateY(-50%);
+        background:#1F2D35;
+        border:1px solid #569AC7;
+        color:#fff;
+        font-size:10px;
+        font-weight:600;
+        letter-spacing:0.02em;
+        padding:2px 6px;
+        border-radius:3px;
+        text-transform:uppercase;
+        white-space:nowrap;
+}
+
 /* Fourth header (Status) in SSID table - right-align the header text */
 #ssidTable th:nth-child(4) {
         text-align: center;
@@ -683,14 +716,14 @@ body {
         border:1px solid #4D595D;
         border-radius:0 6px 6px 6px;
         box-shadow:0 6px 16px rgba(0,0,0,0.45);
-        max-height:clamp(440px, 70vh, 760px);
+        max-height:none;
         overflow:hidden;
         pointer-events:none;
         opacity:0;
         transform:translateY(-12px);
         transition:opacity 0.22s ease, transform 0.22s ease;
         position: relative;
-    z-index: 60;
+        z-index: 60;
 }
 
 .cli-container.expanded .cli-shell {
@@ -855,8 +888,9 @@ body {
         background-color:#2F3A3E;
         border:1px solid #4D595D;
         border-radius:0 0 6px 6px;
-        flex:0 0 auto;
-        max-height:clamp(220px, 32vh, 360px);
+        flex:1 1 auto;
+        min-height:180px;
+        max-height:none;
         overflow:auto;
         color:#FFFFFF;
         box-shadow:0 1px 4px rgba(0,0,0,0.35);
@@ -946,6 +980,69 @@ body {
         padding:3px 8px;
         font-size:10px;
 }
+
+/* ============================================================================
+   VLAN Interface Badges - Display attached SSIDs, ports, and trunks
+   ============================================================================ */
+
+.vlan-interfaces {
+        display:flex;
+        flex-wrap:wrap;
+        gap:4px;
+        margin-bottom:8px;
+        padding-bottom:6px;
+        border-bottom:1px solid #3A4A50;
+}
+
+.iface-badge {
+        display:inline-flex;
+        align-items:center;
+        gap:3px;
+        padding:2px 6px;
+        border-radius:4px;
+        font-size:10px;
+        font-family:Consolas, "Courier New", monospace;
+        white-space:nowrap;
+        cursor:default;
+}
+
+.iface-ssid {
+        background-color:#2D4A5E;
+        border:1px solid #3D6A8E;
+        color:#7EC8E3;
+}
+
+.iface-access {
+        background-color:#3D4A35;
+        border:1px solid #5D7A45;
+        color:#A8D88A;
+}
+
+.iface-trunk {
+        background-color:#4A3D35;
+        border:1px solid #7A5D45;
+        color:#E8C88A;
+}
+
+.iface-trunk .trunk-info {
+        font-size:9px;
+        opacity:0.85;
+        margin-left:2px;
+}
+
+.iface-vlan {
+        background-color:#3D3D4A;
+        border:1px solid #5D5D7A;
+        color:#A8A8E8;
+}
+
+.iface-unknown {
+        background-color:#3A3A3A;
+        border:1px solid #5A5A5A;
+        color:#AAAAAA;
+}
+
+/* ============================================================================ */
 
 .warn { color:#E6A23C; }
 .err { color:#E74C3C; }

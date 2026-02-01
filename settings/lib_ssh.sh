@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_ssh.sh || version="0.48"                          #
+#                - File: lib_ssh.sh || version="0.49"                          #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Define shared SSH related functions                            #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -464,6 +464,216 @@ ssh_keys_effectively_installed() {
     fi
 
     return 1
+}
+
+# ========================================================================== #
+# SAFE SSH WRAPPERS — hard timeout + 3 retries + clear skip reasons          #
+# ========================================================================== #
+
+# Public knobs (can be overridden per script via env)
+: "${MERV_SSH_RETRIES:=3}"          # MUST be 3 per requirement
+: "${MERV_SSH_TIMEOUT:=10}"         # seconds per attempt (dbclient hard timeout)
+: "${MERV_SSH_PING_TIMEOUT:=2}"     # seconds for ping -W
+: "${MERV_SSH_RETRY_DELAY:=2}"      # seconds between attempts
+
+# Last failure reason/details (for callers to log consistently)
+MERV_SSH_LAST_REASON=""
+MERV_SSH_LAST_DETAIL=""
+
+_merv_log_info() { command -v info >/dev/null 2>&1 && info -c cli,vlan "$*" || echo "[INFO] $*"; }
+_merv_log_warn() { command -v warn >/dev/null 2>&1 && warn -c cli,vlan "$*" || echo "[WARN] $*"; }
+_merv_log_err()  { command -v error >/dev/null 2>&1 && error -c cli,vlan "$*" || echo "[ERROR] $*"; }
+
+_merv_is_ipv4() {
+  # returns 0 if $1 looks like IPv4
+  echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+_merv_ping_ok() {
+  # BusyBox ping: -c 1 -W <sec>
+  ping -c 1 -W "$MERV_SSH_PING_TIMEOUT" "$1" >/dev/null 2>&1
+}
+
+_merv_timeout_run() {
+  # Run command with a hard timeout if possible.
+  # Prefer BusyBox 'timeout' when available.
+  seconds="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+    return $?
+  fi
+  # Fallback: no timeout command. Run as-is (not ideal, but avoids breaking)
+  "$@"
+  return $?
+}
+
+merv_ssh_precheck() {
+  # merv_ssh_precheck <node_num> <node_ip>
+  # returns:
+  #   0 = ok
+  #   2 = ssh keys missing
+  #   3 = invalid ip
+  #   4 = unreachable (ping)
+  node_num="$1"
+  node_ip="$2"
+
+  MERV_SSH_LAST_REASON=""
+  MERV_SSH_LAST_DETAIL=""
+
+  if [ -z "$node_ip" ] || ! _merv_is_ipv4 "$node_ip"; then
+    MERV_SSH_LAST_REASON="invalid-ip"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip'"
+    return 3
+  fi
+
+  # Keys check (uses existing lib behavior)
+  if ! ssh_keys_effectively_installed; then
+    MERV_SSH_LAST_REASON="ssh-keys-missing"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip' (SSH_KEYS_INSTALLED=0 or keyfiles missing)"
+    return 2
+  fi
+
+  if [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ]; then
+    MERV_SSH_LAST_REASON="ssh-keyfile-missing"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip' missing SSH_KEY='$SSH_KEY'"
+    return 2
+  fi
+
+  # Fast reachability check
+  if ! _merv_ping_ok "$node_ip"; then
+    MERV_SSH_LAST_REASON="unreachable"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip' not reachable via ping"
+    return 4
+  fi
+
+  return 0
+}
+
+merv_ssh_exec() {
+  # merv_ssh_exec <node_num> <node_ip> <remote_cmd>
+  #
+  # Behavior:
+  # - Precheck (ip + keys + ping)
+  # - 3 attempts total
+  # - hard timeout per attempt
+  # - sets MERV_SSH_LAST_REASON / DETAIL on failure
+  #
+  # Return:
+  #   0 = success
+  #   2 = keys missing
+  #   3 = invalid ip
+  #   4 = unreachable
+  #   5 = ssh failed (timeout/refused/auth/etc)
+  _node_num="$1"
+  _node_ip="$2"
+  _remote_cmd="$3"
+
+  # Refuse to run if node context is set (safety; aligns with mervlan_boot behavior)
+  if [ "${MERV_NODE_CONTEXT:-0}" = "1" ]; then
+    MERV_SSH_LAST_REASON="node-context"
+    MERV_SSH_LAST_DETAIL="Refusing outbound SSH from node context"
+    return 0
+  fi
+
+  # Precheck once before retry loop; if unreachable, still retry (3 total) because LAN can be flaky
+  _attempt=1
+  while [ "$_attempt" -le "$MERV_SSH_RETRIES" ]; do
+    if ! merv_ssh_precheck "$_node_num" "$_node_ip"; then
+      _rc=$?
+      # If invalid ip or keys missing → do not retry (it won't improve)
+      if [ "$_rc" -eq 2 ] || [ "$_rc" -eq 3 ]; then
+        return "$_rc"
+      fi
+      # unreachable → retry up to 3 times
+      if [ "$_attempt" -lt "$MERV_SSH_RETRIES" ]; then
+        sleep "$MERV_SSH_RETRY_DELAY"
+        _attempt=$((_attempt + 1))
+        continue
+      fi
+      return 4
+    fi
+
+    # Build args (read fresh each time in case settings changed)
+    _port="$(get_node_ssh_port)"
+    _user="$(get_node_ssh_user)"
+    [ -n "$_port" ] || _port="22"
+    [ -n "$_user" ] || _user="admin"
+
+    # Capture stderr for reason parsing
+    _tmp="/tmp/merv_ssh_err.$$"
+    : >"$_tmp" 2>/dev/null || _tmp=""
+
+    # Hard-timeout dbclient
+    _out=$(
+      _merv_timeout_run "$MERV_SSH_TIMEOUT" \
+        dbclient -p "$_port" -y -i "$SSH_KEY" \
+        "$_user@$_node_ip" "$_remote_cmd" \
+        2>"$_tmp"
+    )
+    _rc=$?
+    _err=""
+    [ -n "$_tmp" ] && _err="$(cat "$_tmp" 2>/dev/null)"
+    [ -n "$_tmp" ] && rm -f "$_tmp" 2>/dev/null || :
+
+    if [ "$_rc" -eq 0 ]; then
+      MERV_SSH_LAST_REASON=""
+      MERV_SSH_LAST_DETAIL=""
+      # Print stdout so callers can capture it if needed
+      printf '%s' "$_out"
+      return 0
+    fi
+
+    # Timeout(124) if BusyBox timeout was used
+    if [ "$_rc" -eq 124 ]; then
+      MERV_SSH_LAST_REASON="timeout"
+      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' timed out after ${MERV_SSH_TIMEOUT}s (attempt $_attempt/$MERV_SSH_RETRIES)"
+    else
+      # Best-effort classify common dbclient failures
+      if echo "$_err" | grep -qi "Permission denied"; then
+        MERV_SSH_LAST_REASON="auth-failed"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' Permission denied (keys/user mismatch)"
+        # auth failures won't improve by retrying → stop
+        return 5
+      elif echo "$_err" | grep -qi "Connection refused"; then
+        MERV_SSH_LAST_REASON="refused"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' connection refused (SSH service/port wrong)"
+      elif echo "$_err" | grep -qi "No route to host"; then
+        MERV_SSH_LAST_REASON="no-route"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' no route to host"
+      else
+        MERV_SSH_LAST_REASON="ssh-failed"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' dbclient failed rc=$_rc (attempt $_attempt/$MERV_SSH_RETRIES)"
+      fi
+    fi
+
+    if [ "$_attempt" -lt "$MERV_SSH_RETRIES" ]; then
+      sleep "$MERV_SSH_RETRY_DELAY"
+      _attempt=$((_attempt + 1))
+      continue
+    fi
+
+    return 5
+  done
+
+  return 5
+}
+
+merv_ssh_test() {
+  # merv_ssh_test <node_num> <node_ip>
+  # returns 0 if remote echo works
+  merv_ssh_exec "$1" "$2" "echo connected" | grep -q "connected"
+}
+
+merv_ssh_skip_log() {
+  # merv_ssh_skip_log <node_num> <node_ip> <context>
+  _node_num="$1"; _node_ip="$2"; _context="$3"
+  [ -n "$_context" ] || _context="ssh"
+
+  if [ -n "$MERV_SSH_LAST_REASON" ]; then
+    _merv_log_warn "Skipping $_context for NODE${_node_num:-?} ($_node_ip): $MERV_SSH_LAST_REASON — $MERV_SSH_LAST_DETAIL"
+  else
+    _merv_log_warn "Skipping $_context for NODE${_node_num:-?} ($_node_ip): unknown reason"
+  fi
 }
 
 # Flag: settings loaded

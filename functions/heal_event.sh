@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                  - File: heal_event.sh || version="0.47"                     #
+#                  - File: heal_event.sh || version="0.48"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -358,12 +358,12 @@ $vlan"
 # ============================================================================ #
 # check_vlan_config                                                            #
 # Compare expected VLANs (from settings.json) with actual VLANs (from kernel). #
-# On mismatch, logs details and returns 1. On match, returns 0. Attempts up    #
-# to 2 checks with VLAN_SETTLE_DELAY between attempts to allow interfaces to   #
-# stabilize.                                                                   #
+# On mismatch, logs details and returns 1. On match, returns 0. Requires       #
+# mismatch to persist across 2 checks with delay to avoid false positives      #
+# during transient rc states.                                                  #
 # ============================================================================ #
 check_vlan_config() {
-  local exp cur exp_str cur_str missing extra
+  local exp cur exp_str cur_str missing extra mismatch_count
 
   exp=$(expected_vlans_from_settings)
   if [ -z "$exp" ]; then
@@ -372,43 +372,52 @@ check_vlan_config() {
   fi
   exp_str=$(printf '%s\n' "$exp" | xargs 2>/dev/null)
 
-  local delays="1 1 2 2 4"
-  local attempt=1
-  local total_passes=5
+  # Require mismatch to persist across 3 checks with 5s delay between
+  # This prevents false heals during transient rc states (GUI apply, etc.)
+  # Total settling window: 10s (2 sleeps × 5s) before healing
+  mismatch_count=0
+  local check=1
+  local max_checks=3
+  local settle_delay=5
 
-  for delay in $delays; do
+  while [ "$check" -le "$max_checks" ]; do
     cur=$(actual_vlans_from_kernel)
     cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
 
     if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
-      info -c vlan "VLAN check pass ${attempt}/${total_passes} OK: expected=${exp_str:-none} actual=${cur_str:-none}"
+      # VLANs match — config is OK
+      info -c vlan "VLAN check pass ${check}/${max_checks} OK: expected=${exp_str:-none} actual=${cur_str:-none}"
+      return 0
+    fi
 
-      if [ "$attempt" -eq "$total_passes" ]; then
-        info -c vlan "VLAN check final OK after ${attempt} passes: ${cur_str:-none}"
-        return 0
-      fi
+    # Mismatch detected
+    mismatch_count=$((mismatch_count + 1))
 
-      sleep "$delay"
-    else
-      missing=""
-      for vid in $exp; do
-        printf '%s\n' "$cur" | grep -Fx "$vid" >/dev/null 2>&1 || missing="$missing $vid"
-      done
-      missing=${missing# }
+    missing=""
+    for vid in $exp; do
+      printf '%s\n' "$cur" | grep -Fx "$vid" >/dev/null 2>&1 || missing="$missing $vid"
+    done
+    missing=${missing# }
 
-      extra=""
-      for vid in $cur; do
-        printf '%s\n' "$exp" | grep -Fx "$vid" >/dev/null 2>&1 || extra="$extra $vid"
-      done
-      extra=${extra# }
+    extra=""
+    for vid in $cur; do
+      printf '%s\n' "$exp" | grep -Fx "$vid" >/dev/null 2>&1 || extra="$extra $vid"
+    done
+    extra=${extra# }
 
-      warn -c vlan "VLAN mismatch on pass ${attempt}/${total_passes}: expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
+    if [ "$mismatch_count" -ge "$max_checks" ]; then
+      # Mismatch persisted across all checks — real problem
+      warn -c vlan "VLAN mismatch confirmed (${mismatch_count}/${max_checks}): expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
       return 1
     fi
 
-    attempt=$((attempt + 1))
+    # First mismatch — wait and recheck to confirm it's not transient
+    info -c vlan "VLAN mismatch on pass ${check}/${max_checks}, rechecking in ${settle_delay}s: missing{${missing:-none}} extra{${extra:-none}}"
+    sleep "$settle_delay"
+    check=$((check + 1))
   done
 
+  # Fallback (shouldn't reach here)
   info -c vlan "VLAN check completed fallback path; treating as OK (expected=${exp_str:-none})"
   return 0
 }
@@ -483,6 +492,19 @@ EVENT_LABEL="$EVENT"
 if [ -d "$MANAGER_LOCK" ]; then
   info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active"
   exit 0
+fi
+
+# Skip heal if within self-restart window (prevents async event loops from mervlan_manager)
+# The marker contains an expiry timestamp; if now < expiry, we're still in the window.
+SELF_RESTART_MARKER="$LOCKDIR/self_restart.marker"
+if [ -f "$SELF_RESTART_MARKER" ]; then
+  expiry_ts=$(cat "$SELF_RESTART_MARKER" 2>/dev/null || echo 0)
+  case "$expiry_ts" in ''|*[!0-9]*) expiry_ts=0 ;; esac
+  now=$(date +%s)
+  if [ "$now" -lt "$expiry_ts" ]; then
+    info -c vlan "Heal: skipping [$EVENT_LABEL] — within self-restart window"
+    exit 0
+  fi
 fi
 
 # Event debounce: suppress same event if triggered again within 2 seconds
@@ -574,10 +596,9 @@ should_heal_event() {
     nat_start*|restart_nat*|nat_restart*|nat|nat_*)
       return 0
       ;;
-    # HTTPD / GUI reboot
-    httpd|httpd_*|restart_httpd*|httpd_restart*)
-      return 0
-      ;;
+    # NOTE: httpd events intentionally excluded - httpd restarts do not affect
+    # VLAN configuration, and healing on them creates an event loop since
+    # mervlan_manager.sh calls restart_httpd after applying VLANs.
     # Generic reload orchestrators
     reload|reload_*|restart_all|services_restart|service_restart|restart_services|service_reload)
       return 0

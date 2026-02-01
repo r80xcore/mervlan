@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#          - File: service-event-handler.sh || version="0.48"                  #
+#          - File: service-event-handler.sh || version="0.49"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Event handler for http and service events                      #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -299,8 +299,29 @@ case "${TYPE}_${EVENT}" in
     dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update dev
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
-  # Wildcard patterns catch restart_* and service events (httpd, wireless, WAN, LAN, NET, FW, NAT, DNS)
-  *restart*|*wireless*|*httpd*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*)
+  # Wildcard patterns catch restart_* and service events (wireless, WAN, LAN, NET, FW, NAT, DNS)
+  # NOTE: httpd intentionally excluded — httpd restarts don't affect VLANs and cause event floods
+  *restart*|*wireless*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*)
+    # Skip httpd events that slip through via *restart* pattern
+    case "$COMBINED_NORM" in
+      *httpd*) 
+        logger -t "VLANMgr" "handler: skipping httpd event ${COMBINED_NORM} (excluded)"
+        exit 0
+        ;;
+    esac
+
+    # Handler-level debounce for system events (prevents heal storms from rc event floods)
+    HEAL_STAMP="$LOCKDIR/heal_event.last"
+    HEAL_WINDOW="${MERV_HEAL_EVENT_DEBOUNCE:-5}"
+    now="$(date +%s 2>/dev/null || echo 0)"
+    last="$(cat "$HEAL_STAMP" 2>/dev/null || echo 0)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$HEAL_WINDOW" ]; then
+      logger -t "VLANMgr" "handler: heal_event debounced (window=${HEAL_WINDOW}s) for ${COMBINED_NORM}"
+      exit 0
+    fi
+    printf '%s\n' "$now" >"$HEAL_STAMP" 2>/dev/null || :
+
     # Fire-and-forget heal so rc can continue applying its own changes
     logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async)"
     (

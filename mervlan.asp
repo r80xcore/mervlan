@@ -47,6 +47,40 @@ function initial(){
 <script type="text/javascript">
 var _mvmLast = { name: null, t: 0 };
 
+// === Loading overlay guard: block early hides until minimum time passes ===
+(function() {
+  var origHide = window.hideLoading;
+  var origShow = window.showLoading;
+  var mvmLoadingUntil = 0;
+
+  // Call this to enforce a minimum visible duration (ms)
+  window._mvmHoldLoadingFor = function(ms) {
+    var until = Date.now() + ms;
+    if (until > mvmLoadingUntil) mvmLoadingUntil = until;
+  };
+
+  // Block early hides - this is the key to reliable timing
+  window.hideLoading = function() {
+    if (Date.now() < mvmLoadingUntil) return; // blocked: too early
+    if (typeof origHide === "function") return origHide.apply(this, arguments);
+    // fallback
+    var overlay = document.getElementById("Loading");
+    if (overlay) overlay.style.display = "none";
+  };
+
+  // Ensure showLoading doesn't use a tiny duration that expires before our minimum
+  window.showLoading = function(arg) {
+    if (typeof arg === "number") {
+      var remainSec = Math.ceil((mvmLoadingUntil - Date.now()) / 1000);
+      if (remainSec > 0) arg = Math.max(arg, remainSec);
+    }
+    if (typeof origShow === "function") return origShow.apply(this, arguments);
+    // fallback
+    var overlay = document.getElementById("Loading");
+    if (overlay) overlay.style.display = "block";
+  };
+})();
+
 // Hide the ASUS loading overlay even when the skin only exposes showLoading(flag)
 function hideLoadingSafe() {
   if (typeof hideLoading === "function") {
@@ -62,13 +96,17 @@ function hideLoadingSafe() {
 }
 
 // Show the ASUS loading overlay while tolerating different skin signatures
-function showLoadingSafe() {
+function showLoadingSafe(secHint) {
   if (typeof showLoading !== "function") {
+    var overlay = document.getElementById("Loading");
+    if (overlay) overlay.style.display = "block";
     return;
   }
   try {
     if (showLoading.length > 0) {
-      showLoading(1);
+      // Pass a sane duration (seconds), not 1 which expires immediately
+      var s = (typeof secHint === "number" && secHint > 0) ? secHint : 30;
+      showLoading(s);
     } else {
       showLoading();
     }
@@ -124,13 +162,8 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   }
 
   var skipRefresh = !!opts.skipRefresh;
-  if (skipRefresh) {
-    // Minimize any server-side wait UI when we plan to suppress refresh
-    if (actionWaitField) {
-      actionWaitField.value = "0";
-      actionWaitField.setAttribute("value", "0");
-    }
-  }
+  // Note: we no longer zero out action_wait when skipRefresh is true
+  // This allows the loading overlay to show while still preventing page refresh
 
   var orig = {
     refresh_self: (typeof window.refreshpage !== "undefined") ? window.refreshpage : undefined,
@@ -165,10 +198,30 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   }
 
   var wantLoading = (opts.loading !== false);
+  var minLoadingMs = (opts.minLoadingMs != null) ? opts.minLoadingMs : 0;
+  
   if (wantLoading) {
-    showLoadingSafe();
+    // Lock the loading overlay so ASUS firmware cannot dismiss it early
+    if (minLoadingMs > 0 && typeof window._mvmHoldLoadingFor === "function") {
+      window._mvmHoldLoadingFor(minLoadingMs);
+    }
+    // Pass duration hint to showLoadingSafe (converts ms to seconds)
+    var secHint = minLoadingMs > 0 ? Math.ceil(minLoadingMs / 1000) : 30;
+    showLoadingSafe(secHint);
+    // Hide after the minimum duration
+    if (minLoadingMs > 0) {
+      setTimeout(function() { hideLoadingSafe(); }, minLoadingMs);
+    }
   } else {
     hideLoadingSafe();
+  }
+
+  // Helper to hide loading (only if no minLoadingMs, otherwise the timeout handles it)
+  function hideLoadingIfNoMinTime() {
+    if (minLoadingMs <= 0) {
+      hideLoadingSafe();
+    }
+    // If minLoadingMs > 0, the setTimeout above will handle hiding
   }
 
   // Keep overlay hidden if we opted out of loading feedback
@@ -181,7 +234,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
       } else if (tf.detachEvent) {
         tf.detachEvent("onload", oneShot);
       }
-      hideLoadingSafe();
+      hideLoadingIfNoMinTime();
       if (skipRefresh) {
         if (typeof orig.refresh_self !== "undefined") {
           window.refreshpage = orig.refresh_self;
@@ -291,10 +344,12 @@ function mvmRemoveSandboxFrame() {
 /* === Policy lines you edit === */
 const MVM_NO_REFRESH = new Set([
   // Actions that must NOT refresh the page after running:
-  // "save_vlanmgr",
+  "save_vlanmgr",
   "collectclients_vlanmgr",
   "sync_vlanmgr",
   "apply_vlanmgr",
+  "executenodes_vlanmgr",
+  "executenodesonly_vlanmgr",
   "genkey_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr",
@@ -328,8 +383,14 @@ const MVM_ALLOWED_ACTIONS = new Set([
 
 // Optional: actions that need a longer/shorter wait (seconds)
 const MVM_WAIT_OVERRIDE = {
+  // "save_vlanmgr": 5000
   // "sync_vlanmgr": 30,
   // "apply_vlanmgr": 20,
+};
+
+// Optional: actions that need a minimum loading screen time (milliseconds)
+const MVM_MIN_LOADING_MS = {
+  "save_vlanmgr": 5000  // Show loading for at least 1.5s to allow clear+reload verification
 };
 
 /* Build final opts for an action using the policy + any per-call override */
@@ -340,6 +401,9 @@ function mvmOptsFor(actionName, overrideOpts) {
     waitSec: (Object.prototype.hasOwnProperty.call(MVM_WAIT_OVERRIDE, actionName)
               ? MVM_WAIT_OVERRIDE[actionName]
               : 5),
+    minLoadingMs: (Object.prototype.hasOwnProperty.call(MVM_MIN_LOADING_MS, actionName)
+              ? MVM_MIN_LOADING_MS[actionName]
+              : 0),
     target: "hidden_frame",
   };
   if (overrideOpts && typeof overrideOpts === "object") {
@@ -347,6 +411,7 @@ function mvmOptsFor(actionName, overrideOpts) {
     if ("loading" in overrideOpts)     opts.loading = overrideOpts.loading;
     if ("skipRefresh" in overrideOpts) opts.skipRefresh = overrideOpts.skipRefresh;
     if ("waitSec" in overrideOpts)     opts.waitSec = overrideOpts.waitSec;
+    if ("minLoadingMs" in overrideOpts) opts.minLoadingMs = overrideOpts.minLoadingMs;
     if ("target" in overrideOpts)      opts.target = overrideOpts.target;
   }
   return opts;

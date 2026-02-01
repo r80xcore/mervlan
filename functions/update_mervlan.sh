@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.51B"                   #
+#                - File: update_mervlan.sh || version="0.52"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -168,6 +168,131 @@ www/vlan_index_style.css"
 
 # required directories in a valid package
 REQUIRED_STAGE_DIRS="functions settings templates www"
+
+# ========================================================================== #
+# SETTINGS.JSON MERGE HELPERS                                                #
+# ========================================================================== #
+
+# merge_settings_json — Merge old settings into new defaults (skip Hardware)
+# Args: $1=old_settings_file, $2=new_settings_file
+# Behavior: Preserves user values from old file, keeps new keys from updated
+#           defaults, and skips all keys under Hardware.
+merge_settings_json() {
+	old_file="$1"
+	new_file="$2"
+	tmp_kv="$TMP_BASE/merge_kv.$$"
+
+	[ -f "$old_file" ] || return 0
+	[ -f "$new_file" ] || return 1
+
+	: > "$tmp_kv"
+
+	if ! awk -v out="$tmp_kv" '
+		function net_braces(s,   t, o, c) {
+			t = s
+			o = gsub(/\{/, "", t)
+			c = gsub(/\}/, "", t)
+			return o - c
+		}
+		function get_name(line,   t) {
+			t = line
+			sub(/^[[:space:]]*"/, "", t)
+			sub(/".*$/, "", t)
+			return t
+		}
+		BEGIN {
+			depth=-1
+			sec=""; subsec=""
+			sec_depth=0; sub_depth=0
+			in_hw=0; hw_depth=0
+		}
+		{
+			line=$0
+
+			# Enter top-level section only when at depth 0
+			if (depth==0 && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*\{/) {
+				sec = get_name(line)
+				sec_depth = depth + net_braces(line)
+				if (sec == "Hardware") {
+					in_hw = 1
+					hw_depth = sec_depth
+				} else {
+					in_hw = 0
+				}
+				subsec = ""
+				sub_depth = 0
+			}
+
+			# Enter subsection only when inside a section at depth 1 (not Hardware)
+			if (!in_hw && sec != "" && depth==1 &&
+			    line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*\{/) {
+				subsec = get_name(line)
+				sub_depth = depth + net_braces(line)
+			}
+
+			# Capture quoted scalar values only (no arrays/objects)
+			if (!in_hw && sec != "" &&
+			    line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*$/) {
+				k = get_name(line)
+				v = line
+				sub(/^[^:]*:[[:space:]]*"/, "", v)
+				sub(/".*$/, "", v)
+				if (k !~ /^_/ && k !~ /^BACKUP_[123]$/) {
+					if (depth==1) {
+						printf "%s|%s|%s|%s\n", sec, "", k, v >> out
+					} else if (subsec != "") {
+						printf "%s|%s|%s|%s\n", sec, subsec, k, v >> out
+					}
+				}
+			}
+
+			# Update depth AFTER processing line
+			depth += net_braces(line)
+
+			# Exit Hardware
+			if (in_hw && depth < hw_depth) {
+				in_hw = 0
+				sec = ""
+				subsec = ""
+			}
+
+			# Exit subsection
+			if (subsec != "" && depth < sub_depth) {
+				subsec = ""
+			}
+
+			# Exit section
+			if (sec != "" && depth < sec_depth) {
+				sec = ""
+				subsec = ""
+			}
+		}
+	' "$old_file"; then
+		return 1
+	fi
+
+	if [ -s "$tmp_kv" ]; then
+		cnt="$(wc -l < "$tmp_kv" 2>/dev/null | tr -d '[:space:]')"
+		[ -n "$cnt" ] || cnt="?"
+		info -c cli,vlan "settings.json merge: extracted $cnt scalar values"
+	else
+		warn -c cli,vlan "settings.json merge: extracted 0 values (old file format mismatch?)"
+		rm -f "$tmp_kv" 2>/dev/null || :
+		return 0
+	fi
+
+	while IFS='|' read -r section subsection key value || [ -n "$section" ]; do
+		[ -n "$section" ] || continue
+		[ -n "$key" ] || continue
+		if [ -n "$subsection" ]; then
+			json_set_section2_value "$section" "$subsection" "$key" "$value" "$new_file" || { rm -f "$tmp_kv" 2>/dev/null || :; return 1; }
+		else
+			json_set_section_value "$section" "$key" "$value" "$new_file" || { rm -f "$tmp_kv" 2>/dev/null || :; return 1; }
+		fi
+	done < "$tmp_kv"
+
+	rm -f "$tmp_kv" 2>/dev/null || :
+}
 
 # ========================================================================== #
 # BACKUP METADATA → settings.json                                            #
@@ -583,38 +708,42 @@ fi
 list_configured_nodes() {
 	[ -f "$SETTINGS_FILE" ] || return 1
 	grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-		sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | \
-		grep -v "none" | \
-		grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+		sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
+		awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
 }
 
 has_configured_nodes() {
-	local nodes
 	nodes=$(list_configured_nodes)
 	[ -n "$nodes" ]
 }
 
 clean_remote_addon_dirs() {
-    local nodes node
     nodes=$(list_configured_nodes)
     if [ -z "$nodes" ]; then
         info -c cli,vlan "Remote cleanup skipped (no nodes configured)"
         return 0
     fi
 
-    if [ ! -f "$SSH_KEY" ]; then
-        info -c cli,vlan "Remote cleanup skipped (SSH key not found)"
+    # If keys are missing, skip cleanly (no freeze, no failure)
+    if ! ssh_keys_effectively_installed; then
+        warn -c cli,vlan "Remote cleanup skipped (SSH keys not installed)"
         return 0
     fi
 
-    for node in $nodes; do
-        if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-            "$SSH_NODE_USER@$node" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
-            info -c cli,vlan "Cleared remote addon directory on $node"
+    while read -r node_id node_ip; do
+        [ -n "$node_ip" ] || continue
+
+        if merv_ssh_exec "$node_id" "$node_ip" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
+            info -c cli,vlan "Cleared remote addon directory on NODE${node_id} ($node_ip)"
         else
-            warn -c cli,vlan "Failed to clean remote addon directory on $node"
+            merv_ssh_skip_log "$node_id" "$node_ip" "remote cleanup"
+            # IMPORTANT: do not fail the update; just warn and continue
         fi
-    done
+    done <<EOF
+$nodes
+EOF
+
+    return 0
 }
 
 # ========================================================================== #
@@ -794,6 +923,14 @@ for rel_path in $BACKUP_LIST; do
 	backup_file="$BACKUP_DIR/$rel_path"
 	target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
 	if [ -f "$backup_file" ]; then
+		if [ "$rel_path" = "settings/settings.json" ]; then
+			info -c cli,vlan "Merging settings.json (preserve user keys, keep new defaults, skip Hardware)"
+			if ! merge_settings_json "$backup_file" "$target"; then
+				rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+				fail_update restoring_user_data "Failed to merge settings.json"
+			fi
+			continue
+		fi
 		if ! mkdir -p "$(dirname "$target")" 2>/dev/null; then
 			rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
 			fail_update restoring_user_data "Failed to recreate directory for $rel_path"
