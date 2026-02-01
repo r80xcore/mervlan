@@ -8,7 +8,14 @@ now includes settings.json migration logic that older versions do not have.
 DO NOT use the GUI update button for this version. Run one of these in SSH:
 
 OPTION 1 - Download dependencies first, then update (recommended):
-/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/lib_json.sh" -o "/jffs/addons/mervlan/settings/lib_json.sh" && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/lib_ssh.sh" -o "/jffs/addons/mervlan/settings/lib_ssh.sh" && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/var_settings.sh" -o "/jffs/addons/mervlan/settings/var_settings.sh" && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/log_settings.sh" -o "/jffs/addons/mervlan/settings/log_settings.sh" && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/functions/update_mervlan.sh" -o "/jffs/addons/mervlan/functions/update_mervlan.sh" && chmod 0644 /jffs/addons/mervlan/settings/lib_json.sh /jffs/addons/mervlan/settings/lib_ssh.sh /jffs/addons/mervlan/settings/var_settings.sh /jffs/addons/mervlan/settings/log_settings.sh && chmod 0755 /jffs/addons/mervlan/functions/update_mervlan.sh && /jffs/addons/mervlan/functions/update_mervlan.sh update dev
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/lib_json.sh" -o "/jffs/addons/mervlan/settings/lib_json.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/lib_ssh.sh" -o "/jffs/addons/mervlan/settings/lib_ssh.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/var_settings.sh" -o "/jffs/addons/mervlan/settings/var_settings.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/log_settings.sh" -o "/jffs/addons/mervlan/settings/log_settings.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/functions/update_mervlan.sh" -o "/jffs/addons/mervlan/functions/update_mervlan.sh" && \
+chmod 0644 /jffs/addons/mervlan/settings/lib_json.sh /jffs/addons/mervlan/settings/lib_ssh.sh /jffs/addons/mervlan/settings/var_settings.sh /jffs/addons/mervlan/settings/log_settings.sh && \
+chmod 0755 /jffs/addons/mervlan/functions/update_mervlan.sh && \
+/jffs/addons/mervlan/functions/update_mervlan.sh update dev
 
 OPTION 2 - Run update twice (if OPTION 1 should fail, second run uses new updater):
 /jffs/addons/mervlan/functions/update_mervlan.sh update dev && /jffs/addons/mervlan/functions/update_mervlan.sh update dev
