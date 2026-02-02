@@ -31,7 +31,16 @@ source /usr/sbin/helper.sh
 # SETTINGS_FILE — JSON configs used during install
 # BOOT_SCRIPT — Helper used for setupenable/nodeenable orchestration
 
-GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/main"
+BRANCH="main"
+
+if [ "$1" = "dev" ]; then
+    BRANCH="dev"
+    shift
+    echo "[install] DEV branch selected"
+    echo "[install] WARNING: This is a development build and may be unstable"
+fi
+
+GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/${BRANCH}"
 ADDON_DIR="/jffs/addons"
 ADDON="mervlan"
 MERV_BASE="$ADDON_DIR/$ADDON"
