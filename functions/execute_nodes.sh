@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: execute_nodes.sh || version="0.48"                    #
+#                - File: execute_nodes.sh || version="0.49"                    #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -255,6 +255,7 @@ ensure_remote_settings_dir() {
 # Transfer local settings.json to remote node's settings directory via SSH.    #
 # Uses atomic rename to avoid partial file reads. Preserves node's Hardware    #
 # section to avoid overwriting device-specific hardware detection values.      #
+# IS_NODE and NODE_ID are set separately by set_node_flags_remote().           #
 # ============================================================================ #
 copy_settings_conf_to_node() {
     node_id="$1"
@@ -270,6 +271,7 @@ copy_settings_conf_to_node() {
     fi
 
     # Fetch node's current Hardware section (if exists) to preserve it
+    # NOTE: We do NOT preserve IS_NODE/NODE_ID here - they are set by set_node_flags_remote()
     _cstn_tmp="$TMPDIR/settings_merged_node${node_id}.$$"
     _cstn_node_hw=""
 
@@ -287,6 +289,11 @@ copy_settings_conf_to_node() {
             rm -f "$_cstn_tmp" 2>/dev/null
             return 1
         }
+
+        # Reset Trunks section to defaults (nodes should never trunk)
+        if ! json_reset_trunks_section "$_cstn_tmp"; then
+            warn -c cli,vlan "⚠️ Failed to reset trunks section, continuing anyway"
+        fi
 
         # Write node's Hardware to temp file, then replace in the copy
         _cstn_hw_file="$TMPDIR/node_hw_${node_id}.$$"
@@ -311,13 +318,37 @@ copy_settings_conf_to_node() {
         rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
     fi
 
-    # No existing Hardware section on node, or merge wasn't needed - copy as-is
+    # No existing Hardware section on node, or merge wasn't needed - copy with trunk reset
+    # Create temp file with reset trunks
+    _cstn_tmp="$TMPDIR/settings_trunk_reset_node${node_id}.$$"
+    cp "$SETTINGS_FILE" "$_cstn_tmp" 2>/dev/null || {
+        error -c cli,vlan "✗ Failed to create temp file for trunk reset"
+        rm -f "$_cstn_tmp" 2>/dev/null
+        return 1
+    }
+
+    # Reset Trunks section to defaults (nodes should never trunk)
+    if ! json_reset_trunks_section "$_cstn_tmp"; then
+        warn -c cli,vlan "⚠️ Failed to reset trunks section, copying original file"
+        rm -f "$_cstn_tmp" 2>/dev/null
+        # Fallback to original file
+        if cat "$SETTINGS_FILE" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+            info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
+            return 0
+        else
+            error -c cli,vlan "✗ Failed to copy $file_rel to $node_ip:$remote_path"
+            return 1
+        fi
+    fi
+
     # Use cat pipe through SSH with atomic rename (write to .tmp then mv)
-    if cat "$SETTINGS_FILE" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
-        info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
+    if cat "$_cstn_tmp" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+        info -c cli,vlan "✓ Copied $file_rel (trunk-safe) to $node_ip:$remote_path"
+        rm -f "$_cstn_tmp" 2>/dev/null
         return 0
     else
         error -c cli,vlan "✗ Failed to copy $file_rel to $node_ip:$remote_path"
+        rm -f "$_cstn_tmp" 2>/dev/null
         return 1
     fi
 }
@@ -325,7 +356,9 @@ copy_settings_conf_to_node() {
 # ============================================================================ #
 # verify_settings_conf_on_node                                                 #
 # Verify that settings.json was copied correctly to node. Check file exists,   #
-# compare file sizes, and validate MD5 checksums if available.                 #
+# is non-empty, and contains valid JSON structure. Since we preserve node-     #
+# specific values (Hardware, IS_NODE, NODE_ID) during copy, byte-level         #
+# comparison is not appropriate - just verify basic integrity.                 #
 # ============================================================================ #
 verify_settings_conf_on_node() {
     node_id="$1"
@@ -338,49 +371,63 @@ verify_settings_conf_on_node() {
         return 1
     fi
 
-    # Compare file sizes (local vs remote)
-    remote_size=$(merv_ssh_exec "$node_id" "$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0")
-    local_size=$(stat -c%s "$SETTINGS_FILE" 2>/dev/null || wc -c < "$SETTINGS_FILE" 2>/dev/null || echo 0)
-
-    # Extract numeric values; strip any non-digit characters
-    remote_size=$(echo "$remote_size" | tr -cd '0-9')
-    local_size=$(echo "$local_size" | tr -cd '0-9')
-
-    # Fail if sizes don't match or file is empty
-    if [ "$remote_size" -ne "$local_size" ] || [ "$remote_size" -eq 0 ]; then
-        error -c cli,vlan "⚠️  Size mismatch for settings.json on $node_ip (local: $local_size, remote: $remote_size)"
-        return 1
-    fi
-
-    # Attempt MD5 checksum verification if md5sum/md5 available
-    local_md5=""
-    remote_md5=""
-
-    if command -v md5sum >/dev/null 2>&1; then
-        local_md5=$(md5sum "$SETTINGS_FILE" 2>/dev/null | awk '{print $1}')
-    elif command -v md5 >/dev/null 2>&1; then
-        local_md5=$(md5 -r "$SETTINGS_FILE" 2>/dev/null | awk '{print $1}')
-    fi
-
-    # If we have a local MD5, fetch remote MD5 and compare
-    if [ -n "$local_md5" ]; then
-        remote_md5=$(merv_ssh_exec "$node_id" "$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \\$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \\$1}'; else echo NA; fi")
-        remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
-
-        # Compare MD5s if remote MD5 was successfully computed
-        if [ -n "$remote_md5" ] && [ "$remote_md5" != "NA" ]; then
-            if [ "$local_md5" != "$remote_md5" ]; then
-                error -c cli,vlan "✗ MD5 mismatch for settings.json on $node_ip (local: $local_md5, remote: $remote_md5)"
-                return 1
-            fi
-            info -c cli,vlan "✓ Verified settings.json on $node_ip (size: $remote_size bytes, md5 ok)"
-            return 0
+    # Check file is non-empty and contains basic JSON structure
+    _vscon_check=$(merv_ssh_exec "$node_id" "$node_ip" "
+        if [ ! -s '$remote_file' ]; then
+            echo 'EMPTY'
+            exit 1
         fi
-    fi
+        
+        # Basic JSON validity: must have opening/closing braces and at least one key
+        if ! grep -q '^{' '$remote_file' 2>/dev/null; then
+            echo 'NO_OPENING_BRACE'
+            exit 1
+        fi
+        if ! grep -q '^}' '$remote_file' 2>/dev/null; then
+            echo 'NO_CLOSING_BRACE'
+            exit 1
+        fi
+        
+        # Count keys (should have multiple sections: General, SSH, Nodes, WiFi, VLAN, Hardware)
+        key_count=\$(grep -c '\"[^\"]*\"[[:space:]]*:' '$remote_file' 2>/dev/null || echo 0)
+        if [ \"\$key_count\" -lt 10 ]; then
+            echo \"TOO_FEW_KEYS \$key_count\"
+            exit 1
+        fi
+        
+        # Verify critical sections exist
+        if ! grep -q '\"General\"' '$remote_file' 2>/dev/null; then
+            echo 'MISSING_GENERAL'
+            exit 1
+        fi
+        if ! grep -q '\"VLAN\"' '$remote_file' 2>/dev/null; then
+            echo 'MISSING_VLAN'
+            exit 1
+        fi
+        
+        echo 'OK'
+    " 2>&1)
 
-    # If no MD5 available, consider verification complete based on size
-    info -c cli,vlan "✓ Verified settings.json on $node_ip (size: $remote_size bytes)"
-    return 0
+    _vscon_result=$(echo "$_vscon_check" | tail -n 1 | tr -d '\r\n')
+    
+    if [ "$_vscon_result" = "OK" ]; then
+        info -c cli,vlan "✓ Verified settings.json on $node_ip (structure valid)"
+        return 0
+    elif echo "$_vscon_result" | grep -q "EMPTY"; then
+        error -c cli,vlan "✗ settings.json is empty on $node_ip"
+        return 1
+    elif echo "$_vscon_result" | grep -q "TOO_FEW_KEYS"; then
+        key_count=$(echo "$_vscon_result" | awk '{print $2}')
+        error -c cli,vlan "✗ settings.json appears incomplete on $node_ip (only $key_count keys found)"
+        return 1
+    elif echo "$_vscon_result" | grep -q "MISSING"; then
+        error -c cli,vlan "✗ settings.json missing critical sections on $node_ip: $_vscon_result"
+        return 1
+    else
+        warn -c cli,vlan "⚠️ Unable to verify settings.json on $node_ip (check: $_vscon_result)"
+        # Don't fail - file exists and was copied, verification just couldn't complete
+        return 0
+    fi
 }
 
 # ============================================================================ #
@@ -410,7 +457,8 @@ sync_settings_conf_for_node() {
     return 0
 }
 
-# set_node_flags_remote — Set IS_NODE=1 and NODE_ID on remote settings.json
+# set_node_flags_remote — Ensure IS_NODE=1 and NODE_ID are set on remote settings.json
+# Only writes if values are missing or incorrect (to avoid unnecessary file modifications)
 set_node_flags_remote() {
     node_id="$1"
     node_ip="$2"
@@ -431,8 +479,20 @@ set_node_flags_remote() {
             echo 'lib-json-load-failed' >&2
             exit 1
         }
-        json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
-        json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
+        
+        # Read current values
+        current_is_node=\$(json_get_flag IS_NODE '' \"\$SETTINGS_FILE\" 2>/dev/null)
+        current_node_id=\$(json_get_flag NODE_ID '' \"\$SETTINGS_FILE\" 2>/dev/null)
+        
+        # Only write if values are missing or incorrect
+        if [ \"\$current_is_node\" != \"1\" ]; then
+            json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
+        fi
+        if [ \"\$current_node_id\" != \"$node_id\" ]; then
+            json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
+        fi
+        
+        # Return final values for verification
         json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
         json_get_flag NODE_ID \"none\" \"\$SETTINGS_FILE\"
     "
@@ -442,11 +502,11 @@ set_node_flags_remote() {
     node_id_value=$(echo "$node_flags" | tail -n 1 | tr -d '\r\n')
 
     if [ "$node_flag_value" = "1" ] && [ "$node_id_value" = "$node_id" ]; then
-        info -c cli,vlan "✓ Set IS_NODE=1 and NODE_ID=$node_id on $node_ip"
+        info -c cli,vlan "✓ Verified IS_NODE=1 and NODE_ID=$node_id on $node_ip"
         return 0
     fi
 
-    error -c cli,vlan "✗ Failed to set IS_NODE/NODE_ID on $node_ip (IS_NODE='$node_flag_value', NODE_ID='$node_id_value')"
+    error -c cli,vlan "✗ Failed to verify IS_NODE/NODE_ID on $node_ip (IS_NODE='$node_flag_value', NODE_ID='$node_id_value')"
     return 1
 }
 

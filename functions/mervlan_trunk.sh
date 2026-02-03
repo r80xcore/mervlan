@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_trunk.sh || version="0.52"                     #
+#               - File: mervlan_trunk.sh || version="0.53"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # ───── MerVLAN environment bootstrap ─────
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -206,8 +206,7 @@ ensure_vlan_bridge() {
     run_cmd ip link set "$br" up || warn -c vlan,cli "ensure_vlan_bridge: failed to set $br up"
   fi
 
-  # Ensure uplink vlan is a member of the bridge (single brctl call for membership)
-' "$members" | grep -qx "$uplink_vlan"; then
+  # Ensure uplink vlan is a member of the bridge
   if ! bridge_has_if "$br" "$uplink_vlan"; then
     if ! run_cmd brctl addif "$br" "$uplink_vlan"; then
       if bridge_has_if "$br" "$uplink_vlan"; then
@@ -532,8 +531,7 @@ main() {
   # Print compact trunk summary (what was applied or would be applied)
   if [ -n "$TRUNK_SUMMARY" ]; then
     info -c vlan,cli "=== Trunk summary ==="
-    printf '%s
-' "$TRUNK_SUMMARY" | while IFS= read -r l; do
+    printf '%s\n' "$TRUNK_SUMMARY" | while IFS= read -r l; do
       [ -z "$l" ] && continue
       info -c vlan,cli "  $l"
     done

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.52"                        #
+#               - File: sync_nodes.sh || version="0.53"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -455,9 +455,44 @@ copy_file_to_node() {
         return 0
     fi
 
-    # Note: For settings.json, we copy as-is here. The Hardware section will be
-    # repopulated by hw_probe.sh which runs after nodeenable. This ensures new
-    # model definitions from updates are always applied.
+    # Special handling for settings.json: reset Trunks section to prevent trunk configs on nodes
+    if [ "$file" = "settings/settings.json" ]; then
+        _cfn_tmp="$TMPDIR/settings_trunk_reset_sync_node${node_id}.$$"
+        cp "$MERV_BASE/$file" "$_cfn_tmp" 2>/dev/null || {
+            error -c cli,vlan "✗ Failed to create temp file for trunk reset"
+            rm -f "$_cfn_tmp" 2>/dev/null
+            return 1
+        }
+
+        # Reset Trunks section to defaults (nodes should never trunk)
+        if ! json_reset_trunks_section "$_cfn_tmp"; then
+            warn -c cli,vlan "⚠️ Failed to reset trunks section, copying original file"
+            rm -f "$_cfn_tmp" 2>/dev/null
+            # Fallback to original file
+            if cat "$MERV_BASE/$file" | _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+                info -c cli,vlan "✓ Copied $file to NODE${node_id} ($node_ip):$remote_path"
+                return 0
+            else
+                error -c cli,vlan "✗ Failed to copy $file to NODE${node_id} ($node_ip):$remote_path"
+                return 1
+            fi
+        fi
+
+        # Use cat piped with timeout wrapper for atomic file transfer
+        if cat "$_cfn_tmp" | _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+            info -c cli,vlan "✓ Copied $file (trunk-safe) to NODE${node_id} ($node_ip):$remote_path"
+            rm -f "$_cfn_tmp" 2>/dev/null
+            return 0
+        else
+            error -c cli,vlan "✗ Failed to copy $file to NODE${node_id} ($node_ip):$remote_path"
+            rm -f "$_cfn_tmp" 2>/dev/null
+            return 1
+        fi
+    fi
+
+    # For all other files, copy as-is
+    # Note: The Hardware section in settings.json will be repopulated by hw_probe.sh 
+    # which runs after nodeenable. This ensures new model definitions from updates are always applied.
 
     # Use cat piped with timeout wrapper for atomic file transfer
     if cat "$MERV_BASE/$file" | _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then

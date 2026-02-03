@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                    - File: install.sh || version="0.47"                      #
+#                    - File: install.sh || version="0.48"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -31,12 +31,13 @@ source /usr/sbin/helper.sh
 # SETTINGS_FILE — JSON configs used during install
 # BOOT_SCRIPT — Helper used for setupenable/nodeenable orchestration
 
+# Default to main branch
 BRANCH="main"
 
-if [ "$1" = "dev" ]; then
+# Check for 'full dev' pattern: ./install.sh full dev
+if [ "$1" = "full" ] && [ "$2" = "dev" ]; then
     BRANCH="dev"
-    shift
-    echo "[install] DEV branch selected"
+    echo "[install] DEV branch selected for full install"
     echo "[install] WARNING: This is a development build and may be unstable"
 fi
 
@@ -714,63 +715,253 @@ has_configured_nodes() {
 # DOWNLOAD & BOOTSTRAP UTILITIES — Fetch repo and prepare fresh install      #
 # ========================================================================== #
 
+# select_and_validate_tarball — Interactive menu for tarball selection
+# Args: $1 = staging directory path
+# Returns: 0 on success (sets SELECTED_TARBALL), 1 on error/cancel
+# Explanation: Lists available tarballs, allows selection and deletion
+select_and_validate_tarball() {
+  local staging_dir="$1"
+  local tarballs idx sel chosen action
+  
+  while :; do
+    # Find all mervlan-*.tar.gz files
+    tarballs=$(ls "$staging_dir"/mervlan-*.tar.gz 2>/dev/null | sort -r)
+    
+    if [ -z "$tarballs" ]; then
+      echo "[install] No mervlan tarballs found in $staging_dir"
+      echo "[install] Run './install.sh download' first"
+      return 1
+    fi
+    
+    # Display menu
+    echo ""
+    echo "Available MerVLAN tarballs:"
+    idx=0
+    for tarball in $tarballs; do
+      idx=$((idx + 1))
+      base="$(basename "$tarball")"
+      size="$(wc -c < "$tarball" 2>/dev/null)"
+      # Extract branch and version from filename: mervlan-main-v0.48.tar.gz
+      branch=$(echo "$base" | sed 's/mervlan-\([^-]*\)-.*/\1/')
+      version=$(echo "$base" | sed 's/.*-\(v[^.]*\.[^.]*\)\.tar\.gz/\1/')
+      printf '  %d) %s  [%s | %s | %d bytes]\n' "$idx" "$base" "$branch" "$version" "$size"
+      eval "TARBALL_$idx=\"$tarball\""
+    done
+    
+    echo ""
+    echo "  d) Delete a tarball"
+    echo "  q) Quit without installing"
+    echo ""
+    printf "Select tarball to install [1-%d, d, q]: " "$idx"
+    read sel
+    
+    case "$sel" in
+      [0-9]|[0-9][0-9])
+        if [ "$sel" -ge 1 ] && [ "$sel" -le "$idx" ]; then
+          eval "chosen=\$TARBALL_$sel"
+          if [ -n "$chosen" ] && [ -f "$chosen" ]; then
+            echo ""
+            echo "Selected: $(basename "$chosen")"
+            printf "Install this tarball? [y/N]: "
+            read action
+            case "$action" in
+              y|Y|yes|YES)
+                SELECTED_TARBALL="$chosen"
+                return 0
+                ;;
+              *)
+                echo "[install] Selection cancelled"
+                continue
+                ;;
+            esac
+          fi
+        else
+          echo "[install] Invalid selection"
+          sleep 1
+        fi
+        ;;
+      d|D)
+        echo ""
+        printf "Enter number of tarball to delete [1-%d]: " "$idx"
+        read sel
+        if [ "$sel" -ge 1 ] 2>/dev/null && [ "$sel" -le "$idx" ] 2>/dev/null; then
+          eval "chosen=\$TARBALL_$sel"
+          if [ -n "$chosen" ] && [ -f "$chosen" ]; then
+            echo ""
+            echo "WARNING: This will permanently delete:"
+            echo "  $(basename "$chosen")"
+            printf "Continue? [y/N]: "
+            read action
+            case "$action" in
+              y|Y|yes|YES)
+                rm -f "$chosen"
+                echo "[install] Deleted $(basename "$chosen")"
+                sleep 1
+                ;;
+              *)
+                echo "[install] Deletion cancelled"
+                sleep 1
+                ;;
+            esac
+          fi
+        else
+          echo "[install] Invalid selection"
+          sleep 1
+        fi
+        ;;
+      q|Q)
+        echo "[install] Installation cancelled by user"
+        return 1
+        ;;
+      *)
+        echo "[install] Invalid selection"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
 # download_mervlan — Retrieve tarball, extract, copy into $MERV_BASE
 # Args: none (uses global paths/URLs)
 # Returns: 0 on success, non-zero on download/extract failures
 # Explanation: Handles BusyBox quirks (tar -z support), ensures permissions,
 #   injects service-event hooks, and runs hardware probe on new installs
+#   Supports 'download' mode (fetch only) and 'tarball' mode (install from existing)
 download_mervlan() {
   set -e
-    echo "[download_mervlan] start"
-    echo "[download_mervlan] GITHUB_URL=$GITHUB_URL"
-    echo "[download_mervlan] MERV_BASE=$MERV_BASE"
-    mkdir -p "$MERV_BASE"
-    echo "[download_mervlan] ensured MERV_BASE exists"
+  local download_only=0 tarball_only=0 branch_choice=""
+
+  echo "[download_mervlan] start"
+
+  # Detect special modes
+  case "$MODE" in
+    download) 
+      download_only=1
+      # Ask user which branch to download
+      echo ""
+      echo "Select branch to download:"
+      echo "  1) main   - Stable release"
+      echo "  2) dev    - Development version"
+      while :; do
+        printf "Enter choice [1-2]: "
+        read branch_choice
+        case "$branch_choice" in
+          1) BRANCH="main"; break ;;
+          2) BRANCH="dev"; break ;;
+          *) echo "Invalid choice. Please enter 1 or 2." ;;
+        esac
+      done
+      GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/${BRANCH}"
+      ;;
+    tarball)  
+      tarball_only=1 
+      ;;
+  esac
 
   # Use provided TMP_DIR; otherwise create a private temp workspace
   local tmp created=0
-    if [ -n "$TMP_DIR" ]; then
+  if [ -n "$TMP_DIR" ]; then
     tmp="$TMP_DIR"
     mkdir -p "$tmp"
   else
     tmp="$(mktemp -d)"; created=1
   fi
-    echo "[download_mervlan] tmp workspace: $tmp (created=$created)"
-    trap 'if [ "$created" -eq 1 ]; then echo "[download_mervlan] cleaning tmp: $tmp"; rm -rf "$tmp"; fi' EXIT
+  echo "[download_mervlan] tmp workspace: $tmp (created=$created)"
+  trap 'if [ "$created" -eq 1 ]; then echo "[download_mervlan] cleaning tmp: $tmp"; rm -rf "$tmp"; fi' EXIT
 
-# ========================================================================== #
-# SSH PORT CONFIGURATION — Optional override for node SSH connections       #
-# ========================================================================== #
-# Source: settings/lib_ssh.sh
+  # download/tarball modes require explicit TMP_DIR to ensure both phases use same location
+  if [ "$created" -eq 1 ]; then
+    if [ "$tarball_only" -eq 1 ] || [ "$download_only" -eq 1 ]; then
+      echo "[download_mervlan] ERROR: 'download' and 'tarball' modes require explicit TMP_DIR environment variable" >&2
+      echo "[download_mervlan] Usage examples:" >&2
+      echo "[download_mervlan]   TMP_DIR=/tmp/mervlan_staging ./install.sh download" >&2
+      echo "[download_mervlan]   TMP_DIR=/tmp/mervlan_staging ./install.sh tarball" >&2
+      trap - EXIT
+      return 1
+    fi
+  fi
 
-  # Fetch archive to a file (curl only)
-    echo "[download_mervlan] downloading archive -> $tmp/mervlan.tar.gz"
-    /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$tmp/mervlan.tar.gz"
-    if [ -s "$tmp/mervlan.tar.gz" ]; then
-        echo "[download_mervlan] download ok, size=$(wc -c < "$tmp/mervlan.tar.gz" 2>/dev/null) bytes"
+  # Tarball mode: show interactive menu to select from available downloads
+  if [ "$tarball_only" -eq 1 ]; then
+    select_and_validate_tarball "$tmp" || {
+      trap - EXIT
+      return 1
+    }
+  else
+    # Full or download mode: fetch the tarball
+    echo "[download_mervlan] GITHUB_URL=$GITHUB_URL"
+    echo "[download_mervlan] downloading archive -> $tmp/mervlan_temp.tar.gz"
+    /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$tmp/mervlan_temp.tar.gz"
+    if [ -s "$tmp/mervlan_temp.tar.gz" ]; then
+      echo "[download_mervlan] download ok, size=$(wc -c < "$tmp/mervlan_temp.tar.gz" 2>/dev/null) bytes"
     else
-        echo "[download_mervlan] ERROR: download failed or empty file" >&2
-        return 1
+      echo "[download_mervlan] ERROR: download failed or empty file" >&2
+      trap - EXIT
+      return 1
     fi
 
-  # Extract: prefer tar -xzf; fallback to gzip -dc | tar -x for BusyBox without -z
-    if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
-        echo "[download_mervlan] extracting with tar -xzf"
-        tar -xzf "$tmp/mervlan.tar.gz" -C "$tmp"
-  else
-        echo "[download_mervlan] extracting with gzip -dc | tar -x (fallback)"
-        gzip -dc "$tmp/mervlan.tar.gz" | tar -x -C "$tmp"
+    # Extract version from changelog.txt inside the tarball
+    local version=""
+    if tar -tzf "$tmp/mervlan_temp.tar.gz" >/dev/null 2>&1; then
+      version=$(tar -xzf "$tmp/mervlan_temp.tar.gz" -O "*/changelog.txt" 2>/dev/null | head -1 | sed 's/^mervlan[[:space:]]*//')
+    else
+      version=$(gzip -dc "$tmp/mervlan_temp.tar.gz" | tar -x -O "*/changelog.txt" 2>/dev/null | head -1 | sed 's/^mervlan[[:space:]]*//')
+    fi
+    version=$(printf '%s' "$version" | tr -d '\r\n')
+    
+    if [ -z "$version" ]; then
+      version="unknown"
+    fi
+    
+    # Rename tarball to include branch and version
+    local final_name="mervlan-${BRANCH}-${version}.tar.gz"
+    mv "$tmp/mervlan_temp.tar.gz" "$tmp/$final_name"
+    echo "[download_mervlan] Renamed to $final_name"
+    
+    # Set SELECTED_TARBALL for later use
+    SELECTED_TARBALL="$tmp/$final_name"
+
+    # Download only mode: stop here
+    if [ "$download_only" -eq 1 ]; then
+      echo "[download_mervlan] Download complete. Tarball saved to $tmp/$final_name"
+      echo "[download_mervlan] Branch: $BRANCH | Version: $version"
+      echo "[download_mervlan] To install, run: TMP_DIR=$tmp ./install.sh tarball"
+      trap - EXIT
+      return 0
+    fi
   fi
-    echo "[download_mervlan] extraction complete; top-level entries:"
-    ls -1 "$tmp" 2>/dev/null | sed 's/^/[download_mervlan]   /'
+
+  # Continue with extraction and installation
+  # Verify SELECTED_TARBALL is set (should be set by either download or tarball mode)
+  if [ -z "$SELECTED_TARBALL" ] || [ ! -f "$SELECTED_TARBALL" ]; then
+    echo "[download_mervlan] ERROR: No tarball selected or file not found" >&2
+    trap - EXIT
+    return 1
+  fi
+  
+  echo "[download_mervlan] MERV_BASE=$MERV_BASE"
+  mkdir -p "$MERV_BASE"
+  echo "[download_mervlan] ensured MERV_BASE exists"
+
+  # Extract: prefer tar -xzf; fallback to gzip -dc | tar -x for BusyBox without -z
+  echo "[download_mervlan] Extracting $(basename "$SELECTED_TARBALL")"
+  if tar -tzf "$SELECTED_TARBALL" >/dev/null 2>&1; then
+    echo "[download_mervlan] extracting with tar -xzf"
+    tar -xzf "$SELECTED_TARBALL" -C "$tmp"
+  else
+    echo "[download_mervlan] extracting with gzip -dc | tar -x (fallback)"
+    gzip -dc "$SELECTED_TARBALL" | tar -x -C "$tmp"
+  fi
+  echo "[download_mervlan] extraction complete; top-level entries:"
+  ls -1 "$tmp" 2>/dev/null | sed 's/^/[download_mervlan]   /'
 
     # Determine top-level extracted directory from archive listing, with fallbacks
     local topdir="" topname=""
-    if tar -tzf "$tmp/mervlan.tar.gz" >/dev/null 2>&1; then
-        topname="$(tar -tzf "$tmp/mervlan.tar.gz" 2>/dev/null | head -1 | cut -d/ -f1)"
+    if tar -tzf "$SELECTED_TARBALL" >/dev/null 2>&1; then
+        topname="$(tar -tzf "$SELECTED_TARBALL" 2>/dev/null | head -1 | cut -d/ -f1)"
         echo "[download_mervlan] tar lists topname: ${topname:-<none>}"
     else
-        topname="$(gzip -dc "$tmp/mervlan.tar.gz" 2>/dev/null | tar -t 2>/dev/null | head -1 | cut -d/ -f1)"
+        topname="$(gzip -dc "$SELECTED_TARBALL" 2>/dev/null | tar -t 2>/dev/null | head -1 | cut -d/ -f1)"
         echo "[download_mervlan] gzip|tar lists topname: ${topname:-<none>}"
     fi
     if [ -n "$topname" ] && [ -d "$tmp/$topname" ]; then
@@ -939,10 +1130,46 @@ create_logs() {
 }
 
 # ========================================================================== #
-# INSTALL ENTRYPOINT — Support "full" bootstrap mode with download step     #
+# INSTALL ENTRYPOINT — Support multiple install modes                       #
+# ========================================================================== #
+# Supported modes and behaviors:
+#
+#   ./install.sh
+#     - Standard upgrade install (uses existing /jffs/addons/mervlan)
+#     - Continues to normal install flow (no download)
+#     - Does not prompt for SSH credentials
+#
+#   ./install.sh full
+#     - Fresh install from main branch
+#     - Creates dirs + downloads + installs
+#     - Prompts for SSH credentials
+#
+#   ./install.sh full dev
+#     - Fresh install from dev branch
+#     - Creates dirs + downloads + installs
+#     - Prompts for SSH credentials
+#     - Shows dev warning
+#
+#   TMP_DIR=/path ./install.sh download
+#     - Interactive download session
+#     - Prompts for branch selection (main/dev)
+#     - Downloads and renames to mervlan-{branch}-{version}.tar.gz
+#     - Exits after download (does not install)
+#
+#   TMP_DIR=/path ./install.sh tarball
+#     - Interactive tarball selection menu
+#     - Shows all mervlan-*.tar.gz in TMP_DIR
+#     - Allows selection, deletion, or abort (q)
+#     - Prompts for SSH credentials if installing
+#     - Abortable at any confirmation prompt
+#
+#   ./install.sh credentials
+#     - Update SSH credentials only
+#     - Exits after updating settings.json
+#
 # ========================================================================== #
 
-# Handle "full" and "credentials" install mode: first-install dirs + fetch latest, then continue
+# Handle "full", "tarball", "download", and "credentials" install modes
 MODE="${1:-}"
 
 # Handle special modes before normal install flow
@@ -955,8 +1182,22 @@ case "$MODE" in
         echo "[install] Credentials updated. Exiting."
         exit 0
         ;;
+    download)
+        # Download tarball to TMP_DIR for later installation
+        logger -t "$ADDON" "Download mode: fetching package to TMP_DIR for later installation"
+        download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
+        logger -t "$ADDON" "Download complete. Use 'install tarball' to install."
+        exit 0
+        ;;
+    tarball)
+        # Install from previously downloaded tarball
+        logger -t "$ADDON" "Tarball mode: installing from previously downloaded package"
+        create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
+        download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
+        ;;
     full)
-        logger -t "$ADDON" "Full install requested: creating base dirs and downloading package"
+        # Full install: create dirs + download + setup
+        logger -t "$ADDON" "Full install mode: creating base dirs and downloading package"
         create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
         ;;
@@ -1009,8 +1250,8 @@ else
     exit 1
 fi
 
-# Only ask for SSH credentials during a full install
-if [ "$MODE" = "full" ]; then
+# Only ask for SSH credentials during a full or tarball install
+if [ "$MODE" = "full" ] || [ "$MODE" = "tarball" ]; then
     prompt_ssh_user_override
     prompt_ssh_port_override
 fi

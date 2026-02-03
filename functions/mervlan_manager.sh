@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.55"                   #
+#               - File: mervlan_manager.sh || version="0.56"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -1270,12 +1270,14 @@ restart_services() {
   if is_ap_mode; then
     # Prefer a lighter touch in AP mode to avoid rc race conditions
     safe_service_restart "switch restart" "switch" 30
-    safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
+    # REMOVED restart_httpd: causes GUI logouts. User must refresh browser after changes.
+    info -c cli,vlan "VLAN changes applied. Refresh your browser to see UI updates."
   else
     safe_service_restart "restart_wireless" "restart_wireless|wireless" 90
     sleep 2
     safe_service_restart "switch restart" "switch" 30
-    safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
+    # REMOVED restart_httpd: causes GUI logouts. User must refresh browser after changes.
+    info -c cli,vlan "VLAN changes applied. Refresh your browser to see UI updates."
   fi
 
   if type eapd >/dev/null 2>&1 && [ -x /usr/sbin/eapd ]; then

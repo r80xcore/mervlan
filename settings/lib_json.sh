@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_json.sh || version="0.51"                         #
+#                - File: lib_json.sh || version="0.52"                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -793,6 +793,89 @@ json_get_hw_int() {
             return 0
             ;;
     esac
+}
+
+# ============================================================================ #
+# json_reset_trunks_section — Reset Trunks to default values for nodes        #
+# Args: $1=file to modify                                                      #
+# Returns: 0 on success, 1 on failure                                          #
+# Purpose: Prevents trunk configurations from being applied on nodes.          #
+#          Only the main router should have trunk capability.                  #
+# ============================================================================ #
+json_reset_trunks_section() {
+    _jrt_file="$1"
+    _jrt_tmp="${_jrt_file}.trunk_reset.$$"
+
+    [ -f "$_jrt_file" ] || return 1
+
+    # Generate default Trunks section
+    _jrt_default_trunks='    "Trunks": {
+      "_description": "Per-port trunk enable plus tagged/untagged membership",
+      "TRUNK1": "0",
+      "TRUNK2": "0",
+      "TRUNK3": "0",
+      "TRUNK4": "0",
+      "TRUNK5": "0",
+      "TRUNK6": "0",
+      "TRUNK7": "0",
+      "TRUNK8": "0",
+
+      "TAGGED_TRUNK1": "none",
+      "TAGGED_TRUNK2": "none",
+      "TAGGED_TRUNK3": "none",
+      "TAGGED_TRUNK4": "none",
+      "TAGGED_TRUNK5": "none",
+      "TAGGED_TRUNK6": "none",
+      "TAGGED_TRUNK7": "none",
+      "TAGGED_TRUNK8": "none",
+
+      "UNTAGGED_TRUNK1": "none",
+      "UNTAGGED_TRUNK2": "none",
+      "UNTAGGED_TRUNK3": "none",
+      "UNTAGGED_TRUNK4": "none",
+      "UNTAGGED_TRUNK5": "none",
+      "UNTAGGED_TRUNK6": "none",
+      "UNTAGGED_TRUNK7": "none",
+      "UNTAGGED_TRUNK8": "none"
+    }'
+
+    # Replace Trunks section in file
+    awk -v trunks_block="$_jrt_default_trunks" '
+        BEGIN { in_trunks=0; depth=0; printed_trunks=0 }
+        {
+            line = $0
+
+            # Detect start of Trunks section
+            if (!in_trunks && line ~ /"Trunks"[[:space:]]*:[[:space:]]*\{/) {
+                in_trunks = 1
+                t = line; gsub(/[^{}]/, "", t)
+                depth = gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                # Print the default Trunks block instead
+                if (!printed_trunks) {
+                    print trunks_block
+                    printed_trunks = 1
+                }
+                next
+            }
+
+            if (in_trunks) {
+                # Update depth
+                t = line; gsub(/[^{}]/, "", t)
+                depth += gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
+                # Skip lines until we exit Trunks section
+                if (depth <= 0) {
+                    in_trunks = 0
+                }
+                next
+            }
+
+            # Print all non-Trunks lines
+            print line
+        }
+    ' "$_jrt_file" > "$_jrt_tmp" || { rm -f "$_jrt_tmp"; return 1; }
+
+    mv "$_jrt_tmp" "$_jrt_file" 2>/dev/null || { rm -f "$_jrt_tmp"; return 1; }
+    return 0
 }
 
 LIB_JSON_LOADED=1

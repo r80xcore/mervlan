@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.6" -->
+  <!-- index.html version="0.52.7" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -1006,7 +1006,7 @@
                         class="trunk-toggle"
                         name="TRUNK${i}"
                         data-port="${i}"
-                        title="Mark this LAN port as a trunk port (experimental)"
+                        title="Mark this LAN port as a trunk port (main router only - trunks are automatically disabled on nodes)"
                       >
                       <span>Trunk</span>
                     </label>
@@ -1379,6 +1379,7 @@ function showTooltip() {
       loadLanFieldsFromCache(CURRENT_LAN_TARGET);
       updateLanRowVisibility(CURRENT_LAN_TARGET);
       updateLanProductIdBadge(CURRENT_LAN_TARGET);
+      updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
     }
 
@@ -1647,12 +1648,26 @@ function showTooltip() {
 
     function updateExperimentalVisibility(){
       const enabled = isExperimentalEnabled();
+      const isMainRouter = CURRENT_LAN_TARGET === "main";
+      
+      // Trunks only visible on main router when experimental mode is enabled
+      const showTrunks = enabled && isMainRouter;
+      
       document.querySelectorAll(".experimental-only").forEach(el => {
         el.classList.toggle("experimental-hidden", !enabled);
       });
+      
+      // Override trunk visibility - hide on node views even if experimental is on
+      document.querySelectorAll(".lan-trunk-toggle").forEach(el => {
+        el.classList.toggle("experimental-hidden", !showTrunks);
+      });
+      document.querySelectorAll(".lan-trunk-config").forEach(el => {
+        el.classList.toggle("experimental-hidden", !showTrunks);
+      });
+      
       document.querySelectorAll(".trunk-toggle").forEach(input => {
         if(!input) return;
-        input.disabled = !enabled;
+        input.disabled = !showTrunks;
       });
       updateAllTrunkRows();
     }
@@ -1748,12 +1763,14 @@ function showTooltip() {
         return;
       }
       const experimentalOn = isExperimentalEnabled();
-      const showConfig = experimentalOn && trunkCheck.checked;
+      const isMainRouter = CURRENT_LAN_TARGET === "main";
+      const showConfig = experimentalOn && trunkCheck.checked && isMainRouter;
       const mainVlan = document.querySelector(`.lan-main-vlan[data-vlan-for="${portIndex}"]`);
       if(config){
         config.classList.toggle("experimental-hidden", !showConfig);
       }
       if(mainVlan){
+        // On node tabs, always show regular VLAN input
         mainVlan.classList.toggle("is-hidden", showConfig);
       }
       [taggedSel, untagSel].forEach(sel => {

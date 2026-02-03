@@ -1,4 +1,154 @@
-mervlan v0.52.6
+mervlan v0.52.7
+
+This update resolves critical UI logout issues, enhances node sync reliability,
+improves VLAN healing with faster monitoring and escalation logic, plus major
+improvements to the installation system with interactive branch selection,
+tarball management, and version tracking.
+
+NOTABLE FIXES:
+
+UI Logout Issue Resolution:
+- Removed httpd restart from mervlan_manager.sh completely.
+- Users can now save VLAN settings without being logged out.
+- Web interface remains active throughout entire configuration process.
+
+Node Sync Reliability:
+- Fixed false "size mismatch" errors during settings.json sync to nodes.
+- Improved verification focuses on JSON structure validity instead of byte count.
+- Better Hardware section preservation prevents corruption of node-specific values.
+- Eliminated stdin corruption issues with cleaner SSH communication patterns.
+
+UPDATED FILES:
+
+mervlan_manager.sh
+- Removed httpd restart call to eliminate UI logout issues during VLAN saves.
+- Previous behavior caused immediate logout after saving settings via web UI.
+- VLAN changes now apply without disrupting active web sessions.
+- GUI remains accessible throughout the entire save operation.
+
+execute_nodes.sh
+- Fixed settings.json sync verification that reported false size mismatches.
+- Replaced byte-count comparison with semantic JSON structure validation.
+- New verify_settings_conf_on_node() checks:
+  * File existence and non-empty content.
+  * Valid JSON structure (opening/closing braces).
+  * Minimum key count (ensures complete structure).
+  * Critical sections present (General, VLAN, Hardware).
+- Improved JSON merge logic in copy_settings_conf_to_node():
+  * Preserves only Hardware section from node's existing settings.json.
+  * Main router settings copied cleanly to node (VLAN config, Pool, etc.).
+  * IS_NODE and NODE_ID flags set separately via set_node_flags_remote().
+- Eliminated stdin piping through SSH that caused JSON corruption.
+- Fixed multi-line JSON parsing issues with hardware values.
+- More reliable node synchronization with proper error detection.
+- Added automatic trunk configuration reset when pushing settings.json to nodes.
+- Prevents trunk VLANs from being applied on nodes (main router only).
+- All TRUNKx values set to "0", TAGGED/UNTAGGED_TRUNKx set to "none" on nodes.
+- Ensures trunk capability remains exclusive to main router unit.
+
+heal_event.sh
+- Fixed syntax error (duplicate closing brace) in check_vlan_config().
+- Fixed expected_vlans_from_settings() to properly parse trunk VLAN configurations.
+- Now correctly reads comma-separated TAGGED_TRUNKx values (e.g., "187,188,189").
+- Added trunk enable check - only reads VLAN config when TRUNKx is enabled (1 or positive).
+- Prevents constant heal loops when trunk VLANs are configured.
+- Each VLAN ID in trunk config is now properly extracted and validated.
+- Fixed bridge_has_members() to detect trunk VLAN bridges correctly.
+- Now recognizes eth1.X, eth2.X, etc. as valid edge members (trunk ports).
+- Distinguishes between uplink (eth0/eth0.*) and LAN-side trunk interfaces.
+- Trunk VLANs (e.g., br70, br100) now properly detected during heal checks.
+- Optimized monitoring: 10 checks @ 3s intervals (27s window, down from 25s).
+- Heal trigger: 6 seconds on persistent issues (3 consecutive mismatches).
+- Implemented escalator pattern for cron events:
+  Phase 1: Fast sensor check (single-pass validation).
+  Phase 2: Full validation (10 passes over 27s) only if fast check fails.
+- Prevents unnecessary 27s delays when VLANs are healthy during cron runs.
+- Quick healing (6s) on confirmed persistent issues remains unchanged.
+- Added --cron-test mode for testing full escalation cycle.
+- Injects fake VLAN (9999) to trigger escalation from fast check to full validation.
+- Allows testing of escalation logic without actual VLAN damage.
+- Skips actual heal execution in test mode (shows what would happen).
+
+sync_nodes.sh
+- Added automatic trunk configuration reset when syncing settings.json to nodes.
+- Detects settings.json during file copy and applies trunk reset transformation.
+- Prevents trunk VLANs from being applied on nodes (main router only).
+- All TRUNKx values set to "0", TAGGED/UNTAGGED_TRUNKx set to "none" on nodes.
+- Ensures trunk capability remains exclusive to main router unit.
+- Fallback to original file if trunk reset fails (with warning logged).
+
+lib_json.sh
+- Added json_reset_trunks_section() function for node trunk configuration safety.
+  Replaces entire Trunks section with default disabled values.
+  Uses same AWK-based pattern as json_replace_hardware_section() for consistency.
+  Called automatically by execute_nodes.sh and sync_nodes.sh when pushing settings.
+
+mervlan_trunk.sh
+- Fixed unterminated quoted string syntax errors (lines 210 and 536).
+  Removed corrupted leftover code from ensure_vlan_bridge() function.
+  Fixed multi-line printf statement that caused shell parsing errors.
+
+index.html
+- Fixed trunk UI visibility to properly hide on node tabs (Node1-5).
+  Trunk toggle and configuration now only appear on main router tab.
+- Added CURRENT_LAN_TARGET check in updateExperimentalVisibility().
+- Modified updateSingleTrunkRow() to force regular VLAN input on node tabs.
+- Regular VLAN input (.lan-main-vlan) now always shows on node views.
+  Trunk configuration (.lan-trunk-config) now always hidden on node views.
+- Ensures nodes never display trunk UI regardless of experimental mode state.
+  Prevents confusion by showing only standard VLAN inputs on node configuration.
+
+install.sh
+- Added interactive branch selection during download mode.
+- Prompts user to choose between main (stable) or dev (development) branch.
+- Automatically extracts version from changelog.txt inside downloaded tarball.
+- Renames tarballs to mervlan-{branch}-{version}.tar.gz for easy identification.
+- Added interactive tarball selection menu (similar to update_mervlan.sh restore UI).
+- Shows all available mervlan-*.tar.gz files with branch, version, and size.
+- Menu options: [1-N] select tarball, [d] delete tarball, [q] quit/abort.
+- Delete functionality with confirmation prompt for removing unwanted downloads.
+- Added support for './install.sh full dev' to install fresh from dev branch.
+- Fixed EXIT trap cleanup in all early return paths (prevents "[: bad number" errors).
+- Added TMP_DIR validation for download/tarball modes.
+- Added SELECTED_TARBALL safety check before extraction.
+- Enhanced mode documentation with comprehensive usage examples.
+- All modes properly abortable with appropriate exit codes.
+
+SUPPORTED INSTALL MODES:
+
+./install.sh
+  - Standard upgrade install (uses existing /jffs/addons/mervlan).
+  - No download, no SSH credential prompts.
+
+./install.sh full
+  - Fresh install from main branch.
+  - Creates directories, downloads, and installs.
+  - Prompts for SSH credentials.
+
+./install.sh full dev
+  - Fresh install from dev branch.
+  - Creates directories, downloads, and installs.
+  - Shows development version warning.
+  - Prompts for SSH credentials.
+
+./install.sh download
+  - Interactive download session.
+  - Prompts for branch selection (main/dev).
+  - Downloads and renames to mervlan-{branch}-{version}.tar.gz.
+  - Exits after download (does not install).
+
+./install.sh tarball
+  - Interactive tarball selection menu.
+  - Shows all mervlan-*.tar.gz files in TMP_DIR.
+  - Allows selection, deletion, or abort (q).
+  - Prompts for SSH credentials if installing.
+  - Fully abortable at any confirmation prompt.
+
+
+
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.6
 IMPORTANT: TRANSITION UPDATE FOR EXISTING INSTALLATIONS
 ========================================================
 If you are updating from v0.52.5 or earlier, you MUST use one of the 
