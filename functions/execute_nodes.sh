@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: execute_nodes.sh || version="0.49"                    #
+#                - File: execute_nodes.sh || version="0.50"                    #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #

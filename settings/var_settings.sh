@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: var_settings.sh || version="0.48"                     #
+#                - File: var_settings.sh || version="0.49"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #

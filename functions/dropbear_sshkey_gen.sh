@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: dropbear_sshkey_gen.sh || version="0.46"              #
+#                - File: dropbear_sshkey_gen.sh || version="0.47"              #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Generate SSH key pairs for MerVLAN and set the SSH key         #
 #               flag if not already set.                                       #

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ---------------------------------------------------------------------------- #
-#                   - File: hw_probe.sh || version="0.46.5"                    #
+#                   - File: hw_probe.sh || version="0.47"                    #
 # ---------------------------------------------------------------------------- #
 # - Purpose:    Probe system hardware and record hardware keys in the central
 #                settings store (settings.json). Writes non-destructively via

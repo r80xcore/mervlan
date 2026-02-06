@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: lib_debug.sh || version="0.46"                        #
+#               - File: lib_debug.sh || version="0.47"                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Shared debug helpers for MerVLAN scripts. Provides uniform     #
 #               toggles, JSON-driven initialization, and formatted output via  #

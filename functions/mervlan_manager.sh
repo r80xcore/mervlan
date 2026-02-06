@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.56"                   #
+#               - File: mervlan_manager.sh || version="0.57"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -74,6 +74,7 @@ MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 
 # Initialize SSID filter based on node identity (affects which SSIDs we manage)
 ssid_filter_init "$MERV_NODE_ID"
+info -c vlan "SSID filter: identity=${_SSID_FILTER_TOKEN} node_id=${MERV_NODE_ID:-none}"
 
 # Completion marker directory and file (used by main router to verify node execution)
 MERV_COMPLETION_DIR="/tmp/mervlan_tmp/results/node_complete"
@@ -1145,6 +1146,27 @@ set_ap_isolation() {
 # Initial pass is immediate; the post-restart second pass acts as the VAP safety net.
 # Also restores unconfigured SSIDs to br0 (prevents orphaning on VLAN changes)
 bind_configured_ssids() {
+  # Build a quick summary of which SSID slots pass the filter
+  _filter_allowed=""
+  _filter_denied=""
+  _fi=1
+  while [ "$_fi" -le "$MAX_SSIDS" ]; do
+    if is_ssid_slot_allowed "$_fi" "$SETTINGS_FILE"; then
+      _fs=$(get_ssid_slot_value "$_fi" "$SETTINGS_FILE")
+      [ "$_fs" != "unused-placeholder" ] && [ -n "$_fs" ] && \
+        _filter_allowed="${_filter_allowed} $(printf '%02d' "$_fi"):${_fs}"
+    else
+      _filter_denied="${_filter_denied} $(printf '%02d' "$_fi")"
+    fi
+    _fi=$((_fi+1))
+  done
+  if [ -n "$_filter_allowed" ]; then
+    info -c cli,vlan "SSID filter [${_SSID_FILTER_TOKEN}] active:${_filter_allowed}"
+  else
+    info -c cli,vlan "SSID filter [${_SSID_FILTER_TOKEN}]: no active SSIDs for this node"
+  fi
+  [ -z "$_filter_denied" ] || info -c vlan "SSID filter [${_SSID_FILTER_TOKEN}] denied slots:${_filter_denied}"
+
   i=1
   # Loop through all SSID slots (SSID_01, SSID_02, etc. up to MAX_SSIDS)
   while [ $i -le "$MAX_SSIDS" ]; do

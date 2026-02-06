@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#         - File: templates/mervlan_templates.sh || version="0.50"             #
+#         - File: templates/mervlan_templates.sh || version="0.51"             #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide unified template lookup utilities for MerVLAN.         #
 #               Each template is stored inline and can be materialized via     #

@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: log_settings.sh || version="0.45"                      #
+#               - File: log_settings.sh || version="0.46"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Define logging settings and environment variables used         #
 #               throughout the MerVLAN addon. Enables colored output,          #

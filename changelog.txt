@@ -78,9 +78,13 @@ lib_ssh.sh
 - Uses merv_has for dbclient/ssh detection.
 - Uses merv_has for json_set_flag/json_get_flag availability checks.
 
+install.sh
+- Made install a little more verbose
+
 uninstall.sh
 - Added merv_has/merv_cmd shim for BusyBox compatibility.
 - Uses merv_has for JSON function and SSH client detection.
+- Made uninstall a little more verbose.
 
 mervlan_templates.sh
 - Templates now invoke mervlan_manager.sh with "boot" argument.
@@ -122,11 +126,44 @@ Boot Gating Logic:
 - Continues after timeout with warning (does not block boot indefinitely).
 - Only active when invoked with "boot" argument.
 
+BUGFIXES:
 
+mervlan_boot.sh
+- Fixed BusyBox flock compatibility: replaced "flock -w 5" (unsupported) with
+  "flock -x" in both copy_inject() and remove_inject() functions.
+- BusyBox v1.25.1 only supports -s, -x, -u, -n flags; -w (wait timeout) caused
+  silent failures during setupenable and other template injection operations.
 
-################ v0.52.7 ################
+lib_json.sh
+- Fixed json_set_section_value() to support upsert (insert if key missing).
+- Previously only replaced existing keys; new keys like PRODUCTID_NODE1 and
+  MAX_ETH_PORTS_NODE1 written by sync_nodes.sh were silently discarded.
+- Now inserts new key-value pairs before the section closing brace with proper
+  comma handling.
+- Also handles numeric value replacement (not just quoted strings).
 
-mervlan v0.52.7
+index.html
+- Fixed node LAN buttons and SSID assign checkboxes remaining disabled after
+  loading settings with configured node IPs.
+- Buttons now enable when a valid IP is configured (hardware detection optional).
+- Updated SSID assign tooltips to use node alias, IP, and PRODUCTID:
+  enabled: "Assign to {ALIAS}, {IP} ({PRODUCTID})"
+  disabled: "Configure {ALIAS} IP first"
+- Added dynamic AP Isolation availability: select enables when both SSID and
+  VLAN ID are valid in the form (no save/load required).
+- AP Isolation disabled tooltip: "Enter valid SSID and VLAN ID first".
+- Added setupDisabledAssignClickGuard() to prevent checkbox toggling on
+  disabled labels while preserving tooltip hover.
+
+vlan_form_style.css
+- Removed pointer-events:none from disabled SSID assign labels so tooltips
+  display on hover (matching LAN button disabled behavior).
+- Added consistent disabled styling for AP Isolation select elements
+  (opacity, muted colors, cursor: not-allowed).
+
+################ END OF CURRENT CHANGELOG
+
+previous mervlan v0.52.7 changes
 
 This update resolves critical UI logout issues, enhances node sync reliability,
 improves VLAN healing with faster monitoring and escalation logic, plus major

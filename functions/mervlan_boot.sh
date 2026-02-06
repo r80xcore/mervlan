@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: mervlan_boot.sh || version="0.53"                    #
+#                - File: mervlan_boot.sh || version="0.54"                    #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -273,10 +273,11 @@ copy_inject() {
   if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! merv_has flock; then
     inject_block || { rm -f "$block_file" "$tmp_new" 2>/dev/null || :; return 1; }
   else
+    mkdir -p "$LOCKDIR" 2>/dev/null || :
     if ! (
       flock -x 200 || exit 1
       inject_block
-    ) 200>"${dest}.lock"; then
+    ) 200>"$LOCKDIR/$(basename "$dest").lock"; then
       rm -f "$block_file" "$tmp_new" 2>/dev/null || :
       return 1
     fi
@@ -341,10 +342,11 @@ remove_inject() {
   if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! merv_has flock; then
     remove_block || { rm -f "$tmp_new" 2>/dev/null || :; return 1; }
   else
+    mkdir -p "$LOCKDIR" 2>/dev/null || :
     if ! (
       flock -x 200 || exit 1
       remove_block
-    ) 200>"${dest}.lock"; then
+    ) 200>"$LOCKDIR/$(basename "$dest").lock"; then
       rm -f "$tmp_new" 2>/dev/null || :
       return 1
     fi

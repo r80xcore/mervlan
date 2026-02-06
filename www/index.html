@@ -1118,6 +1118,7 @@
           updateLanRowVisibility(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
           if (typeof setupSSIDViewToggle === "function") setupSSIDViewToggle();
+          updateAPIsolationAvailability();
           HW_SETTINGS.TABLES_READY = true;
           HW_SETTINGS.LAST_MAX_SSIDS = HW_SETTINGS.MAX_SSIDS;
           HW_SETTINGS.LAST_MAX_ETH_PORTS = overallMax;
@@ -1372,6 +1373,7 @@ function showTooltip() {
      */
     function updateLanNodeButtonStates() {
       if (!HW_SETTINGS.LOADED) return;
+      const settings = CURRENT_SETTINGS_CACHE || {};
       document.querySelectorAll(".lan-node-btn").forEach(btn => {
         const target = btn.dataset.lanTarget || "";
         if (target === "main") {
@@ -1384,18 +1386,30 @@ function showTooltip() {
         const match = target.match(/^NODE(\d+)$/);
         if (!match) return;
         const n = parseInt(match[1], 10);
+        
+        // Check if node has a valid IP configured
+        const nodeIP = (settings["NODE" + n] || "").trim();
+        const hasValidIP = nodeIP && nodeIP.toLowerCase() !== "none" &&
+          /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(nodeIP);
+        
         const ethKey = "MAX_ETH_PORTS_NODE" + n;
         const maxPorts = HW_SETTINGS[ethKey] || 0;
         const pidKey = "PRODUCTID_NODE" + n;
         const pid = HW_SETTINGS[pidKey] || "";
-        if (maxPorts > 0) {
+        
+        // Enable if hardware detected OR valid IP configured
+        if (maxPorts > 0 || hasValidIP) {
           btn.disabled = false;
           btn.classList.remove("is-disabled");
-          btn.title = pid ? `Edit ${pid} LAN VLANs (${maxPorts} ports)` : `Edit Node ${n} LAN VLANs (${maxPorts} ports)`;
+          if (maxPorts > 0) {
+            btn.title = pid ? `Edit ${pid} LAN VLANs (${maxPorts} ports)` : `Edit Node ${n} LAN VLANs (${maxPorts} ports)`;
+          } else {
+            btn.title = `Edit Node ${n} LAN VLANs (run Sync Nodes to detect ports)`;
+          }
         } else {
           btn.disabled = true;
           btn.classList.add("is-disabled");
-          btn.title = "Node hardware not detected – run Sync Nodes first";
+          btn.title = "Configure node IP first";
         }
       });
     }
@@ -1462,17 +1476,14 @@ function showTooltip() {
 
     /**
      * Update SSID node assignment checkboxes based on configured/loaded nodes.
-     * Nodes must have:
-     *   1. A valid IP in settings (NODE1..NODE5)
-     *   2. Hardware detected (HW_SETTINGS.MAX_ETH_PORTS_NODE{n} > 0 or similar)
+     * Nodes with a valid IP in settings (NODE1..NODE5) are enabled.
      * If no nodes configured at all, all checkboxes except MAIN are disabled.
      */
     function updateSSIDAssignCheckboxes() {
       const settings = CURRENT_SETTINGS_CACHE || {};
       const hw = HW_SETTINGS || {};
-      const hwLoaded = hw.LOADED === true;
       
-      // Determine which nodes are available (have IP + hardware detected)
+      // Determine which nodes are available (have valid IP configured)
       const nodeAvailable = {};
       nodeAvailable["MAIN"] = true; // Main is always available
       
@@ -1482,12 +1493,8 @@ function showTooltip() {
         const hasValidIP = ip && ip.toLowerCase() !== "none" && 
           /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(ip);
         
-        // Check if node hardware has been detected (similar to LAN node buttons)
-        const maxPortsKey = "MAX_ETH_PORTS_NODE" + i;
-        const maxSSIDsKey = "MAX_SSIDS_NODE" + i;
-        const hasHardware = hwLoaded && ((hw[maxPortsKey] > 0) || (hw[maxSSIDsKey] > 0));
-        
-        nodeAvailable[nodeKey] = hasValidIP && hasHardware;
+        // Enable node if valid IP is configured (hardware detection is optional for UI access)
+        nodeAvailable[nodeKey] = hasValidIP;
       }
       
       // Update all SSID assign checkboxes
@@ -1510,9 +1517,16 @@ function showTooltip() {
             label.title = "Assign to Main Router";
           } else {
             const n = nodeId.replace("NODE", "");
+            const ip = (settings["NODE" + n] || "").trim();
+            const aliasKey = "NODE" + n + "_ALIAS";
+            const alias = (settings[aliasKey] || "").trim() || `Node ${n}`;
             const pidKey = "PRODUCTID_NODE" + n;
             const pid = hw[pidKey] || "";
-            label.title = pid ? `Assign to ${pid}` : `Assign to Node ${n}`;
+            if (pid) {
+              label.title = `Assign to ${alias}, ${ip} (${pid})`;
+            } else {
+              label.title = `Assign to ${alias}, ${ip}`;
+            }
           }
         } else {
           label.classList.add("is-disabled");
@@ -1521,19 +1535,28 @@ function showTooltip() {
             label.title = "Main Router";
           } else {
             const n = nodeId.replace("NODE", "");
-            if (!hwLoaded) {
-              label.title = `Node ${n} – Run "Sync Nodes" to detect hardware`;
-            } else {
-              const ip = (settings["NODE" + n] || "").trim();
-              if (!ip || ip.toLowerCase() === "none") {
-                label.title = `Node ${n} – Configure IP in Nodes section first`;
-              } else {
-                label.title = `Node ${n} – Hardware not detected, check connectivity`;
-              }
-            }
+            const aliasKey = "NODE" + n + "_ALIAS";
+            const alias = (settings[aliasKey] || "").trim() || `Node ${n}`;
+            label.title = `Configure ${alias} IP first`;
           }
         }
       });
+    }
+
+    /**
+     * Prevent click-through on disabled SSID assign checkboxes.
+     * Uses event delegation on the SSID table so it works for dynamically generated rows.
+     */
+    function setupDisabledAssignClickGuard() {
+      const table = document.getElementById("ssidTable");
+      if (!table) return;
+      table.addEventListener("click", function(e) {
+        const label = e.target.closest(".ssid-node-cb.is-disabled");
+        if (label) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }, true);
     }
 
     const nodeDependentButtons = [];
@@ -1677,6 +1700,7 @@ function showTooltip() {
     function validateSSIDField(input){
       const raw=input.value;
       const v=raw; input.classList.remove("valid","invalid"); if(v.trim()==="") return; if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
+      updateAPIsolationAvailability();
     }
     function validateNodeField(input){
       const raw=input.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned){ const d=raw.length-cleaned.length; const s=(input.selectionStart||cleaned.length)-d; const e=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(s,e);}catch{} }
@@ -1781,7 +1805,39 @@ function showTooltip() {
         }
       });
     }
-    function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); }
+    function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); updateAPIsolationAvailability(); }
+
+    function updateAPIsolationAvailability(){
+      // Enable AP Isolation select only when both SSID and VLAN are valid
+      for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
+        const idx = String(i).padStart(2, "0");
+        const ssidInput = document.querySelector(`input[name="SSID_${idx}"]`);
+        const vlanInput = document.querySelector(`input[name="VLAN_${idx}"]`);
+        const apisoSelect = document.querySelector(`select[name="APISO_${idx}"]`);
+        
+        if (!ssidInput || !vlanInput || !apisoSelect) continue;
+        
+        const ssidValue = ssidInput.value.trim();
+        const vlanValue = vlanInput.value.trim();
+        
+        // SSID is valid if 1-32 chars and not empty or placeholder
+        const ssidValid = ssidValue.length >= 1 && ssidValue.length <= 32 && 
+                         ssidValue !== "unused-placeholder";
+        
+        // VLAN is valid if numeric and in range 1-4094
+        const vlanNum = parseInt(vlanValue, 10);
+        const vlanValid = !isNaN(vlanNum) && vlanNum >= 1 && vlanNum <= 4094;
+        
+        // Enable AP Isolation if BOTH are valid
+        if (ssidValid && vlanValid) {
+          apisoSelect.disabled = false;
+          apisoSelect.title = TOOLTIP.APISO || "Enable AP Isolation for this SSID";
+        } else {
+          apisoSelect.disabled = true;
+          apisoSelect.title = "Enter valid SSID and VLAN ID first";
+        }
+      }
+    }
 
     function isExperimentalEnabled(){
       const expToggle = document.getElementById("experimentalToggle");
@@ -2346,6 +2402,7 @@ function showTooltip() {
       setupNodeAliasEditors();
       setupLanTargetButtons();
       setupSSIDViewToggle();
+      setupDisabledAssignClickGuard();
       scheduleFormPaneWidthUpdate();
 
       // bind listeners AFTER tables exist
@@ -3274,6 +3331,7 @@ async function runVlanManagerOnlyNodes() {
       scheduleFormPaneWidthUpdate();
       rebuildTrunkVlanOptionsFromSettings(flat);
       updateExperimentalVisibility();
+      updateAPIsolationAvailability();
     }
 
     function deepEqualObjects(a, b) {

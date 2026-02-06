@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: collect_clients.sh || version="0.48"                  #
+#                - File: collect_clients.sh || version="0.49"                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #

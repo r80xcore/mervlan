@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                    - File: install.sh || version="0.48"                      #
+#                    - File: install.sh || version="0.49"                      #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -730,6 +730,13 @@ has_configured_nodes() {
     [ -n "$nodes" ]
 }
 
+count_configured_nodes() {
+    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
+        grep -v "none" | \
+        grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
 # ========================================================================== #
 # DOWNLOAD & BOOTSTRAP UTILITIES — Fetch repo and prepare fresh install      #
 # ========================================================================== #
@@ -1243,9 +1250,11 @@ am_get_webui_page "$ADDON_DIR/$ADDON/mervlan.asp"
 # Abort installation if router has no free user page slots available
 if [ "$am_webui_page" = "none" ]; then
     logger -t "$ADDON" "Unable to install $ADDON (no free user page)"
+    echo "[install] ERROR: No free user page slots available" >&2
     exit 5
 fi
 logger -t "$ADDON" "Mounting $ADDON as $am_webui_page"
+echo "[install] Mounting web UI page: $am_webui_page"
 
 # 3. Publish our page to /www/user/<slot>.asp
 cp "$ADDON_DIR/$ADDON/mervlan.asp" "/www/user/$am_webui_page"
@@ -1256,16 +1265,19 @@ cp "$ADDON_DIR/$ADDON/mervlan.asp" "/www/user/$am_webui_page"
 
 # 3a. Create Project Dirs
 # Ensure runtime temp/log directories exist before exposing UI assets
+echo "[install] Creating runtime directories and logs"
 if create_dirs && create_logs; then
     logger -t "$ADDON" "Logs & folder structure complete!"
 else
     logger -t "$ADDON" "ERROR: Failed to initialize directories or logs"
+    echo "[install] ERROR: Failed to initialize directories or logs" >&2
     exit 1
 fi
 if mkdir -p "${MERV_BASE%/*}/mervlan_backups" 2>/dev/null; then
     logger -t "$ADDON" "Backup directory created successfully"
 else
     logger -t "$ADDON" "ERROR: Failed to create backup directory"
+    echo "[install] ERROR: Failed to create backup directory" >&2
     exit 1
 fi
 
@@ -1304,7 +1316,7 @@ create_link "$TMP_DIR/logs/vlan_manager.log"            "$PUBLIC_DIR/tmp/logs/vl
 create_link "$TMP_DIR/results/vlan_clients.json"        "$PUBLIC_DIR/tmp/results/vlan_clients.json"
 
 logger -t "$ADDON" "Symlinks created successfully"
-echo "$ADDON" "Symlinks created successfully"
+echo "[install] Runtime symlinks created"
 
 
 # ========================================================================== #
@@ -1336,37 +1348,49 @@ am_settings_set mervlan_state "enabled"
 am_settings_set mervlan_version "v0.46"
 
 logger -t "$ADDON" "Installed tab 'MerVLAN' under LAN -> $am_webui_page"
-echo "$ADDON" "Installed tab 'MerVLAN' under LAN -> $am_webui_page"
+echo "[install] Web UI tab installed: LAN -> MerVLAN ($am_webui_page)"
 
 # ========================================================================== #
 # POST-INSTALL HOOKS — Ensure service scripts reachable and sync nodes       #
 # ========================================================================== #
 
 # Ensure boot/service-event hooks are present even on non-full installs
+echo "[install] Installing service-event hooks"
 if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
     if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1; then
         logger -t "$ADDON" "addon setupenable completed (post-install)"
+        echo "[install] Service-event hooks installed"
     else
         logger -t "$ADDON" "WARNING: setupenable failed during post-install"
+        echo "[install] WARNING: Service-event hook installation failed" >&2
     fi
 else
     logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping post-install setupenable"
+    echo "[install] WARNING: mervlan_boot.sh not executable" >&2
 fi
 
 # If nodes are configured and SSH keys are ready, propagate nodeenable now
 if has_configured_nodes && ssh_keys_effectively_installed; then
     if [ -x "$BOOT_SCRIPT" ]; then
+        echo "[install] Propagating setup to $(count_configured_nodes) configured node(s)"
         logger -t "$ADDON" "Propagating nodeenable to configured nodes"
         if sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then
             logger -t "$ADDON" "nodeenable completed successfully"
+            echo "[install] Node setup completed successfully"
         else
             logger -t "$ADDON" "WARNING: nodeenable encountered errors"
+            echo "[install] WARNING: Some node operations may have failed" >&2
         fi
     else
         logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping nodeenable"
+        echo "[install] WARNING: Cannot propagate to nodes (mervlan_boot.sh not executable)" >&2
     fi
 else
+    if has_configured_nodes; then
+        echo "[install] Nodes configured but SSH keys not ready; run SSH key setup to enable nodes"
+    fi
     logger -t "$ADDON" "Nodeenable skipped (no nodes configured or SSH keys not installed)"
 fi
 
+echo "[install] Installation complete!"
 exit 0

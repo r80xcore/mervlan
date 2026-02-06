@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                  - File: heal_event.sh || version="0.49"                     #
+#                  - File: heal_event.sh || version="0.50"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #

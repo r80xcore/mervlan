@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: lib_ssid_filter.sh || version="0.50"                   #
+#               - File: lib_ssid_filter.sh || version="0.51"                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Node-scoped SSID/VLAN slot filtering for multi-node setups.   #
 #               Determines which SSID slots are "visible" on the current node. #

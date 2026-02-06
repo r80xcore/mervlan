@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: lib_json.sh || version="0.52"                         #
+#                - File: lib_json.sh || version="0.53"                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -288,7 +288,7 @@ json_get_section_value() {
 
 json_set_section_value() {
     # json_set_section_value <section> <key> <value> [file]
-    # Update a key inside a one-level nested section without touching other keys.
+    # Update or insert a key inside a one-level nested section (upsert behavior).
     section="$1"
     key="$2"
     value="$3"
@@ -308,28 +308,80 @@ json_set_section_value() {
             gsub(/[^{}]/, "", t)
             return gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
         }
-        BEGIN { in_sec=0; depth=0; sec_depth=0; replaced=0 }
+        BEGIN { in_sec=0; depth=0; sec_depth=0; replaced=0; pending_line=""; has_content=0 }
         {
             line=$0
 
-            if (!in_sec && line ~ ("\""sec"\"[[:space:]]*:[[:space:]]*\{")) {
+            if (!in_sec && line ~ ("\""sec"\"[[:space:]]*:[[:space:]]*\\{")) {
                 in_sec=1
                 sec_depth=depth + count_braces(line)
+                print line
+                depth = depth + count_braces(line)
+                next
             }
 
             if (in_sec && !replaced) {
+                # Match string values: "KEY": "VALUE"
                 if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
                     gsub("\""key"\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\""key"\": \""val"\"", line)
                     replaced=1
                 }
+                # Also match numeric values: "KEY": 123
+                else if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*[0-9]")) {
+                    gsub("\""key"\"[[:space:]]*:[[:space:]]*[0-9]+", "\""key"\": \""val"\"", line)
+                    replaced=1
+                }
             }
 
-            print line
-
-            depth += count_braces($0)
-            if (in_sec && depth < sec_depth) {
+            # Detect section closing: depth drops below sec_depth
+            new_depth = depth + count_braces(line)
+            if (in_sec && new_depth < sec_depth) {
+                # Insert key before the closing brace if not replaced
+                if (!replaced) {
+                    # Print pending line with comma added if it has content
+                    if (pending_line != "") {
+                        # Add comma if the pending line doesnt already end with one
+                        if (pending_line !~ /,[[:space:]]*$/) {
+                            sub(/[[:space:]]*$/, ",", pending_line)
+                        }
+                        print pending_line
+                    }
+                    # Insert new key-value (no trailing comma as its the last entry)
+                    printf "    \"%s\": \"%s\"\n", key, val
+                    replaced=1
+                    pending_line=""
+                } else if (pending_line != "") {
+                    print pending_line
+                    pending_line=""
+                }
                 in_sec=0
+                print line
+                depth = new_depth
+                next
             }
+
+            # Buffer lines within section to handle comma insertion
+            if (in_sec) {
+                if (pending_line != "") {
+                    print pending_line
+                }
+                # Track if this line has actual key-value content
+                if (line ~ /"[^"]+":/) {
+                    has_content=1
+                }
+                pending_line=line
+            } else {
+                if (pending_line != "") {
+                    print pending_line
+                    pending_line=""
+                }
+                print line
+            }
+
+            depth = new_depth
+        }
+        END {
+            if (pending_line != "") print pending_line
         }
     ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
 

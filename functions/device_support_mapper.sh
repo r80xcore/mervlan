@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#                - File: device_support_mapper.sh || version="0.50.1"            #
+#                - File: device_support_mapper.sh || version="0.50.2"            #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:  Creates a map template by detecting physical LAN/WAN port order  #
 #             to enable MerVLAN support with correct device mapping.           #

@@ -448,11 +448,10 @@
         color: #7bd77b;
 }
 
-/* Disabled state for node checkboxes */
+/* Disabled state for node checkboxes — matches LAN button disabled pattern */
 .ssid-node-cb.is-disabled {
-        opacity: 0.4;
+        opacity: 0.5;
         cursor: not-allowed;
-        pointer-events: none;
 }
 
 .ssid-node-cb.is-disabled input[type="checkbox"] {
@@ -461,6 +460,15 @@
 
 .ssid-node-cb.is-disabled span {
         color: #777;
+}
+
+/* Disabled state for AP Isolation select — matches LAN button disabled pattern */
+.input_option:disabled,
+.input_option[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+        background-color: #3a4e55;
+        color: #888;
 }
 
 /* Ensure consistent row height across SSID table views */

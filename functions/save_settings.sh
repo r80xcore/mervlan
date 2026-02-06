@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ──────────────────────────────────────────────────────────────────────────── #
-#               - File: save_settings.sh || version="0.48"                     #
+#               - File: save_settings.sh || version="0.49"                     #
 # ──────────────────────────────────────────────────────────────────────────── #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
