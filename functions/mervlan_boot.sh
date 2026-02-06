@@ -274,7 +274,7 @@ copy_inject() {
     inject_block || { rm -f "$block_file" "$tmp_new" 2>/dev/null || :; return 1; }
   else
     if ! (
-      flock -w 5 200 || exit 1
+      flock -x 200 || exit 1
       inject_block
     ) 200>"${dest}.lock"; then
       rm -f "$block_file" "$tmp_new" 2>/dev/null || :
@@ -342,7 +342,7 @@ remove_inject() {
     remove_block || { rm -f "$tmp_new" 2>/dev/null || :; return 1; }
   else
     if ! (
-      flock -w 5 200 || exit 1
+      flock -x 200 || exit 1
       remove_block
     ) 200>"${dest}.lock"; then
       rm -f "$tmp_new" 2>/dev/null || :
