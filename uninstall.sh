@@ -28,6 +28,25 @@ LOGTAG="VLAN"
 ACTION="${1:-standard}"
 source /usr/sbin/helper.sh
 
+# ---- merv: portable `command -v` replacement ----
+if ! type merv_has >/dev/null 2>&1; then
+  merv_has() { type "$1" >/dev/null 2>&1; }
+  merv_cmd() {
+    _merv_c="$1"
+    case "$_merv_c" in
+      */*) [ -x "$_merv_c" ] && { printf '%s\n' "$_merv_c"; return 0; } ;;
+    esac
+    _merv_oldIFS="$IFS"; IFS=:
+    for _merv_d in $PATH; do
+      [ -z "$_merv_d" ] && _merv_d="."
+      [ -x "$_merv_d/$_merv_c" ] && { IFS="$_merv_oldIFS"; printf '%s\n' "$_merv_d/$_merv_c"; return 0; }
+    done
+    IFS="$_merv_oldIFS"
+    return 1
+  }
+fi
+# ---- end shim ----
+
 SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
@@ -617,7 +636,7 @@ _sync_ssh_flag() {
 	local desired="$1"
 	[ -n "$desired" ] || return 0
 
-	if command -v json_set_flag >/dev/null 2>&1; then
+	if merv_has json_set_flag; then
 		json_set_flag "SSH_KEYS_INSTALLED" "$desired" >/dev/null 2>&1
 	fi
 	return 0
@@ -632,7 +651,7 @@ ssh_keys_effectively_installed() {
         have_keys="1"
     fi
 
-    if command -v json_get_flag >/dev/null 2>&1; then
+    if merv_has json_get_flag; then
         # Read flag via JSON helper
         flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
 
@@ -651,7 +670,7 @@ ssh_keys_effectively_installed() {
     fi
 
     # If flag key is missing entirely, sync it to whatever we think it currently is
-    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && command -v json_set_flag >/dev/null 2>&1; then
+    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && merv_has json_set_flag; then
         _sync_ssh_flag "$flag"
         flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
     fi
@@ -700,11 +719,11 @@ remove_nodes_full_install() {
     nodes=$(list_configured_nodes)
     [ -n "$nodes" ] || return 0
 
-    if command -v dbclient >/dev/null 2>&1; then
-        ssh_bin=$(command -v dbclient)
+    if merv_has dbclient; then
+        ssh_bin=$(merv_cmd dbclient) || ssh_bin=""
         impl="dbclient"
-    elif command -v ssh >/dev/null 2>&1; then
-        ssh_bin=$(command -v ssh)
+    elif merv_has ssh; then
+        ssh_bin=$(merv_cmd ssh) || ssh_bin=""
         impl="ssh"
     else
         logger -t "$LOGTAG" "WARNING: No SSH client available; cannot clean nodes"

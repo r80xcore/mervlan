@@ -65,6 +65,21 @@
       "APISO_10": "0",
       "APISO_11": "0",
       "APISO_12": "0"
+    },
+    "SSIDassign": {
+      "_description": "Node assignment per SSID slot (comma-separated: MAIN,NODE1..NODE5 or none)",
+      "SSIDassign_01": "MAIN,none,none,none,none,none",
+      "SSIDassign_02": "MAIN,none,none,none,none,none",
+      "SSIDassign_03": "MAIN,none,none,none,none,none",
+      "SSIDassign_04": "MAIN,none,none,none,none,none",
+      "SSIDassign_05": "MAIN,none,none,none,none,none",
+      "SSIDassign_06": "MAIN,none,none,none,none,none",
+      "SSIDassign_07": "MAIN,none,none,none,none,none",
+      "SSIDassign_08": "MAIN,none,none,none,none,none",
+      "SSIDassign_09": "MAIN,none,none,none,none,none",
+      "SSIDassign_10": "MAIN,none,none,none,none,none",
+      "SSIDassign_11": "MAIN,none,none,none,none,none",
+      "SSIDassign_12": "MAIN,none,none,none,none,none"
     }
   },
 

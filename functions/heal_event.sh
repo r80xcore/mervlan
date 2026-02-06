@@ -28,6 +28,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
 
@@ -42,6 +43,10 @@ if [ -z "${ETH_PORTS:-}" ]; then
   ETH_PORTS=$(json_get_section_array "Hardware" "ETH_PORTS" "$HW_SETTINGS_FILE")
   [ -z "$ETH_PORTS" ] && ETH_PORTS=$(json_get_array ETH_PORTS "$HW_SETTINGS_FILE")
 fi
+
+# Initialize SSID filter based on node identity (affects which VLAN slots we consider)
+MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
+ssid_filter_init "$MERV_NODE_ID"
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -111,15 +116,16 @@ any_vlan_configured() {
     idx=$((idx+1))
   done
 
-  # Check SSID VLANs from VLAN pool (VLAN_01..VLAN_NN)
-  # We only care if any VLAN_NN is a valid VLAN ID.
+  # Check SSID VLANs from VLAN pool (VLAN_01..VLAN_NN, filtered by node assignment)
+  # We only care if any VLAN_NN is a valid VLAN ID assigned to this node.
   local i=1 vlan tmp
   while [ $i -le "$max_ssids" ]; do
-    tmp=$(printf 'VLAN_%02d' "$i")
-    # Use nested structure first, fallback to flat
-    vlan=$(json_get_section2_value "VLAN" "Pool" "$tmp" "$SETTINGS_FILE" 2>/dev/null)
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "$tmp" "" "$SETTINGS_FILE")
+    # Use filtered accessor to respect node assignment
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    # Check for fatal filter condition after first accessor call
+    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c vlan "Heal: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
+      return 1
     fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
@@ -338,17 +344,17 @@ expected_vlans_from_settings() {
   # using section-aware JSON helpers for nested structure.
   local vids tmp i idx vlan
 
-  # SSID VLAN pool from VLAN.Pool section
+  # SSID VLAN pool from VLAN.Pool section (filtered by node assignment)
   i=1
-  while :; do
-    tmp=$(printf 'VLAN_%02d' "$i")
-    # Use json_get_section2_value for VLAN->Pool->VLAN_XX nested structure
-    vlan=$(json_get_section2_value "VLAN" "Pool" "$tmp" "$SETTINGS_FILE" 2>/dev/null)
-    # Fallback to old flat structure for backwards compatibility
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "$tmp" "" "$SETTINGS_FILE")
+  while [ $i -le "${MAX_SSIDS:-12}" ]; do
+    # Use filtered accessor to respect node assignment
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    # Check for fatal filter condition after first accessor call
+    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c vlan "expected_vlans_from_settings: aborting due to SSID filter fatal condition"
+      printf ''
+      return 1
     fi
-    [ -z "$vlan" ] && break
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
       vids="$vids

@@ -1,3 +1,131 @@
+mervlan v0.52.8
+
+This update introduces a robust SSID/VLAN node assignment filter, boot-time
+gating for VLAN configuration, and systemwide BusyBox compatibility fixes.
+Together these tries to eliminate boot race conditions and enable per-node
+SSID control in multi-node deployments.
+
+
+
+NOTABLE FEATURES:
+
+Node-Scoped SSID/VLAN Filtering:
+- New lib_ssid_filter.sh library for per-node SSID slot assignment.
+- Each SSID slot (1-12) can be assigned to MAIN and/or NODE1-NODE5.
+- Format: "MAIN,NODE1,none,none,none,none" controls which nodes manage each SSID.
+- Filter automatically respects NODE_ID on each device.
+- Nodes only apply VLANs to SSIDs they are assigned to.
+- Prevents VLAN misconfiguration on nodes that don't broadcast certain SSIDs.
+
+Boot-Time SSID Gating:
+- New boot_wait_for_configured_ssids() function in mervlan_manager.sh.
+- Boot mode (invoked via "mervlan_manager.sh boot") waits up to 30 seconds.
+- Validates configured SSIDs exist in nvram before proceeding.
+- Logs warnings for SSIDs not found in nvram (likely typos).
+- Only waits for SSIDs that are actually present on the router.
+- Reduces VLAN apply failures caused by WiFi interfaces not being ready.
+
+BusyBox Compatibility (merv_has/merv_cmd shim):
+- Replaced all "command -v" calls which fail silently in BusyBox ash.
+- New portable shim: merv_has() and merv_cmd() functions.
+- Shim is guarded and defined in all library entry points.
+- Functions use "type" builtin which is universally supported.
+- merv_has() - Check if command/function/builtin exists (returns 0/1).
+- merv_cmd() - Resolve external command's full path (like "which").
+- Eliminates cryptic failures from command detection code.
+
+UPDATED FILES:
+
+lib_ssid_filter.sh (NEW)
+- Core SSID filter library for multi-node deployments.
+- ssid_filter_init() - Initialize filter based on NODE_ID.
+- is_ssid_slot_allowed() - Check if SSID slot is assigned to current node.
+- get_ssid_slot_value() - Get SSID value with filtering (returns placeholder if denied).
+- get_vlan_slot_value() - Get VLAN ID with filtering (returns "none" if denied).
+- get_apiso_slot_value() - Get AP isolation value with filtering.
+- Reads SSIDassign_XX from WiFi.SSIDassign section in settings.json.
+- Default assignment: MAIN-only for backwards compatibility.
+- SSID_FILTER_FATAL flag for graceful abort when hardware profile not ready.
+
+mervlan_manager.sh
+- Added lib_ssid_filter.sh integration for filtered SSID/VLAN reads.
+- All SSID, VLAN, and APISO reads now use filtered accessors.
+- New boot mode with SSID readiness gating (boot_wait_for_configured_ssids).
+- Boot mode validates SSIDs exist in nvram before waiting for interfaces.
+- Logs warnings for typos/misconfigured SSIDs not found in wireless config.
+- Added SSID_FILTER_FATAL checks with graceful abort on filter failures.
+
+heal_event.sh
+- Added lib_ssid_filter.sh integration for filtered VLAN reads.
+- any_vlan_configured() now respects node assignment filter.
+- expected_vlans_from_settings() uses filtered get_vlan_slot_value().
+- Nodes only heal VLANs for SSIDs they are assigned to.
+- Added SSID_FILTER_FATAL checks for graceful abort on filter failures.
+
+var_settings.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Shim is guarded to avoid redefinition if already present.
+
+log_settings.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Uses merv_has for logger availability check.
+
+lib_debug.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+
+lib_ssh.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Uses merv_has for dbclient/ssh detection.
+- Uses merv_has for json_set_flag/json_get_flag availability checks.
+
+uninstall.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Uses merv_has for JSON function and SSH client detection.
+
+mervlan_templates.sh
+- Templates now invoke mervlan_manager.sh with "boot" argument.
+- Enables boot-time SSID gating for VLAN configuration.
+- Template: "mervlan_manager.sh boot >/dev/null 2>&1 || :"
+
+settings.json
+- New WiFi.SSIDassign section with SSIDassign_01 through SSIDassign_12.
+- Each value is comma-separated: "MAIN,NODE1,NODE2,NODE3,NODE4,NODE5".
+- "none" in any position means slot is not assigned to that node.
+- Default: "MAIN,none,none,none,none,none" (MAIN only).
+
+sync_nodes.sh
+- Added lib_ssid_filter.sh to the copy & chmod lists
+
+index.html
+- Added SSID Node Assignment UI in assign view.
+- Checkboxes for each node (M, 1, 2, 3, 4, 5) per SSID row.
+- Checkboxes disabled for nodes without hardware detected.
+- updateSSIDAssignCheckboxes() syncs checkbox state with settings.
+- Settings serialization includes SSIDassign_XX in save payload.
+
+TECHNICAL DETAILS:
+
+Filter Token Matching:
+- Node identity mapped to tokens: MAIN, NODE1, NODE2, NODE3, NODE4, NODE5.
+- Token matching uses `,token,` wrapping to prevent partial matches.
+- Example: ",MAIN,NODE1,none,none,none,none," matches MAIN and NODE1.
+
+Filter Edge Cases:
+- Empty/missing assignment defaults to MAIN-only.
+- Explicit "none" string denies slot to all nodes.
+- Non-numeric slot index returns denied.
+- MAX_SSIDS < 1 sets SSID_FILTER_FATAL flag for graceful abort.
+
+Boot Gating Logic:
+- Partition SSIDs into: present in nvram (wait) vs. missing (warn only).
+- Wait loop checks for interface availability with configurable timeout.
+- Continues after timeout with warning (does not block boot indefinitely).
+- Only active when invoked with "boot" argument.
+
+
+
+################ v0.52.7 ################
+
 mervlan v0.52.7
 
 This update resolves critical UI logout issues, enhances node sync reliability,

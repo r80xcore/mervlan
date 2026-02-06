@@ -52,8 +52,6 @@ _dest_id() {
   printf '%s\n' "${path##*/}"
 }
 
-_has_cmd() { command -v "$1" >/dev/null 2>&1; }
-
 : "${MERV_DISABLE_LOCKS:=0}"
 
 # Compute content hash (md5 is in busybox; sha256 may not be)
@@ -62,8 +60,8 @@ _content_md5() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
 CRON_NAME="mervlan_health"
 CRU_BIN=""
 
-if command -v cru >/dev/null 2>&1; then
-  CRU_BIN=$(command -v cru)
+if merv_has cru; then
+  CRU_BIN=$(merv_cmd cru) || CRU_BIN=""
 elif [ -x /usr/sbin/cru ]; then
   CRU_BIN="/usr/sbin/cru"
 fi
@@ -272,7 +270,7 @@ copy_inject() {
     return 0
   }
 
-  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! _has_cmd flock; then
+  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! merv_has flock; then
     inject_block || { rm -f "$block_file" "$tmp_new" 2>/dev/null || :; return 1; }
   else
     if ! (
@@ -340,7 +338,7 @@ remove_inject() {
     mv -f "$tmp_new" "$dest"
   }
 
-  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! _has_cmd flock; then
+  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! merv_has flock; then
     remove_block || { rm -f "$tmp_new" 2>/dev/null || :; return 1; }
   else
     if ! (

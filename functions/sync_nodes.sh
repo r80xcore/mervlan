@@ -99,7 +99,8 @@ settings/var_settings.sh
 settings/log_settings.sh 
 settings/lib_json.sh
 settings/lib_debug.sh
-settings/lib_ssh.sh 
+settings/lib_ssh.sh
+settings/lib_ssid_filter.sh
 functions/mervlan_boot.sh
 functions/mervlan_manager.sh 
 functions/collect_local_clients.sh 
@@ -124,7 +125,8 @@ settings/var_settings.sh
 settings/log_settings.sh 
 settings/lib_json.sh  
 settings/lib_debug.sh 
-settings/lib_ssh.sh 
+settings/lib_ssh.sh
+settings/lib_ssid_filter.sh 
 templates/mervlan_templates.sh
 "
 dbg_log "File synchronization manifest loaded"
@@ -526,14 +528,14 @@ verify_file_on_node() {
             local local_md5=""
             local remote_md5=""
 
-            if command -v md5sum >/dev/null 2>&1; then
+            if merv_has md5sum; then
                 local_md5=$(md5sum "$MERV_BASE/$file" 2>/dev/null | awk '{print $1}')
-            elif command -v md5 >/dev/null 2>&1; then
+            elif merv_has md5; then
                 local_md5=$(md5 -r "$MERV_BASE/$file" 2>/dev/null | awk '{print $1}')
             fi
 
             if [ -n "$local_md5" ]; then
-                remote_md5=$(merv_ssh_exec "$node_id" "$node_ip" "if command -v md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \$1}'; elif command -v md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \$1}'; else echo NA; fi" 2>/dev/null)
+                remote_md5=$(merv_ssh_exec "$node_id" "$node_ip" "if type md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \$1}'; elif type md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \$1}'; else echo NA; fi" 2>/dev/null)
                 remote_md5=$(echo "$remote_md5" | head -n 1 | tr -cd 'a-fA-F0-9')
 
                 if [ -n "$remote_md5" ] && [ "$remote_md5" != "NA" ]; then

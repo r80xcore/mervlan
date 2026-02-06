@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.7" -->
+  <!-- index.html version="0.52.8" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -109,7 +109,19 @@
         <!-- SSIDs -->
         <!-- SSIDs -->
         <table id="ssidTable" class="FormTable_table vlan-table">
-          <tr><th>SSID</th><th>VLAN ID</th><th>AP Isolation</th><th>Status</th></tr>
+          <tr>
+            <th>
+              <div class="ssid-header-wrap">
+                <button type="button" class="lan-node-btn ssid-view-btn is-active" data-ssid-view="config" title="Show VLAN and AP Isolation settings">Config</button>
+                <span>SSID</span>
+                <button type="button" class="lan-node-btn ssid-view-btn" data-ssid-view="assign" title="Show Node Assignment">Assign</button>
+              </div>
+            </th>
+            <th class="ssid-col-config">VLAN ID</th>
+            <th class="ssid-col-config">AP Isolation</th>
+            <th class="ssid-col-config">Status</th>
+            <th class="ssid-col-assign ssid-col-hidden" colspan="3">Node Assignment</th>
+          </tr>
         </table>
 
   <!-- LAN Ports -->
@@ -258,7 +270,10 @@
           <div id="leftPanelOverlay" class="overlay"></div>
           <div class="cli-container collapsed" id="cliPanel">
             <div class="cli-shell" aria-hidden="true">
-              <div class="cli-header">VLAN Manager Command Output</div>
+              <div class="cli-header">
+                <span>VLAN Manager Command Output</span>
+                <button class="cli-fullsize-btn" id="cliFullsizeBtn" onclick="toggleCliFullsize()" title="Expand CLI panel">⛶</button>
+              </div>
 
               <div class="cli-scroll-wrap">
                 <div class="cli-box" id="cliOutput"></div>
@@ -553,6 +568,7 @@
           const wifi = ensurePlainObject(data.WiFi);
           const ssids = ensurePlainObject(wifi.SSIDs);
           const apiso = ensurePlainObject(wifi.APISO);
+          const ssidAssign = ensurePlainObject(wifi.SSIDassign);
           const vlan = ensurePlainObject(data.VLAN);
           const pool = ensurePlainObject(vlan.Pool);
           const ethPorts = ensurePlainObject(vlan.Ethernet_ports);
@@ -563,6 +579,7 @@
             flat[`SSID_${idx}`] = stringOrDefault(ssids[`SSID_${idx}`], "unused-placeholder");
             flat[`APISO_${idx}`] = stringOrDefault(apiso[`APISO_${idx}`], "0");
             flat[`VLAN_${idx}`] = stringOrDefault(pool[`VLAN_${idx}`], "none");
+            flat[`SSIDassign_${idx}`] = stringOrDefault(ssidAssign[`SSIDassign_${idx}`], "MAIN,none,none,none,none,none");
           }
           for (let i = 1; i <= 8; i++) {
             flat[`ETH${i}_VLAN`] = stringOrDefault(ethPorts[`ETH${i}_VLAN`], "none");
@@ -719,6 +736,7 @@
           const wifi = target.WiFi = ensurePlainObject(target.WiFi);
           const ssids = wifi.SSIDs = ensurePlainObject(wifi.SSIDs);
           const apiso = wifi.APISO = ensurePlainObject(wifi.APISO);
+          const ssidAssign = wifi.SSIDassign = ensurePlainObject(wifi.SSIDassign);
           const vlan = target.VLAN = ensurePlainObject(target.VLAN);
           const pool = vlan.Pool = ensurePlainObject(vlan.Pool);
 
@@ -727,6 +745,7 @@
             ssids[`SSID_${idx}`] = stringOrDefault(flat[`SSID_${idx}`], ssids[`SSID_${idx}`] ?? "unused-placeholder");
             apiso[`APISO_${idx}`] = stringOrDefault(flat[`APISO_${idx}`], apiso[`APISO_${idx}`] ?? "0");
             pool[`VLAN_${idx}`] = stringOrDefault(flat[`VLAN_${idx}`], pool[`VLAN_${idx}`] ?? "none");
+            ssidAssign[`SSIDassign_${idx}`] = stringOrDefault(flat[`SSIDassign_${idx}`], ssidAssign[`SSIDassign_${idx}`] ?? "MAIN,none,none,none,none,none");
           }
 
           const ethPorts = vlan.Ethernet_ports = ensurePlainObject(vlan.Ethernet_ports);
@@ -845,6 +864,7 @@
 
           generateDynamicTables();
           updateLanNodeButtonStates();
+          updateSSIDAssignCheckboxes();
 
           if (unsupported) {
             showUnsupportedModelModal();
@@ -921,6 +941,7 @@
 
           generateDynamicTables();
           updateLanNodeButtonStates();
+          updateSSIDAssignCheckboxes();
           updateLanRowVisibility(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
 
@@ -980,12 +1001,22 @@
             ssidTable.insertAdjacentHTML("beforeend", `
               <tr>
                 <td><input class="input_25_table vlan-input" name="SSID_${idx}" size="25" type="text" onchange="markEdited(${i})" title="${TOOLTIP.SSID}"></td>
-                <td><input class="input_6_table vlan-input" name="VLAN_${idx}" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited(${i})" title="${TOOLTIP.VLAN}"></td>
-                <td><select class="input_option" name="APISO_${idx}" onchange="markEdited(${i})" title="${TOOLTIP.APISO}">
+                <td class="ssid-col-config"><input class="input_6_table vlan-input" name="VLAN_${idx}" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited(${i})" title="${TOOLTIP.VLAN}"></td>
+                <td class="ssid-col-config"><select class="input_option" name="APISO_${idx}" onchange="markEdited(${i})" title="${TOOLTIP.APISO}">
                       <option value="0">Off</option>
                       <option value="1">On</option>
                     </select></td>
-                <td><span id="status${i}" class="status">❌</span></td>
+                <td class="ssid-col-config"><span id="status${i}" class="status">❌</span></td>
+                <td class="ssid-col-assign ssid-col-hidden" colspan="3">
+                  <div class="ssid-node-assign" data-ssid="${idx}">
+                    <label class="ssid-node-cb" title="Assign to Main Router"><input type="checkbox" name="SSIDassign_${idx}_MAIN" value="MAIN" checked onchange="markEdited(${i})"><span>M</span></label>
+                    <label class="ssid-node-cb" title="Assign to Node 1"><input type="checkbox" name="SSIDassign_${idx}_NODE1" value="NODE1" onchange="markEdited(${i})"><span>1</span></label>
+                    <label class="ssid-node-cb" title="Assign to Node 2"><input type="checkbox" name="SSIDassign_${idx}_NODE2" value="NODE2" onchange="markEdited(${i})"><span>2</span></label>
+                    <label class="ssid-node-cb" title="Assign to Node 3"><input type="checkbox" name="SSIDassign_${idx}_NODE3" value="NODE3" onchange="markEdited(${i})"><span>3</span></label>
+                    <label class="ssid-node-cb" title="Assign to Node 4"><input type="checkbox" name="SSIDassign_${idx}_NODE4" value="NODE4" onchange="markEdited(${i})"><span>4</span></label>
+                    <label class="ssid-node-cb" title="Assign to Node 5"><input type="checkbox" name="SSIDassign_${idx}_NODE5" value="NODE5" onchange="markEdited(${i})"><span>5</span></label>
+                  </div>
+                </td>
               </tr>
             `);
           }
@@ -1086,6 +1117,7 @@
           updateExperimentalVisibility();
           updateLanRowVisibility(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
+          if (typeof setupSSIDViewToggle === "function") setupSSIDViewToggle();
           HW_SETTINGS.TABLES_READY = true;
           HW_SETTINGS.LAST_MAX_SSIDS = HW_SETTINGS.MAX_SSIDS;
           HW_SETTINGS.LAST_MAX_ETH_PORTS = overallMax;
@@ -1395,6 +1427,115 @@ function showTooltip() {
       updateLanInputNames("main");
       setLanTarget("main", { skipSync: true });
     }
+
+    // SSID view toggle: "Config" (VLAN/APISO/Status) vs "Assign" (Node Assignment)
+    let CURRENT_SSID_VIEW = "config";
+
+    function setSSIDView(view) {
+      CURRENT_SSID_VIEW = view;
+      const ssidTable = document.getElementById("ssidTable");
+      if (!ssidTable) return;
+      
+      // Toggle header and data columns
+      ssidTable.querySelectorAll(".ssid-col-config").forEach(el => {
+        el.classList.toggle("ssid-col-hidden", view !== "config");
+      });
+      ssidTable.querySelectorAll(".ssid-col-assign").forEach(el => {
+        el.classList.toggle("ssid-col-hidden", view !== "assign");
+      });
+      
+      // Update button states
+      document.querySelectorAll(".ssid-view-btn").forEach(btn => {
+        btn.classList.toggle("is-active", btn.dataset.ssidView === view);
+      });
+    }
+
+    function setupSSIDViewToggle() {
+      document.querySelectorAll(".ssid-view-btn").forEach(btn => {
+        if (btn.dataset.handlerAttached === "1") return;
+        btn.addEventListener("click", () => {
+          setSSIDView(btn.dataset.ssidView || "config");
+        });
+        btn.dataset.handlerAttached = "1";
+      });
+    }
+
+    /**
+     * Update SSID node assignment checkboxes based on configured/loaded nodes.
+     * Nodes must have:
+     *   1. A valid IP in settings (NODE1..NODE5)
+     *   2. Hardware detected (HW_SETTINGS.MAX_ETH_PORTS_NODE{n} > 0 or similar)
+     * If no nodes configured at all, all checkboxes except MAIN are disabled.
+     */
+    function updateSSIDAssignCheckboxes() {
+      const settings = CURRENT_SETTINGS_CACHE || {};
+      const hw = HW_SETTINGS || {};
+      const hwLoaded = hw.LOADED === true;
+      
+      // Determine which nodes are available (have IP + hardware detected)
+      const nodeAvailable = {};
+      nodeAvailable["MAIN"] = true; // Main is always available
+      
+      for (let i = 1; i <= 5; i++) {
+        const nodeKey = "NODE" + i;
+        const ip = (settings[nodeKey] || "").trim();
+        const hasValidIP = ip && ip.toLowerCase() !== "none" && 
+          /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(ip);
+        
+        // Check if node hardware has been detected (similar to LAN node buttons)
+        const maxPortsKey = "MAX_ETH_PORTS_NODE" + i;
+        const maxSSIDsKey = "MAX_SSIDS_NODE" + i;
+        const hasHardware = hwLoaded && ((hw[maxPortsKey] > 0) || (hw[maxSSIDsKey] > 0));
+        
+        nodeAvailable[nodeKey] = hasValidIP && hasHardware;
+      }
+      
+      // Update all SSID assign checkboxes
+      document.querySelectorAll(".ssid-node-cb").forEach(label => {
+        const cb = label.querySelector('input[type="checkbox"]');
+        if (!cb) return;
+        
+        // Extract node from checkbox name: SSIDassign_XX_MAIN or SSIDassign_XX_NODE1
+        const name = cb.name || "";
+        const match = name.match(/SSIDassign_\d+_(MAIN|NODE[1-5])$/);
+        if (!match) return;
+        
+        const nodeId = match[1];
+        const isAvailable = nodeAvailable[nodeId] === true;
+        
+        if (isAvailable) {
+          label.classList.remove("is-disabled");
+          cb.disabled = false;
+          if (nodeId === "MAIN") {
+            label.title = "Assign to Main Router";
+          } else {
+            const n = nodeId.replace("NODE", "");
+            const pidKey = "PRODUCTID_NODE" + n;
+            const pid = hw[pidKey] || "";
+            label.title = pid ? `Assign to ${pid}` : `Assign to Node ${n}`;
+          }
+        } else {
+          label.classList.add("is-disabled");
+          cb.disabled = true;
+          if (nodeId === "MAIN") {
+            label.title = "Main Router";
+          } else {
+            const n = nodeId.replace("NODE", "");
+            if (!hwLoaded) {
+              label.title = `Node ${n} – Run "Sync Nodes" to detect hardware`;
+            } else {
+              const ip = (settings["NODE" + n] || "").trim();
+              if (!ip || ip.toLowerCase() === "none") {
+                label.title = `Node ${n} – Configure IP in Nodes section first`;
+              } else {
+                label.title = `Node ${n} – Hardware not detected, check connectivity`;
+              }
+            }
+          }
+        }
+      });
+    }
+
     const nodeDependentButtons = [];
     let CURRENT_SETTINGS_CACHE = null;
     let CURRENT_SETTINGS_STRUCTURED = null;
@@ -1443,6 +1584,7 @@ function showTooltip() {
     }
     function updateNodeButtonsFromSettings(settings){
       setNodeButtonsEnabled(hasConfiguredNodes(settings));
+      updateSSIDAssignCheckboxes();
     }
     function updateStatusTooltips(){ document.querySelectorAll(".status").forEach(el=>{ const i=el.textContent.trim(); if(statusTooltips[i]) el.title=statusTooltips[i]; else el.removeAttribute("title"); }); }
     function markEdited(index){ const el=document.getElementById("status"+index); if(el){ el.textContent="🟩"; updateStatusTooltips(); } }
@@ -2030,6 +2172,7 @@ function showTooltip() {
       const ssidTable = document.getElementById("ssidTable");
       if(!cliPanel || !formBox || !ssidTable) return;
       cliPanel.style.setProperty("--cli-panel-top", "0px");
+      adjustClientsPanelHeight();
     }
 
     function updateFormPaneWidth(){
@@ -2133,6 +2276,11 @@ function showTooltip() {
       if(experimentalToggle){
         experimentalToggle.checked = false;
       }
+      // Clear SSIDassign checkboxes (reset to MAIN only)
+      document.querySelectorAll('.ssid-node-cb input[type="checkbox"]').forEach(cb => {
+        const name = cb.name || "";
+        cb.checked = name.endsWith("_MAIN"); // Only MAIN checked by default
+      });
       for(let i = 1; i <= 5; i++){
         setNodeAlias(i, getDefaultNodeAlias(i), { markEdited: false });
       }
@@ -2197,6 +2345,7 @@ function showTooltip() {
       }
       setupNodeAliasEditors();
       setupLanTargetButtons();
+      setupSSIDViewToggle();
       scheduleFormPaneWidthUpdate();
 
       // bind listeners AFTER tables exist
@@ -2429,6 +2578,28 @@ function clearDebug() {
   lastLogText = "";
   currentView = "normal";
   savedNormalHTML = "";
+  // Also clear the CLI log file on disk so it doesn't reappear on refresh
+  // Call MVM_clearCliLog directly to avoid queueServiceAction's appendCliText
+  const parentWin = window.parent;
+  if (parentWin && typeof parentWin.MVM_clearCliLog === "function") {
+    parentWin.MVM_clearCliLog();
+  } else if (parentWin && typeof parentWin.MVM_trigger === "function") {
+    parentWin.MVM_trigger('clearclilog_vlanmgr', { loading: false, skipRefresh: true });
+  }
+}
+
+function toggleCliFullsize() {
+  const shell = document.querySelector('.cli-shell');
+  const btn = document.getElementById('cliFullsizeBtn');
+  if (!shell) return;
+  shell.classList.toggle('cli-fullsize');
+  if (shell.classList.contains('cli-fullsize')) {
+    btn.title = 'Exit full-size CLI panel';
+  } else {
+    btn.title = 'Expand CLI panel';
+  }
+  // Recalculate heights after toggle
+  adjustClientsPanelHeight();
 }
 
     // View state management
@@ -3082,6 +3253,15 @@ async function runVlanManagerOnlyNodes() {
         if (f[`VLAN_${idx}`]) f[`VLAN_${idx}`].value = vlan;
         if (f[`APISO_${idx}`]) f[`APISO_${idx}`].value = apiso;
 
+        // Populate SSIDassign checkboxes (format: "MAIN,NODE1,none,none,none,none")
+        const assignRaw = flat[`SSIDassign_${idx}`] ?? "MAIN,none,none,none,none,none";
+        const assignList = String(assignRaw).split(",").map(s => s.trim().toUpperCase());
+        const nodeTokens = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
+        nodeTokens.forEach(token => {
+          const cb = f[`SSIDassign_${idx}_${token}`];
+          if (cb) cb.checked = assignList.includes(token);
+        });
+
         const s = document.getElementById("status" + i);
         if (s) s.textContent = (ssid || vlan) ? "✅" : "❎";
       }
@@ -3168,6 +3348,14 @@ async function runVlanManagerOnlyNodes() {
         out["vlanmgr_SSID_" + idx] = ssidRaw === "" ? "unused-placeholder" : ssidRaw;
         out["vlanmgr_VLAN_" + idx] = vlanRaw === "" ? "none" : vlanRaw;
         out["vlanmgr_APISO_" + idx] = apisoRaw;
+
+        // Serialize SSIDassign checkboxes as comma-separated fixed-width list
+        const nodeTokens = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
+        const assignParts = nodeTokens.map(token => {
+          const cb = f[`SSIDassign_${idx}_${token}`];
+          return (cb && cb.checked) ? token : "none";
+        });
+        out[`vlanmgr_SSIDassign_${idx}`] = assignParts.join(",");
       }
 
       out["vlanmgr_PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
@@ -3236,6 +3424,7 @@ async function runVlanManagerOnlyNodes() {
       updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
       if (hwChanged) {
         updateLanNodeButtonStates();
+        updateSSIDAssignCheckboxes();
         updateLanRowVisibility(CURRENT_LAN_TARGET);
         updateLanProductIdBadge(CURRENT_LAN_TARGET);
       }
@@ -3293,6 +3482,13 @@ async function runVlanManagerOnlyNodes() {
         flat[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||"");
         flat[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
         flat[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0");
+        // Serialize SSIDassign checkboxes as comma-separated fixed-width list
+        const nodeTokens = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
+        const assignParts = nodeTokens.map(token => {
+          const cb = f[`SSIDassign_${idx}_${token}`];
+          return (cb && cb.checked) ? token : "none";
+        });
+        flat[`SSIDassign_${idx}`] = assignParts.join(",");
       }
       flat["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
       flat["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
@@ -3696,7 +3892,7 @@ function normalizeToFlatSettings(obj) {
 // Only compare keys MerVLAN actually manages (ignore Hardware, timestamps, etc)
 function extractManagedKeys(flat) {
   const out = {};
-  const re = /^(PERSISTENT|DRY_RUN|EXPERIMENTAL|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const re = /^(PERSISTENT|DRY_RUN|EXPERIMENTAL|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(flat || {}).forEach(k => {
     if (re.test(k)) out[k] = String(flat[k] ?? "");
   });
@@ -3846,7 +4042,7 @@ async function uploadSettingsAndSave(btn) {
 </script>
 
 <script>
-// Size clients panel to fill remaining viewport when CLI overlay is open
+// Size cli-shell and internal panels to fill from shell top to bottom of form area
 function adjustClientsPanelHeight(){
   const cliPanel = document.getElementById('cliPanel');
   const cliShell = cliPanel ? cliPanel.querySelector('.cli-shell') : null;
@@ -3855,43 +4051,40 @@ function adjustClientsPanelHeight(){
   if(!cliPanel || !cliShell || !clientsPanel) return;
 
   if(!cliPanel.classList.contains('expanded')){
+    cliShell.style.removeProperty('--cli-shell-height');
     clientsPanel.style.maxHeight = '';
-    if(cliScrollWrap) cliScrollWrap.style.maxHeight = '';
+    clientsPanel.style.minHeight = '';
+    if(cliScrollWrap){
+      cliScrollWrap.style.maxHeight = '';
+      cliScrollWrap.style.minHeight = '';
+    }
     return;
   }
 
-  const shellRect = cliShell.getBoundingClientRect();
-  if(!shellRect || !isFinite(shellRect.top)) return;
+  // Find the bottom edge of the form area (experimental box or form-box--main)
+  const expBox = document.querySelector('.form-box--experimental');
+  const formMain = document.querySelector('.form-box--main');
+  const anchor = expBox || formMain;
+  if(!anchor) return;
 
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
-  const bottomPadding = 24; // margin from viewport bottom
-  
-  // Calculate total available height for the entire cli-shell
-  let totalAvailable = viewportHeight - shellRect.top - bottomPadding;
-  if(!isFinite(totalAvailable) || totalAvailable < 400) totalAvailable = 400;
-  
-  // Get heights of fixed elements (header, footer, clients-header)
-  const cliHeader = cliShell.querySelector('.cli-header');
-  const cliFooter = cliShell.querySelector('.cli-footer');
-  const clientsHeader = clientsPanel.querySelector('.clients-header');
-  
-  const headerH = cliHeader ? cliHeader.offsetHeight : 40;
-  const footerH = cliFooter ? cliFooter.offsetHeight : 40;
-  const clientsHeaderH = clientsHeader ? clientsHeader.offsetHeight : 40;
-  const marginsAndBorders = 30; // margins between elements + borders
-  
-  // CLI box gets ~40% of remaining space, clients panel gets ~60%
-  const contentArea = totalAvailable - headerH - footerH - marginsAndBorders;
-  const cliBoxHeight = Math.max(180, Math.floor(contentArea * 0.35));
-  const clientsPanelHeight = Math.max(200, contentArea - cliBoxHeight - clientsHeaderH - 12);
-  
-  // Apply calculated heights
-  if(cliScrollWrap) {
-    cliScrollWrap.style.maxHeight = cliBoxHeight + 'px';
-    cliScrollWrap.style.minHeight = Math.min(180, cliBoxHeight) + 'px';
+  const anchorRect = anchor.getBoundingClientRect();
+  const shellRect = cliShell.getBoundingClientRect();
+  if(!shellRect || !isFinite(shellRect.top) || !anchorRect || !isFinite(anchorRect.bottom)) return;
+
+  // Total available height = from shell top to bottom of form area
+  let totalAvailable = anchorRect.bottom - shellRect.top;
+  if(!isFinite(totalAvailable) || totalAvailable < 400) totalAvailable = 800;
+
+  // Set the shell height to fill the form area
+  cliShell.style.setProperty('--cli-shell-height', totalAvailable + 'px');
+
+  // Clear inline overrides; let CSS flex handle the split
+  clientsPanel.style.maxHeight = '';
+  clientsPanel.style.minHeight = '';
+  if(cliScrollWrap){
+    cliScrollWrap.style.maxHeight = '';
+    cliScrollWrap.style.minHeight = '';
   }
-  clientsPanel.style.maxHeight = clientsPanelHeight + 'px';
-  clientsPanel.style.minHeight = Math.min(180, clientsPanelHeight) + 'px';
 }
 
 // Re-align when expanding/collapsing CLI

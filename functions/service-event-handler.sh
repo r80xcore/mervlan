@@ -123,7 +123,7 @@ case "${TYPE}_${EVENT}" in
   save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
   executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
   disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr|\
-  update_vlanmgr|updatedev_vlanmgr)
+  clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr)
     APP_EVENT=1
     ;;
 esac
@@ -289,6 +289,12 @@ case "${TYPE}_${EVENT}" in
   collectclients_vlanmgr)
     # Collect client list from router and nodes (triggered by refresh request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/collect_clients.sh"
+    ;;
+  clearclilog_vlanmgr)
+    # Clear CLI output log file (triggered by Clear button in UI)
+    # Uses : to truncate file in place; no script needed
+    : > /tmp/mervlan_tmp/logs/cli_output.log 2>/dev/null || :
+    logger -t "VLANMgr" "handler: clearclilog_vlanmgr - CLI log truncated"
     ;;
   update_vlanmgr)
     # Update MerVLAN addon from stable channel (triggered by update request)

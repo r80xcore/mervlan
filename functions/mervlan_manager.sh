@@ -29,13 +29,19 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 unset LIB_JSON_LOADED
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 # Optional CLI overrides:
+#   boot                 → boot mode (enables SSID readiness gate)
 #   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
 #   --no-collect         → skip collect_clients.sh (for parallel execution)
+MERV_MANAGER_MODE="normal"
 CLI_DRY_RUN="no"
 SKIP_COLLECT="no"
 for arg in "$@"; do
   case "$arg" in
+    boot)
+      MERV_MANAGER_MODE="boot"
+      ;;
     dryrun|--dry-run|-n)
       CLI_DRY_RUN="yes"
       ;;
@@ -44,6 +50,19 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# Boot mode: ensure log directories and files exist before any logging
+# This is critical because install.sh may not have run yet on first boot
+if [ "$MERV_MANAGER_MODE" = "boot" ]; then
+  _boot_logdir="${TMPDIR:-/tmp/mervlan_tmp}/logs"
+  mkdir -p "$_boot_logdir" 2>/dev/null || :
+  [ -f "$_boot_logdir/cli_output.log" ] || : > "$_boot_logdir/cli_output.log" 2>/dev/null || :
+  [ -f "$_boot_logdir/vlan_manager.log" ] || : > "$_boot_logdir/vlan_manager.log" 2>/dev/null || :
+  chmod 644 "$_boot_logdir/cli_output.log" "$_boot_logdir/vlan_manager.log" 2>/dev/null || :
+  # Trim logs on boot to prevent unbounded growth (see LOG_MAX_LINES in log_settings.sh)
+  log_trim_all
+fi
+
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -52,6 +71,9 @@ done
 # Read IS_NODE and NODE_ID from settings.json (set by execute_nodes.sh)
 MERV_IS_NODE="$(json_get_flag IS_NODE 0 "$SETTINGS_FILE")"
 MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
+
+# Initialize SSID filter based on node identity (affects which SSIDs we manage)
+ssid_filter_init "$MERV_NODE_ID"
 
 # Completion marker directory and file (used by main router to verify node execution)
 MERV_COMPLETION_DIR="/tmp/mervlan_tmp/results/node_complete"
@@ -936,6 +958,131 @@ EOF
 }
 
 # ========================================================================== #
+# BOOT SSID READINESS GATE — Wait for configured SSIDs during boot mode      #
+# ========================================================================== #
+
+# ssid_in_nvram — Check if an SSID exists anywhere in nvram
+# Args: $1=ssid_name
+# Returns: 0 if found, 1 if not found
+ssid_in_nvram() {
+  _needle="$1"
+  [ -n "$_needle" ] || return 1
+  # Cache nvram output for efficiency (only fetch once)
+  [ -n "${_NVRAM_SSID_CACHE:-}" ] || _NVRAM_SSID_CACHE="$(nvram show 2>/dev/null | grep '_ssid=')"
+  printf '%s\n' "$_NVRAM_SSID_CACHE" | grep -Fq "_ssid=$_needle"
+}
+
+# boot_wait_for_configured_ssids — Block until configured SSIDs are ready (boot mode only)
+# Args: $1=timeout_seconds (default 30)
+# Returns: 0 always (logs warnings on timeout/missing SSIDs, continues anyway)
+# Purpose: Reduce boot race conditions by waiting for WLAN interfaces to appear
+boot_wait_for_configured_ssids() {
+  [ "$MERV_MANAGER_MODE" = "boot" ] || return 0
+
+  timeout="${1:-30}"
+  case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+
+  # Build list of configured SSIDs from settings.json (filtered by node assignment)
+  cfg=""
+  i=1
+  while [ "$i" -le "${MAX_SSIDS:-12}" ]; do
+    ssid="$(get_ssid_slot_value "$i" "$SETTINGS_FILE")"
+    # Check for fatal filter condition (hardware profile not ready)
+    if [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c cli,vlan "Boot SSID wait: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
+      return 1
+    fi
+    [ -z "$ssid" ] && ssid="unused-placeholder"
+    if [ "$ssid" != "unused-placeholder" ]; then
+      cfg="${cfg}
+$i|$ssid"
+    fi
+    i=$((i+1))
+  done
+  cfg="$(printf '%s\n' "$cfg" | sed '/^$/d')"
+
+  [ -n "$cfg" ] || {
+    info -c cli,vlan "Boot SSID wait: no SSIDs configured"
+    return 0
+  }
+
+  info -c cli,vlan "Boot SSID wait: validating configured SSIDs vs nvram, then waiting up to ${timeout}s for interfaces..."
+
+  # Partition SSIDs: in nvram (wait for interface) vs missing (likely typo)
+  missing_nvram=""
+  waitlist=""
+  while IFS='|' read -r idx ssid; do
+    [ -n "$idx" ] || continue
+    if ssid_in_nvram "$ssid"; then
+      waitlist="${waitlist}
+$idx|$ssid"
+    else
+      missing_nvram="${missing_nvram}
+SSID_$(printf '%02d' "$idx")='$ssid'"
+    fi
+  done <<EOF
+$cfg
+EOF
+
+  if [ -n "$missing_nvram" ]; then
+    warn -c cli,vlan "Boot SSID wait: SSID(s) not found in nvram (likely typo or not configured in Wireless GUI):"
+    printf '%s\n' "$missing_nvram" | sed '/^$/d' | while IFS= read -r line; do
+      warn -c cli,vlan "  $line"
+    done
+  fi
+
+  waitlist="$(printf '%s\n' "$waitlist" | sed '/^$/d')"
+  [ -n "$waitlist" ] || return 0
+
+  start="$(date +%s 2>/dev/null || echo 0)"
+  case "$start" in ''|*[!0-9]*) start=1 ;; esac
+
+  # Wait until all SSIDs in waitlist resolve to present interfaces, or timeout
+  pending="$waitlist"
+  ready_count=0
+  total_count="$(printf '%s\n' "$waitlist" | wc -l | tr -d ' ')"
+
+  while :; do
+    new_pending=""
+
+    while IFS='|' read -r idx ssid; do
+      [ -n "$idx" ] || continue
+
+      ifn="$(find_if_by_ssid_any "$ssid")"
+      if [ -n "$ifn" ] && iface_exists "$ifn"; then
+        ready_count=$((ready_count + 1))
+      else
+        new_pending="${new_pending}
+$idx|$ssid"
+      fi
+    done <<EOF
+$pending
+EOF
+
+    pending="$(printf '%s\n' "$new_pending" | sed '/^$/d')"
+    [ -z "$pending" ] && {
+      info -c cli,vlan "Boot SSID wait: all $total_count configured SSID interfaces are present"
+      return 0
+    }
+
+    now="$(date +%s 2>/dev/null || echo 0)"
+    case "$now" in ''|*[!0-9]*) now=$((start + timeout + 1)) ;; esac
+
+    if [ $((now - start)) -ge "$timeout" ]; then
+      warn -c cli,vlan "Boot SSID wait: timed out after ${timeout}s ($ready_count/$total_count ready)"
+      warn -c cli,vlan "Boot SSID wait: still missing interface(s) for:"
+      printf '%s\n' "$pending" | while IFS='|' read -r idx ssid; do
+        [ -n "$idx" ] || continue
+        warn -c cli,vlan "  SSID_$(printf '%02d' "$idx")='$ssid'"
+      done
+      return 0
+    fi
+
+    sleep 1
+  done
+}
+
+# ========================================================================== #
 # AP ISOLATION & SSID BINDING — Wireless policy and bridge attachment        #
 # ========================================================================== #
 
@@ -1001,9 +1148,14 @@ bind_configured_ssids() {
   i=1
   # Loop through all SSID slots (SSID_01, SSID_02, etc. up to MAX_SSIDS)
   while [ $i -le "$MAX_SSIDS" ]; do
-    # Read SSID and VLAN settings from JSON (printf %02d = zero-padded decimal)
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
+    # Read SSID and VLAN settings via filter (respects node assignment)
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    # Check for fatal filter condition after first accessor call
+    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c cli,vlan "bind_configured_ssids: aborting due to SSID filter fatal condition"
+      return 1
+    fi
     # Apply defaults: empty SSID = placeholder, empty VLAN = untagged (none)
     [ -z "$ssid" ] && ssid="unused-placeholder"
     [ -z "$vlan" ] && vlan="none"
@@ -1358,6 +1510,10 @@ main() {
 
   # Pre-flight validation: verify required files and settings exist
   validate_configuration
+
+  # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
+  # This only runs when invoked with "boot" argument from services-start
+  boot_wait_for_configured_ssids 30
   
   # Log startup information
   info -c cli,vlan "Starting VLAN manager on $MODEL ($PRODUCTID)"
@@ -1387,11 +1543,11 @@ main() {
     idx=$((idx+1))
   done
 
-  # Validate SSID VLAN assignments (VLAN_01-VLAN_MAX_SSIDS)
+  # Validate SSID VLAN assignments (VLAN_01-VLAN_MAX_SSIDS, filtered by node assignment)
   i=1
   while [ $i -le "$MAX_SSIDS" ]; do
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
     # Only validate if SSID is configured (not empty or placeholder)
     [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && validate_vlan_id "$vlan"
     i=$((i+1))
@@ -1419,11 +1575,11 @@ main() {
   bind_configured_ssids
 
   # Configuration phase 3: Apply AP isolation policies across all SSIDs
-  # Iterate through configured SSIDs and apply APISO_01-APISO_MAX_SSIDS settings
+  # Iterate through configured SSIDs and apply APISO settings (filtered by node assignment)
   i=1
   while [ $i -le "$MAX_SSIDS" ]; do
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    apiso=$(read_json "$(printf "APISO_%02d" $i)" "$SETTINGS_FILE")
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    apiso=$(get_apiso_slot_value "$i" "$SETTINGS_FILE")
     # Apply AP isolation if SSID is configured and APISO value is set
     if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && [ -n "$apiso" ]; then
       iface=$(find_if_by_ssid_any "$ssid")

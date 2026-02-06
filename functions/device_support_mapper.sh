@@ -39,6 +39,25 @@
 # -----------------------------
 # Config
 # -----------------------------
+# ---- merv: portable `command -v` replacement ----
+if ! type merv_has >/dev/null 2>&1; then
+  merv_has() { type "$1" >/dev/null 2>&1; }
+  merv_cmd() {
+    _merv_c="$1"
+    case "$_merv_c" in
+      */*) [ -x "$_merv_c" ] && { printf '%s\n' "$_merv_c"; return 0; } ;;
+    esac
+    _merv_oldIFS="$IFS"; IFS=:
+    for _merv_d in $PATH; do
+      [ -z "$_merv_d" ] && _merv_d="."
+      [ -x "$_merv_d/$_merv_c" ] && { IFS="$_merv_oldIFS"; printf '%s\n' "$_merv_d/$_merv_c"; return 0; }
+    done
+    IFS="$_merv_oldIFS"
+    return 1
+  }
+fi
+# ---- end shim ----
+
 MERV_BASE="/jffs/addons/mervlan"
 DEFAULT_HW_PROBE="$MERV_BASE/functions/hw_probe.sh"
 
@@ -129,8 +148,8 @@ now_stamp() { date '+%Y%m%d_%H%M%S' 2>/dev/null || echo "unknown_time"; }
 # Robust nvram detection
 # -----------------------------
 find_nvram() {
-  if command -v nvram >/dev/null 2>&1; then
-    command -v nvram
+  if merv_has nvram; then
+    merv_cmd nvram
     return 0
   fi
   for p in /usr/sbin/nvram /sbin/nvram /bin/nvram /usr/bin/nvram; do

@@ -19,7 +19,26 @@
 # Only set if not already set (allows override for testing)
 : "${MERV_BASE:?MERV_BASE must be set before sourcing folder_settings.sh}"
 
-
+# ---- merv: portable `command -v` replacement ----
+# merv_has <name> : true if <name> exists as function/builtin/external
+# merv_cmd <name> : prints PATH-resolved executable (external only); fails if not found
+if ! type merv_has >/dev/null 2>&1; then
+  merv_has() { type "$1" >/dev/null 2>&1; }
+  merv_cmd() {
+    _merv_c="$1"
+    case "$_merv_c" in
+      */*) [ -x "$_merv_c" ] && { printf '%s\n' "$_merv_c"; return 0; } ;;
+    esac
+    _merv_oldIFS="$IFS"; IFS=:
+    for _merv_d in $PATH; do
+      [ -z "$_merv_d" ] && _merv_d="."
+      [ -x "$_merv_d/$_merv_c" ] && { IFS="$_merv_oldIFS"; printf '%s\n' "$_merv_d/$_merv_c"; return 0; }
+    done
+    IFS="$_merv_oldIFS"
+    return 1
+  }
+fi
+# ---- end shim ----
 
 # Folders
 readonly SCRIPTS_DIR="/jffs/scripts"

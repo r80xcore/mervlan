@@ -33,7 +33,7 @@ umask 022
 logger -t "VLANMgr" "collect_local_clients: PATH=$PATH"
 # Check that all required commands are available in the environment
 for cmd in ip brctl awk grep sed; do
-  command -v "$cmd" >/dev/null 2>&1 || logger -t "VLANMgr" "collect_local_clients: missing cmd $cmd"
+  merv_has "$cmd" || logger -t "VLANMgr" "collect_local_clients: missing cmd $cmd"
 done
 # =========================================== End of MerVLAN environment setup #
 

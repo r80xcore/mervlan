@@ -346,6 +346,7 @@ const MVM_NO_REFRESH = new Set([
   // Actions that must NOT refresh the page after running:
   "save_vlanmgr",
   "collectclients_vlanmgr",
+  "clearclilog_vlanmgr",
   "sync_vlanmgr",
   "apply_vlanmgr",
   "executenodes_vlanmgr",
@@ -362,6 +363,7 @@ const MVM_NO_LOADING = new Set([
   // Actions that should NOT show the loading overlay:
   // "checkservice_vlanmgr",
   // "collectclients_vlanmgr",
+  "clearclilog_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr"
 ]);
@@ -377,6 +379,7 @@ const MVM_ALLOWED_ACTIONS = new Set([
   "disableservice_vlanmgr",
   "checkservice_vlanmgr",
   "collectclients_vlanmgr",
+  "clearclilog_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr"
 ]);
@@ -431,6 +434,7 @@ function MVM_enableService(opts)             { return MVM_exec("enableservice_vl
 function MVM_disableService(opts)            { return MVM_exec("disableservice_vlanmgr",null,        mvmOptsFor("disableservice_vlanmgr",opts)); }
 function MVM_checkService(opts)              { return MVM_exec("checkservice_vlanmgr",  null,        mvmOptsFor("checkservice_vlanmgr",  opts)); }
 function MVM_collectClients(opts)            { return MVM_exec("collectclients_vlanmgr",null,        mvmOptsFor("collectclients_vlanmgr",opts)); }
+function MVM_clearCliLog(opts)               { return MVM_exec("clearclilog_vlanmgr",   null,        mvmOptsFor("clearclilog_vlanmgr",   opts)); }
 function MVM_update(opts)                    { return MVM_exec("update_vlanmgr",        null,        mvmOptsFor("update_vlanmgr",        opts)); }
 function MVM_updateDev(opts)                 { return MVM_exec("updatedev_vlanmgr",     null,        mvmOptsFor("updatedev_vlanmgr",     opts)); }
 
