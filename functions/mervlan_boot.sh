@@ -756,8 +756,9 @@ case "$ACTION" in
       boot_state=enabled
     fi
 
-    # Check if addon install.sh entry exists in services-start
-    if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then
+    # Check if addon boot entry exists in services-start
+    # Matches either legacy install.sh or current mervlan_boot_wrap.sh install
+    if [ -f "$SERVICES_START" ] && grep -qE "mervlan/(install\.sh|functions/mervlan_boot_wrap\.sh install)" "$SERVICES_START" 2>/dev/null; then
       addon_state=active
     fi
 
@@ -871,8 +872,8 @@ case "$ACTION" in
     is_node_state=no
     # Check persisted boot state and set boot_state to 1 if enabled
     if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE")" = "1" ]; then boot_state=1; fi
-    # Check for addon install.sh entry in services-start
-    if [ -f "$SERVICES_START" ] && grep -q "/jffs/addons/mervlan/install.sh" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
+    # Check for addon boot entry in services-start (wrapper or legacy install.sh)
+    if [ -f "$SERVICES_START" ] && grep -qE "mervlan/(install\.sh|functions/mervlan_boot_wrap\.sh install)" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
     # Check service-event wrapper and determine state: disabled/active/custom
     if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
       if grep -q "service-event disabled" "$SERVICE_EVENT_WRAPPER"; then
