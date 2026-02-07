@@ -1,3 +1,81 @@
+mervlan v0.52.9
+
+This update brings full STP (Spanning Tree Protocol) support, major improvements
+to trunk port handling with better VLAN filtering, and a safer boot process that
+won't stall your router or lose logs. UI improvements and code cleanup throughout.
+
+
+NOTABLE FEATURES:
+
+STP Support:
+- New Spanning Tree Protocol support for multi-node setups.
+- Prevents network loops when multiple nodes are interconnected.
+- Each node gets a unique, stable bridge ID that persists across reboots.
+- Toggle STP on/off via UI: General Settings → "STP: On/Off".
+- Recommended for complex multi-node topologies; optional for simple setups.
+
+Better Boot Process:
+- New boot wrapper prevents router startup delays.
+- Logs are now properly captured instead of being discarded.
+- Install checks only run once per boot cycle (faster subsequent boots).
+- Boot operations run in background so other services aren't blocked.
+- All boot activity logged to boot_wrap.log for troubleshooting.
+
+Trunk Port Improvements (EXPERIMENTAL):
+- Complete rewrite of trunk port configuration logic.
+- Smarter handling of native (untagged) VLANs on trunk ports.
+- Automatic cleanup of stale VLAN configurations from previous runs.
+- New strict VLAN filtering prevents unauthorized VLANs on trunk ports.
+- Better error detection and validation.
+- Still experimental — use with caution on production networks.
+
+
+UPDATED FILES:
+
+mervlan_manager.sh
+- Full STP support with proper bridge MAC management.
+- Better bridge detection and configuration.
+- Improved cleanup of old VLAN configurations.
+
+mervlan_trunk.sh
+- Major rewrite for better VLAN handling on trunk ports.
+- Native VLAN configuration improved.
+- Strict VLAN filtering with ebtables (when available).
+- Better duplicate and overlap detection.
+- Still in a experimental state and in need of heavy testing.
+
+lib_stp.sh (NEW)
+- Library for STP bridge MAC generation and management.
+- Ensures consistent bridge IDs across reboots and nodes.
+
+mervlan_boot_wrap.sh (NEW)
+- Boot-time wrapper for safer startup.
+- Three modes: install, manager, cron.
+- Proper logging and error handling.
+
+mervlan_templates.sh
+- Updated boot scripts to use new wrapper.
+- Background execution prevents boot delays.
+
+sync_nodes.sh
+- Added new library and wrapper to node sync.
+
+index.html
+- Replaced "Persistent" toggle with "STP" toggle.
+- Updated settings handling for STP support.
+
+help.html
+- Complete overhaul of help documentation.
+- New organized tabs: Getting Started, SSID Setup, LAN Setup, etc.
+- Better setup guides for single and multi-node configurations.
+- Added support links (SNB Forums, Discord, GitHub).
+
+Code Formatting:
+- Standardized headers across all scripts for consistency.
+
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.8
 
 This update introduces a robust SSID/VLAN node assignment filter, boot-time
@@ -106,6 +184,17 @@ index.html
 - Checkboxes disabled for nodes without hardware detected.
 - updateSSIDAssignCheckboxes() syncs checkbox state with settings.
 - Settings serialization includes SSIDassign_XX in save payload.
+- Fixed node LAN buttons and SSID assign checkboxes remaining disabled after
+  loading settings with configured node IPs.
+- Buttons now enable when a valid IP is configured (hardware detection optional).
+- Updated SSID assign tooltips to use node alias, IP, and PRODUCTID:
+  enabled: "Assign to {ALIAS}, {IP} ({PRODUCTID})"
+  disabled: "Configure {ALIAS} IP first"
+- Added dynamic AP Isolation availability: select enables when both SSID and
+  VLAN ID are valid in the form (no save/load required).
+- AP Isolation disabled tooltip: "Enter valid SSID and VLAN ID first".
+- Added setupDisabledAssignClickGuard() to prevent checkbox toggling on
+  disabled labels while preserving tooltip hover.
 
 TECHNICAL DETAILS:
 
@@ -141,19 +230,6 @@ lib_json.sh
 - Now inserts new key-value pairs before the section closing brace with proper
   comma handling.
 - Also handles numeric value replacement (not just quoted strings).
-
-index.html
-- Fixed node LAN buttons and SSID assign checkboxes remaining disabled after
-  loading settings with configured node IPs.
-- Buttons now enable when a valid IP is configured (hardware detection optional).
-- Updated SSID assign tooltips to use node alias, IP, and PRODUCTID:
-  enabled: "Assign to {ALIAS}, {IP} ({PRODUCTID})"
-  disabled: "Configure {ALIAS} IP first"
-- Added dynamic AP Isolation availability: select enables when both SSID and
-  VLAN ID are valid in the form (no save/load required).
-- AP Isolation disabled tooltip: "Enter valid SSID and VLAN ID first".
-- Added setupDisabledAssignClickGuard() to prevent checkbox toggling on
-  disabled labels while preserving tooltip hover.
 
 vlan_form_style.css
 - Removed pointer-events:none from disabled SSID assign labels so tooltips

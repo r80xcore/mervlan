@@ -7,7 +7,6 @@
     "EXPERIMENTAL": "0",
     "IS_NODE": "0",
     "NODE_ID": "none",
-    "PERSISTENT": "no",
     "BACKUP_1": ["none", "none", "none"],
     "BACKUP_2": ["none", "none", "none"],
     "BACKUP_3": ["none", "none", "none"]

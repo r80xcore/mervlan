@@ -1,5 +1,5 @@
 #!/bin/sh
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -10,13 +10,13 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#         - File: templates/mervlan_templates.sh || version="0.51"             #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#         - File: templates/mervlan_templates.sh || version="0.52"             #
+# ============================================================================ #
 # - Purpose:    Provide unified template lookup utilities for MerVLAN.         #
 #               Each template is stored inline and can be materialized via     #
 #               tpl_path for injection/removal helpers.                        #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 
 [ -n "${MERV_TEMPLATE_LIB_LOADED:-}" ] && return 0 2>/dev/null
 
@@ -34,29 +34,29 @@ MERV_BASE_PLACEHOLDER/functions/service-event-handler.sh "$@"
 %%TEMPLATE services-start 1
 # MerVLAN auto-enable VLAN on boot
 sleep 10
-MERV_BASE_PLACEHOLDER/functions/mervlan_manager.sh boot >/dev/null 2>&1 || :
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
 sleep 10
-MERV_BASE_PLACEHOLDER/functions/mervlan_boot.sh cronenable >/dev/null 2>&1 || :
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 2>&1 &
 %%END
 
 %%TEMPLATE services-start 2
 # MerVLAN auto-enable VLAN on boot
 sleep 10
-MERV_BASE_PLACEHOLDER/functions/mervlan_manager.sh boot >/dev/null 2>&1 || :
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
 sleep 10
-MERV_BASE_PLACEHOLDER/functions/mervlan_boot.sh cronenable >/dev/null 2>&1 || :
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 2>&1 &
 %%END
 
 %%TEMPLATE services-start-addon 1
 # MerVLAN mount addon on boot
 sleep 5
-MERV_BASE_PLACEHOLDER/install.sh >/dev/null 2>&1 || :
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh install </dev/null >/dev/null 2>&1 &
 %%END
 
 %%TEMPLATE services-start-addon 2
 # MerVLAN mount addon on boot
 sleep 5
-MERV_BASE_PLACEHOLDER/install.sh >/dev/null 2>&1 || :
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh install </dev/null >/dev/null 2>&1 &
 %%END
 
 EOF

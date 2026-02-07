@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.8" -->
+  <!-- index.html version="0.52.9" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -204,10 +204,10 @@
       <div class="form-box controls-panel">
         <h2>General Settings</h2>
         <div class="button-row button-row-toggles">
-          <span id="statusPERSISTENT" class="status gen-status" title="❌ Missing/invalid value">❌</span>
-          <select id="persistentToggle" name="PERSISTENT" class="input_option" onchange="markEdited('PERSISTENT')" title="Persistent mode: yes=commit nvram changes">
-            <option value="no">Persistent: Off</option>
-            <option value="yes">Persistent: On</option>
+          <span id="statusENABLE_STP" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+          <select id="stpToggle" name="ENABLE_STP" class="input_option" onchange="markEdited('ENABLE_STP')" title="STP: enable Spanning Tree Protocol with deterministic bridge MACs">
+            <option value="0">STP: Off</option>
+            <option value="1">STP: On</option>
           </select>
           <select id="dryRunToggle" name="DRY_RUN" class="input_option" onchange="markEdited('DRY_RUN')" title="Dry run: yes=simulate only, no changes">
             <option value="no">Dry Run: Off</option>
@@ -553,7 +553,7 @@
         function flattenStructuredSettingsPayload(data) {
           const flat = {};
           const general = ensurePlainObject(data.General);
-          flat.PERSISTENT = stringOrDefault(general.PERSISTENT ?? general.Persistent, "no");
+          flat.ENABLE_STP = stringOrDefault(general.ENABLE_STP, "0");
           flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
           flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
 
@@ -660,8 +660,7 @@
               BOOT_ENABLED: "0",
               DRY_RUN: "yes",
               ENABLE_STP: "0",
-              EXPERIMENTAL: "0",
-              PERSISTENT: "no"
+              EXPERIMENTAL: "0"
             },
             SSH: {
               _description: "SSH settings for main router and nodes",
@@ -721,7 +720,7 @@
         function expandFlatSettingsToStructured(flat, source) {
           const target = cloneStructuredSettingsPayload(source) || structuredSettingsDefaultsTemplate();
           const general = target.General = ensurePlainObject(target.General);
-          general.PERSISTENT = stringOrDefault(flat.PERSISTENT, general.PERSISTENT ?? "no");
+          general.ENABLE_STP = stringOrDefault(flat.ENABLE_STP, general.ENABLE_STP ?? "0");
           general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
           general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
 
@@ -3229,17 +3228,17 @@ async function runVlanManagerOnlyNodes() {
       ensureTablesReady();
       const f = document.getElementById("settingsForm");
 
-      const persistentToggle = document.getElementById("persistentToggle");
+      const stpToggle = document.getElementById("stpToggle");
       const dryRunToggle = document.getElementById("dryRunToggle");
       const experimentalToggle = document.getElementById("experimentalToggle");
 
-      if (persistentToggle) persistentToggle.value = flat["PERSISTENT"] || "no";
+      if (stpToggle) stpToggle.value = flat["ENABLE_STP"] || "0";
       if (dryRunToggle) dryRunToggle.value = flat["DRY_RUN"] || "yes";
       if (experimentalToggle) experimentalToggle.checked = flat["EXPERIMENTAL"] === "1";
 
-      const persistentStatus = document.getElementById("statusPERSISTENT");
+      const stpStatus = document.getElementById("statusENABLE_STP");
       const dryRunStatus = document.getElementById("statusDRY_RUN");
-      if (persistentStatus) persistentStatus.textContent = "✅";
+      if (stpStatus) stpStatus.textContent = "✅";
       if (dryRunStatus) dryRunStatus.textContent = "✅";
 
       for (let i = 1; i <= 5; i++) {
@@ -3416,7 +3415,7 @@ async function runVlanManagerOnlyNodes() {
         out[`vlanmgr_SSIDassign_${idx}`] = assignParts.join(",");
       }
 
-      out["vlanmgr_PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
+      out["vlanmgr_ENABLE_STP"] = document.getElementById("stpToggle").value || "0";
       out["vlanmgr_DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
       out["vlanmgr_EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
@@ -3548,7 +3547,7 @@ async function runVlanManagerOnlyNodes() {
         });
         flat[`SSIDassign_${idx}`] = assignParts.join(",");
       }
-      flat["PERSISTENT"] = document.getElementById("persistentToggle").value || "no";
+      flat["ENABLE_STP"] = document.getElementById("stpToggle").value || "0";
       flat["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
       flat["EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
@@ -3950,7 +3949,7 @@ function normalizeToFlatSettings(obj) {
 // Only compare keys MerVLAN actually manages (ignore Hardware, timestamps, etc)
 function extractManagedKeys(flat) {
   const out = {};
-  const re = /^(PERSISTENT|DRY_RUN|EXPERIMENTAL|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const re = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(flat || {}).forEach(k => {
     if (re.test(k)) out[k] = String(flat[k] ?? "");
   });

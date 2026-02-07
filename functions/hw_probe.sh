@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ---------------------------------------------------------------------------- #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,14 +11,14 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ---------------------------------------------------------------------------- #
-#                   - File: hw_probe.sh || version="0.47"                    #
-# ---------------------------------------------------------------------------- #
-# - Purpose:    Probe system hardware and record hardware keys in the central
-#                settings store (settings.json). Writes non-destructively via
-#                json_set_flag so values remain compatible with legacy top-level
-#                keys and the newer Hardware block in settings.json.
-# ---------------------------------------------------------------------------- #
+# ============================================================================ #
+#                   - File: hw_probe.sh || version="0.47"                      #
+# ============================================================================ #
+# - Purpose:  Probe system hardware and record hardware keys in the central    #
+#             settings store (settings.json). Writes non-destructively via     #
+#             json_set_flag so values remain compatible with legacy top-level  #
+#             keys and the newer Hardware block in settings.json.              #
+# ============================================================================ #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"

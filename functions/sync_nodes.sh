@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,11 +11,11 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: sync_nodes.sh || version="0.54"                        #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#               - File: sync_nodes.sh || version="0.54.1"                      #
+# ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -101,7 +101,9 @@ settings/lib_json.sh
 settings/lib_debug.sh
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
+settings/lib_stp.sh
 functions/mervlan_boot.sh
+functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
 functions/collect_local_clients.sh 
 functions/heal_event.sh  
@@ -113,6 +115,7 @@ templates/mervlan_templates.sh
 # FILES_TO_COPY_CHMOD — Files requiring executable permissions on nodes (755)
 FILES_TO_COPY_CHMOD="
 functions/mervlan_boot.sh
+functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
 functions/collect_local_clients.sh
 functions/heal_event.sh
@@ -127,6 +130,7 @@ settings/lib_json.sh
 settings/lib_debug.sh 
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
+settings/lib_stp.sh
 templates/mervlan_templates.sh
 "
 dbg_log "File synchronization manifest loaded"

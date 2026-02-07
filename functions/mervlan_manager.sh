@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,13 +11,13 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.57"                   #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#               - File: mervlan_manager.sh || version="0.58"                   #
+# ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
 #               settings defined in JSON files.                                #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -30,6 +30,7 @@ fi
 unset LIB_JSON_LOADED
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
+[ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
 # Optional CLI overrides:
 #   boot                 → boot mode (enables SSID readiness gate)
 #   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
@@ -147,54 +148,33 @@ read_json_array() {
   json_get_array "$1" "$2"
 }
 
-detect_trunk_ports() {
-  TRUNK_ENABLED_PORTS=""
-  local idx val port
-
+detect_trunks_configured() {
+  local idx val
   idx=1
   while [ $idx -le 8 ]; do
     val=$(read_json_number "TRUNK${idx}" "$SETTINGS_FILE")
-    if [ -z "$val" ]; then
-      val=$(read_json_number "trunk${idx}" "$SETTINGS_FILE")
-    fi
-    if [ -z "$val" ]; then
-      val=$(json_get_section2_int "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
-    fi
-    if [ -z "$val" ]; then
-      val=$(json_get_section2_int "VLAN" "Trunks" "trunk${idx}" "$SETTINGS_FILE" 2>/dev/null)
-    fi
-    case "$val" in
-      ''|0) ;;
-      *)
-        if [ "$val" -ge 1 ] 2>/dev/null && [ "$val" -le 8 ] 2>/dev/null; then
-          port="eth${val}"
-          case " $TRUNK_ENABLED_PORTS " in
-            *" $port "*) ;;
-            *) TRUNK_ENABLED_PORTS="${TRUNK_ENABLED_PORTS} $port" ;;
-          esac
-        fi
-        ;;
-    esac
+    [ -z "$val" ] && val=$(read_json_number "trunk${idx}" "$SETTINGS_FILE")
+    [ -z "$val" ] && val=$(json_get_section2_int "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    [ -z "$val" ] && val=$(json_get_section2_int "VLAN" "Trunks" "trunk${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    case "$val" in ''|0) ;; *) return 0 ;; esac
     idx=$((idx + 1))
   done
-
-  TRUNK_ENABLED_PORTS=$(printf '%s\n' "$TRUNK_ENABLED_PORTS" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+  return 1
 }
 
 run_trunk_if_configured() {
   TRUNK_APPLIED=0
-  detect_trunk_ports
 
-  if [ -z "$TRUNK_ENABLED_PORTS" ]; then
+  if ! detect_trunks_configured; then
     info -c cli,vlan "No trunk configuration enabled. Skipping."
     return 0
   fi
 
-  info -c cli,vlan "Trunk enabled on: $TRUNK_ENABLED_PORTS. Configuring..."
+  info -c cli,vlan "Trunk config detected. Running trunk script..."
 
   if [ ! -x "$FUNCDIR/mervlan_trunk.sh" ]; then
-    warn -c cli,vlan "Trunk configuration skipped because this is a node or remote AP"
-    return 1
+    info -c cli,vlan "Node/remote AP: trunk script not present; skipping trunk config"
+    return 0
   fi
 
   if DRY_RUN="$DRY_RUN" UPLINK_PORT="$UPLINK_PORT" DEFAULT_BRIDGE="$DEFAULT_BRIDGE" MAX_TRUNKS=8 \
@@ -234,7 +214,6 @@ to_lower() {
 
 BOUND_IFACES=""
 WATCH_IFACES=""
-TRUNK_ENABLED_PORTS=""
 TRUNK_APPLIED=0
 
 # ========================================================================== #
@@ -591,77 +570,92 @@ ensure_vlan_bridge() {
     return 0
   fi
 
-  # Check if VLAN interface already exists (eth0.VID, for example)
+  # ---- Uplink VLAN sub-interface (needed by every path below) ----
   if ! iface_exists "${UPLINK_PORT}.${VID}"; then
     if [ "$DRY_RUN" = "yes" ]; then
-      # Dry-run: show what would be executed
       echo "[DRY-RUN] ip link add link $UPLINK_PORT name ${UPLINK_PORT}.${VID} type vlan id $VID"
       echo "[DRY-RUN] ip link set ${UPLINK_PORT}.${VID} up"
     else
-      # Create VLAN sub-interface (e.g., eth0.100)
       ip link add link "$UPLINK_PORT" name "${UPLINK_PORT}.${VID}" type vlan id "$VID" 2>/dev/null || \
       iface_exists "${UPLINK_PORT}.${VID}" || {
         error -c cli,vlan "Failed to create VLAN interface ${UPLINK_PORT}.${VID}"
         return 1
       }
-      # Bring interface up (enter active state)
       ip link set "${UPLINK_PORT}.${VID}" up 2>/dev/null
       info -c cli,vlan "Created VLAN interface ${UPLINK_PORT}.${VID}"
       track_change "Created VLAN interface ${UPLINK_PORT}.${VID}"
     fi
   fi
 
-  # Check if bridge brVID exists (e.g., br100)
-  if ! brctl show 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "br${VID}"; then
+  # ---- Bridge (sysfs-first detection) ----
+  if ! iface_exists "br${VID}"; then
+    # --- New bridge ---
     if [ "$DRY_RUN" = "yes" ]; then
       echo "[DRY-RUN] brctl addbr br${VID}"
+      stp_set_bridge_mac "$VID" "$DRY_RUN"
       echo "[DRY-RUN] brctl addif br${VID} ${UPLINK_PORT}.${VID}"
       echo "[DRY-RUN] ip link set br${VID} up"
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        echo "[DRY-RUN] brctl stp br${VID} on"
-        echo "[DRY-RUN] brctl setfd br${VID} 15"
-      else
-        echo "[DRY-RUN] brctl stp br${VID} off"
-        echo "[DRY-RUN] brctl setfd br${VID} 0"
-      fi
+      stp_apply_policy "$VID" "$DRY_RUN" "${ENABLE_STP:-0}"
     else
-      # Create bridge interface
+      # 1. Create bridge
       brctl addbr "br${VID}" 2>/dev/null || {
         error -c cli,vlan "Failed to create bridge br${VID}"
         return 1
       }
-      # Add VLAN interface to bridge
-      brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null
-      # Bring bridge up (enter active state)
-      ip link set "br${VID}" up 2>/dev/null
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        brctl stp "br${VID}" on 2>/dev/null
-        brctl setfd "br${VID}" 15 2>/dev/null
-      else
-        brctl stp "br${VID}" off 2>/dev/null
-        brctl setfd "br${VID}" 0 2>/dev/null
+      # 2. Set deterministic MAC while bridge is still empty/down
+      if ! stp_set_bridge_mac "$VID" "$DRY_RUN"; then
+        if [ "${ENABLE_STP:-0}" -eq 1 ] 2>/dev/null; then
+          error -c cli,vlan "ensure_vlan_bridge: FATAL — MAC set failed on new br${VID} with STP enabled; removing bridge"
+          brctl delbr "br${VID}" 2>/dev/null
+          return 1
+        fi
+        warn -c cli,vlan "ensure_vlan_bridge: MAC set failed on new br${VID} (STP off, continuing)"
       fi
+      # 3. Add uplink VLAN interface
+      brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null || {
+        error -c cli,vlan "Failed to attach uplink ${UPLINK_PORT}.${VID} to br${VID}"
+        brctl delbr "br${VID}" 2>/dev/null
+        return 1
+      }
+      # 4. Bring bridge up
+      ip link set "br${VID}" up 2>/dev/null
+      # 5. STP policy
+      stp_apply_policy "$VID" "$DRY_RUN" "${ENABLE_STP:-0}"
       info -c cli,vlan "Created bridge br${VID}"
       track_change "Created bridge br${VID}"
     fi
   else
-    if [ "$DRY_RUN" = "yes" ]; then
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        echo "[DRY-RUN] brctl stp br${VID} on"
-        echo "[DRY-RUN] brctl setfd br${VID} 15"
-      else
-        echo "[DRY-RUN] brctl stp br${VID} off"
-        echo "[DRY-RUN] brctl setfd br${VID} 0"
+    # --- Existing bridge: enforce MAC + policy ---
+    if [ "${ENABLE_STP:-0}" -eq 1 ] 2>/dev/null; then
+      if ! stp_force_bridge_mac "$VID" "$DRY_RUN"; then
+        error -c cli,vlan "ensure_vlan_bridge: FATAL — failed to enforce bridge MAC on br${VID} with STP enabled"
+        return 1
       fi
     else
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        brctl stp "br${VID}" on 2>/dev/null
-        brctl setfd "br${VID}" 15 2>/dev/null
-      else
-        brctl stp "br${VID}" off 2>/dev/null
-        brctl setfd "br${VID}" 0 2>/dev/null
+      stp_set_bridge_mac "$VID" "$DRY_RUN"
+    fi
+    # Ensure uplink VLAN iface is a member (force-mac may have detached it)
+    if [ "$DRY_RUN" = "yes" ]; then
+      echo "[DRY-RUN] ensure ${UPLINK_PORT}.${VID} is member of br${VID}"
+    else
+      if ! member_of_bridge "br${VID}" "${UPLINK_PORT}.${VID}"; then
+        brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null || {
+          error -c cli,vlan "ensure_vlan_bridge: FATAL — could not attach uplink ${UPLINK_PORT}.${VID} to br${VID}"
+          return 1
+        }
+        info -c cli,vlan "ensure_vlan_bridge: re-attached uplink ${UPLINK_PORT}.${VID} to br${VID}"
+      fi
+      # Best-effort: make sure bridge is up
+      ip link set "br${VID}" up 2>/dev/null
+      # Post-enforcement verification (STP only — log mismatch for diagnostics)
+      if [ "${ENABLE_STP:-0}" -eq 1 ] 2>/dev/null; then
+        stp_verify_bridge_mac "$VID" || {
+          error -c cli,vlan "ensure_vlan_bridge: FATAL — bridge MAC verification failed on br${VID}"
+          return 1
+        }
       fi
     fi
+    stp_apply_policy "$VID" "$DRY_RUN" "${ENABLE_STP:-0}"
   fi
 }
 
@@ -1272,12 +1266,10 @@ show_configuration_summary() {
     info -c cli,vlan "  $line"
   done
 
-  if [ -n "${TRUNK_ENABLED_PORTS:-}" ]; then
-    if [ "$TRUNK_APPLIED" -eq 1 ]; then
-      info -c cli,vlan "Trunk summary: enabled on $TRUNK_ENABLED_PORTS"
-    else
-      info -c cli,vlan "Trunk summary: configuration requested on $TRUNK_ENABLED_PORTS but trunk script failed or was skipped"
-    fi
+  if [ "$TRUNK_APPLIED" -eq 1 ]; then
+    info -c cli,vlan "Trunk summary: trunk script applied successfully"
+  elif detect_trunks_configured; then
+    info -c cli,vlan "Trunk summary: trunk config detected but script was not applied"
   fi
 
   if [ "$DRY_RUN" = "yes" ]; then
@@ -1295,6 +1287,43 @@ show_configuration_summary() {
 # CLEANUP & SERVICE RESTART — Remove old config, restart affected services   #
 # ========================================================================== #
 
+# ebt_cleanup_all_trunk_rules — Remove all MerVLAN ebtables trunk chains/jumps
+# Must run before any bridge/VLAN changes to prevent stale ebtables rules from
+# blocking traffic after config changes. Safe to call even if ebtables is absent
+# or no MerVLAN rules exist.
+ebt_cleanup_all_trunk_rules() {
+  # Skip if ebtables binary is not available
+  type ebtables >/dev/null 2>&1 || return 0
+
+  local port chain proto="802_1Q" idx=0
+
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "[DRY-RUN] would clean up ebtables trunk rules for eth0-eth9"
+    return 0
+  fi
+
+  info -c cli,vlan "Cleaning up stale ebtables trunk rules..."
+
+  # Enumerate eth0-eth9 (covers all supported trunk ports)
+  while [ $idx -le 9 ]; do
+    port="eth${idx}"
+    chain="MERV_TRUNK_${port}"
+
+    # Delete ingress jump rules from FORWARD
+    while ebtables -t filter -D FORWARD -p "$proto" -i "$port" -j "$chain" 2>/dev/null; do :; done
+    # Delete egress jump rules from FORWARD
+    while ebtables -t filter -D FORWARD -p "$proto" -o "$port" -j "$chain" 2>/dev/null; do :; done
+    # Flush and delete the per-port chain (ignore errors if nonexistent)
+    ebtables -t filter -F "$chain" 2>/dev/null
+    ebtables -t filter -X "$chain" 2>/dev/null
+
+    idx=$((idx + 1))
+  done
+
+  # Clean up plan file directory from previous runs
+  rm -f /tmp/mervlan_tmp/ebtables/trunk.rules 2>/dev/null || :
+}
+
 # cleanup_existing_config — Remove VLAN infrastructure from previous runs
 # Args: none
 # Returns: none (logs all actions)
@@ -1302,15 +1331,21 @@ show_configuration_summary() {
 # Preserves br0 (default LAN bridge)
 cleanup_existing_config() {
   info -c cli,vlan "Cleaning up existing VLAN config..."
-  
+
+  # --- ebtables: remove all MerVLAN trunk filter rules FIRST ---
+  # Must run before bridge/VLAN teardown to prevent stale rules that reference
+  # chains on interfaces we are about to delete.
+  ebt_cleanup_all_trunk_rules
+
   # Remove VLAN bridges (except br0 - the default LAN bridge)
   # Iterate through all bridges, remove those numbered br1+ (custom VLANs)
   for br in $(brctl show 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^br[1-9][0-9]*$'); do
     if [ "$DRY_RUN" = "yes" ]; then
       echo "[DRY-RUN] detach all ports from $br; ip link set $br down; brctl delbr $br"
     else
-      # Detach any member interfaces so delbr succeeds (handles continuation lines)
-      for port in $(brctl show "$br" 2>/dev/null | awk 'NR>1 { for (i=4; i<=NF; i++) print $i }'); do
+      # Detach any member interfaces so delbr succeeds
+      # Reuse lib_stp's robust sysfs-first + brctl-fallback enumerator
+      for port in $(stp_list_bridge_members "$br"); do
         brctl delif "$br" "$port" 2>/dev/null
       done
       # Bring bridge down before deletion
