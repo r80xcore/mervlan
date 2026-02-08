@@ -1,3 +1,17 @@
+mervlan v0.52.91
+
+mervlan_boot.sh — Hotfix
+- Fixed a bug where the boot template injection could silently remove other
+template blocks from services-start. When the addon block was re-injected
+on boot, everything after it (including the manager and cron entries) was
+dropped. This caused VLANs and the health-check cron job to not be restored
+on the second reboot, even though the first boot worked fine.
+
+Thanks to mistermoonlight1 for helping track this down with detailed logs
+and testing across multiple reboots.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.9
 
 This update brings full STP (Spanning Tree Protocol) support, major improvements

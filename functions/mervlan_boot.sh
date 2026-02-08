@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.54"                     #
+#                - File: mervlan_boot.sh || version="0.55"                     #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -231,6 +231,8 @@ copy_inject() {
           if (index($0, end_base) == 1) {
             skipping = 0;
           }
+        } else {
+          print;
         }
       }
     ' "$dest" > "$tmp_new" || return 1
