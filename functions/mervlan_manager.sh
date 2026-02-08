@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,13 +11,13 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_manager.sh || version="0.52"                   #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#               - File: mervlan_manager.sh || version="0.58"                   #
+# ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
 #               settings defined in JSON files.                                #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -29,14 +29,57 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 unset LIB_JSON_LOADED
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
-# Optional CLI override: "mervlan_manager.sh dryrun" (forces dry-run regardless of settings.json)
+[ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
+[ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
+# Optional CLI overrides:
+#   boot                 → boot mode (enables SSID readiness gate)
+#   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
+#   --no-collect         → skip collect_clients.sh (for parallel execution)
+MERV_MANAGER_MODE="normal"
 CLI_DRY_RUN="no"
-case "$1" in
-  dryrun|--dry-run|-n)
-    CLI_DRY_RUN="yes"
-    ;;
-esac
+SKIP_COLLECT="no"
+for arg in "$@"; do
+  case "$arg" in
+    boot)
+      MERV_MANAGER_MODE="boot"
+      ;;
+    dryrun|--dry-run|-n)
+      CLI_DRY_RUN="yes"
+      ;;
+    --no-collect)
+      SKIP_COLLECT="yes"
+      ;;
+  esac
+done
+
+# Boot mode: ensure log directories and files exist before any logging
+# This is critical because install.sh may not have run yet on first boot
+if [ "$MERV_MANAGER_MODE" = "boot" ]; then
+  _boot_logdir="${TMPDIR:-/tmp/mervlan_tmp}/logs"
+  mkdir -p "$_boot_logdir" 2>/dev/null || :
+  [ -f "$_boot_logdir/cli_output.log" ] || : > "$_boot_logdir/cli_output.log" 2>/dev/null || :
+  [ -f "$_boot_logdir/vlan_manager.log" ] || : > "$_boot_logdir/vlan_manager.log" 2>/dev/null || :
+  chmod 644 "$_boot_logdir/cli_output.log" "$_boot_logdir/vlan_manager.log" 2>/dev/null || :
+  # Trim logs on boot to prevent unbounded growth (see LOG_MAX_LINES in log_settings.sh)
+  log_trim_all
+fi
+
 # =========================================== End of MerVLAN environment setup #
+
+# ============================================================================ #
+# NODE DETECTION — Check if running on a node (satellite) vs main router      #
+# ============================================================================ #
+# Read IS_NODE and NODE_ID from settings.json (set by execute_nodes.sh)
+MERV_IS_NODE="$(json_get_flag IS_NODE 0 "$SETTINGS_FILE")"
+MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
+
+# Initialize SSID filter based on node identity (affects which SSIDs we manage)
+ssid_filter_init "$MERV_NODE_ID"
+info -c vlan "SSID filter: identity=${_SSID_FILTER_TOKEN} node_id=${MERV_NODE_ID:-none}"
+
+# Completion marker directory and file (used by main router to verify node execution)
+MERV_COMPLETION_DIR="/tmp/mervlan_tmp/results/node_complete"
+MERV_COMPLETION_MARKER="$MERV_COMPLETION_DIR/node_${MERV_NODE_ID}.marker"
 
 # ========================================================================== #
 # JSON HELPERS — BusyBox-safe parsing for settings and hardware JSON files    #
@@ -50,14 +93,21 @@ esc_key() {
   json_escape_key "$@"
 }
 
-# read_json — Extract scalar value from JSON file by key name
+# read_json_raw — Extract scalar value from JSON file by key name (no NODE_ID remapping)
 # Args: $1=key_name, $2=file_path
 # Returns: stdout value (quoted string or bare number), or empty if not found
 # Explanation: Uses sed with enhanced regex to handle escaped quotes. Prefers
 #   quoted strings; falls back to bare values for numbers. Trims whitespace.
-read_json() {
+read_json_raw() {
   # Backwards-compatible wrapper: delegate to centralized json_get_scalar
   json_get_scalar "$1" "$2"
+}
+
+# read_json — Early alias for read_json_raw (pre-NODE_ID wrapper)
+# Args: $1=key_name, $2=file_path
+# Returns: stdout value from json_get_scalar
+read_json() {
+  read_json_raw "$@"
 }
 
 # read_json_number — Extract numeric value from JSON key (grep only digits)
@@ -98,48 +148,33 @@ read_json_array() {
   json_get_array "$1" "$2"
 }
 
-detect_trunk_ports() {
-  TRUNK_ENABLED_PORTS=""
-  local idx val port
-
+detect_trunks_configured() {
+  local idx val
   idx=1
   while [ $idx -le 8 ]; do
     val=$(read_json_number "TRUNK${idx}" "$SETTINGS_FILE")
-    if [ -z "$val" ]; then
-      val=$(read_json_number "trunk${idx}" "$SETTINGS_FILE")
-    fi
-    case "$val" in
-      ''|0) ;;
-      *)
-        if [ "$val" -ge 1 ] 2>/dev/null && [ "$val" -le 8 ] 2>/dev/null; then
-          port="eth${val}"
-          case " $TRUNK_ENABLED_PORTS " in
-            *" $port "*) ;;
-            *) TRUNK_ENABLED_PORTS="${TRUNK_ENABLED_PORTS} $port" ;;
-          esac
-        fi
-        ;;
-    esac
+    [ -z "$val" ] && val=$(read_json_number "trunk${idx}" "$SETTINGS_FILE")
+    [ -z "$val" ] && val=$(json_get_section2_int "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    [ -z "$val" ] && val=$(json_get_section2_int "VLAN" "Trunks" "trunk${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    case "$val" in ''|0) ;; *) return 0 ;; esac
     idx=$((idx + 1))
   done
-
-  TRUNK_ENABLED_PORTS=$(printf '%s\n' "$TRUNK_ENABLED_PORTS" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+  return 1
 }
 
 run_trunk_if_configured() {
   TRUNK_APPLIED=0
-  detect_trunk_ports
 
-  if [ -z "$TRUNK_ENABLED_PORTS" ]; then
+  if ! detect_trunks_configured; then
     info -c cli,vlan "No trunk configuration enabled. Skipping."
     return 0
   fi
 
-  info -c cli,vlan "Trunk enabled on: $TRUNK_ENABLED_PORTS. Configuring..."
+  info -c cli,vlan "Trunk config detected. Running trunk script..."
 
   if [ ! -x "$FUNCDIR/mervlan_trunk.sh" ]; then
-    warn -c cli,vlan "Trunk configuration skipped because this is a node or remote AP"
-    return 1
+    info -c cli,vlan "Node/remote AP: trunk script not present; skipping trunk config"
+    return 0
   fi
 
   if DRY_RUN="$DRY_RUN" UPLINK_PORT="$UPLINK_PORT" DEFAULT_BRIDGE="$DEFAULT_BRIDGE" MAX_TRUNKS=8 \
@@ -179,7 +214,6 @@ to_lower() {
 
 BOUND_IFACES=""
 WATCH_IFACES=""
-TRUNK_ENABLED_PORTS=""
 TRUNK_APPLIED=0
 
 # ========================================================================== #
@@ -224,9 +258,22 @@ fi
 
 # Extract user configuration from settings.json
 TOPOLOGY="switch"
-PERSISTENT=$(read_json PERSISTENT "$SETTINGS_FILE")
-DRY_RUN=$(read_json DRY_RUN "$SETTINGS_FILE")
-ENABLE_STP=$(read_json ENABLE_STP "$SETTINGS_FILE")
+PERSISTENT=$(read_json_raw PERSISTENT "$SETTINGS_FILE")
+DRY_RUN=$(read_json_raw DRY_RUN "$SETTINGS_FILE")
+ENABLE_STP=$(read_json_raw ENABLE_STP "$SETTINGS_FILE")
+
+# Extract NODE_ID early (before node-aware read_json wrapper is defined)
+NODE_ID=$(read_json_raw NODE_ID "$SETTINGS_FILE")
+if [ -z "$NODE_ID" ]; then
+  NODE_ID=$(read_json_section_value "General" "NODE_ID" "$SETTINGS_FILE")
+fi
+[ -z "$NODE_ID" ] && NODE_ID="none"
+
+# Normalize invalid NODE_IDs to prevent unexpected behavior
+case "$NODE_ID" in
+  none|1|2|3|4|5) : ;;
+  *) NODE_ID="none" ;;
+esac
 
 # Apply defaults for unconfigured values
 [ -z "$MAX_SSIDS" ] && MAX_SSIDS=12
@@ -256,6 +303,45 @@ PERSISTENT="no"
 # Resolve bridge and WAN interface
 UPLINK_PORT="$WAN_IF"
 DEFAULT_BRIDGE="br0"
+
+# ========================================================================== #
+# NODE-AWARE read_json WRAPPER — Intercept ETH VLAN reads for node overrides #
+# ========================================================================== #
+
+# read_json — Smart wrapper that redirects ETH*_VLAN reads based on NODE_ID
+# Args: $1=key_name, $2=file_path
+# Returns: stdout value from appropriate pool (node override or main)
+# Explanation: When NODE_ID is 1-5, intercepts ETH1_VLAN..ETH8_VLAN reads
+#   and redirects to NODE{n}_ETH{idx}_VLAN. No fallback to main pool.
+#   All other keys pass through to read_json_raw unchanged.
+read_json() {
+  local key="$1"
+  local file="$2"
+  local idx okey val
+
+  # Only redirect ETH port VLAN reads, only for settings.json, only on nodes
+  case "$NODE_ID" in
+    1|2|3|4|5)
+      if [ "$file" = "$SETTINGS_FILE" ]; then
+        case "$key" in
+          ETH[1-8]_VLAN)
+            idx="${key#ETH}"      # "1_VLAN"
+            idx="${idx%_VLAN}"    # "1"
+            okey="NODE${NODE_ID}_ETH${idx}_VLAN"
+
+            val="$(read_json_raw "$okey" "$file")"
+            [ -z "$val" ] && val="none"   # strict modular: no fallback to main
+            printf '%s' "$val"
+            return 0
+            ;;
+        esac
+      fi
+      ;;
+  esac
+
+  # Main unit (NODE_ID=none) or non-ETH keys: normal read
+  read_json_raw "$key" "$file"
+}
 
 # ========================================================================== #
 # STATE TRACKING & AUDIT — Change log, cleanup on exit, change tracking      #
@@ -484,77 +570,92 @@ ensure_vlan_bridge() {
     return 0
   fi
 
-  # Check if VLAN interface already exists (eth0.VID, for example)
+  # ---- Uplink VLAN sub-interface (needed by every path below) ----
   if ! iface_exists "${UPLINK_PORT}.${VID}"; then
     if [ "$DRY_RUN" = "yes" ]; then
-      # Dry-run: show what would be executed
       echo "[DRY-RUN] ip link add link $UPLINK_PORT name ${UPLINK_PORT}.${VID} type vlan id $VID"
       echo "[DRY-RUN] ip link set ${UPLINK_PORT}.${VID} up"
     else
-      # Create VLAN sub-interface (e.g., eth0.100)
       ip link add link "$UPLINK_PORT" name "${UPLINK_PORT}.${VID}" type vlan id "$VID" 2>/dev/null || \
       iface_exists "${UPLINK_PORT}.${VID}" || {
         error -c cli,vlan "Failed to create VLAN interface ${UPLINK_PORT}.${VID}"
         return 1
       }
-      # Bring interface up (enter active state)
       ip link set "${UPLINK_PORT}.${VID}" up 2>/dev/null
       info -c cli,vlan "Created VLAN interface ${UPLINK_PORT}.${VID}"
       track_change "Created VLAN interface ${UPLINK_PORT}.${VID}"
     fi
   fi
 
-  # Check if bridge brVID exists (e.g., br100)
-  if ! brctl show 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "br${VID}"; then
+  # ---- Bridge (sysfs-first detection) ----
+  if ! iface_exists "br${VID}"; then
+    # --- New bridge ---
     if [ "$DRY_RUN" = "yes" ]; then
       echo "[DRY-RUN] brctl addbr br${VID}"
+      stp_set_bridge_mac "$VID" "$DRY_RUN"
       echo "[DRY-RUN] brctl addif br${VID} ${UPLINK_PORT}.${VID}"
       echo "[DRY-RUN] ip link set br${VID} up"
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        echo "[DRY-RUN] brctl stp br${VID} on"
-        echo "[DRY-RUN] brctl setfd br${VID} 15"
-      else
-        echo "[DRY-RUN] brctl stp br${VID} off"
-        echo "[DRY-RUN] brctl setfd br${VID} 0"
-      fi
+      stp_apply_policy "$VID" "$DRY_RUN" "${ENABLE_STP:-0}"
     else
-      # Create bridge interface
+      # 1. Create bridge
       brctl addbr "br${VID}" 2>/dev/null || {
         error -c cli,vlan "Failed to create bridge br${VID}"
         return 1
       }
-      # Add VLAN interface to bridge
-      brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null
-      # Bring bridge up (enter active state)
-      ip link set "br${VID}" up 2>/dev/null
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        brctl stp "br${VID}" on 2>/dev/null
-        brctl setfd "br${VID}" 15 2>/dev/null
-      else
-        brctl stp "br${VID}" off 2>/dev/null
-        brctl setfd "br${VID}" 0 2>/dev/null
+      # 2. Set deterministic MAC while bridge is still empty/down
+      if ! stp_set_bridge_mac "$VID" "$DRY_RUN"; then
+        if [ "${ENABLE_STP:-0}" -eq 1 ] 2>/dev/null; then
+          error -c cli,vlan "ensure_vlan_bridge: FATAL — MAC set failed on new br${VID} with STP enabled; removing bridge"
+          brctl delbr "br${VID}" 2>/dev/null
+          return 1
+        fi
+        warn -c cli,vlan "ensure_vlan_bridge: MAC set failed on new br${VID} (STP off, continuing)"
       fi
+      # 3. Add uplink VLAN interface
+      brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null || {
+        error -c cli,vlan "Failed to attach uplink ${UPLINK_PORT}.${VID} to br${VID}"
+        brctl delbr "br${VID}" 2>/dev/null
+        return 1
+      }
+      # 4. Bring bridge up
+      ip link set "br${VID}" up 2>/dev/null
+      # 5. STP policy
+      stp_apply_policy "$VID" "$DRY_RUN" "${ENABLE_STP:-0}"
       info -c cli,vlan "Created bridge br${VID}"
       track_change "Created bridge br${VID}"
     fi
   else
-    if [ "$DRY_RUN" = "yes" ]; then
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        echo "[DRY-RUN] brctl stp br${VID} on"
-        echo "[DRY-RUN] brctl setfd br${VID} 15"
-      else
-        echo "[DRY-RUN] brctl stp br${VID} off"
-        echo "[DRY-RUN] brctl setfd br${VID} 0"
+    # --- Existing bridge: enforce MAC + policy ---
+    if [ "${ENABLE_STP:-0}" -eq 1 ] 2>/dev/null; then
+      if ! stp_force_bridge_mac "$VID" "$DRY_RUN"; then
+        error -c cli,vlan "ensure_vlan_bridge: FATAL — failed to enforce bridge MAC on br${VID} with STP enabled"
+        return 1
       fi
     else
-      if [ "${ENABLE_STP:-0}" -eq 1 ]; then
-        brctl stp "br${VID}" on 2>/dev/null
-        brctl setfd "br${VID}" 15 2>/dev/null
-      else
-        brctl stp "br${VID}" off 2>/dev/null
-        brctl setfd "br${VID}" 0 2>/dev/null
+      stp_set_bridge_mac "$VID" "$DRY_RUN"
+    fi
+    # Ensure uplink VLAN iface is a member (force-mac may have detached it)
+    if [ "$DRY_RUN" = "yes" ]; then
+      echo "[DRY-RUN] ensure ${UPLINK_PORT}.${VID} is member of br${VID}"
+    else
+      if ! member_of_bridge "br${VID}" "${UPLINK_PORT}.${VID}"; then
+        brctl addif "br${VID}" "${UPLINK_PORT}.${VID}" 2>/dev/null || {
+          error -c cli,vlan "ensure_vlan_bridge: FATAL — could not attach uplink ${UPLINK_PORT}.${VID} to br${VID}"
+          return 1
+        }
+        info -c cli,vlan "ensure_vlan_bridge: re-attached uplink ${UPLINK_PORT}.${VID} to br${VID}"
+      fi
+      # Best-effort: make sure bridge is up
+      ip link set "br${VID}" up 2>/dev/null
+      # Post-enforcement verification (STP only — log mismatch for diagnostics)
+      if [ "${ENABLE_STP:-0}" -eq 1 ] 2>/dev/null; then
+        stp_verify_bridge_mac "$VID" || {
+          error -c cli,vlan "ensure_vlan_bridge: FATAL — bridge MAC verification failed on br${VID}"
+          return 1
+        }
       fi
     fi
+    stp_apply_policy "$VID" "$DRY_RUN" "${ENABLE_STP:-0}"
   fi
 }
 
@@ -598,7 +699,9 @@ member_of_bridge() {
 verify_interface_binding() {
   iface="$1"
   vid="$2"
-  [ "$vid" = "none" ] || [ "$vid" = "trunk" ] && return 0
+  case "$vid" in
+    none|trunk) return 0 ;;
+  esac
   member_of_bridge "br${vid}" "$iface"
 }
 
@@ -850,6 +953,131 @@ EOF
 }
 
 # ========================================================================== #
+# BOOT SSID READINESS GATE — Wait for configured SSIDs during boot mode      #
+# ========================================================================== #
+
+# ssid_in_nvram — Check if an SSID exists anywhere in nvram
+# Args: $1=ssid_name
+# Returns: 0 if found, 1 if not found
+ssid_in_nvram() {
+  _needle="$1"
+  [ -n "$_needle" ] || return 1
+  # Cache nvram output for efficiency (only fetch once)
+  [ -n "${_NVRAM_SSID_CACHE:-}" ] || _NVRAM_SSID_CACHE="$(nvram show 2>/dev/null | grep '_ssid=')"
+  printf '%s\n' "$_NVRAM_SSID_CACHE" | grep -Fq "_ssid=$_needle"
+}
+
+# boot_wait_for_configured_ssids — Block until configured SSIDs are ready (boot mode only)
+# Args: $1=timeout_seconds (default 30)
+# Returns: 0 always (logs warnings on timeout/missing SSIDs, continues anyway)
+# Purpose: Reduce boot race conditions by waiting for WLAN interfaces to appear
+boot_wait_for_configured_ssids() {
+  [ "$MERV_MANAGER_MODE" = "boot" ] || return 0
+
+  timeout="${1:-30}"
+  case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+
+  # Build list of configured SSIDs from settings.json (filtered by node assignment)
+  cfg=""
+  i=1
+  while [ "$i" -le "${MAX_SSIDS:-12}" ]; do
+    ssid="$(get_ssid_slot_value "$i" "$SETTINGS_FILE")"
+    # Check for fatal filter condition (hardware profile not ready)
+    if [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c cli,vlan "Boot SSID wait: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
+      return 1
+    fi
+    [ -z "$ssid" ] && ssid="unused-placeholder"
+    if [ "$ssid" != "unused-placeholder" ]; then
+      cfg="${cfg}
+$i|$ssid"
+    fi
+    i=$((i+1))
+  done
+  cfg="$(printf '%s\n' "$cfg" | sed '/^$/d')"
+
+  [ -n "$cfg" ] || {
+    info -c cli,vlan "Boot SSID wait: no SSIDs configured"
+    return 0
+  }
+
+  info -c cli,vlan "Boot SSID wait: validating configured SSIDs vs nvram, then waiting up to ${timeout}s for interfaces..."
+
+  # Partition SSIDs: in nvram (wait for interface) vs missing (likely typo)
+  missing_nvram=""
+  waitlist=""
+  while IFS='|' read -r idx ssid; do
+    [ -n "$idx" ] || continue
+    if ssid_in_nvram "$ssid"; then
+      waitlist="${waitlist}
+$idx|$ssid"
+    else
+      missing_nvram="${missing_nvram}
+SSID_$(printf '%02d' "$idx")='$ssid'"
+    fi
+  done <<EOF
+$cfg
+EOF
+
+  if [ -n "$missing_nvram" ]; then
+    warn -c cli,vlan "Boot SSID wait: SSID(s) not found in nvram (likely typo or not configured in Wireless GUI):"
+    printf '%s\n' "$missing_nvram" | sed '/^$/d' | while IFS= read -r line; do
+      warn -c cli,vlan "  $line"
+    done
+  fi
+
+  waitlist="$(printf '%s\n' "$waitlist" | sed '/^$/d')"
+  [ -n "$waitlist" ] || return 0
+
+  start="$(date +%s 2>/dev/null || echo 0)"
+  case "$start" in ''|*[!0-9]*) start=1 ;; esac
+
+  # Wait until all SSIDs in waitlist resolve to present interfaces, or timeout
+  pending="$waitlist"
+  ready_count=0
+  total_count="$(printf '%s\n' "$waitlist" | wc -l | tr -d ' ')"
+
+  while :; do
+    new_pending=""
+
+    while IFS='|' read -r idx ssid; do
+      [ -n "$idx" ] || continue
+
+      ifn="$(find_if_by_ssid_any "$ssid")"
+      if [ -n "$ifn" ] && iface_exists "$ifn"; then
+        ready_count=$((ready_count + 1))
+      else
+        new_pending="${new_pending}
+$idx|$ssid"
+      fi
+    done <<EOF
+$pending
+EOF
+
+    pending="$(printf '%s\n' "$new_pending" | sed '/^$/d')"
+    [ -z "$pending" ] && {
+      info -c cli,vlan "Boot SSID wait: all $total_count configured SSID interfaces are present"
+      return 0
+    }
+
+    now="$(date +%s 2>/dev/null || echo 0)"
+    case "$now" in ''|*[!0-9]*) now=$((start + timeout + 1)) ;; esac
+
+    if [ $((now - start)) -ge "$timeout" ]; then
+      warn -c cli,vlan "Boot SSID wait: timed out after ${timeout}s ($ready_count/$total_count ready)"
+      warn -c cli,vlan "Boot SSID wait: still missing interface(s) for:"
+      printf '%s\n' "$pending" | while IFS='|' read -r idx ssid; do
+        [ -n "$idx" ] || continue
+        warn -c cli,vlan "  SSID_$(printf '%02d' "$idx")='$ssid'"
+      done
+      return 0
+    fi
+
+    sleep 1
+  done
+}
+
+# ========================================================================== #
 # AP ISOLATION & SSID BINDING — Wireless policy and bridge attachment        #
 # ========================================================================== #
 
@@ -912,12 +1140,38 @@ set_ap_isolation() {
 # Initial pass is immediate; the post-restart second pass acts as the VAP safety net.
 # Also restores unconfigured SSIDs to br0 (prevents orphaning on VLAN changes)
 bind_configured_ssids() {
+  # Build a quick summary of which SSID slots pass the filter
+  _filter_allowed=""
+  _filter_denied=""
+  _fi=1
+  while [ "$_fi" -le "$MAX_SSIDS" ]; do
+    if is_ssid_slot_allowed "$_fi" "$SETTINGS_FILE"; then
+      _fs=$(get_ssid_slot_value "$_fi" "$SETTINGS_FILE")
+      [ "$_fs" != "unused-placeholder" ] && [ -n "$_fs" ] && \
+        _filter_allowed="${_filter_allowed} $(printf '%02d' "$_fi"):${_fs}"
+    else
+      _filter_denied="${_filter_denied} $(printf '%02d' "$_fi")"
+    fi
+    _fi=$((_fi+1))
+  done
+  if [ -n "$_filter_allowed" ]; then
+    info -c cli,vlan "SSID filter [${_SSID_FILTER_TOKEN}] active:${_filter_allowed}"
+  else
+    info -c cli,vlan "SSID filter [${_SSID_FILTER_TOKEN}]: no active SSIDs for this node"
+  fi
+  [ -z "$_filter_denied" ] || info -c vlan "SSID filter [${_SSID_FILTER_TOKEN}] denied slots:${_filter_denied}"
+
   i=1
   # Loop through all SSID slots (SSID_01, SSID_02, etc. up to MAX_SSIDS)
   while [ $i -le "$MAX_SSIDS" ]; do
-    # Read SSID and VLAN settings from JSON (printf %02d = zero-padded decimal)
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
+    # Read SSID and VLAN settings via filter (respects node assignment)
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    # Check for fatal filter condition after first accessor call
+    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c cli,vlan "bind_configured_ssids: aborting due to SSID filter fatal condition"
+      return 1
+    fi
     # Apply defaults: empty SSID = placeholder, empty VLAN = untagged (none)
     [ -z "$ssid" ] && ssid="unused-placeholder"
     [ -z "$vlan" ] && vlan="none"
@@ -1012,12 +1266,10 @@ show_configuration_summary() {
     info -c cli,vlan "  $line"
   done
 
-  if [ -n "${TRUNK_ENABLED_PORTS:-}" ]; then
-    if [ "$TRUNK_APPLIED" -eq 1 ]; then
-      info -c cli,vlan "Trunk summary: enabled on $TRUNK_ENABLED_PORTS"
-    else
-      info -c cli,vlan "Trunk summary: configuration requested on $TRUNK_ENABLED_PORTS but trunk script failed or was skipped"
-    fi
+  if [ "$TRUNK_APPLIED" -eq 1 ]; then
+    info -c cli,vlan "Trunk summary: trunk script applied successfully"
+  elif detect_trunks_configured; then
+    info -c cli,vlan "Trunk summary: trunk config detected but script was not applied"
   fi
 
   if [ "$DRY_RUN" = "yes" ]; then
@@ -1035,6 +1287,43 @@ show_configuration_summary() {
 # CLEANUP & SERVICE RESTART — Remove old config, restart affected services   #
 # ========================================================================== #
 
+# ebt_cleanup_all_trunk_rules — Remove all MerVLAN ebtables trunk chains/jumps
+# Must run before any bridge/VLAN changes to prevent stale ebtables rules from
+# blocking traffic after config changes. Safe to call even if ebtables is absent
+# or no MerVLAN rules exist.
+ebt_cleanup_all_trunk_rules() {
+  # Skip if ebtables binary is not available
+  type ebtables >/dev/null 2>&1 || return 0
+
+  local port chain proto="802_1Q" idx=0
+
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "[DRY-RUN] would clean up ebtables trunk rules for eth0-eth9"
+    return 0
+  fi
+
+  info -c cli,vlan "Cleaning up stale ebtables trunk rules..."
+
+  # Enumerate eth0-eth9 (covers all supported trunk ports)
+  while [ $idx -le 9 ]; do
+    port="eth${idx}"
+    chain="MERV_TRUNK_${port}"
+
+    # Delete ingress jump rules from FORWARD
+    while ebtables -t filter -D FORWARD -p "$proto" -i "$port" -j "$chain" 2>/dev/null; do :; done
+    # Delete egress jump rules from FORWARD
+    while ebtables -t filter -D FORWARD -p "$proto" -o "$port" -j "$chain" 2>/dev/null; do :; done
+    # Flush and delete the per-port chain (ignore errors if nonexistent)
+    ebtables -t filter -F "$chain" 2>/dev/null
+    ebtables -t filter -X "$chain" 2>/dev/null
+
+    idx=$((idx + 1))
+  done
+
+  # Clean up plan file directory from previous runs
+  rm -f /tmp/mervlan_tmp/ebtables/trunk.rules 2>/dev/null || :
+}
+
 # cleanup_existing_config — Remove VLAN infrastructure from previous runs
 # Args: none
 # Returns: none (logs all actions)
@@ -1042,15 +1331,21 @@ show_configuration_summary() {
 # Preserves br0 (default LAN bridge)
 cleanup_existing_config() {
   info -c cli,vlan "Cleaning up existing VLAN config..."
-  
+
+  # --- ebtables: remove all MerVLAN trunk filter rules FIRST ---
+  # Must run before bridge/VLAN teardown to prevent stale rules that reference
+  # chains on interfaces we are about to delete.
+  ebt_cleanup_all_trunk_rules
+
   # Remove VLAN bridges (except br0 - the default LAN bridge)
   # Iterate through all bridges, remove those numbered br1+ (custom VLANs)
   for br in $(brctl show 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^br[1-9][0-9]*$'); do
     if [ "$DRY_RUN" = "yes" ]; then
       echo "[DRY-RUN] detach all ports from $br; ip link set $br down; brctl delbr $br"
     else
-      # Detach any member interfaces so delbr succeeds (handles continuation lines)
-      for port in $(brctl show "$br" 2>/dev/null | awk 'NR>1 { for (i=4; i<=NF; i++) print $i }'); do
+      # Detach any member interfaces so delbr succeeds
+      # Reuse lib_stp's robust sysfs-first + brctl-fallback enumerator
+      for port in $(stp_list_bridge_members "$br"); do
         brctl delif "$br" "$port" 2>/dev/null
       done
       # Bring bridge down before deletion
@@ -1173,15 +1468,25 @@ restart_services() {
   # Skip if dry-run mode
   [ "$DRY_RUN" = "yes" ] && return
 
+  # Create self-restart marker with expiry timestamp to prevent heal_event.sh from
+  # triggering event loops when our service restarts fire service-event callbacks.
+  # We write the expiry time (now + window) so heal_event.sh can check: now < expiry.
+  SELF_RESTART_MARKER="$LOCKDIR/self_restart.marker"
+  SELF_RESTART_WINDOW="${MERV_SELF_RESTART_WINDOW:-45}"
+  now=$(date +%s)
+  printf '%s\n' $((now + SELF_RESTART_WINDOW)) > "$SELF_RESTART_MARKER" 2>/dev/null || :
+
   if is_ap_mode; then
     # Prefer a lighter touch in AP mode to avoid rc race conditions
     safe_service_restart "switch restart" "switch" 30
-    safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
+    # REMOVED restart_httpd: causes GUI logouts. User must refresh browser after changes.
+    info -c cli,vlan "VLAN changes applied. Refresh your browser to see UI updates."
   else
     safe_service_restart "restart_wireless" "restart_wireless|wireless" 90
     sleep 2
     safe_service_restart "switch restart" "switch" 30
-    safe_service_restart "restart_httpd" "httpd|restart_httpd" 15
+    # REMOVED restart_httpd: causes GUI logouts. User must refresh browser after changes.
+    info -c cli,vlan "VLAN changes applied. Refresh your browser to see UI updates."
   fi
 
   if type eapd >/dev/null 2>&1 && [ -x /usr/sbin/eapd ]; then
@@ -1247,13 +1552,40 @@ post_rc_watchdog() {
 # Returns: none (exit code via mervlan_manager.sh script)
 main() {
   acquire_script_lock
+
+  # Clean up stale self-restart markers (older than 60s past expiry)
+  # These markers prevent heal_event.sh loops but should not persist forever
+  _stale_marker="$LOCKDIR/self_restart.marker"
+  if [ -f "$_stale_marker" ]; then
+    _expiry=$(cat "$_stale_marker" 2>/dev/null || echo 0)
+    case "$_expiry" in ''|*[!0-9]*) _expiry=0 ;; esac
+    _now=$(date +%s)
+    if [ $((_now - 60)) -gt "$_expiry" ]; then
+      rm -f "$_stale_marker" 2>/dev/null || :
+    fi
+  fi
+
   # Pre-flight validation: verify required files and settings exist
   validate_configuration
+
+  # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
+  # This only runs when invoked with "boot" argument from services-start
+  boot_wait_for_configured_ssids 30
   
   # Log startup information
   info -c cli,vlan "Starting VLAN manager on $MODEL ($PRODUCTID)"
   info -c cli,vlan "WAN: $WAN_IF, Topology: $TOPOLOGY"
   info -c cli,vlan "Dry Run: $DRY_RUN, Persistent: $PERSISTENT"
+  
+  # Log NODE_ID mode
+  case "$NODE_ID" in
+    1|2|3|4|5)
+      info -c cli,vlan "Node Mode: Using NODE${NODE_ID} Ethernet port overrides"
+      ;;
+    *)
+      info -c cli,vlan "Node Mode: Using main Ethernet port configuration"
+      ;;
+  esac
 
   # Validation phase 1: check all VLAN IDs for syntax errors before any changes
   info -c cli,vlan "Validating VLAN settings..."
@@ -1268,11 +1600,11 @@ main() {
     idx=$((idx+1))
   done
 
-  # Validate SSID VLAN assignments (VLAN_01-VLAN_MAX_SSIDS)
+  # Validate SSID VLAN assignments (VLAN_01-VLAN_MAX_SSIDS, filtered by node assignment)
   i=1
   while [ $i -le "$MAX_SSIDS" ]; do
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    vlan=$(read_json "$(printf "VLAN_%02d" $i)" "$SETTINGS_FILE")
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
     # Only validate if SSID is configured (not empty or placeholder)
     [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && validate_vlan_id "$vlan"
     i=$((i+1))
@@ -1300,11 +1632,11 @@ main() {
   bind_configured_ssids
 
   # Configuration phase 3: Apply AP isolation policies across all SSIDs
-  # Iterate through configured SSIDs and apply APISO_01-APISO_MAX_SSIDS settings
+  # Iterate through configured SSIDs and apply APISO settings (filtered by node assignment)
   i=1
   while [ $i -le "$MAX_SSIDS" ]; do
-    ssid=$(read_json "$(printf "SSID_%02d" $i)" "$SETTINGS_FILE")
-    apiso=$(read_json "$(printf "APISO_%02d" $i)" "$SETTINGS_FILE")
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    apiso=$(get_apiso_slot_value "$i" "$SETTINGS_FILE")
     # Apply AP isolation if SSID is configured and APISO value is set
     if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && [ -n "$apiso" ]; then
       iface=$(find_if_by_ssid_any "$ssid")
@@ -1340,8 +1672,19 @@ main() {
 
   info -c cli,vlan "VLAN manager run completed at $(date '+%H:%M:%S')"
 
+  # On nodes: write completion marker for main router to verify
+  if [ "$MERV_IS_NODE" = "1" ]; then
+    mkdir -p "$MERV_COMPLETION_DIR" 2>/dev/null
+    echo "$(date +%s) NODE$MERV_NODE_ID" > "$MERV_COMPLETION_MARKER"
+    info -c cli,vlan "Node execution complete - marker written"
+  fi
+
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "Dry-run mode; skipping VLAN client list refresh (collect_clients.sh)"
+  elif [ "$MERV_IS_NODE" = "1" ]; then
+    info -c cli,vlan "Running on node; skipping client refresh (handled by main router)"
+  elif [ "$SKIP_COLLECT" = "yes" ]; then
+    info -c cli,vlan "Parallel mode; skipping client refresh (will be run after node verification)"
   elif [ -x "$FUNCDIR/collect_clients.sh" ]; then
     info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
     sleep 5
@@ -1353,7 +1696,7 @@ main() {
       warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
     fi
   else
-    info -c cli,vlan "this is a node; skipping client refresh"
+    info -c cli,vlan "collect_clients.sh not available; skipping client refresh"
   fi
 }
 

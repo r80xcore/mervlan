@@ -1,4 +1,4 @@
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -9,19 +9,43 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: log_settings.sh || version="0.45"                      #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#               - File: log_settings.sh || version="0.46"                      #
+# ============================================================================ #
 # - Purpose:    Define logging settings and environment variables used         #
 #               throughout the MerVLAN addon. Enables colored output,          #
 #               per-channel log files, and syslog integration.                 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 [ -n "${LOG_SETTINGS_LOADED:-}" ] && return 0 2>/dev/null
+
+# ---- merv: portable `command -v` replacement ----
+if ! type merv_has >/dev/null 2>&1; then
+  merv_has() { type "$1" >/dev/null 2>&1; }
+  merv_cmd() {
+    _merv_c="$1"
+    case "$_merv_c" in
+      */*) [ -x "$_merv_c" ] && { printf '%s\n' "$_merv_c"; return 0; } ;;
+    esac
+    _merv_oldIFS="$IFS"; IFS=:
+    for _merv_d in $PATH; do
+      [ -z "$_merv_d" ] && _merv_d="."
+      [ -x "$_merv_d/$_merv_c" ] && { IFS="$_merv_oldIFS"; printf '%s\n' "$_merv_d/$_merv_c"; return 0; }
+    done
+    IFS="$_merv_oldIFS"
+    return 1
+  }
+fi
+# ---- end shim ----
+
 # ===================================================== Central settings setup #
 : "${LOGROOT:=/tmp/mervlan_tmp/logs}"   # default dir for logs
 : "${LOG_TAG:=mervlan}"             # syslog tag
 : "${LOG_SYSLOG:=1}"                # 1 = send marked logs to syslog
 : "${COLOR:=auto}"                  # auto | always | never
+
+# ========================================================== Log trim settings #
+# Maximum lines to keep per log file (set to 0 to disable trimming)
+: "${LOG_MAX_LINES:=2000}"
 
 # ======================================================= Log channel settings #
 # Default command names
@@ -104,6 +128,34 @@ _log_for_each_channel() {
     for ch in "$@"; do printf '%s\n' "$ch"; done
 }
 
+# ========================= Log trimming / rotation =========================== #
+# Trims a single log file to LOG_MAX_LINES (keeps the newest lines).
+# Usage: _log_trim_file "/path/to/logfile"
+_log_trim_file() {
+    _ltf_file="$1"
+    [ -z "$_ltf_file" ] && return 0
+    [ -f "$_ltf_file" ] || return 0
+    [ "${LOG_MAX_LINES:-0}" -gt 0 ] 2>/dev/null || return 0
+
+    _ltf_count=$(wc -l < "$_ltf_file" 2>/dev/null) || return 0
+    _ltf_count=${_ltf_count##* }  # strip leading spaces from wc output
+    [ "$_ltf_count" -le "$LOG_MAX_LINES" ] && return 0
+
+    # Keep last LOG_MAX_LINES lines
+    tail -n "$LOG_MAX_LINES" "$_ltf_file" > "$_ltf_file.tmp" 2>/dev/null && \
+        mv "$_ltf_file.tmp" "$_ltf_file" 2>/dev/null || \
+        rm -f "$_ltf_file.tmp" 2>/dev/null
+}
+
+# Trim all known log channels. Call on boot or periodically.
+# Usage: log_trim_all
+log_trim_all() {
+    for _lta_ch in cli vlan; do
+        _lta_f=$(_log_path_for_channel "$_lta_ch")
+        _log_trim_file "$_lta_f"
+    done
+}
+
 # --------------------------- public API impls --------------------------------
 
 # Unmarked: file-only (good for watchdog). Usage:
@@ -151,7 +203,7 @@ _info_warn_error() {
     for ch in $(_log_for_each_channel "$channels"); do
         _log_append_channel "$ch" "$line"
         # syslog (optional, per-channel with tag suffix)
-        if [ "$LOG_SYSLOG" = 1 ] && [ "$level" = "ERROR" ] && [ "$ch" = "vlan" ] && command -v logger >/dev/null 2>&1; then
+        if [ "$LOG_SYSLOG" = 1 ] && [ "$level" = "ERROR" ] && [ "$ch" = "vlan" ] && merv_has logger; then
             case "$level" in
                 ERROR) 
                     logger -t "${LOG_TAG}:${ch}" -p "user.err" -- "$*"

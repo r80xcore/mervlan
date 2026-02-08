@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <html>
 <head>
-      <!-- index.html version="0.45" -->
+      <!-- index.html version="0.46" -->
   <meta charset="utf-8" />
-  <title>XT8 VLAN Manager - Complete User Guide</title>
+  <title>MerVLAN VLAN Manager - Help & Usage Guide</title>
   <style>
     body { 
         background: #1E1E1E; 
@@ -127,16 +127,17 @@
 </head>
 <body>
   <div class="header">
-    <h1>XT8 VLAN Manager - Help & Usage Guide</h1>
+    <h1>MerVLAN VLAN Manager - Help & Usage Guide</h1>
   </div>
 
   <div class="tabs">
-    <div class="tab active" data-tab="important">Important</div>
-    <div class="tab" data-tab="ssid">SSID Configuration</div>
-    <div class="tab" data-tab="lan">LAN Configuration</div>
-    <div class="tab" data-tab="general">General Settings</div>
-    <div class="tab" data-tab="controls">Controls</div>
-    <div class="tab" data-tab="cli">CLI Box & Active VLANs</div>
+    <div class="tab active" data-tab="start">Getting Started</div>
+    <div class="tab" data-tab="ssid">SSID Setup</div>
+    <div class="tab" data-tab="lan">LAN Setup</div>
+    <div class="tab" data-tab="apply">Apply Changes</div>
+    <div class="tab" data-tab="logs">Logs & Monitoring</div>
+    <div class="tab" data-tab="unsupported">Device Support</div>
+    <div class="tab" data-tab="support">Get Help</div>
   </div>
 
   <div class="content" id="content"></div>
@@ -147,106 +148,544 @@
 
   <script>
     const SECTIONS = {
-      important: `
-MerVLAN - Usage Guide
-==============================
+      start: `
+GETTING STARTED WITH MERVLAN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Welcome to the MerVLAN Manager!
-This tool helps you configure VLANs, SSIDs, LAN ports,
-and access point nodes on your AP.
+Welcome to MerVLAN!
+This addon lets you manage VLANs across your router's SSIDs, 
+LAN ports, and multiple access points or AiMesh nodes.
 
-Before making changes:
-- Always review existing VLAN assignments.
-- Avoid duplicate VLAN IDs between SSIDs and LAN ports.
-- Use [Dry Run] to simulate changes safely.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+ SETUP CHECKLIST (First Time Users)
+
+For Single Router Setup:
+  1. Configure your SSIDs (see "SSID Setup" tab)
+  2. Configure LAN ports if needed (see "LAN Setup" tab)
+  3. Save your settings
+  4. Apply changes
+  5. Done!
+
+For Multi-Node Setup (AiMesh/Multiple APs):
+  1. Install SSH Keys first!
+     Click [SSH Keys Install] button
+     Follow the installation wizard
+    - AiMesh Nodes share the SSH key with the main router, so only one installation is needed for all nodes.
+    - Full AP nodes require separate SSH key installation for each node. Install the same key on all nodes. 
+  
+  2. Configure your nodes
+     Add node IP addresses in the nodes panel
+     Give them friendly names by doubleclicking the name (optional)
+
+     Click [Save Settings] to persist node configurations before syncing
+
+  3. Sync nodes
+     Click [Sync Nodes] to copy MerVLAN to all nodes
+  
+  4. Configure SSIDs
+     Set up SSID → VLAN → AP Isolation → Node Assignment
+  
+  5. Configure LAN ports (if needed)
+  
+  6. Save your settings
+  
+  7. ✅ Apply changes
+     Choose "Local + Nodes" (recommended)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ IMPORTANT TIPS
+
+• Always SAVE before applying changes
+• Use DRY RUN to test configurations safely
+• Avoid duplicate VLAN IDs unless you know what you're doing
+• Check the CLI log for detailed feedback
+• Node assignment defaults to MAIN (single router users can ignore it)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Ready to start? Check the "SSID Setup" tab! →
 `,
       ssid: `
 SSID CONFIGURATION
-------------------------------
-For each SSID:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-• SSID        : Must match an existing SSID from the Merlin GUI. (Empty equals not used)
-• VLAN ID     : Number (2–4096). Avoid duplicates unless intentional.
-• AP Isolation: "On" isolates wireless clients.
+MerVLAN follows this simple flow for each SSID:
 
-Status Icons:
-✅ Valid configuration
-❌ Invalid or missing SSID
-🟡 Duplicate VLAN detected
+  SSID → VLAN → AP Isolation → Node Assignment
 
-Tips:
-- Each SSID can have its own VLAN.
-- AP isolation is recommended for guest networks.
+Let's break it down:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SSID Name
+   • Enter the exact SSID name from your router settings (case-sensitive)
+   • The SSID must already exist in the router's Wireless settings
+   • Leave blank if you're not using that slot
+   • Status: ✅ Valid | ❌ Not found
+
+VLAN ID
+   • Choose a number between 2-4094
+   • Each SSID can have its own VLAN
+   • Avoid duplicates (unless you want SSIDs to share a VLAN)
+   • Status: ✅ Valid | 🟡 Duplicate detected
+
+AP Isolation
+   • "On" = Wireless clients can't see each other
+   • "Off" = Clients can communicate
+   • Recommended: OFF for normal network behaviour, ON if you want to isolate devices (e.g., Guest network)
+   • Only appears when SSID + VLAN are valid
+
+Node Assignment (Multi-Node Only)
+   • Choose which nodes broadcast this SSID
+   • MAIN = The main router
+   • NODE1-5 = Your configured access points/nodes
+   • Multiple selections allowed
+   • For example, you can have "IoT" SSID on both MAIN and NODE1, while "Guest" is only on MAIN
+   • Don't mix enabled nodes with disabled ones for the same SSID - it can cause confusion and unexpected behaviour. If you want an SSID on all nodes, just select them all!
+   • If the SSID is only on a node, deselect MAIN to avoid longer apply times and potential issues.
+      Everything defaults to MAIN automatically.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUICK TIPS
+
+• Name your SSIDs in the main Wireless settings first
+• Check status icons to validate your config
+• Green empty indicators (🟩) mean you have unsaved changes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Example Setup:
+  SSID: "MyHome"     → VLAN: 10  → Isolation: OFF → MAIN
+  SSID: "Guest"      → VLAN: 20  → Isolation: ON  → MAIN
+  SSID: "IoT"        → VLAN: 30  → Isolation: ON  → MAIN, NODE1
+  SSID: "Kids"       → VLAN: 40  → Isolation: OFF → MAIN, NODE2
+
+Next: Configure LAN ports if needed →
 `,
       lan: `
-LAN PORT VLANs
-------------------------------
+LAN PORT CONFIGURATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Assign VLANs to physical LAN ports.
+This lets you isolate wired devices too!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 For each LAN port:
 
-• VLAN ID     : Number (2–4096). Avoid duplicates unless intentional.
-• Port Isolation: "On" isolates this port from others.
+• VLAN ID
+  Number between 2-4094
+  Can match SSID VLANs to bridge wireless + wired
 
-Same status icons as SSIDs apply.
+• Trunk
+  If enabled, the user can select which VLANs are tagged on this port and which is the untagged/native VLAN. This is for advanced users who want to connect another switch or access point that handles VLAN tagging itself. This feature is experimental and may not work perfectly on all devices. Use with caution or if you want to help debugging!
 
-Access Point Nodes (optional):
-- Define up to 5 AP nodes (IP addresses)
-- Example: 192.168.1.10
-- Status icons:
-  ✅ Valid IP
-  ❌ Invalid or missing IP
-`,
-      general: `
-GENERAL SETTINGS
-------------------------------
-[PERSISTENT]
-Toggles whether settings are committed to nvram.
-- "On"  = Saved across reboots.
-- "Off" = Temporary, cleared on reboot.
 
-[DRY RUN]
-Simulates VLAN changes without applying them.
-Useful for verifying configurations.
-
-Buttons:
-• [Save]  → Save settings to settings.conf
-• [Load]  → Load previously saved settings
-• [Clear] → Reset all fields to blank
-
-`,
-      controls: `
-CONTROLS
-------------------------------
-• [Apply VLAN] → Apply the current VLAN configuration.
-• [Sync Nodes]       → Synchronize all AP nodes.
-• [Enable Service]   → Enable VLAN Manager on boot.
-• [Disable Service]  → Disable auto-start.
-• [Service Status]   → Show current service status.
-• [SSH Key Install]  → Open SSH key installation & guide.
-
-Tips:
-- Always save before running the manager.
-- "Enable Service" ensures VLANs persist across reboots and events.
-`,
-      cli: `
-CLI BOX & ACTIVE VLANS
-------------------------------
-The console window displays real-time feedback and command results.
-
-• Commands such as "Apply VLAN" and "Sync Nodes"
-  print output here.
-• [Clear Debug] removes all console text.
-• [Help] opens this usage guide.
-• Active VLANs on main and nodes are listed below the CLI box. Refresh as needed.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 STATUS ICONS
-------------------------------
-✅ Configured and saved
-❎ Not configured
-🟩 Edited but not saved
-❌ Invalid or missing value
-🟡 Duplicate VLAN detected
 
+✅ Valid VLAN configured
+❎ No VLAN assigned (untagged/default)
+🟩 Edited but not saved
+🟡 Duplicate VLAN (check if intentional)
+❌ Invalid VLAN ID
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+COMMON SETUPS
+
+Scenario 1: IoT VLAN on LAN4
+  LAN1-3: Leave blank (default network)
+  LAN4: VLAN 30
+  → Matches "IoT" SSID from SSID Setup
+
+Scenario 2:
+  LAN1: VLAN 10
+  LAN2: VLAN 20
+  LAN3: VLAN 30
+  LAN4: VLAN 40
+  → Each port is its own isolated network
+
+Scenario 3: Guest Network Bridge
+  Guest SSID: VLAN 20
+  LAN2: VLAN 20
+  → Wireless guests and LAN2 share the same network
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+REMEMBER
+
+• Avoid duplicate VLANs unless intentional.
+
+Ready to apply? Check the "Apply Changes" tab →
+`,
+      apply: `
+APPLYING YOUR CONFIGURATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Once you've configured everything, it's time to apply!
+
+MerVLAN automatically detects if you're using multiple nodes
+and offers three apply modes:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+APPLY MODES (Multi-Node Setups)
+
+1. Local Unit Only
+   • Applies changes to this router only
+   • Nodes are not updated
+   • Use when: Testing on main router first
+
+2. Local + Nodes (Recommended)
+   • Applies to main router first
+   • Then propagates to all configured nodes
+   • Use when: Normal operation (most common)
+
+3. Nodes Only
+   • Skips main router
+   • Only updates configured nodes
+   • Use when: Debugging node-specific issues
+
+Single Router: No choice needed - applies immediately!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BEFORE APPLYING
+
+1. Save your configuration
+   Click [Save Settings] to persist changes
+
+2. Optional: Test with Dry Run
+   Enable "Dry Run" mode to simulate without applying
+   Check CLI output for any errors
+
+3. Click [Apply VLAN Manager]
+   Choose your apply mode if multi-node
+   Watch the CLI log for progress
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT HAPPENS DURING APPLY?
+
+Step 1: Validates your configuration
+Step 2: Creates VLAN bridges (brX)
+Step 3: Binds SSIDs to their VLANs
+Step 4: Configures LAN port VLANs
+Step 5: For nodes: Triggers same process remotely via SSH
+
+Progress is shown in the CLI log in real-time!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TROUBLESHOOTING
+
+If apply fails:
+  • Check the CLI log for error messages
+  • Verify SSIDs exist in Wireless settings
+  • Ensure VLAN IDs are valid (2-4094)
+  • For nodes: Verify SSH connection and sync status
+  • Try Dry Run first to spot issues
+
+If nodes don't update:
+  • Click [Sync Nodes] first
+  • Check node IP addresses are correct
+  • Verify SSH keys are installed
+  • Check "Logs & Monitoring" for details
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Want to monitor results? Check "Logs & Monitoring" →
+`,
+      logs: `
+LOGS & MONITORING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MerVLAN provides multiple ways to monitor your setup:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CLI LOG BOX (Main Window)
+
+The console window shows real-time feedback:
+  • Configuration validation results
+  • Apply progress and status
+  • Error messages and warnings
+  • SSH connection status
+  • SSID filtering info (multi-node)
+
+Controls:
+  [Clear CLI] - Removes all console text
+  Auto-scrolls to show latest output
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FULL LOG VIEWER (Separate Window)
+
+Click [View Full Logs] for detailed logging:
+  • Complete execution logs
+  • Timestamps for all operations
+  • Detailed error traces
+  • Historical command output
+
+Perfect for debugging complex issues!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ACTIVE VLANS PANEL
+
+Located below the CLI box, shows:
+  • Main router active VLANs
+  • Each node's active VLANs
+  
+Click [Refresh Active VLANs] to update the display
+
+Example Output:
+  MAIN: br0, br10, br20, br30
+  NODE1 (192.168.1.50): br0, br20, br30
+  NODE2 (192.168.1.51): br0, br30
+
+This confirms which VLANs are actually running!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT TO LOOK FOR
+
+✅ Good Signs:
+  • "✓ SSID 'Name' resolved to wl1.1"
+  • "✓ Successfully bound to br20"
+  • "Filtering SSID identity=MAIN"
+  • "Node setup completed successfully"
+
+❌ Warning Signs:
+  • "SSID 'Name' not found on any band"
+  • "SSH connection failed"
+  • "VLAN ID out of range"
+  • "Fatal: Hardware profile not ready"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEBUGGING TIPS
+
+Problem: SSIDs not binding
+  → Check CLI for "not found" messages
+  → Verify SSID names match exactly (case-sensitive)
+  → Check if SSIDs are enabled in Wireless settings
+
+Problem: Nodes not updating
+  → View Full Logs for SSH errors
+  → Sync Nodes again
+  → Check node IPs in Active VLANs panel
+
+Problem: VLANs not appearing
+  → Refresh Active VLANs panel
+  → Check apply mode (local vs nodes)
+  → Look for error messages in CLI
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Need help? Check "Get Help" tab for support links →
+`,
+      unsupported: `
+DEVICE SUPPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MerVLAN works on most Asuswrt-Merlin devices, but some
+require hardware profile configuration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FULLY SUPPORTED DEVICES
+
+The following devices have complete hardware profiles:
+
+  • RT-AX86U / RT-AX86U Pro / RT-AX86S
+  • RT-AX88U / RT-AX88U Pro
+  • GT-AX11000 / GT-AX11000 Pro
+  • GT-AXE16000
+  • XT8 (AiMesh)
+  • XT12
+  • More being added regularly!
+
+These devices are correctly mapped - no configuration needed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+UNSUPPORTED DEVICE POPUP
+
+If your device isn't recognized, you'll see a popup:
+
+  "Your device [MODEL] is not yet fully supported.
+   Would you like to add hardware support now?"
+
+Don't panic! This just means we need to map your device's
+physical ports and SSID capabilities.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ADDING SUPPORT (Recommended!)
+
+Click "Yes, Add Support" in the popup to:
+
+1. Run the hardware detection tool
+   • Maps your LAN/WAN ports
+   • Detects SSID capabilities
+   • Identifies optimal trunk configuration
+
+2. Review the detected settings
+   • Port mappings shown visually
+   • Max SSIDs detected
+   • Trunk port identified
+
+3. Save the hardware profile
+   • Stored in settings.json
+   • Used for all future operations
+   • Can be updated anytime
+
+Why add support?
+  • Unlocks full port management
+  • Proper SSID filtering
+  • Accurate VLAN assignments
+  • Better error detection
+  • Helps the community!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After the MANUAL MAPPING
+
+1. Configure your VLANs normally
+
+Warning: If you skip adding support, MerVLAN will attempt to guess port mappings capabilities. This may lead to:
+  • Incorrect VLAN assignments
+  • SSIDs not binding properly
+  • Apply failures
+  • Longer apply times
+  • Inability to use advanced features like trunk ports
+
+Note: Some features may be limited without hardware profile.
+      If WAN port isn't mapped correctly the manager wont work correctly at all.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SHARING YOUR PROFILE
+
+After adding support:
+  • Consider sharing your hardware profile
+  • Helps other users with the same device
+  • Post on SNB Forums or Discord (see "Get Help" tab)
+  • We can include it in future versions!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Questions about device support? Get help →
+`,
+      support: `
+GET HELP & SUPPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Need assistance? Have questions? Found a bug?
+The MerVLAN community is here to help!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SNB FORUMS (General Discussion)
+
+Best for: Questions, setup help, sharing configs
+
+https://www.snbforums.com/threads/mervlan-v0-52-1-dev-0-52-7-simple-and-powerful-vlan-management-beta.95936/
+
+  • Active community of users
+  • Developer responses
+  • Configuration examples
+  • Feature discussions
+  • Tips and tricks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DISCORD SERVER (Real-Time Chat)
+
+Best for: Quick questions, live troubleshooting
+
+https://discord.com/invite/8c3C8q54hn
+
+  • Direct chat with developers
+  • Fast community support
+  • Share logs easily
+  • Pre-release testing
+  • General networking chat
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GITHUB ISSUES (Bug Reports)
+
+Best for: Bugs, feature requests, technical issues
+
+https://github.com/r80xcore/mervlan/issues
+
+Before opening an issue:
+  1. Search existing issues first
+  2. Include your device model
+  3. Attach relevant logs (use Full Log Viewer)
+  4. Describe steps to reproduce
+  5. Include your firmware version
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT TO INCLUDE WHEN ASKING FOR HELP
+
+1. Device Information
+   • Router model (e.g., RT-AX86U)
+   • Firmware version
+   • Are you using AiMesh/nodes?
+
+2. Configuration Details
+   • How many SSIDs configured?
+   • How many VLANs?
+   • Multi-node setup?
+
+3. Logs (Very Important!)
+   • CLI output showing the error
+   • Full logs from [View Full Logs]
+   • Screenshot if visual issue
+
+4. What You've Tried
+   • Steps taken so far
+   • Any error messages
+   • Dry run results
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUICK TROUBLESHOOTING
+
+Before asking for help, try these:
+
+  ✓ Check the CLI log for errors
+  ✓ Run a Dry Run to validate config
+  ✓ Verify SSIDs match exactly
+  ✓ For nodes: Sync Nodes first
+  ✓ Check Active VLANs panel
+  ✓ Review the "Logs & Monitoring" tab
+  ✓ Restart router if things seem stuck
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONTRIBUTING
+
+Want to help make MerVLAN better?
+
+  • Share your hardware profile (unsupported devices)
+  • Report bugs you encounter
+  • Suggest features you'd like
+  • Help other users on forums/Discord
+  • Star the GitHub repo!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Happy VLANing!
 `
     };
 
@@ -264,8 +703,8 @@ STATUS ICONS
       tab.addEventListener('click', () => showTab(tab.getAttribute('data-tab')));
     });
 
-    // Default to the first tab
-    showTab('important');
+    // Default to Getting Started tab
+    showTab('start');
   </script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,12 +11,12 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#                - File: update_mervlan.sh || version="0.51B"                   #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#                - File: update_mervlan.sh || version="0.53"                   #
+# ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
@@ -168,6 +168,131 @@ www/vlan_index_style.css"
 
 # required directories in a valid package
 REQUIRED_STAGE_DIRS="functions settings templates www"
+
+# ========================================================================== #
+# SETTINGS.JSON MERGE HELPERS                                                #
+# ========================================================================== #
+
+# merge_settings_json — Merge old settings into new defaults (skip Hardware)
+# Args: $1=old_settings_file, $2=new_settings_file
+# Behavior: Preserves user values from old file, keeps new keys from updated
+#           defaults, and skips all keys under Hardware.
+merge_settings_json() {
+	old_file="$1"
+	new_file="$2"
+	tmp_kv="$TMP_BASE/merge_kv.$$"
+
+	[ -f "$old_file" ] || return 0
+	[ -f "$new_file" ] || return 1
+
+	: > "$tmp_kv"
+
+	if ! awk -v out="$tmp_kv" '
+		function net_braces(s,   t, o, c) {
+			t = s
+			o = gsub(/\{/, "", t)
+			c = gsub(/\}/, "", t)
+			return o - c
+		}
+		function get_name(line,   t) {
+			t = line
+			sub(/^[[:space:]]*"/, "", t)
+			sub(/".*$/, "", t)
+			return t
+		}
+		BEGIN {
+			depth=-1
+			sec=""; subsec=""
+			sec_depth=0; sub_depth=0
+			in_hw=0; hw_depth=0
+		}
+		{
+			line=$0
+
+			# Enter top-level section only when at depth 0
+			if (depth==0 && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*\{/) {
+				sec = get_name(line)
+				sec_depth = depth + net_braces(line)
+				if (sec == "Hardware") {
+					in_hw = 1
+					hw_depth = sec_depth
+				} else {
+					in_hw = 0
+				}
+				subsec = ""
+				sub_depth = 0
+			}
+
+			# Enter subsection only when inside a section at depth 1 (not Hardware)
+			if (!in_hw && sec != "" && depth==1 &&
+			    line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*\{/) {
+				subsec = get_name(line)
+				sub_depth = depth + net_braces(line)
+			}
+
+			# Capture quoted scalar values only (no arrays/objects)
+			if (!in_hw && sec != "" &&
+			    line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*$/) {
+				k = get_name(line)
+				v = line
+				sub(/^[^:]*:[[:space:]]*"/, "", v)
+				sub(/".*$/, "", v)
+				if (k !~ /^_/ && k !~ /^BACKUP_[123]$/) {
+					if (depth==1) {
+						printf "%s|%s|%s|%s\n", sec, "", k, v >> out
+					} else if (subsec != "") {
+						printf "%s|%s|%s|%s\n", sec, subsec, k, v >> out
+					}
+				}
+			}
+
+			# Update depth AFTER processing line
+			depth += net_braces(line)
+
+			# Exit Hardware
+			if (in_hw && depth < hw_depth) {
+				in_hw = 0
+				sec = ""
+				subsec = ""
+			}
+
+			# Exit subsection
+			if (subsec != "" && depth < sub_depth) {
+				subsec = ""
+			}
+
+			# Exit section
+			if (sec != "" && depth < sec_depth) {
+				sec = ""
+				subsec = ""
+			}
+		}
+	' "$old_file"; then
+		return 1
+	fi
+
+	if [ -s "$tmp_kv" ]; then
+		cnt="$(wc -l < "$tmp_kv" 2>/dev/null | tr -d '[:space:]')"
+		[ -n "$cnt" ] || cnt="?"
+		info -c cli,vlan "settings.json merge: extracted $cnt scalar values"
+	else
+		warn -c cli,vlan "settings.json merge: extracted 0 values (old file format mismatch?)"
+		rm -f "$tmp_kv" 2>/dev/null || :
+		return 0
+	fi
+
+	while IFS='|' read -r section subsection key value || [ -n "$section" ]; do
+		[ -n "$section" ] || continue
+		[ -n "$key" ] || continue
+		if [ -n "$subsection" ]; then
+			json_set_section2_value "$section" "$subsection" "$key" "$value" "$new_file" || { rm -f "$tmp_kv" 2>/dev/null || :; return 1; }
+		else
+			json_set_section_value "$section" "$key" "$value" "$new_file" || { rm -f "$tmp_kv" 2>/dev/null || :; return 1; }
+		fi
+	done < "$tmp_kv"
+
+	rm -f "$tmp_kv" 2>/dev/null || :
+}
 
 # ========================================================================== #
 # BACKUP METADATA → settings.json                                            #
@@ -335,7 +460,7 @@ if [ "$MODE" = "restore" ]; then
 
 		if [ ! -d "$MERVLAN_BACKUP_DIR" ]; then
 			warning_msg="No backup directory found at $MERVLAN_BACKUP_DIR"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -346,7 +471,7 @@ if [ "$MODE" = "restore" ]; then
 		set -- "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz
 		if [ ! -e "$1" ]; then
 			warning_msg="No backup archives found in $MERVLAN_BACKUP_DIR"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -367,7 +492,7 @@ if [ "$MODE" = "restore" ]; then
 
 		if [ "$idx" -eq 0 ]; then
 			warning_msg="No backup archives available to restore"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -394,7 +519,7 @@ if [ "$MODE" = "restore" ]; then
 
 		if [ -z "$chosen" ]; then
 			warning_msg="No backup selected"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -425,7 +550,7 @@ if [ "$MODE" = "restore" ]; then
 		RESTORE_BASE="$TMP_DIR/restore.$$"
 		mkdir -p "$RESTORE_BASE" 2>/dev/null || {
 			warning_msg="Failed to create restore workdir: $RESTORE_BASE"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -437,7 +562,7 @@ if [ "$MODE" = "restore" ]; then
 		info -c cli,vlan "Extracting backup $BACKUP_BASENAME"
 		if ! tar -xzf "$chosen" -C "$RESTORE_BASE" 2>/dev/null; then
 			warning_msg="Failed to extract backup archive"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -449,7 +574,7 @@ if [ "$MODE" = "restore" ]; then
 		RESTORE_TREE="$RESTORE_BASE/$BACKUP_BASENAME"
 		if [ ! -d "$RESTORE_TREE" ]; then
 			warning_msg="Restore tree not found at $RESTORE_TREE"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -467,7 +592,7 @@ if [ "$MODE" = "restore" ]; then
 		if [ -d "$MERV_BASE" ]; then
 			if ! rm -rf "$MERV_BASE" 2>/dev/null; then
 				warning_msg="Failed to remove existing MerVLAN directory"
-				if command -v error >/dev/null 2>&1; then
+				if merv_has error; then
 					error -c cli,vlan "$warning_msg"
 				else
 					echo "$warning_msg" >&2
@@ -479,7 +604,7 @@ if [ "$MODE" = "restore" ]; then
 
 		if ! mv "$RESTORE_TREE" "$MERV_BASE" 2>/dev/null; then
 			warning_msg="Failed to move restored tree into place"
-			if command -v error >/dev/null 2>&1; then
+			if merv_has error; then
 				error -c cli,vlan "$warning_msg"
 			else
 				echo "$warning_msg" >&2
@@ -510,8 +635,9 @@ fi
 
 # find curl binary in PATH or fallback to /usr/sbin/curl
 find_curl() {
-	if command -v curl >/dev/null 2>&1; then
-		printf '%s\n' "$(command -v curl)"
+	CURL_PATH=$(merv_cmd curl 2>/dev/null) || CURL_PATH=""
+	if [ -n "$CURL_PATH" ]; then
+		printf '%s\n' "$CURL_PATH"
 	elif [ -x /usr/sbin/curl ]; then
 		printf '%s\n' "/usr/sbin/curl"
 	else
@@ -566,9 +692,9 @@ fi
 # CAPTURE ORIGINAL BOOT STATE (BEFORE TEARDOWN)                              #
 # ========================================================================== #
 if [ -f "$MERV_BASE/settings/settings.json" ]; then
-	if command -v json_get_section_value >/dev/null 2>&1; then
+	if merv_has json_get_section_value; then
 		PRE_BOOT_ENABLED="$(json_get_section_value "General" "BOOT_ENABLED" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
-	elif command -v json_get_flag >/dev/null 2>&1; then
+	elif merv_has json_get_flag; then
 		PRE_BOOT_ENABLED="$(json_get_flag "BOOT_ENABLED" "0" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
 	elif grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$MERV_BASE/settings/settings.json" 2>/dev/null; then
 		PRE_BOOT_ENABLED="1"
@@ -583,38 +709,42 @@ fi
 list_configured_nodes() {
 	[ -f "$SETTINGS_FILE" ] || return 1
 	grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-		sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | \
-		grep -v "none" | \
-		grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+		sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
+		awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
 }
 
 has_configured_nodes() {
-	local nodes
 	nodes=$(list_configured_nodes)
 	[ -n "$nodes" ]
 }
 
 clean_remote_addon_dirs() {
-    local nodes node
     nodes=$(list_configured_nodes)
     if [ -z "$nodes" ]; then
         info -c cli,vlan "Remote cleanup skipped (no nodes configured)"
         return 0
     fi
 
-    if [ ! -f "$SSH_KEY" ]; then
-        info -c cli,vlan "Remote cleanup skipped (SSH key not found)"
+    # If keys are missing, skip cleanly (no freeze, no failure)
+    if ! ssh_keys_effectively_installed; then
+        warn -c cli,vlan "Remote cleanup skipped (SSH keys not installed)"
         return 0
     fi
 
-    for node in $nodes; do
-        if dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-            "$SSH_NODE_USER@$node" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
-            info -c cli,vlan "Cleared remote addon directory on $node"
+    while read -r node_id node_ip; do
+        [ -n "$node_ip" ] || continue
+
+        if merv_ssh_exec "$node_id" "$node_ip" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
+            info -c cli,vlan "Cleared remote addon directory on NODE${node_id} ($node_ip)"
         else
-            warn -c cli,vlan "Failed to clean remote addon directory on $node"
+            merv_ssh_skip_log "$node_id" "$node_ip" "remote cleanup"
+            # IMPORTANT: do not fail the update; just warn and continue
         fi
-    done
+    done <<EOF
+$nodes
+EOF
+
+    return 0
 }
 
 # ========================================================================== #
@@ -794,6 +924,14 @@ for rel_path in $BACKUP_LIST; do
 	backup_file="$BACKUP_DIR/$rel_path"
 	target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
 	if [ -f "$backup_file" ]; then
+		if [ "$rel_path" = "settings/settings.json" ]; then
+			info -c cli,vlan "Merging settings.json (preserve user keys, keep new defaults, skip Hardware)"
+			if ! merge_settings_json "$backup_file" "$target"; then
+				rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+				fail_update restoring_user_data "Failed to merge settings.json"
+			fi
+			continue
+		fi
 		if ! mkdir -p "$(dirname "$target")" 2>/dev/null; then
 			rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
 			fail_update restoring_user_data "Failed to recreate directory for $rel_path"
@@ -818,24 +956,6 @@ rm -rf "$MERV_BASE" 2>/dev/null || \
 if ! mv "$MERVLAN_UPDATED_TREE_DIR" "$MERV_BASE" 2>/dev/null; then
 	fail_update swapping_installation "Failed to activate new installation"
 fi
-
-# Capture boot state before any install scripts can modify settings
-BOOT_ENABLED_FROM_RESTORE="0"
-if [ -f "$MERV_BASE/settings/settings.json" ]; then
-	if command -v json_get_section_value >/dev/null 2>&1; then
-		BOOT_ENABLED_FROM_RESTORE="$(json_get_section_value "General" "BOOT_ENABLED" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
-	elif command -v json_get_flag >/dev/null 2>&1; then
-		BOOT_ENABLED_FROM_RESTORE="$(json_get_flag "BOOT_ENABLED" "0" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
-	elif grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$MERV_BASE/settings/settings.json" 2>/dev/null; then
-		BOOT_ENABLED_FROM_RESTORE="1"
-	fi
-fi
-
-if [ "$BOOT_ENABLED_FROM_RESTORE" != "1" ]; then
-	BOOT_ENABLED_FROM_RESTORE="0"
-fi
-
-info -c cli,vlan "Detected BOOT_ENABLED in restored settings: $BOOT_ENABLED_FROM_RESTORE"
 
 # ========================================================================== #
 # OPTIONAL POST-UPDATE TASKS                                                 #
@@ -907,8 +1027,11 @@ if [ -x "$BOOT_SCRIPT" ]; then
 		warn -c cli,vlan "mervlan_boot.sh setupenable returned non-zero (continuing)"
 	fi
 
-	if [ "$BOOT_ENABLED_FROM_RESTORE" = "1" ]; then
-		info -c cli,vlan "BOOT_ENABLED_FROM_RESTORE=1; enabling MerVLAN boot on main router"
+	# Use PRE_BOOT_ENABLED (captured before teardown) instead of BOOT_ENABLED_FROM_RESTORE
+	# The teardown phase writes BOOT_ENABLED=0 to settings.json before backup, so
+	# BOOT_ENABLED_FROM_RESTORE will always be 0. PRE_BOOT_ENABLED holds the original state.
+	if [ "$PRE_BOOT_ENABLED" = "1" ]; then
+		info -c cli,vlan "PRE_BOOT_ENABLED=1; enabling MerVLAN boot on main router"
 		if ! sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
 			warn -c cli,vlan "mervlan_boot.sh enable returned non-zero (continuing)"
 		fi
@@ -923,7 +1046,7 @@ if [ -x "$BOOT_SCRIPT" ]; then
 			info -c cli,vlan "Node enable skipped (no nodes configured or SSH keys absent)"
 		fi
 	else
-		info -c cli,vlan "BOOT_ENABLED_FROM_RESTORE!=1; leaving MerVLAN boot disabled"
+		info -c cli,vlan "PRE_BOOT_ENABLED!=1; leaving MerVLAN boot disabled"
 	fi
 else
 	warn -c cli,vlan "mervlan_boot.sh not executable; skipping post-update hook setup"

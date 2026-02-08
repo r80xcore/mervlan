@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,12 +11,12 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#                   - File: uninstall.sh || version: 0.45                      #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#                   - File: uninstall.sh || version: 0.46                      #
+# ============================================================================ #
 # - Purpose:    Disable the MerVLAN addon and clean up necessary files.        #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 # ============================================================================ #
 #                  CONFIGURATION & RUNTIME CONTEXT                             #
 # Define global paths, addon identifiers, and helper entry points leveraged    #
@@ -27,6 +27,25 @@ ADDON="Merlin_VLAN_Manager"
 LOGTAG="VLAN"
 ACTION="${1:-standard}"
 source /usr/sbin/helper.sh
+
+# ---- merv: portable `command -v` replacement ----
+if ! type merv_has >/dev/null 2>&1; then
+  merv_has() { type "$1" >/dev/null 2>&1; }
+  merv_cmd() {
+    _merv_c="$1"
+    case "$_merv_c" in
+      */*) [ -x "$_merv_c" ] && { printf '%s\n' "$_merv_c"; return 0; } ;;
+    esac
+    _merv_oldIFS="$IFS"; IFS=:
+    for _merv_d in $PATH; do
+      [ -z "$_merv_d" ] && _merv_d="."
+      [ -x "$_merv_d/$_merv_c" ] && { IFS="$_merv_oldIFS"; printf '%s\n' "$_merv_d/$_merv_c"; return 0; }
+    done
+    IFS="$_merv_oldIFS"
+    return 1
+  }
+fi
+# ---- end shim ----
 
 SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
@@ -617,7 +636,7 @@ _sync_ssh_flag() {
 	local desired="$1"
 	[ -n "$desired" ] || return 0
 
-	if command -v json_set_flag >/dev/null 2>&1; then
+	if merv_has json_set_flag; then
 		json_set_flag "SSH_KEYS_INSTALLED" "$desired" >/dev/null 2>&1
 	fi
 	return 0
@@ -632,7 +651,7 @@ ssh_keys_effectively_installed() {
         have_keys="1"
     fi
 
-    if command -v json_get_flag >/dev/null 2>&1; then
+    if merv_has json_get_flag; then
         # Read flag via JSON helper
         flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
 
@@ -651,7 +670,7 @@ ssh_keys_effectively_installed() {
     fi
 
     # If flag key is missing entirely, sync it to whatever we think it currently is
-    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && command -v json_set_flag >/dev/null 2>&1; then
+    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && merv_has json_set_flag; then
         _sync_ssh_flag "$flag"
         flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
     fi
@@ -700,11 +719,11 @@ remove_nodes_full_install() {
     nodes=$(list_configured_nodes)
     [ -n "$nodes" ] || return 0
 
-    if command -v dbclient >/dev/null 2>&1; then
-        ssh_bin=$(command -v dbclient)
+    if merv_has dbclient; then
+        ssh_bin=$(merv_cmd dbclient) || ssh_bin=""
         impl="dbclient"
-    elif command -v ssh >/dev/null 2>&1; then
-        ssh_bin=$(command -v ssh)
+    elif merv_has ssh; then
+        ssh_bin=$(merv_cmd ssh) || ssh_bin=""
         impl="ssh"
     else
         logger -t "$LOGTAG" "WARNING: No SSH client available; cannot clean nodes"
@@ -788,6 +807,9 @@ if [ -z "$am_page" ]; then
 fi
 
 logger -t "$LOGTAG" "Uninstalling $ADDON page '$am_page'"
+if [ -n "$am_page" ]; then
+    echo "[uninstall] Removing web UI tab: $am_page"
+fi
 
 ########################################
 # 2. Make sure we have a writable copy of menuTree.js
@@ -824,6 +846,7 @@ fi
 # Delete the ASP view so the Tools menu no longer loads MerVLAN
 if [ -n "$am_page" ]; then
     rm -f "/www/user/$am_page"
+    echo "[uninstall] Web UI assets removed"
 fi
 
 # Remove our static asset directory (new path, keep legacy for safety)
@@ -833,12 +856,23 @@ rm -rf /www/user/merlin_vlan_manager 2>/dev/null
 # Remove service-event and addon hooks via setupdisable
 # Run setupdisable to unregister service-event handlers and node sync scripts
 if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-    echo "[uninstall] invoking setupdisable to remove hooks"
+    echo "[uninstall] Removing service-event hooks"
     # Log outcome of setupdisable while skipping node sync for performance
     if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
-        echo "[uninstall] setupdisable completed successfully"
+        echo "[uninstall] Service-event hooks removed"
     else
         echo "[uninstall] WARNING: setupdisable failed" >&2
+    fi
+    
+    # Handle node cleanup if nodes are configured
+    if has_configured_nodes; then
+        node_count=$(list_configured_nodes | wc -w)
+        echo "[uninstall] Removing hooks from $node_count configured node(s)"
+        if sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1; then
+            echo "[uninstall] Node hooks removed successfully"
+        else
+            echo "[uninstall] WARNING: Some node cleanup operations may have failed" >&2
+        fi
     fi
 else
     echo "[uninstall] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
@@ -855,14 +889,21 @@ am_settings_set merlin_vlan_manager_page ""
 am_settings_set merlin_vlan_manager_version ""
 
 logger -t "$LOGTAG" "$ADDON uninstalled"
+echo "[uninstall] MerVLAN uninstalled successfully"
+
 # When ACTION=full, remove addon directories for a clean slate reinstall later
 if [ "$ACTION" = "full" ]; then
+    echo "[uninstall] Running full uninstall (removing all addon data)"
     logger -t "$LOGTAG" "Performing full uninstall (removing addon directories)"
     if has_configured_nodes && ssh_keys_effectively_installed; then
+        node_count=$(list_configured_nodes | wc -w)
+        echo "[uninstall] Removing MerVLAN from $node_count configured node(s)"
         remove_nodes_full_install
+        echo "[uninstall] Node cleanup completed"
     fi
     rm -rf /jffs/addons/mervlan 2>/dev/null
     rm -rf /tmp/mervlan_tmp 2>/dev/null
     rm -rf /www/user/mervlan 2>/dev/null
+    echo "[uninstall] All addon files and data removed"
 fi
 exit 0

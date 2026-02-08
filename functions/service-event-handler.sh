@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,11 +11,11 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#          - File: service-event-handler.sh || version="0.48"                  #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#          - File: service-event-handler.sh || version="0.50"                  #
+# ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 
 # ========================================================================== #
 # BASIC INITIALIZATION                                                       #
@@ -123,7 +123,7 @@ case "${TYPE}_${EVENT}" in
   save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
   executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
   disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr|\
-  update_vlanmgr|updatedev_vlanmgr)
+  clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr)
     APP_EVENT=1
     ;;
 esac
@@ -290,6 +290,12 @@ case "${TYPE}_${EVENT}" in
     # Collect client list from router and nodes (triggered by refresh request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/collect_clients.sh"
     ;;
+  clearclilog_vlanmgr)
+    # Clear CLI output log file (triggered by Clear button in UI)
+    # Uses : to truncate file in place; no script needed
+    : > /tmp/mervlan_tmp/logs/cli_output.log 2>/dev/null || :
+    logger -t "VLANMgr" "handler: clearclilog_vlanmgr - CLI log truncated"
+    ;;
   update_vlanmgr)
     # Update MerVLAN addon from stable channel (triggered by update request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update main
@@ -299,8 +305,29 @@ case "${TYPE}_${EVENT}" in
     dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update dev
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
-  # Wildcard patterns catch restart_* and service events (httpd, wireless, WAN, LAN, NET, FW, NAT, DNS)
-  *restart*|*wireless*|*httpd*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*)
+  # Wildcard patterns catch restart_* and service events (wireless, WAN, LAN, NET, FW, NAT, DNS)
+  # NOTE: httpd intentionally excluded — httpd restarts don't affect VLANs and cause event floods
+  *restart*|*wireless*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*)
+    # Skip httpd events that slip through via *restart* pattern
+    case "$COMBINED_NORM" in
+      *httpd*) 
+        logger -t "VLANMgr" "handler: skipping httpd event ${COMBINED_NORM} (excluded)"
+        exit 0
+        ;;
+    esac
+
+    # Handler-level debounce for system events (prevents heal storms from rc event floods)
+    HEAL_STAMP="$LOCKDIR/heal_event.last"
+    HEAL_WINDOW="${MERV_HEAL_EVENT_DEBOUNCE:-5}"
+    now="$(date +%s 2>/dev/null || echo 0)"
+    last="$(cat "$HEAL_STAMP" 2>/dev/null || echo 0)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$HEAL_WINDOW" ]; then
+      logger -t "VLANMgr" "handler: heal_event debounced (window=${HEAL_WINDOW}s) for ${COMBINED_NORM}"
+      exit 0
+    fi
+    printf '%s\n' "$now" >"$HEAL_STAMP" 2>/dev/null || :
+
     # Fire-and-forget heal so rc can continue applying its own changes
     logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async)"
     (

@@ -1,5 +1,5 @@
 #!/bin/sh
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -10,10 +10,10 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: mervlan_trunk.sh || version="0.51"                     #
-# ──────────────────────────────────────────────────────────────────────────── #
-# ───── MerVLAN environment bootstrap ─────
+# ============================================================================ #
+#               - File: mervlan_trunk.sh || version="0.55"                     #
+# ============================================================================ #
+# =========================================== MerVLAN environment bootstrap == #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
@@ -25,6 +25,7 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_DEBUG_LOADED:-}" ] || . "$MERV_BASE/settings/lib_debug.sh"
+[ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
 
 DBG_CHANNEL="vlan,cli"
 : "${DBG_PREFIX:=[DEBUG]}"
@@ -135,8 +136,182 @@ log_bridge_membership() {
   [ -n "$out" ] && dbg_log "Bridge table snapshot (filtered) for $ifc:" && dbg_log "$out"
 }
 
+# ───── ebtables strict VLAN filtering helpers ─────
+#
+# Per-port user chains filter tagged frames on trunk ports.
+# Only explicitly allowed VLAN IDs pass; all other 802.1Q frames are dropped.
+# Rules use RETURN (not ACCEPT) to avoid overriding user rule policy.
+#
+# Chain naming: MERV_TRUNK_ethX  (e.g. MERV_TRUNK_eth1)
+# Hook:         FORWARD  (both -i and -o for bidirectional tag-leak prevention)
+# Plan file:    /tmp/mervlan_tmp/ebtables/trunk.rules
+
+MERV_EBT_PLANDIR="$TMPDIR/ebtables"
+MERV_EBT_PLANFILE="$MERV_EBT_PLANDIR/trunk.rules"
+MERV_EBT_OK=""         # cached preflight result: "1" = usable, "0" = not
+MERV_EBT_PROTO="802_1Q" # protocol token (overridden if alternate token needed)
+
+# ebt_ok — check ebtables binary exists and supports --vlan-id + -p 802_1Q
+# Sets MERV_EBT_OK=1 on success, MERV_EBT_OK=0 on failure.
+# Returns: 0 if usable, 1 otherwise.
+ebt_ok() {
+  # Return cached result if already tested
+  case "$MERV_EBT_OK" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+
+  # 1) binary must exist
+  if ! type ebtables >/dev/null 2>&1; then
+    info -c vlan,cli "ebtables: binary not found; strict VLAN filtering disabled"
+    MERV_EBT_OK=0
+    return 1
+  fi
+
+  # 2) active test: -p 802_1Q --vlan-id (create disposable chain)
+  _t="_merv_test_$$"
+  ebtables -t filter -N "$_t" 2>/dev/null
+  ebtables -t filter -F "$_t" 2>/dev/null
+  if ! ebtables -t filter -A "$_t" -p "$MERV_EBT_PROTO" --vlan-id 188 -j RETURN 2>/dev/null; then
+    # Try without explicit proto token (some builds)
+    ebtables -t filter -F "$_t" 2>/dev/null
+    ebtables -t filter -X "$_t" 2>/dev/null
+    warn -c vlan,cli "ebtables: --vlan-id / -p $MERV_EBT_PROTO not supported; strict VLAN filtering disabled"
+    MERV_EBT_OK=0
+    return 1
+  fi
+  ebtables -t filter -F "$_t" 2>/dev/null
+  ebtables -t filter -X "$_t" 2>/dev/null
+
+  info -c vlan,cli "ebtables: preflight passed (proto=$MERV_EBT_PROTO, --vlan-id ok)"
+  MERV_EBT_OK=1
+  return 0
+}
+
+# ebt_run — run an ebtables command, honouring DRY_RUN
+# Args: all arguments forwarded to ebtables
+# Returns: ebtables exit code (0 on dry-run)
+ebt_run() {
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c vlan,cli "[DRY-RUN] ebtables $*"
+    return 0
+  fi
+  ebtables "$@" 2>/dev/null
+}
+
+# ebt_port_chain — print the chain name for a given port
+# Args: $1=port (e.g. eth1)
+# Stdout: MERV_TRUNK_eth1
+ebt_port_chain() {
+  printf 'MERV_TRUNK_%s\n' "$1"
+}
+
+# ebt_begin_plan — create plan directory and truncate plan file
+ebt_begin_plan() {
+  [ "$DRY_RUN" = "yes" ] && return 0
+  mkdir -p "$MERV_EBT_PLANDIR" 2>/dev/null || :
+  : > "$MERV_EBT_PLANFILE" 2>/dev/null || :
+}
+
+# ebt_plan_line — append a command line to the plan file
+# Args: $1=command string
+ebt_plan_line() {
+  [ "$DRY_RUN" = "yes" ] && return 0
+  printf '%s\n' "$1" >> "$MERV_EBT_PLANFILE" 2>/dev/null || :
+}
+
+# ebt_cleanup_port — remove all MERV jump rules and chain for a single port
+# Args: $1=port (e.g. eth1)
+# Safe to call even if no rules/chain exist for that port.
+# Respects DRY_RUN — will only log what would be removed.
+ebt_cleanup_port() {
+  local port="$1" chain
+  [ -n "$port" ] || return 0
+  chain="$(ebt_port_chain "$port")"
+
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c vlan,cli "[DRY-RUN] would cleanup ebtables chain $chain for $port"
+    return 0
+  fi
+
+  # Delete ingress jump from FORWARD (-i port)
+  while ebtables -t filter -D FORWARD -p "$MERV_EBT_PROTO" -i "$port" -j "$chain" 2>/dev/null; do :; done
+  # Delete egress jump from FORWARD (-o port)
+  while ebtables -t filter -D FORWARD -p "$MERV_EBT_PROTO" -o "$port" -j "$chain" 2>/dev/null; do :; done
+  # Flush and delete the per-port chain
+  ebtables -t filter -F "$chain" 2>/dev/null
+  ebtables -t filter -X "$chain" 2>/dev/null
+}
+
+# ebt_apply_port — create per-port chain with allowed VIDs, install FORWARD jumps
+# Args: $1=port, $2=space-separated list of allowed VIDs (may be empty)
+# An empty allow list means: drop ALL tagged frames on that trunk port.
+ebt_apply_port() {
+  local port="$1" allow_vids="$2" chain vid
+  [ -n "$port" ] || return 0
+  chain="$(ebt_port_chain "$port")"
+
+  # Clean existing rules for this port first (idempotent)
+  ebt_cleanup_port "$port"
+
+  # Create user chain (create-or-flush: -N may fail if chain survives cleanup)
+  ebt_run -t filter -N "$chain" || :
+  ebt_run -t filter -F "$chain" || :
+  ebt_plan_line "ebtables -t filter -N $chain"
+  ebt_plan_line "ebtables -t filter -F $chain"
+
+  # RETURN rules for each allowed VID
+  for vid in $allow_vids; do
+    ebt_run -t filter -A "$chain" -p "$MERV_EBT_PROTO" --vlan-id "$vid" -j RETURN
+    ebt_plan_line "ebtables -t filter -A $chain -p $MERV_EBT_PROTO --vlan-id $vid -j RETURN"
+  done
+
+  # Drop all other tagged frames
+  ebt_run -t filter -A "$chain" -p "$MERV_EBT_PROTO" -j DROP
+  ebt_plan_line "ebtables -t filter -A $chain -p $MERV_EBT_PROTO -j DROP"
+
+  # Install FORWARD jumps at position 1 (ingress + egress)
+  # Using -I (insert) instead of -A (append) ensures strict filtering cannot
+  # be bypassed by earlier broad ACCEPT rules in FORWARD.
+  ebt_run -t filter -I FORWARD 1 -p "$MERV_EBT_PROTO" -i "$port" -j "$chain"
+  ebt_plan_line "ebtables -t filter -I FORWARD 1 -p $MERV_EBT_PROTO -i $port -j $chain"
+
+  ebt_run -t filter -I FORWARD 1 -p "$MERV_EBT_PROTO" -o "$port" -j "$chain"
+  ebt_plan_line "ebtables -t filter -I FORWARD 1 -p $MERV_EBT_PROTO -o $port -j $chain"
+
+  local vid_count=0
+  for vid in $allow_vids; do vid_count=$((vid_count + 1)); done
+  info -c vlan,cli "ebtables: applied strict filter on $port ($vid_count VIDs allowed, allow=${allow_vids:-<none>})"
+}
+
 # ───── Low level helpers ─────
 iface_exists() { [ -d "/sys/class/net/$1" ]; }
+
+list_bridge_members() {
+  local br="$1" path
+  [ -n "$br" ] || return 0
+
+  if [ -d "/sys/class/net/$br/brif" ]; then
+    for path in "/sys/class/net/$br/brif"/*; do
+      [ -e "$path" ] || continue
+      printf '%s\n' "${path##*/}"
+    done
+    return 0
+  fi
+
+  brctl show "$br" 2>/dev/null | awk '
+    NR==1 { next }
+    NF>=4 { for (i=4;i<=NF;i++) print $i; next }
+    NF==1 { print $1 }
+  '
+}
+
+bridge_has_if() {
+  local br="$1" ifc="$2"
+  [ -n "$br" ] || return 1
+  [ -n "$ifc" ] || return 1
+  list_bridge_members "$br" | grep -qx "$ifc"
+}
 
 ensure_port_up() {
   local ifc="$1"
@@ -162,7 +337,7 @@ ensure_vlan_bridge() {
   iface_exists "$UPLINK_PORT" || { error -c vlan,cli "ensure_vlan_bridge: uplink $UPLINK_PORT missing"; return 1; }
   ensure_port_up "$UPLINK_PORT" || { error -c vlan,cli "ensure_vlan_bridge: cannot bring uplink $UPLINK_PORT up"; return 1; }
 
-  # Create VLAN sub-interface on uplink only if it doesn't exist
+  # ---- Uplink VLAN sub-interface (needed by every path below) ----
   if ! iface_exists "$uplink_vlan"; then
     if ! run_cmd ip link add link "$UPLINK_PORT" name "$uplink_vlan" type vlan id "$vid"; then
       error -c vlan,cli "ensure_vlan_bridge: failed to create $uplink_vlan"
@@ -171,37 +346,68 @@ ensure_vlan_bridge() {
   fi
   run_cmd ip link set "$uplink_vlan" up || { error -c vlan,cli "ensure_vlan_bridge: failed to set $uplink_vlan up"; return 1; }
 
-  # Create bridge only if missing (idempotent and additive)
-  if ! brctl show 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$br"; then
+  # ---- Bridge (sysfs-first detection) ----
+  if ! iface_exists "$br"; then
+    # --- New bridge ---
     if ! run_cmd brctl addbr "$br"; then
       error -c vlan,cli "ensure_vlan_bridge: failed to create bridge $br"
       return 1
     fi
-    run_cmd ip link set "$br" up || warn -c vlan,cli "ensure_vlan_bridge: failed to set $br up"
-  fi
-
-  # Ensure uplink vlan is a member of the bridge (single brctl call for membership)
-  members=$(brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}')
-  if ! printf '%s
-' "$members" | grep -qx "$uplink_vlan"; then
+    # Set deterministic MAC while bridge is still empty/down
+    if ! stp_set_bridge_mac "$vid" "${DRY_RUN:-no}"; then
+      if [ "${STP_ENABLED:-0}" -eq 1 ] 2>/dev/null; then
+        error -c vlan,cli "ensure_vlan_bridge: FATAL — MAC set failed on new $br with STP enabled; removing bridge"
+        run_cmd brctl delbr "$br"
+        return 1
+      fi
+      warn -c vlan,cli "ensure_vlan_bridge: MAC set failed on new $br (STP off, continuing)"
+    fi
+    # Add uplink VLAN interface to bridge
     if ! run_cmd brctl addif "$br" "$uplink_vlan"; then
-      error -c vlan,cli "ensure_vlan_bridge: failed to add $uplink_vlan to $br"
+      error -c vlan,cli "ensure_vlan_bridge: failed to attach uplink $uplink_vlan to $br"
+      run_cmd brctl delbr "$br"
       return 1
     fi
+    # Bring bridge up
+    run_cmd ip link set "$br" up || warn -c vlan,cli "ensure_vlan_bridge: failed to set $br up"
+    # STP policy
+    stp_apply_policy "$vid" "${DRY_RUN:-no}" "${STP_ENABLED:-0}"
+    info -c vlan,cli "ensure_vlan_bridge: created bridge $br"
+  else
+    # --- Existing bridge: enforce MAC + policy ---
+    if [ "${STP_ENABLED:-0}" -eq 1 ] 2>/dev/null; then
+      if ! stp_force_bridge_mac "$vid" "${DRY_RUN:-no}"; then
+        error -c vlan,cli "ensure_vlan_bridge: FATAL — failed to enforce bridge MAC on $br with STP enabled"
+        return 1
+      fi
+    else
+      stp_set_bridge_mac "$vid" "${DRY_RUN:-no}"
+    fi
+    # Ensure uplink VLAN iface is a member (force-mac may have detached it)
+    if [ "${DRY_RUN:-}" = "yes" ]; then
+      info -c vlan,cli "[DRY-RUN] ensure $uplink_vlan is member of $br"
+    else
+      if ! bridge_has_if "$br" "$uplink_vlan"; then
+        if ! run_cmd brctl addif "$br" "$uplink_vlan"; then
+          error -c vlan,cli "ensure_vlan_bridge: FATAL — could not attach uplink $uplink_vlan to $br"
+          return 1
+        fi
+        info -c vlan,cli "ensure_vlan_bridge: re-attached uplink $uplink_vlan to $br"
+      fi
+      # Best-effort: make sure bridge is up
+      run_cmd ip link set "$br" up
+      # Post-enforcement verification (STP only)
+      if [ "${STP_ENABLED:-0}" -eq 1 ] 2>/dev/null; then
+        stp_verify_bridge_mac "$vid" || {
+          error -c vlan,cli "ensure_vlan_bridge: FATAL — bridge MAC verification failed on $br"
+          return 1
+        }
+      fi
+    fi
+    stp_apply_policy "$vid" "${DRY_RUN:-no}" "${STP_ENABLED:-0}"
   fi
 
   dbg_log "ensure_vlan_bridge: $br ready with uplink $uplink_vlan"
-
-  # Apply STP behavior based on global ENABLE_STP flag
-  if [ "${STP_ENABLED:-0}" -eq 1 ]; then
-    # Classic STP ON; non-zero forwarding delay
-    run_cmd brctl stp "$br" on || :
-    run_cmd brctl setfd "$br" 15 || :
-  else
-    # Default behavior: STP off, zero forwarding delay
-    run_cmd brctl stp "$br" off || :
-    run_cmd brctl setfd "$br" 0 || :
-  fi
 }
 
 bridge_add_if() {
@@ -213,9 +419,13 @@ bridge_add_if() {
     return 0
   fi
   iface_exists "$ifc" || return 1
-  ensure_port_up "$ifc"
-  brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}' | grep -qx "$ifc" && return 0
+  ensure_port_up "$ifc" || return 1
+  bridge_has_if "$br" "$ifc" && return 0
   if ! run_cmd brctl addif "$br" "$ifc"; then
+    if bridge_has_if "$br" "$ifc"; then
+      warn -c vlan,cli "bridge_add_if: $ifc already on $br (continuing)"
+      return 0
+    fi
     error -c vlan,cli "bridge_add_if: failed to add $ifc to $br"
     return 1
   fi
@@ -223,26 +433,44 @@ bridge_add_if() {
 
 bridge_del_if() {
   local br="$1" ifc="$2"
-  brctl show "$br" 2>/dev/null | awk '{for (i=4;i<=NF;i++) print $i}' | grep -qx "$ifc" || return 0
+  bridge_has_if "$br" "$ifc" || return 0
   if ! run_cmd brctl delif "$br" "$ifc"; then
+    if ! bridge_has_if "$br" "$ifc"; then
+      return 0
+    fi
     warn -c vlan,cli "bridge_del_if: failed to remove $ifc from $br"
     return 1
   fi
 }
 
+detach_from_all_bridges() {
+  local ifc="$1" _dab_br
+  [ -n "$ifc" ] || return 0
+  [ "${DRY_RUN:-}" = "yes" ] && return 0
+  for _dab_br in $(brctl show 2>/dev/null | awk 'NR>1 && $1!="" {print $1}' | sort -u); do
+    brctl delif "$_dab_br" "$ifc" 2>/dev/null
+  done
+}
+
 parse_vlan_list() {
   local raw="$1"
-  local vid
+  local vid _seen
 
   [ -n "$raw" ] || return 0
   [ "$raw" = "none" ] && return 0
 
+  _seen=" "
   printf '%s\n' "$raw" | tr ',;' ' ' | tr -s ' ' | tr ' ' '\n' | while read -r vid; do
     [ -n "$vid" ] || continue
     case "$vid" in
       *[!0-9]*) continue ;;
     esac
     if [ "$vid" -ge 2 ] 2>/dev/null && [ "$vid" -le 4094 ] 2>/dev/null; then
+      # dedup: skip if already seen
+      case "$_seen" in
+        *" ${vid} "*) continue ;;
+      esac
+      _seen="${_seen}${vid} "
       printf '%s ' "$vid"
     fi
   done
@@ -259,6 +487,21 @@ get_trunk_port() {
     # Fallback to lowercase key if that ever appears
     raw="$(json_get_int "trunk${idx}" -1 "$SETTINGS_FILE" 2>/dev/null)"
     dbg_log "trunk${idx}: lowercase fallback returned '${raw}'"
+    dbg_var raw
+  fi
+
+  if [ "$raw" -lt 0 ] 2>/dev/null; then
+    # Fallback to nested settings: VLAN -> Trunks -> TRUNKx
+    raw="$(json_get_section2_int "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)"
+    [ -n "$raw" ] || raw=-1
+    dbg_log "trunk${idx}: nested TRUNK lookup returned '${raw}'"
+    dbg_var raw
+  fi
+
+  if [ "$raw" -lt 0 ] 2>/dev/null; then
+    raw="$(json_get_section2_int "VLAN" "Trunks" "trunk${idx}" "$SETTINGS_FILE" 2>/dev/null)"
+    [ -n "$raw" ] || raw=-1
+    dbg_log "trunk${idx}: nested lowercase fallback returned '${raw}'"
     dbg_var raw
   fi
 
@@ -302,8 +545,18 @@ get_trunk_config() {
   local untagged_key="UNTAGGED_TRUNK${idx}"
   local tagged_raw untagged_raw
 
-  tagged_raw="$(json_get_flag "$tagged_key" "none" "$SETTINGS_FILE" 2>/dev/null)"
-  untagged_raw="$(json_get_flag "$untagged_key" "none" "$SETTINGS_FILE" 2>/dev/null)"
+  tagged_raw="$(json_get_flag "$tagged_key" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)"
+  untagged_raw="$(json_get_flag "$untagged_key" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)"
+
+  if [ -z "$tagged_raw" ] || [ "$tagged_raw" = "__MISSING__" ]; then
+    tagged_raw="$(json_get_section2_value "VLAN" "Trunks" "$tagged_key" "$SETTINGS_FILE" 2>/dev/null)"
+  fi
+  if [ -z "$untagged_raw" ] || [ "$untagged_raw" = "__MISSING__" ]; then
+    untagged_raw="$(json_get_section2_value "VLAN" "Trunks" "$untagged_key" "$SETTINGS_FILE" 2>/dev/null)"
+  fi
+
+  [ -n "$tagged_raw" ] || tagged_raw="none"
+  [ -n "$untagged_raw" ] || untagged_raw="none"
 
   dbg_log "trunk${idx}: resolved tagged/untagged payloads"
   dbg_var tagged_raw untagged_raw
@@ -341,15 +594,16 @@ configure_trunk() {
   log_bridge_membership "$port"
 
   if [ "$untagged_raw" = "none" ]; then
-    # Keep physical port attached to default bridge
+    # Native = DEFAULT_BRIDGE: detach base port first (convergence from prior UVID)
+    detach_from_all_bridges "$port"
     bridge_add_if "$DEFAULT_BRIDGE" "$port" || warn -c vlan,cli "trunk${idx}: failed to ensure $port on $DEFAULT_BRIDGE"
-    info -c vlan,cli "trunk${idx}: $port stays on $DEFAULT_BRIDGE for untagged"
-    # Summarize: no untagged mapping, record tagged list below
-    u_summary="none"
+    info -c vlan,cli "trunk${idx}: $port (base) in $DEFAULT_BRIDGE for native/untagged"
+    u_summary="$DEFAULT_BRIDGE"
   else
     case "$untagged_raw" in
       *[!0-9]*)
         warn -c vlan,cli "trunk${idx}: invalid untagged VLAN '$untagged_raw'; keeping $port on $DEFAULT_BRIDGE"
+        detach_from_all_bridges "$port"
         if ! bridge_add_if "$DEFAULT_BRIDGE" "$port"; then
           warn -c vlan,cli "trunk${idx}: failed to ensure $port on $DEFAULT_BRIDGE after invalid untagged"
         fi
@@ -358,36 +612,37 @@ configure_trunk() {
         ;;
       *)
         uvid="$untagged_raw"
+        # Detach physical port from any bridge it may be in (previous run, manual config)
+        detach_from_all_bridges "$port"
+
         # Prepare uplink and VLAN bridge first
         if ! ensure_vlan_bridge "$uvid"; then
           warn -c vlan,cli "trunk${idx}: failed preparing br${uvid}; keeping $port on $DEFAULT_BRIDGE"
+          bridge_add_if "$DEFAULT_BRIDGE" "$port" 2>/dev/null
           ERROR_SEEN=1
           append_summary "trunk${idx}: port=${port} failed to prepare br${uvid} (keeps on ${DEFAULT_BRIDGE})"
           return 1
         fi
 
-        # Ensure per-port VLAN subinterface ready
-        if ! ensure_vlan_iface "$port" "$uvid"; then
-          warn -c vlan,cli "trunk${idx}: failed creating ${port}.${uvid}; keeping $port on $DEFAULT_BRIDGE"
+        # Netgear native/PVID: base port goes into br<UVID> (NOT a subinterface)
+        # Untagged frames arriving on base port are classified into this VLAN.
+        if ! bridge_add_if "br${uvid}" "$port"; then
+          warn -c vlan,cli "trunk${idx}: failed adding $port to br${uvid}; keeping on $DEFAULT_BRIDGE"
+          bridge_add_if "$DEFAULT_BRIDGE" "$port" 2>/dev/null
           ERROR_SEEN=1
-          append_summary "trunk${idx}: port=${port} failed to create ${port}.${uvid} (keeps on ${DEFAULT_BRIDGE})"
+          append_summary "trunk${idx}: port=${port} failed to add to br${uvid} (keeps on ${DEFAULT_BRIDGE})"
           return 1
         fi
 
-        # Add the created subinterface to the VLAN bridge
-        if ! bridge_add_if "br${uvid}" "${port}.${uvid}"; then
-          warn -c vlan,cli "trunk${idx}: failed adding ${port}.${uvid} to br${uvid}; keeping $port on $DEFAULT_BRIDGE"
-          ERROR_SEEN=1
-          append_summary "trunk${idx}: port=${port} failed to add ${port}.${uvid} to br${uvid} (keeps on ${DEFAULT_BRIDGE})"
-          return 1
+        # Clean up stale subinterface from previous "tag-native" implementation
+        if [ "${DRY_RUN:-}" != "yes" ] && iface_exists "${port}.${uvid}"; then
+          detach_from_all_bridges "${port}.${uvid}"
+          run_cmd ip link del "${port}.${uvid}" || \
+            warn -c vlan,cli "trunk${idx}: failed to delete stale ${port}.${uvid}"
+          info -c vlan,cli "trunk${idx}: removed stale subinterface ${port}.${uvid} (native uses base port)"
         fi
 
-        # Only after the new untagged path is ready, remove the physical port from default bridge
-        if ! bridge_del_if "$DEFAULT_BRIDGE" "$port"; then
-          warn -c vlan,cli "trunk${idx}: failed to remove $port from $DEFAULT_BRIDGE (may be already detached)"
-        fi
-
-        info -c vlan,cli "trunk${idx}: $port untagged mapped to VLAN $uvid"
+        info -c vlan,cli "trunk${idx}: $port (base) in br${uvid} for native VLAN $uvid"
         u_summary="$uvid"
         ;;
     esac
@@ -395,8 +650,13 @@ configure_trunk() {
 
   # Build tagged list and ensure membership; skip if none
   tagged_list=""
+  ebt_allow=""  # ebtables: accumulate successfully configured VIDs
   for vid in $(parse_vlan_list "$tagged_raw"); do
-    [ "$vid" = "$untagged_raw" ] && continue
+    # Forbid overlap: native VLAN must not also appear as tagged
+    if [ "$vid" = "$untagged_raw" ]; then
+      warn -c vlan,cli "trunk${idx}: VLAN $vid is the native VLAN; removing from tagged list"
+      continue
+    fi
 
     if ! ensure_vlan_bridge "$vid"; then
       warn -c vlan,cli "trunk${idx}: failed preparing br${vid}; skipping tag $vid"
@@ -421,7 +681,43 @@ configure_trunk() {
 
     info -c vlan,cli "trunk${idx}: tagged VLAN $vid active"
     tagged_list="${tagged_list}${tagged_list:+,}${vid}"
+    ebt_allow="${ebt_allow}${ebt_allow:+ }${vid}"
   done
+
+  # --- Tag reconciliation: detach stale VLAN subinterfaces for this port ---
+  # Enumerate existing ${port}.* subinterfaces; detach any whose VID is not in
+  # the desired tagged set. This removes explicit VLAN handling so stale VLANs
+  # are no longer bridged. NOTE: on Linux without VLAN-aware bridge filtering,
+  # tagged frames may still traverse via the native bridge path; this step does
+  # NOT guarantee "drop tags not in list" — a tag-leak test is required to
+  # confirm platform behavior (see §1.2 / §7 in the implementation guide).
+  if [ "${DRY_RUN:-}" != "yes" ]; then
+    # Build effective desired set (excluding native UVID, matching tagged loop)
+    _desired_tags=" "
+    for _v in $(parse_vlan_list "$tagged_raw"); do
+      [ "$_v" = "$untagged_raw" ] && continue
+      _desired_tags="${_desired_tags}${_v} "
+    done
+    for _stale_path in /sys/class/net/${port}.[0-9]*; do
+      [ -e "$_stale_path" ] || continue
+      _stale_ifc="${_stale_path##*/}"
+      _stale_vid="${_stale_ifc#${port}.}"
+      # Skip if this VID is in the desired tagged set
+      case "$_desired_tags" in
+        *" ${_stale_vid} "*) continue ;;
+      esac
+      # Skip if this is the native VLAN (already handled above)
+      [ "$_stale_vid" = "$untagged_raw" ] && continue
+      # Stale: detach from all bridges (safe — does not delete the interface)
+      detach_from_all_bridges "$_stale_ifc"
+      info -c vlan,cli "trunk${idx}: detached stale ${_stale_ifc} (VID $_stale_vid not in tagged list)"
+    done
+  fi
+
+  # --- ebtables strict VLAN filtering for this trunk port ---
+  if ebt_ok; then
+    ebt_apply_port "$port" "$ebt_allow"
+  fi
 
   # After operations, log membership for debugging
   log_bridge_membership "$port"
@@ -448,6 +744,11 @@ main() {
     ensure_port_up "$DEFAULT_BRIDGE" || warn -c vlan,cli "Could not bring $DEFAULT_BRIDGE up"
   fi
 
+  # Initialise ebtables plan file only if ebtables is usable
+  if ebt_ok; then
+    ebt_begin_plan
+  fi
+
   # quick pre-check: if no trunks configured, no-op
   local idx=1 any=0
   while [ "$idx" -le "$MAX_TRUNKS" ]; do
@@ -471,8 +772,7 @@ main() {
   # Print compact trunk summary (what was applied or would be applied)
   if [ -n "$TRUNK_SUMMARY" ]; then
     info -c vlan,cli "=== Trunk summary ==="
-    printf '%s
-' "$TRUNK_SUMMARY" | while IFS= read -r l; do
+    printf '%s\n' "$TRUNK_SUMMARY" | while IFS= read -r l; do
       [ -z "$l" ] && continue
       info -c vlan,cli "  $l"
     done

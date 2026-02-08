@@ -1,4 +1,691 @@
-mervlan v0.52.1
+mervlan v0.52.91
+
+mervlan_boot.sh — Hotfix
+- Fixed a bug where the boot template injection could silently remove other
+template blocks from services-start. When the addon block was re-injected
+on boot, everything after it (including the manager and cron entries) was
+dropped. This caused VLANs and the health-check cron job to not be restored
+on the second reboot, even though the first boot worked fine.
+
+Thanks to mistermoonlight1 for helping track this down with detailed logs
+and testing across multiple reboots.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.9
+
+This update brings full STP (Spanning Tree Protocol) support, major improvements
+to trunk port handling with better VLAN filtering, and a safer boot process that
+won't stall your router or lose logs. UI improvements and code cleanup throughout.
+
+
+NOTABLE FEATURES:
+
+STP Support:
+- New Spanning Tree Protocol support for multi-node setups.
+- Prevents network loops when multiple nodes are interconnected.
+- Each node gets a unique, stable bridge ID that persists across reboots.
+- Toggle STP on/off via UI: General Settings → "STP: On/Off".
+- Recommended for complex multi-node topologies; optional for simple setups.
+
+Better Boot Process:
+- New boot wrapper prevents router startup delays.
+- Logs are now properly captured instead of being discarded.
+- Install checks only run once per boot cycle (faster subsequent boots).
+- Boot operations run in background so other services aren't blocked.
+- All boot activity logged to boot_wrap.log for troubleshooting.
+
+Trunk Port Improvements (EXPERIMENTAL):
+- Complete rewrite of trunk port configuration logic.
+- Smarter handling of native (untagged) VLANs on trunk ports.
+- Automatic cleanup of stale VLAN configurations from previous runs.
+- New strict VLAN filtering prevents unauthorized VLANs on trunk ports.
+- Better error detection and validation.
+- Still experimental — use with caution on production networks.
+
+
+UPDATED FILES:
+
+mervlan_manager.sh
+- Full STP support with proper bridge MAC management.
+- Better bridge detection and configuration.
+- Improved cleanup of old VLAN configurations.
+
+mervlan_trunk.sh
+- Major rewrite for better VLAN handling on trunk ports.
+- Native VLAN configuration improved.
+- Strict VLAN filtering with ebtables (when available).
+- Better duplicate and overlap detection.
+- Still in a experimental state and in need of heavy testing.
+
+lib_stp.sh (NEW)
+- Library for STP bridge MAC generation and management.
+- Ensures consistent bridge IDs across reboots and nodes.
+
+mervlan_boot_wrap.sh (NEW)
+- Boot-time wrapper for safer startup.
+- Three modes: install, manager, cron.
+- Proper logging and error handling.
+
+mervlan_templates.sh
+- Updated boot scripts to use new wrapper.
+- Background execution prevents boot delays.
+
+sync_nodes.sh
+- Added new library and wrapper to node sync.
+
+index.html
+- Replaced "Persistent" toggle with "STP" toggle.
+- Updated settings handling for STP support.
+
+help.html
+- Complete overhaul of help documentation.
+- New organized tabs: Getting Started, SSID Setup, LAN Setup, etc.
+- Better setup guides for single and multi-node configurations.
+- Added support links (SNB Forums, Discord, GitHub).
+
+Code Formatting:
+- Standardized headers across all scripts for consistency.
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.8
+
+This update introduces a robust SSID/VLAN node assignment filter, boot-time
+gating for VLAN configuration, and systemwide BusyBox compatibility fixes.
+Together these tries to eliminate boot race conditions and enable per-node
+SSID control in multi-node deployments.
+
+
+
+NOTABLE FEATURES:
+
+Node-Scoped SSID/VLAN Filtering:
+- New lib_ssid_filter.sh library for per-node SSID slot assignment.
+- Each SSID slot (1-12) can be assigned to MAIN and/or NODE1-NODE5.
+- Format: "MAIN,NODE1,none,none,none,none" controls which nodes manage each SSID.
+- Filter automatically respects NODE_ID on each device.
+- Nodes only apply VLANs to SSIDs they are assigned to.
+- Prevents VLAN misconfiguration on nodes that don't broadcast certain SSIDs.
+
+Boot-Time SSID Gating:
+- New boot_wait_for_configured_ssids() function in mervlan_manager.sh.
+- Boot mode (invoked via "mervlan_manager.sh boot") waits up to 30 seconds.
+- Validates configured SSIDs exist in nvram before proceeding.
+- Logs warnings for SSIDs not found in nvram (likely typos).
+- Only waits for SSIDs that are actually present on the router.
+- Reduces VLAN apply failures caused by WiFi interfaces not being ready.
+
+BusyBox Compatibility (merv_has/merv_cmd shim):
+- Replaced all "command -v" calls which fail silently in BusyBox ash.
+- New portable shim: merv_has() and merv_cmd() functions.
+- Shim is guarded and defined in all library entry points.
+- Functions use "type" builtin which is universally supported.
+- merv_has() - Check if command/function/builtin exists (returns 0/1).
+- merv_cmd() - Resolve external command's full path (like "which").
+- Eliminates cryptic failures from command detection code.
+
+UPDATED FILES:
+
+lib_ssid_filter.sh (NEW)
+- Core SSID filter library for multi-node deployments.
+- ssid_filter_init() - Initialize filter based on NODE_ID.
+- is_ssid_slot_allowed() - Check if SSID slot is assigned to current node.
+- get_ssid_slot_value() - Get SSID value with filtering (returns placeholder if denied).
+- get_vlan_slot_value() - Get VLAN ID with filtering (returns "none" if denied).
+- get_apiso_slot_value() - Get AP isolation value with filtering.
+- Reads SSIDassign_XX from WiFi.SSIDassign section in settings.json.
+- Default assignment: MAIN-only for backwards compatibility.
+- SSID_FILTER_FATAL flag for graceful abort when hardware profile not ready.
+
+mervlan_manager.sh
+- Added lib_ssid_filter.sh integration for filtered SSID/VLAN reads.
+- All SSID, VLAN, and APISO reads now use filtered accessors.
+- New boot mode with SSID readiness gating (boot_wait_for_configured_ssids).
+- Boot mode validates SSIDs exist in nvram before waiting for interfaces.
+- Logs warnings for typos/misconfigured SSIDs not found in wireless config.
+- Added SSID_FILTER_FATAL checks with graceful abort on filter failures.
+
+heal_event.sh
+- Added lib_ssid_filter.sh integration for filtered VLAN reads.
+- any_vlan_configured() now respects node assignment filter.
+- expected_vlans_from_settings() uses filtered get_vlan_slot_value().
+- Nodes only heal VLANs for SSIDs they are assigned to.
+- Added SSID_FILTER_FATAL checks for graceful abort on filter failures.
+
+var_settings.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Shim is guarded to avoid redefinition if already present.
+
+log_settings.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Uses merv_has for logger availability check.
+
+lib_debug.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+
+lib_ssh.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Uses merv_has for dbclient/ssh detection.
+- Uses merv_has for json_set_flag/json_get_flag availability checks.
+
+install.sh
+- Made install a little more verbose
+
+uninstall.sh
+- Added merv_has/merv_cmd shim for BusyBox compatibility.
+- Uses merv_has for JSON function and SSH client detection.
+- Made uninstall a little more verbose.
+
+mervlan_templates.sh
+- Templates now invoke mervlan_manager.sh with "boot" argument.
+- Enables boot-time SSID gating for VLAN configuration.
+- Template: "mervlan_manager.sh boot >/dev/null 2>&1 || :"
+
+settings.json
+- New WiFi.SSIDassign section with SSIDassign_01 through SSIDassign_12.
+- Each value is comma-separated: "MAIN,NODE1,NODE2,NODE3,NODE4,NODE5".
+- "none" in any position means slot is not assigned to that node.
+- Default: "MAIN,none,none,none,none,none" (MAIN only).
+
+sync_nodes.sh
+- Added lib_ssid_filter.sh to the copy & chmod lists
+
+index.html
+- Added SSID Node Assignment UI in assign view.
+- Checkboxes for each node (M, 1, 2, 3, 4, 5) per SSID row.
+- Checkboxes disabled for nodes without hardware detected.
+- updateSSIDAssignCheckboxes() syncs checkbox state with settings.
+- Settings serialization includes SSIDassign_XX in save payload.
+- Fixed node LAN buttons and SSID assign checkboxes remaining disabled after
+  loading settings with configured node IPs.
+- Buttons now enable when a valid IP is configured (hardware detection optional).
+- Updated SSID assign tooltips to use node alias, IP, and PRODUCTID:
+  enabled: "Assign to {ALIAS}, {IP} ({PRODUCTID})"
+  disabled: "Configure {ALIAS} IP first"
+- Added dynamic AP Isolation availability: select enables when both SSID and
+  VLAN ID are valid in the form (no save/load required).
+- AP Isolation disabled tooltip: "Enter valid SSID and VLAN ID first".
+- Added setupDisabledAssignClickGuard() to prevent checkbox toggling on
+  disabled labels while preserving tooltip hover.
+
+TECHNICAL DETAILS:
+
+Filter Token Matching:
+- Node identity mapped to tokens: MAIN, NODE1, NODE2, NODE3, NODE4, NODE5.
+- Token matching uses `,token,` wrapping to prevent partial matches.
+- Example: ",MAIN,NODE1,none,none,none,none," matches MAIN and NODE1.
+
+Filter Edge Cases:
+- Empty/missing assignment defaults to MAIN-only.
+- Explicit "none" string denies slot to all nodes.
+- Non-numeric slot index returns denied.
+- MAX_SSIDS < 1 sets SSID_FILTER_FATAL flag for graceful abort.
+
+Boot Gating Logic:
+- Partition SSIDs into: present in nvram (wait) vs. missing (warn only).
+- Wait loop checks for interface availability with configurable timeout.
+- Continues after timeout with warning (does not block boot indefinitely).
+- Only active when invoked with "boot" argument.
+
+BUGFIXES:
+
+mervlan_boot.sh
+- Fixed BusyBox flock compatibility: replaced "flock -w 5" (unsupported) with
+  "flock -x" in both copy_inject() and remove_inject() functions.
+- BusyBox v1.25.1 only supports -s, -x, -u, -n flags; -w (wait timeout) caused
+  silent failures during setupenable and other template injection operations.
+
+lib_json.sh
+- Fixed json_set_section_value() to support upsert (insert if key missing).
+- Previously only replaced existing keys; new keys like PRODUCTID_NODE1 and
+  MAX_ETH_PORTS_NODE1 written by sync_nodes.sh were silently discarded.
+- Now inserts new key-value pairs before the section closing brace with proper
+  comma handling.
+- Also handles numeric value replacement (not just quoted strings).
+
+vlan_form_style.css
+- Removed pointer-events:none from disabled SSID assign labels so tooltips
+  display on hover (matching LAN button disabled behavior).
+- Added consistent disabled styling for AP Isolation select elements
+  (opacity, muted colors, cursor: not-allowed).
+
+################ END OF CURRENT CHANGELOG
+
+previous mervlan v0.52.7 changes
+
+This update resolves critical UI logout issues, enhances node sync reliability,
+improves VLAN healing with faster monitoring and escalation logic, plus major
+improvements to the installation system with interactive branch selection,
+tarball management, and version tracking.
+
+NOTABLE FIXES:
+
+UI Logout Issue Resolution:
+- Removed httpd restart from mervlan_manager.sh completely.
+- Users can now save VLAN settings without being logged out.
+- Web interface remains active throughout entire configuration process.
+
+Node Sync Reliability:
+- Fixed false "size mismatch" errors during settings.json sync to nodes.
+- Improved verification focuses on JSON structure validity instead of byte count.
+- Better Hardware section preservation prevents corruption of node-specific values.
+- Eliminated stdin corruption issues with cleaner SSH communication patterns.
+
+UPDATED FILES:
+
+mervlan_manager.sh
+- Removed httpd restart call to eliminate UI logout issues during VLAN saves.
+- Previous behavior caused immediate logout after saving settings via web UI.
+- VLAN changes now apply without disrupting active web sessions.
+- GUI remains accessible throughout the entire save operation.
+
+execute_nodes.sh
+- Fixed settings.json sync verification that reported false size mismatches.
+- Replaced byte-count comparison with semantic JSON structure validation.
+- New verify_settings_conf_on_node() checks:
+  * File existence and non-empty content.
+  * Valid JSON structure (opening/closing braces).
+  * Minimum key count (ensures complete structure).
+  * Critical sections present (General, VLAN, Hardware).
+- Improved JSON merge logic in copy_settings_conf_to_node():
+  * Preserves only Hardware section from node's existing settings.json.
+  * Main router settings copied cleanly to node (VLAN config, Pool, etc.).
+  * IS_NODE and NODE_ID flags set separately via set_node_flags_remote().
+- Eliminated stdin piping through SSH that caused JSON corruption.
+- Fixed multi-line JSON parsing issues with hardware values.
+- More reliable node synchronization with proper error detection.
+- Added automatic trunk configuration reset when pushing settings.json to nodes.
+- Prevents trunk VLANs from being applied on nodes (main router only).
+- All TRUNKx values set to "0", TAGGED/UNTAGGED_TRUNKx set to "none" on nodes.
+- Ensures trunk capability remains exclusive to main router unit.
+
+heal_event.sh
+- Fixed syntax error (duplicate closing brace) in check_vlan_config().
+- Fixed expected_vlans_from_settings() to properly parse trunk VLAN configurations.
+- Now correctly reads comma-separated TAGGED_TRUNKx values (e.g., "187,188,189").
+- Added trunk enable check - only reads VLAN config when TRUNKx is enabled (1 or positive).
+- Prevents constant heal loops when trunk VLANs are configured.
+- Each VLAN ID in trunk config is now properly extracted and validated.
+- Fixed bridge_has_members() to detect trunk VLAN bridges correctly.
+- Now recognizes eth1.X, eth2.X, etc. as valid edge members (trunk ports).
+- Distinguishes between uplink (eth0/eth0.*) and LAN-side trunk interfaces.
+- Trunk VLANs (e.g., br70, br100) now properly detected during heal checks.
+- Optimized monitoring: 10 checks @ 3s intervals (27s window, down from 25s).
+- Heal trigger: 6 seconds on persistent issues (3 consecutive mismatches).
+- Implemented escalator pattern for cron events:
+  Phase 1: Fast sensor check (single-pass validation).
+  Phase 2: Full validation (10 passes over 27s) only if fast check fails.
+- Prevents unnecessary 27s delays when VLANs are healthy during cron runs.
+- Quick healing (6s) on confirmed persistent issues remains unchanged.
+- Added --cron-test mode for testing full escalation cycle.
+- Injects fake VLAN (9999) to trigger escalation from fast check to full validation.
+- Allows testing of escalation logic without actual VLAN damage.
+- Skips actual heal execution in test mode (shows what would happen).
+
+sync_nodes.sh
+- Added automatic trunk configuration reset when syncing settings.json to nodes.
+- Detects settings.json during file copy and applies trunk reset transformation.
+- Prevents trunk VLANs from being applied on nodes (main router only).
+- All TRUNKx values set to "0", TAGGED/UNTAGGED_TRUNKx set to "none" on nodes.
+- Ensures trunk capability remains exclusive to main router unit.
+- Fallback to original file if trunk reset fails (with warning logged).
+
+lib_json.sh
+- Added json_reset_trunks_section() function for node trunk configuration safety.
+  Replaces entire Trunks section with default disabled values.
+  Uses same AWK-based pattern as json_replace_hardware_section() for consistency.
+  Called automatically by execute_nodes.sh and sync_nodes.sh when pushing settings.
+
+mervlan_trunk.sh
+- Fixed unterminated quoted string syntax errors (lines 210 and 536).
+  Removed corrupted leftover code from ensure_vlan_bridge() function.
+  Fixed multi-line printf statement that caused shell parsing errors.
+
+index.html
+- Fixed trunk UI visibility to properly hide on node tabs (Node1-5).
+  Trunk toggle and configuration now only appear on main router tab.
+- Added CURRENT_LAN_TARGET check in updateExperimentalVisibility().
+- Modified updateSingleTrunkRow() to force regular VLAN input on node tabs.
+- Regular VLAN input (.lan-main-vlan) now always shows on node views.
+  Trunk configuration (.lan-trunk-config) now always hidden on node views.
+- Ensures nodes never display trunk UI regardless of experimental mode state.
+  Prevents confusion by showing only standard VLAN inputs on node configuration.
+
+install.sh
+- Added interactive branch selection during download mode.
+- Prompts user to choose between main (stable) or dev (development) branch.
+- Automatically extracts version from changelog.txt inside downloaded tarball.
+- Renames tarballs to mervlan-{branch}-{version}.tar.gz for easy identification.
+- Added interactive tarball selection menu (similar to update_mervlan.sh restore UI).
+- Shows all available mervlan-*.tar.gz files with branch, version, and size.
+- Menu options: [1-N] select tarball, [d] delete tarball, [q] quit/abort.
+- Delete functionality with confirmation prompt for removing unwanted downloads.
+- Added support for './install.sh full dev' to install fresh from dev branch.
+- Fixed EXIT trap cleanup in all early return paths (prevents "[: bad number" errors).
+- Added TMP_DIR validation for download/tarball modes.
+- Added SELECTED_TARBALL safety check before extraction.
+- Enhanced mode documentation with comprehensive usage examples.
+- All modes properly abortable with appropriate exit codes.
+
+SUPPORTED INSTALL MODES:
+
+./install.sh
+  - Standard upgrade install (uses existing /jffs/addons/mervlan).
+  - No download, no SSH credential prompts.
+
+./install.sh full
+  - Fresh install from main branch.
+  - Creates directories, downloads, and installs.
+  - Prompts for SSH credentials.
+
+./install.sh full dev
+  - Fresh install from dev branch.
+  - Creates directories, downloads, and installs.
+  - Shows development version warning.
+  - Prompts for SSH credentials.
+
+./install.sh download
+  - Interactive download session.
+  - Prompts for branch selection (main/dev).
+  - Downloads and renames to mervlan-{branch}-{version}.tar.gz.
+  - Exits after download (does not install).
+
+./install.sh tarball
+  - Interactive tarball selection menu.
+  - Shows all mervlan-*.tar.gz files in TMP_DIR.
+  - Allows selection, deletion, or abort (q).
+  - Prompts for SSH credentials if installing.
+  - Fully abortable at any confirmation prompt.
+
+
+
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.6
+IMPORTANT: TRANSITION UPDATE FOR EXISTING INSTALLATIONS
+========================================================
+If you are updating from v0.52.5 or earlier, you MUST use one of the 
+following commands to update. This is required because the update process 
+now includes settings.json migration logic that older versions do not have.
+
+DO NOT use the GUI update button for this version. Run one of these in SSH:
+
+OPTION 1 - Download dependencies first, then update (recommended):
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/lib_json.sh" -o "/jffs/addons/mervlan/settings/lib_json.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/lib_ssh.sh" -o "/jffs/addons/mervlan/settings/lib_ssh.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/var_settings.sh" -o "/jffs/addons/mervlan/settings/var_settings.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/settings/log_settings.sh" -o "/jffs/addons/mervlan/settings/log_settings.sh" && \
+/usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/functions/update_mervlan.sh" -o "/jffs/addons/mervlan/functions/update_mervlan.sh" && \
+chmod 0644 /jffs/addons/mervlan/settings/lib_json.sh /jffs/addons/mervlan/settings/lib_ssh.sh /jffs/addons/mervlan/settings/var_settings.sh /jffs/addons/mervlan/settings/log_settings.sh && \
+chmod 0755 /jffs/addons/mervlan/functions/update_mervlan.sh && \
+/jffs/addons/mervlan/functions/update_mervlan.sh update dev
+
+OPTION 2 - Run update twice (if OPTION 1 should fail, second run uses new updater):
+/jffs/addons/mervlan/functions/update_mervlan.sh update dev && /jffs/addons/mervlan/functions/update_mervlan.sh update dev
+
+The first run downloads the new files, the second run uses the new updater
+which properly migrates your settings.json to the new format.
+
+After this update, future updates can use the normal GUI update button.
+========================================================
+This update focuses on stability improvements, fixing event loop issues,
+adding interface detection for the VLAN client viewer, improving the
+SSH wrapper for more reliable node communication, save verification
+reliability, UI layout fixes, and proper hardware value detection.
+
+This update also addresses the intermittent auto-logout issue that could
+occur after saving settings. The fix ensures save actions use a sandboxed
+iframe target that bypasses ASUS firmware's automatic page refresh behavior.
+
+
+UPDATED FILES:
+
+index.html
+- Added interface badges in VLAN client viewer showing SSIDs, access ports, and trunks.
+- Updated clients panel to expand and fill available viewport space.
+- Added friendly node name display using aliases (e.g., "Living Room AP (192.168.1.100)").
+- Replaced fixed 5500ms save verification timer with intelligent polling.
+- New waitForSettingsToMatch() polls settings.json until managed keys match expected values.
+- Added no-cache fetch headers (cache: "no-store", Cache-Control, Pragma) to prevent stale reads.
+- Added helper functions: normalizeToFlatSettings, extractManagedKeys, shallowEqual, fetchSettingsObjNoStore.
+- loadSettings() now calls refreshHwSettingsFromCache() to detect hardware value changes.
+- If MAX_SSIDS, MAX_ETH_PORTS, or node MAX_ETH_PORTS changed, tables regenerate automatically.
+- Moved trunk toggle checkbox to appear after "LAN X" label (prevents overlap with PRODUCTID badge).
+- LAN row template now orders: PRODUCTID badge → LAN label → Trunk toggle.
+
+vlan_index_style.css
+- Added interface badge styles (.iface-ssid, .iface-access, .iface-trunk, etc.).
+- Updated cli-shell and clients-panel to support dynamic height expansion.
+
+vlan_form_style.css
+- Trunk toggle now positioned on right side of LAN label cell (right:0 instead of left:0).
+- Added padding-right to .lan-label-wrap to accommodate right-aligned trunk toggle.
+- Changed .lan-trunk-inline to flex-direction:column for vertical stacking of T/U fields.
+- Trunk config now expands row height instead of overflowing horizontally.
+
+mervlan.asp
+- Added loading overlay guard to prevent ASUS firmware from dismissing loading screen early.
+- New window._mvmHoldLoadingFor(ms) blocks hideLoading() calls until minimum time passes.
+- Fixed showLoadingSafe() to pass duration hint (seconds) to ASUS showLoading().
+- MVM_exec now calls _mvmHoldLoadingFor() before showing loading overlay.
+- Added save_vlanmgr, executenodes_vlanmgr, executenodesonly_vlanmgr to MVM_NO_REFRESH set.
+
+collect_clients.sh
+- Fixed background job wait logic that could fail on BusyBox non-interactive shells.
+- Replaced unreliable 'jobs -p' with /proc-based PID tracking for parallel node collection.
+- Added explicit wait calls to collect exit codes from background jobs.
+
+collect_local_clients.sh
+- Added interface detection for each VLAN bridge (SSIDs, access ports, trunk ports).
+- New functions to classify interfaces and detect trunk port configurations.
+- Filters out internal switch fabric interfaces (eth0) from display.
+- Added cleanup trap for temporary files.
+
+execute_nodes.sh
+- Migrated all SSH calls to use the new merv_ssh_exec wrapper with retries and timeouts.
+- Added parallel execution of VLAN manager on all nodes and main router.
+- Added completion marker verification to confirm node execution succeeded.
+- Separated collection phase to run after all nodes complete.
+
+heal_event.sh
+- Removed httpd from healable events to prevent GUI logoff loops.
+- Added self-restart marker check with expiry timestamp to prevent event loops.
+- Changed mismatch detection to require persistence across 3 checks (10s window).
+
+hw_probe.sh
+- Fixed model naming to use full product IDs (RT-AX86U instead of AX86U).
+- Added RT-AC86U support entry.
+
+mervlan_boot.sh
+- Migrated all SSH calls to use merv_ssh_exec wrapper.
+- Updated node IP parsing to return node_id and ip pairs.
+- Improved logging with node ID prefixes.
+
+mervlan_manager.sh
+- Added --no-collect flag for parallel execution mode.
+- Added node detection and completion marker creation for nodes.
+- Added stale self-restart marker cleanup at startup.
+- Creates self-restart marker before service restarts to prevent heal loops.
+
+service-event-handler.sh
+- Excluded httpd events from wildcard patterns to prevent event floods.
+- Added secondary filter to catch httpd events that slip through *restart* pattern.
+- Added handler-level debounce (5s) for system events.
+
+sync_nodes.sh
+- Migrated all SSH calls to use merv_ssh_exec wrapper with retries and timeouts.
+- Improved logging with node ID prefixes (NODE1, NODE2, etc.).
+- Fixed enable_jffs_and_reboot to handle connection drop during reboot.
+
+update_mervlan.sh
+- Added settings.json merge helper to preserve user values during updates.
+- Skips Hardware section during merge to allow fresh hardware detection.
+- Improved remote cleanup with proper SSH wrapper usage.
+
+save_settings.sh
+- Now reads MAX_ETH_PORTS from nested Hardware section using json_get_hw_int().
+- Fixed MAX_ETH_PORTS variable assignment so it's properly set before logging.
+- MAX_TRUNK_PORTS correctly inherits from MAX_ETH_PORTS when not explicitly set.
+
+lib_json.sh
+- Added json_set_section_value() for updating keys inside nested sections.
+- Added json_set_section2_value() for two-level nested section updates.
+- Added json_get_hw_value() for reading keys from nested Hardware section.
+- Added json_get_hw_int() for reading integer values from Hardware section with validation.
+- Both new getters use json_extract_hardware_section() to parse nested structure.
+
+lib_ssh.sh
+- Added comprehensive SSH wrapper functions with 3 retries and hard timeouts.
+- New merv_ssh_exec() handles precheck, retries, timeout, and error classification.
+- New merv_ssh_precheck() validates IP, keys, and ping before SSH attempt.
+- New merv_ssh_test() and merv_ssh_skip_log() helper functions.
+- Added _merv_timeout_run() for BusyBox timeout support.
+
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.5 changelog
+
+- This update adds support for per-node/AP ethernet VLAN overrides so 
+  LAN VLANs can be configured individually across all connected nodes/APs.
+- Adds a default profile for unsupported devices.
+
+UPDATED FILES:
+
+execute_nodes.sh
+- Parse NODE1..NODE5 with index and IP for per-node context.
+- Set IS_NODE=1 and NODE_ID=<node index> on the remote settings.json before execution.
+- Preserve overall success tracking by avoiding subshell loop.
+
+mervlan_manager.sh
+- Added read_json_raw + early read_json alias, then node-aware read_json remap for ETH1-ETH8 VLAN keys.
+- NODE_ID normalization and startup log for node override mode.
+- POSIX-safe verify_interface_binding() guard for none/trunk.
+
+sync_nodes.sh
+- Parse NODE1..NODE5 with index and IP for per-node context.
+- Set IS_NODE=1 and NODE_ID=<node index> in the remote settings.json after sync.
+- Preserve overall success tracking by avoiding subshell loop.
+
+settings.json
+- Node_overrides now uses fully qualified per-node keys (NODE{n}_Ethernet_ports/NODE{n}_ETH{p}_VLAN).
+
+index.html
+- Added tabs for ethernet ports on main unit and NODE1..NODE5 (1-5)
+- Node VLAN defaults and templates now use NODE{n}_Ethernet_ports and NODE{n}_ETH{p}_VLAN keys.
+- Flatten/expand logic updated to read/write per-node VLAN keys.
+- LAN validation handles node-aware keys and global VLAN checks.
+- Added support for changing the default node names. You can rename a node by
+  double-clicking its name, allowing you to assign friendlier labels to
+  identify your units instead of relying on remembering which IP address
+  belongs to which device.
+
+vlan_index_style.css
+- Updated for the ethernet tab buttons
+
+hw_probe.sh
+- Added a default "UNSUPPORTED" mapping profile. This profile restricts the
+  device to 3 SSID VLANs and 3 Ethernet VLANs, to reduce the risk of
+  misconfiguration when the hardware is not correctly mapped.
+  A popup will appear with options to either temporarily map support and
+  submit the mapping to GitHub, or continue and test whether it works.
+  
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.4 changes
+
+UPDATED FILES:
+
+device_support_mapper.sh - v0.50.1
+- Fixed auto-press on buttons during the mapper flow.
+
+README.md 
+- Added information on how to use the device_support_mapper.sh
+
+hw_probe.sh - v0.46.3
+- Added support for the following devices: 
+    RT-AX88U (can map VLAN ID on port 1-4 individually. Port 5-8 (seen as LAN 5) can only be tagged as a group.)
+    RT-AX88U_PRO
+    GT-AX6000
+    RT-AX58U
+
+save_settings.sh - v0.47
+- Preserve structured settings.json when publishing to the public UI copy.
+
+index.html - v0.52.4
+- Unsupported model modal. An informational popup with link to add support or continue as-is.
+- Added node alias editing (double-click to rename) with alias persistence on save/load.
+- Version header update.
+- Fixed race on load that could reset HW settings by ensuring hardware is initialized once before dependent UI binds.
+
+vlan_index_style.css
+- Adjusted node label spacing to accommodate friendly names.
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.52.3 changes
+
+NEW FILES:
+- device_support_mapper.sh
+    This new script will help users to map the ETH/LAN-ports on
+    their current device. It will also generate a link to an already
+    filled in support ticket request to MerVLAN github.
+    In addition to this, the script can generate a working template
+    that allows MerVLAN to function as intended, unless there is already
+    an faulty template created and will in that case be patched.
+    run the script with:
+    /jffs/addons/mervlan/functions/device_support_mapper.sh
+    Then follow the instructions.
+
+UPDATED FILES:
+
+mervlan.asp - v0.47
+- Fix UI shell crash on some firmware by loading jQuery before state.js (root cause: $ undefined).
+
+index.html - v0.52.3
+- Updated version header.
+
+hw_probe.sh - 0.46.1
+- Added support for:
+    RT-AC86U
+    RT-AX86U (with 2.5gbps port configured as LAN)
+    RT-AX86S
+    RT-AX88U (but reduced to 4 VLAN active ports until a user can run the mapper)
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.52.2 changes
+
+UPDATED FILES:
+
+index.html - v0.52.2
+- Updated version header.
+
+mervlan.asp - v0.46
+- Switched MerVLAN UI rendering to a static-height iframe to ensure consistency.
+- Disabled iframe scrolling so scrolling is handled exclusively by the main ASUS page (prevents double-scroll issues).
+- Set a default iframe height of 1300px to accommodate maximum expanded UI sections (nodes, SSIDs, LAN ports).
+- Defensive JavaScript to re-apply iframe scroll and overflow settings on load
+- Defensive JavaScripts to guard against ASUS skin overrides that may reset iframe attributes
+
+mervlan_manager.sh – v0.53
+- Added nested VLAN.Trunks fallback reads for trunk detection when settings are not flattened.
+
+mervlan_trunk.sh – v0.52
+- Fixed bridge membership detection to handle brctl continuation lines and sysfs brif.
+- Treated already-member add/del as idempotent success to avoid false trunk failures.
+- Added nested VLAN.Trunks fallback reads for TRUNK/TAGGED/UNTAGGED keys.
+
+collect_clients.sh – v0.47
+- Added bounded retry for ping/SSH/fetch to reduce transient node boot timing misses.
+
+lib_json.sh – v0.50
+- Added two-level nested JSON getters (section1.section2.key) for VLAN.Trunks access.
+
+################ IMPORTANT! Scripts does not follow main version.
+
+Previous mervlan v0.52.1 changes
 
 UPDATED FILES:
 

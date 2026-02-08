@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,13 +11,13 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#                  - File: heal_event.sh || version="0.47"                     #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#                  - File: heal_event.sh || version="0.50"                     #
+# ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
 #               the service-event wrapper.                                     #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -28,6 +28,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
 
@@ -42,6 +43,10 @@ if [ -z "${ETH_PORTS:-}" ]; then
   ETH_PORTS=$(json_get_section_array "Hardware" "ETH_PORTS" "$HW_SETTINGS_FILE")
   [ -z "$ETH_PORTS" ] && ETH_PORTS=$(json_get_array ETH_PORTS "$HW_SETTINGS_FILE")
 fi
+
+# Initialize SSID filter based on node identity (affects which VLAN slots we consider)
+MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
+ssid_filter_init "$MERV_NODE_ID"
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -94,7 +99,11 @@ any_vlan_configured() {
   # Check Ethernet port VLANs (VLAN.Ethernet_ports.ETHx_VLAN)
   local idx=1 vlan token
   for eth in $ETH_PORTS; do
-    vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
+    # Use nested structure first, fallback to flat
+    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
+    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
+      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
+    fi
     vlan=$(trim_spaces "$vlan")
     token=$(to_lower "$vlan")
     # Ignore unconfigured, trunk, or non-numeric entries
@@ -107,11 +116,17 @@ any_vlan_configured() {
     idx=$((idx+1))
   done
 
-  # Check SSID VLANs from VLAN pool (VLAN_01..VLAN_NN)
-  # We only care if any VLAN_NN is a valid VLAN ID.
-  local i=1 vlan
+  # Check SSID VLANs from VLAN pool (VLAN_01..VLAN_NN, filtered by node assignment)
+  # We only care if any VLAN_NN is a valid VLAN ID assigned to this node.
+  local i=1 vlan tmp
   while [ $i -le "$max_ssids" ]; do
-    vlan=$(json_get_flag "$(printf "VLAN_%02d" $i)" "" "$SETTINGS_FILE")
+    # Use filtered accessor to respect node assignment
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    # Check for fatal filter condition after first accessor call
+    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c vlan "Heal: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
+      return 1
+    fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
       return 0
@@ -174,11 +189,12 @@ LAST_MISMATCH_FILE="$LOCKDIR/vlan_last_mismatch.last"
 # ============================================================================ #
 # heal_allowed                                                                 #
 # Check if sufficient time has elapsed (COOLDOWN_SEC) since last vlan_manager  #
-# invocation. Returns 0 if heal is allowed, 1 if within cooldown window.       #
+# invocation. Returns 0 if heal allowed.                                       #
 # ============================================================================ #
 heal_allowed() {
   local now last_raw last
   now=$(date +%s)
+  
   # Read timestamp of last heal; default to 0 (epoch) if file doesn't exist
   last_raw=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
   last=$(sanitize_epoch "$last_raw")
@@ -194,6 +210,7 @@ heal_allowed() {
 mark_heal() {
   date +%s > "$COOLDOWN_FILE"
 }
+
 
 record_mismatch() {
   date +%s > "$LAST_MISMATCH_FILE"
@@ -255,8 +272,9 @@ bridge_has_members() {
   for member in $members; do
     count=$((count + 1))
     case "$member" in
-      eth[0-9]*|vlan[0-9]*|bond[0-9]*) ;;  # uplink/backhaul style members
-      wl*|ra*|ath*|psta*|apcli*|lan*|wan*) has_edge=1 ;;
+      eth0|eth0.*|vlan[0-9]*|bond[0-9]*) ;;  # Uplink/WAN only - don't count as edge
+      eth[0-9]*) has_edge=1 ;;  # LAN port or LAN VLAN subinterface (trunk) - count as edge
+      wl*|ra*|ath*|psta*|apcli*|lan*|wan*) has_edge=1 ;;  # Wireless/client interfaces
       *) has_edge=1 ;;
     esac
   done
@@ -314,20 +332,29 @@ wait_for_rc_quiet() {
 
 # ============================================================================ #
 # expected_vlans_from_settings                                                 #
-# Parse settings.json for VLAN_01..VLAN_16 and ETH*_VLAN keys, extracting      #
-# numeric VLAN IDs (2–4094 range). Returns deduplicated sorted list.           #
+# Parse settings.json for all configured VLAN IDs, extracting numeric values   #
+# (2–4094 range) from Pool, Ethernet_ports, and Trunks sections.               #
+# Returns deduplicated sorted list of all expected VLANs.                      #
 # ============================================================================ #
 expected_vlans_from_settings() {
-  # Pull VLAN IDs from VLAN.Pool (VLAN_01..NN) and VLAN.Ethernet_ports (ETHx_VLAN)
-  # using section-aware JSON helpers.
+  # Pull VLAN IDs from:
+  #  - VLAN.Pool (VLAN_01..NN) - SSID VLANs
+  #  - VLAN.Ethernet_ports (ETHx_VLAN) - Access port VLANs  
+  #  - VLAN.Trunks (TAGGED/UNTAGGED_TRUNKx) - Trunk VLANs
+  # using section-aware JSON helpers for nested structure.
   local vids tmp i idx vlan
 
-  # SSID VLAN pool
+  # SSID VLAN pool from VLAN.Pool section (filtered by node assignment)
   i=1
-  while :; do
-    tmp=$(printf 'VLAN_%02d' "$i")
-    vlan=$(json_get_flag "$tmp" "" "$SETTINGS_FILE")
-    [ -z "$vlan" ] && break
+  while [ $i -le "${MAX_SSIDS:-12}" ]; do
+    # Use filtered accessor to respect node assignment
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    # Check for fatal filter condition after first accessor call
+    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+      error -c vlan "expected_vlans_from_settings: aborting due to SSID filter fatal condition"
+      printf ''
+      return 1
+    fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
       vids="$vids
@@ -336,15 +363,75 @@ $vlan"
     i=$((i+1))
   done
 
-  # Access‑port VLANs
+  # Access-port VLANs from VLAN.Ethernet_ports section
   idx=1
   for eth in $ETH_PORTS; do
-    vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
+    # Use json_get_section2_value for VLAN->Ethernet_ports->ETHx_VLAN nested structure
+    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
+    # Fallback to old flat structure for backwards compatibility
+    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
+      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
+    fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
       vids="$vids
 $vlan"
     fi
+    idx=$((idx+1))
+  done
+
+  # Trunk VLANs from VLAN.Trunks section (both tagged and untagged)
+  idx=1
+  while [ $idx -le 8 ]; do
+    # First check if trunk is enabled (TRUNKx must be 1 or positive integer)
+    trunk_enabled=$(json_get_section2_value "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    if [ -z "$trunk_enabled" ]; then
+      trunk_enabled=$(json_get_flag "TRUNK${idx}" "0" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+    
+    # Skip this trunk if disabled (0) or missing
+    case "$trunk_enabled" in
+      0|none|"") 
+        idx=$((idx+1))
+        continue
+        ;;
+    esac
+    
+    # Trunk is enabled - read TAGGED_TRUNKx (can be comma-separated like "187,188,189")
+    tagged=$(json_get_section2_value "VLAN" "Trunks" "TAGGED_TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    if [ -z "$tagged" ] || [ "$tagged" = "none" ]; then
+      tagged=$(json_get_flag "TAGGED_TRUNK${idx}" "" "$SETTINGS_FILE")
+    fi
+    tagged=$(trim_spaces "$tagged")
+    
+    # Parse comma-separated VLAN IDs from tagged trunk
+    if [ -n "$tagged" ] && [ "$tagged" != "none" ]; then
+      # Save IFS and split by comma
+      oldifs="$IFS"
+      IFS=','
+      for vid in $tagged; do
+        IFS="$oldifs"
+        vid=$(trim_spaces "$vid")
+        if is_number "$vid" && [ "$vid" -ge 2 ] && [ "$vid" -le 4094 ]; then
+          vids="$vids
+$vid"
+        fi
+      done
+      IFS="$oldifs"
+    fi
+    
+    # Read UNTAGGED_TRUNKx (single VLAN ID)
+    untagged=$(json_get_section2_value "VLAN" "Trunks" "UNTAGGED_TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+    if [ -z "$untagged" ] || [ "$untagged" = "none" ]; then
+      untagged=$(json_get_flag "UNTAGGED_TRUNK${idx}" "" "$SETTINGS_FILE")
+    fi
+    untagged=$(trim_spaces "$untagged")
+    
+    if is_number "$untagged" && [ "$untagged" -ge 2 ] && [ "$untagged" -le 4094 ]; then
+      vids="$vids
+$untagged"
+    fi
+    
     idx=$((idx+1))
   done
 
@@ -358,12 +445,12 @@ $vlan"
 # ============================================================================ #
 # check_vlan_config                                                            #
 # Compare expected VLANs (from settings.json) with actual VLANs (from kernel). #
-# On mismatch, logs details and returns 1. On match, returns 0. Attempts up    #
-# to 2 checks with VLAN_SETTLE_DELAY between attempts to allow interfaces to   #
-# stabilize.                                                                   #
+# On mismatch, logs details and returns 1. On match, returns 0. Requires       #
+# mismatch to persist across 2 checks with delay to avoid false positives      #
+# during transient rc states.                                                  #
 # ============================================================================ #
 check_vlan_config() {
-  local exp cur exp_str cur_str missing extra
+  local exp cur exp_str cur_str missing extra mismatch_count
 
   exp=$(expected_vlans_from_settings)
   if [ -z "$exp" ]; then
@@ -372,24 +459,31 @@ check_vlan_config() {
   fi
   exp_str=$(printf '%s\n' "$exp" | xargs 2>/dev/null)
 
-  local delays="1 1 2 2 4"
-  local attempt=1
-  local total_passes=5
+  # Multi-check validation with full monitoring window
+  # - Always performs all max_checks to ensure VLANs remain stable
+  # - Heals if heal_threshold consecutive mismatches detected
+  # - Only returns OK if all checks pass without hitting threshold
+  # This ensures we don't miss issues that appear mid-window
+  local mismatch_count=0
+  local check=1
+  local max_checks=10         # Always run this many checks (27s total window)
+  local heal_threshold=3      # Trigger heal after this many consecutive mismatches (6s)
+  local settle_delay=3        # Seconds between checks
+  local pass_count=0          # Track successful checks
 
-  for delay in $delays; do
+  while [ "$check" -le "$max_checks" ]; do
     cur=$(actual_vlans_from_kernel)
     cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
 
     if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
-      info -c vlan "VLAN check pass ${attempt}/${total_passes} OK: expected=${exp_str:-none} actual=${cur_str:-none}"
-
-      if [ "$attempt" -eq "$total_passes" ]; then
-        info -c vlan "VLAN check final OK after ${attempt} passes: ${cur_str:-none}"
-        return 0
-      fi
-
-      sleep "$delay"
+      # VLANs match on this check
+      info -c vlan "VLAN check pass ${check}/${max_checks} OK: expected=${exp_str:-none} actual=${cur_str:-none}"
+      mismatch_count=0  # Reset consecutive mismatch counter
+      pass_count=$((pass_count + 1))
     else
+      # Mismatch detected
+      mismatch_count=$((mismatch_count + 1))
+
       missing=""
       for vid in $exp; do
         printf '%s\n' "$cur" | grep -Fx "$vid" >/dev/null 2>&1 || missing="$missing $vid"
@@ -402,14 +496,25 @@ check_vlan_config() {
       done
       extra=${extra# }
 
-      warn -c vlan "VLAN mismatch on pass ${attempt}/${total_passes}: expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
-      return 1
+      if [ "$mismatch_count" -ge "$heal_threshold" ]; then
+        # Hit heal threshold — trigger healing immediately
+        warn -c vlan "VLAN mismatch confirmed (${mismatch_count}/${heal_threshold} consecutive): expected{${exp_str:-none}} actual{${cur_str:-none}} missing{${missing:-none}} extra{${extra:-none}}"
+        return 1
+      fi
+
+      # Mismatch but not yet at threshold
+      info -c vlan "VLAN mismatch on pass ${check}/${max_checks} (consecutive: ${mismatch_count}/${heal_threshold}): missing{${missing:-none}} extra{${extra:-none}}"
     fi
 
-    attempt=$((attempt + 1))
+    # Continue to next check (unless this was the last one)
+    if [ "$check" -lt "$max_checks" ]; then
+      sleep "$settle_delay"
+    fi
+    check=$((check + 1))
   done
 
-  info -c vlan "VLAN check completed fallback path; treating as OK (expected=${exp_str:-none})"
+  # Completed all checks without hitting heal threshold
+  info -c vlan "VLAN monitoring complete: ${pass_count}/${max_checks} checks passed, ${mismatch_count} consecutive mismatches (below ${heal_threshold} threshold)"
   return 0
 }
 
@@ -460,6 +565,138 @@ if [ "$1" = "--test" ] || [ "$1" = "test" ]; then
   exit 0
 fi
 
+# Cron escalation test mode: simulate VLAN mismatch to test full escalation flow
+if [ "$1" = "cron-test" ] || [ "$1" = "crontest" ]; then
+  info -c cli,vlan "=== CRON ESCALATION TEST MODE ==="
+  info -c cli,vlan "This will inject a fake VLAN (9999) to trigger the full escalation cycle"
+  
+  # Override expected_vlans_from_settings to inject fake VLAN
+  expected_vlans_from_settings() {
+    # Get real VLANs first
+    local real_vlans
+    real_vlans=$(expected_vlans_from_settings_real)
+    
+    # Add fake VLAN 9999 to force mismatch
+    printf '%s\n9999\n' "$real_vlans" | sed '/^[[:space:]]*$/d' | sort -n | uniq
+  }
+  
+  # Save original function
+  expected_vlans_from_settings_real() {
+    local vids tmp i idx vlan
+
+    i=1
+    while :; do
+      tmp=$(printf 'VLAN_%02d' "$i")
+      vlan=$(json_get_section2_value "VLAN" "Pool" "$tmp" "$SETTINGS_FILE" 2>/dev/null)
+      if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
+        vlan=$(json_get_flag "$tmp" "" "$SETTINGS_FILE")
+      fi
+      [ -z "$vlan" ] && break
+      vlan=$(trim_spaces "$vlan")
+      if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+        vids="$vids
+$vlan"
+      fi
+      i=$((i+1))
+    done
+
+    idx=1
+    for eth in $ETH_PORTS; do
+      vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
+      if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
+        vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
+      fi
+      vlan=$(trim_spaces "$vlan")
+      if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+        vids="$vids
+$vlan"
+      fi
+      idx=$((idx+1))
+    done
+
+    idx=1
+    while [ $idx -le 8 ]; do
+      # First check if trunk is enabled (TRUNKx must be 1 or positive integer)
+      trunk_enabled=$(json_get_section2_value "VLAN" "Trunks" "TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+      if [ -z "$trunk_enabled" ]; then
+        trunk_enabled=$(json_get_flag "TRUNK${idx}" "0" "$SETTINGS_FILE" 2>/dev/null)
+      fi
+      
+      # Skip this trunk if disabled (0) or missing
+      case "$trunk_enabled" in
+        0|none|"") 
+          idx=$((idx+1))
+          continue
+          ;;
+      esac
+      
+      # Trunk is enabled - read TAGGED_TRUNKx
+      tagged=$(json_get_section2_value "VLAN" "Trunks" "TAGGED_TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+      if [ -z "$tagged" ] || [ "$tagged" = "none" ]; then
+        tagged=$(json_get_flag "TAGGED_TRUNK${idx}" "" "$SETTINGS_FILE")
+      fi
+      tagged=$(trim_spaces "$tagged")
+      
+      if [ -n "$tagged" ] && [ "$tagged" != "none" ]; then
+        oldifs="$IFS"
+        IFS=','
+        for vid in $tagged; do
+          IFS="$oldifs"
+          vid=$(trim_spaces "$vid")
+          if is_number "$vid" && [ "$vid" -ge 2 ] && [ "$vid" -le 4094 ]; then
+            vids="$vids
+$vid"
+          fi
+        done
+        IFS="$oldifs"
+      fi
+      
+      untagged=$(json_get_section2_value "VLAN" "Trunks" "UNTAGGED_TRUNK${idx}" "$SETTINGS_FILE" 2>/dev/null)
+      if [ -z "$untagged" ] || [ "$untagged" = "none" ]; then
+        untagged=$(json_get_flag "UNTAGGED_TRUNK${idx}" "" "$SETTINGS_FILE")
+      fi
+      untagged=$(trim_spaces "$untagged")
+      
+      if is_number "$untagged" && [ "$untagged" -ge 2 ] && [ "$untagged" -le 4094 ]; then
+        vids="$vids
+$untagged"
+      fi
+      
+      idx=$((idx+1))
+    done
+
+    printf '%s
+' "$vids" \
+      | sed '/^[[:space:]]*$/d' \
+      | sort -n \
+      | uniq
+  }
+  
+  # Simulate cron event
+  info -c cli,vlan "--- Phase 1: Fast check (should detect fake VLAN 9999) ---"
+  if ! check_vlan_config_fast; then
+    record_mismatch
+    info -c vlan "Cron test: Fast check detected mismatch — escalating to full validation..."
+    
+    info -c cli,vlan "--- Phase 2: Full validation (10 passes over 27s) ---"
+    if ! check_vlan_config; then
+      if heal_allowed; then
+        info -c cli,vlan "Cron test: VLAN damage confirmed — would normally heal here (skipping actual heal in test mode)"
+        info -c cli,vlan "In production, this would run: $VLAN_MANAGER"
+      else
+        info -c cli,vlan "Cron test: Damage confirmed but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+      fi
+    else
+      info -c vlan "Cron test: Escalation cleared — VLANs recovered (unexpected in test mode)"
+    fi
+  else
+    info -c cli,vlan "Cron test: Fast check passed (unexpected — fake VLAN should have been detected)"
+  fi
+  
+  info -c cli,vlan "=== CRON ESCALATION TEST COMPLETE ==="
+  exit 0
+fi
+
 # Normalize incoming event payload into a single lower-case token
 RAW_EVENT="$1"
 if [ $# -gt 0 ]; then
@@ -485,6 +722,19 @@ if [ -d "$MANAGER_LOCK" ]; then
   exit 0
 fi
 
+# Skip heal if within self-restart window (prevents async event loops from mervlan_manager)
+# The marker contains an expiry timestamp; if now < expiry, we're still in the window.
+SELF_RESTART_MARKER="$LOCKDIR/self_restart.marker"
+if [ -f "$SELF_RESTART_MARKER" ]; then
+  expiry_ts=$(cat "$SELF_RESTART_MARKER" 2>/dev/null || echo 0)
+  case "$expiry_ts" in ''|*[!0-9]*) expiry_ts=0 ;; esac
+  now=$(date +%s)
+  if [ "$now" -lt "$expiry_ts" ]; then
+    info -c vlan "Heal: skipping [$EVENT_LABEL] — within self-restart window"
+    exit 0
+  fi
+fi
+
 # Event debounce: suppress same event if triggered again within 2 seconds
 EVENT_DEBOUNCE="$LOCKDIR/vlan_event.last"
 event_now=$(date +%s)
@@ -500,15 +750,23 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # Phase 1: Fast sensor check
   if ! check_vlan_config_fast; then
     record_mismatch
+    info -c vlan "Cron: Fast check detected mismatch — escalating to full validation..."
 
-    if heal_allowed; then
-      info -c cli,vlan "Cron: VLAN config mismatch detected — invoking vlan_manager (cooldown ${COOLDOWN_SEC}s)"
-      mark_heal
-      "$VLAN_MANAGER" >/dev/null 2>&1 &
+    # Phase 2: Escalated full validation (10 passes over 27s)
+    # If it returns 1, damage is confirmed (3+ consecutive mismatches)
+    if ! check_vlan_config; then
+      if heal_allowed; then
+        info -c cli,vlan "Cron: VLAN damage confirmed after escalation — healing (cooldown ${COOLDOWN_SEC}s)"
+        mark_heal
+        "$VLAN_MANAGER" >/dev/null 2>&1 &
+      else
+        info -c cli,vlan "Cron: Damage confirmed but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+      fi
     else
-      info -c cli,vlan "Cron: VLAN mismatch detected but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+      info -c vlan "Cron: Escalation cleared — VLANs recovered or mismatch was transient"
     fi
   else
     log_health_ok_if_needed
@@ -574,10 +832,9 @@ should_heal_event() {
     nat_start*|restart_nat*|nat_restart*|nat|nat_*)
       return 0
       ;;
-    # HTTPD / GUI reboot
-    httpd|httpd_*|restart_httpd*|httpd_restart*)
-      return 0
-      ;;
+    # NOTE: httpd events intentionally excluded - httpd restarts do not affect
+    # VLAN configuration, and healing on them creates an event loop since
+    # mervlan_manager.sh calls restart_httpd after applying VLANs.
     # Generic reload orchestrators
     reload|reload_*|restart_all|services_restart|service_restart|restart_services|service_reload)
       return 0
@@ -618,7 +875,7 @@ if should_heal_event "$EVENT"; then
       # Invoke VLAN manager in background to restore config
       "$VLAN_MANAGER" >/dev/null 2>&1 &
     else
-      # Cooldown is still active from previous heal attempt
+      # Cooldown is active
       info -c cli,vlan "Heal suppressed after [$EVENT_LABEL] (within ${COOLDOWN_SEC}s cooldown)"
     fi
   fi

@@ -1,4 +1,4 @@
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -9,15 +9,34 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: lib_debug.sh || version="0.46"                        #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#               - File: lib_debug.sh || version="0.47"                         #
+# ============================================================================ #
 # - Purpose:    Shared debug helpers for MerVLAN scripts. Provides uniform     #
 #               toggles, JSON-driven initialization, and formatted output via  #
 #               the existing info/warn/error logging commands.                 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 
 [ -n "${LIB_DEBUG_LOADED:-}" ] && return 0 2>/dev/null
+
+# ---- merv: portable `command -v` replacement ----
+if ! type merv_has >/dev/null 2>&1; then
+  merv_has() { type "$1" >/dev/null 2>&1; }
+  merv_cmd() {
+    _merv_c="$1"
+    case "$_merv_c" in
+      */*) [ -x "$_merv_c" ] && { printf '%s\n' "$_merv_c"; return 0; } ;;
+    esac
+    _merv_oldIFS="$IFS"; IFS=:
+    for _merv_d in $PATH; do
+      [ -z "$_merv_d" ] && _merv_d="."
+      [ -x "$_merv_d/$_merv_c" ] && { IFS="$_merv_oldIFS"; printf '%s\n' "$_merv_d/$_merv_c"; return 0; }
+    done
+    IFS="$_merv_oldIFS"
+    return 1
+  }
+fi
+# ---- end shim ----
 
 : "${DBG_CHANNEL:=vlan}"
 : "${DBG_PREFIX:=[DEBUG]}"
@@ -62,7 +81,7 @@ debug_set_prefix() {
 _dbg_emit() {
     local message="$1" channel
 
-    if command -v info >/dev/null 2>&1; then
+    if merv_has info; then
         channel="${DBG_CHANNEL:-}"
         if [ -n "$channel" ]; then
             info -c "$channel" "$message"
@@ -123,7 +142,7 @@ debug_init_from_json() {
 
     [ -n "$key" ] || return 1
 
-    if command -v json_get_flag >/dev/null 2>&1; then
+    if merv_has json_get_flag; then
         if [ -n "$file" ]; then
             raw="$(json_get_flag "$key" "$default_value" "$file" 2>/dev/null)"
         else

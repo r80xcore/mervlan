@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 #   /$$      /$$                     /$$    /$$ /$$        /$$$$$$  /$$   /$$  #
 #  | $$$    /$$$                    | $$   | $$| $$       /$$__  $$| $$$ | $$  #
@@ -11,13 +11,13 @@
 #  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$  #
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
-# ──────────────────────────────────────────────────────────────────────────── #
-#               - File: save_settings.sh || version="0.46"                     #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
+#               - File: save_settings.sh || version="0.49"                     #
+# ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
 #               Also ensures custom_settings.txt has correct header line.      #
-# ──────────────────────────────────────────────────────────────────────────── #
+# ============================================================================ #
 #                                                                              #
 # ================================================== MerVLAN environment setup #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -152,15 +152,19 @@ sort_vlanmgr_block_in_custom_settings() {
 
 info -c vlan "save_settings.sh: start"
 
+# Detect ETH port capacity from Hardware section if not already set
+if [ -z "${MAX_ETH_PORTS:-}" ]; then
+    if [ -f "$HW_SETTINGS_FILE" ]; then
+        MAX_ETH_PORTS="$(json_get_hw_int "MAX_ETH_PORTS" "" "$HW_SETTINGS_FILE" 2>/dev/null)"
+    fi
+fi
+
 # Detect TRUNK port capacity (mirrors ETH/LAN unless overridden)
 if [ -z "${MAX_TRUNK_PORTS:-}" ]; then
     if [ -n "${MAX_ETH_PORTS:-}" ]; then
         MAX_TRUNK_PORTS="$MAX_ETH_PORTS"
     else
-        if [ -f "$HW_SETTINGS_FILE" ]; then
-            MAX_TRUNK_PORTS="$(json_get_int "MAX_ETH_PORTS" 8 "$HW_SETTINGS_FILE" 2>/dev/null)"
-        fi
-        [ -n "$MAX_TRUNK_PORTS" ] || MAX_TRUNK_PORTS=8
+        MAX_TRUNK_PORTS=8
     fi
 fi
 
@@ -550,30 +554,37 @@ info -c vlan "save_settings.sh: updated ${SETTINGS_FILE}"
 # Build a properly formatted JSON object from sorted key-value pairs. Escape   #
 # special characters (backslashes, quotes) and add comma separators between    #
 # entries. The last entry has no trailing comma (valid JSON).                  #
+# If the settings file is structured, preserve that structure in the public    #
+# JSON by copying the updated settings.json instead of flattening.             #
 # ============================================================================ #
 
-echo "{" > "${TMP_JSON}"
+if grep -q '"General"[[:space:]]*:' "${SETTINGS_FILE}" 2>/dev/null || \
+   grep -q '"Hardware"[[:space:]]*:' "${SETTINGS_FILE}" 2>/dev/null; then
+    cp "${SETTINGS_FILE}" "${TMP_JSON}"
+else
+    echo "{" > "${TMP_JSON}"
 
-# Count total lines to know when we've reached the last entry (no trailing comma)
-LINECOUNT=$(wc -l < "${TMP_SORTED}")
-COUNT=0
+    # Count total lines to know when we've reached the last entry (no trailing comma)
+    LINECOUNT=$(wc -l < "${TMP_SORTED}")
+    COUNT=0
 
-while IFS=$'\t' read -r OUTKEY OUTVAL; do
-    COUNT=$((COUNT + 1))
+    while IFS=$'\t' read -r OUTKEY OUTVAL; do
+        COUNT=$((COUNT + 1))
 
-    # Escape backslashes and quotes in value to make valid JSON string literals
-    ESCAPED_VAL=$(json_escape_string "${OUTVAL}")
+        # Escape backslashes and quotes in value to make valid JSON string literals
+        ESCAPED_VAL=$(json_escape_string "${OUTVAL}")
 
-    # Add comma after entries except the last one (valid JSON format)
-    if [ "${COUNT}" -lt "${LINECOUNT}" ]; then
-        printf '  "%s": "%s",\n' "${OUTKEY}" "${ESCAPED_VAL}" >> "${TMP_JSON}"
-    else
-        printf '  "%s": "%s"\n' "${OUTKEY}" "${ESCAPED_VAL}" >> "${TMP_JSON}"
-    fi
-done < "${TMP_SORTED}"
+        # Add comma after entries except the last one (valid JSON format)
+        if [ "${COUNT}" -lt "${LINECOUNT}" ]; then
+            printf '  "%s": "%s",\n' "${OUTKEY}" "${ESCAPED_VAL}" >> "${TMP_JSON}"
+        else
+            printf '  "%s": "%s"\n' "${OUTKEY}" "${ESCAPED_VAL}" >> "${TMP_JSON}"
+        fi
+    done < "${TMP_SORTED}"
 
-# Close JSON object
-echo "}" >> "${TMP_JSON}"
+    # Close JSON object
+    echo "}" >> "${TMP_JSON}"
+fi
 
 # ============================================================================ #
 # ============================================================================ #

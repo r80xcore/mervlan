@@ -411,6 +411,120 @@
         display:none !important;
 }
 
+/* SSID Node Assignment checkboxes */
+.ssid-node-cb {
+        display: flex;
+        align-items: center;
+        gap: 1px;
+        cursor: pointer;
+        font-size: 0.75rem;
+        padding: 2px 4px;
+        border-radius: 3px;
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.15);
+        transition: background 0.15s, border-color 0.15s;
+}
+
+.ssid-node-cb:hover {
+        background: rgba(255,255,255,0.12);
+        border-color: rgba(255,255,255,0.25);
+}
+
+.ssid-node-cb input[type="checkbox"] {
+        margin: 0;
+        width: 12px;
+        height: 12px;
+        cursor: pointer;
+}
+
+.ssid-node-cb span {
+        color: #ccc;
+        font-weight: 600;
+        min-width: 10px;
+        text-align: center;
+}
+
+.ssid-node-cb input[type="checkbox"]:checked + span {
+        color: #7bd77b;
+}
+
+/* Disabled state for node checkboxes — matches LAN button disabled pattern */
+.ssid-node-cb.is-disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+}
+
+.ssid-node-cb.is-disabled input[type="checkbox"] {
+        cursor: not-allowed;
+}
+
+.ssid-node-cb.is-disabled span {
+        color: #777;
+}
+
+/* Disabled state for AP Isolation select — matches LAN button disabled pattern */
+.input_option:disabled,
+.input_option[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+        background-color: #3a4e55;
+        color: #888;
+}
+
+/* Ensure consistent row height across SSID table views */
+#ssidTable tr td {
+        height: 34.8px;
+        max-height: 34.8px;
+        vertical-align: middle;
+        box-sizing: border-box;
+}
+
+#ssidTable .ssid-col-assign {
+        padding: 2px;
+}
+
+.ssid-node-assign {
+        display: flex;
+        gap: 2px;
+        justify-content: center;
+        align-items: center;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+}
+
+/* SSID table view toggle (Config vs Assign) */
+.ssid-header-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        position: relative;
+        width: 100%;
+        min-height: 22px;
+}
+
+/* Position Config button on left, Assign button on right */
+.ssid-header-wrap > .ssid-view-btn:first-child {
+        position: absolute;
+        left: 4px;
+}
+
+.ssid-header-wrap > .ssid-view-btn:last-child {
+        position: absolute;
+        right: 4px;
+}
+
+/* SSID column visibility toggle */
+.ssid-col-hidden {
+        display: none !important;
+}
+
+/* Ensure consistent row height for both views */
+.ssid-col-assign {
+        text-align: center;
+}
+
 .lan-table__port {
         position:relative;
 }
@@ -422,11 +536,13 @@
         justify-content:center;
         min-height:30px;
         padding-left:60px;
+        padding-right:60px;
+        position:relative;
 }
 
 .lan-label-wrap .lan-trunk-toggle {
         position:absolute;
-        left:0;
+        right:0;
         display:flex;
         align-items:center;
         gap:6px;
@@ -471,8 +587,9 @@
 
 .lan-trunk-inline {
         display:flex;
-        gap:12px;
-        align-items:flex-start;
+        flex-direction:column;
+        gap:8px;
+        align-items:stretch;
 }
 
 .lan-trunk-field {
