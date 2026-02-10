@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.91" -->
+  <!-- index.html version="0.52.92" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -1118,6 +1118,7 @@
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
           if (typeof setupSSIDViewToggle === "function") setupSSIDViewToggle();
           updateAPIsolationAvailability();
+          updateSSIDAssignCheckboxes();
           HW_SETTINGS.TABLES_READY = true;
           HW_SETTINGS.LAST_MAX_SSIDS = HW_SETTINGS.MAX_SSIDS;
           HW_SETTINGS.LAST_MAX_ETH_PORTS = overallMax;
@@ -1503,11 +1504,26 @@ function showTooltip() {
         
         // Extract node from checkbox name: SSIDassign_XX_MAIN or SSIDassign_XX_NODE1
         const name = cb.name || "";
-        const match = name.match(/SSIDassign_\d+_(MAIN|NODE[1-5])$/);
+        const match = name.match(/SSIDassign_(\d+)_(MAIN|NODE[1-5])$/);
         if (!match) return;
         
-        const nodeId = match[1];
-        const isAvailable = nodeAvailable[nodeId] === true;
+        const slotIdx = match[1];
+        const nodeId = match[2];
+
+        // Check if this SSID row has a valid SSID + VLAN configured
+        const ssidInput = document.querySelector(`input[name="SSID_${slotIdx}"]`);
+        const vlanInput = document.querySelector(`input[name="VLAN_${slotIdx}"]`);
+        const ssidValue = ssidInput ? ssidInput.value.trim() : "";
+        const vlanValue = vlanInput ? vlanInput.value.trim() : "";
+        const ssidValid = ssidValue.length >= 1 && ssidValue.length <= 32 &&
+                         ssidValue !== "unused-placeholder";
+        const vlanNum = parseInt(vlanValue, 10);
+        const vlanValid = !isNaN(vlanNum) && vlanNum >= 1 && vlanNum <= 4094;
+        const rowActive = ssidValid && vlanValid;
+
+        // For MAIN: require SSID + VLAN
+        // For NODEx: require SSID + VLAN + node has valid IP
+        const isAvailable = rowActive && nodeAvailable[nodeId] === true;
         
         if (isAvailable) {
           label.classList.remove("is-disabled");
@@ -1530,7 +1546,9 @@ function showTooltip() {
         } else {
           label.classList.add("is-disabled");
           cb.disabled = true;
-          if (nodeId === "MAIN") {
+          if (!rowActive) {
+            label.title = "Enter valid SSID and VLAN ID first";
+          } else if (nodeId === "MAIN") {
             label.title = "Main Router";
           } else {
             const n = nodeId.replace("NODE", "");
@@ -1700,6 +1718,7 @@ function showTooltip() {
       const raw=input.value;
       const v=raw; input.classList.remove("valid","invalid"); if(v.trim()==="") return; if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
       updateAPIsolationAvailability();
+      updateSSIDAssignCheckboxes();
     }
     function validateNodeField(input){
       const raw=input.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned){ const d=raw.length-cleaned.length; const s=(input.selectionStart||cleaned.length)-d; const e=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(s,e);}catch{} }
@@ -1804,7 +1823,7 @@ function showTooltip() {
         }
       });
     }
-    function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); updateAPIsolationAvailability(); }
+    function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); updateAPIsolationAvailability(); updateSSIDAssignCheckboxes(); }
 
     function updateAPIsolationAvailability(){
       // Enable AP Isolation select only when both SSID and VLAN are valid
@@ -3331,6 +3350,7 @@ async function runVlanManagerOnlyNodes() {
       rebuildTrunkVlanOptionsFromSettings(flat);
       updateExperimentalVisibility();
       updateAPIsolationAvailability();
+      updateSSIDAssignCheckboxes();
     }
 
     function deepEqualObjects(a, b) {
