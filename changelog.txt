@@ -1,4 +1,18 @@
-mervlan v0.52.91
+mervlan v0.52.92
+
+hw_probe.sh
+- added RT-BE92U support. Because of the internal handling of the LAN ports, as of now, i can
+  only provide a bridge VLAN option for LAN on this model. This means that LAN 1-4 will 
+  share the same VLAN-ID if configured. Hopefully this can be fixed further down the road.
+
+index.html
+- Fixed node assignment buttons showing as enabled on all SSID rows even when
+  the SSID or VLAN wasn't configured. Now they only become clickable when you've
+  entered both a valid SSID name and VLAN ID for that row.
+
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.91 changes
 
 mervlan_boot.sh — Hotfix
 - Fixed a bug where the boot template injection could silently remove other
