@@ -109,6 +109,7 @@ functions/collect_local_clients.sh
 functions/heal_event.sh  
 functions/service-event-handler.sh
 functions/hw_probe.sh
+functions/mervlan_trunk.sh
 templates/mervlan_templates.sh
 "
 
@@ -121,6 +122,7 @@ functions/collect_local_clients.sh
 functions/heal_event.sh
 functions/service-event-handler.sh
 functions/hw_probe.sh
+functions/mervlan_trunk.sh
 "
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
 FILES_TO_COPY_CHMOD_644="
@@ -461,17 +463,36 @@ copy_file_to_node() {
         return 0
     fi
 
-    # Special handling for settings.json: reset Trunks section to prevent trunk configs on nodes
+    # Special handling for settings.json: inject node-aware trunk config
+    # Nodes need TRUNK1 enabled so the backhaul port carries tagged VLAN traffic.
     if [ "$file" = "settings/settings.json" ]; then
         _cfn_tmp="$TMPDIR/settings_trunk_reset_sync_node${node_id}.$$"
         cp "$MERV_BASE/$file" "$_cfn_tmp" 2>/dev/null || {
-            error -c cli,vlan "✗ Failed to create temp file for trunk reset"
+            error -c cli,vlan "✗ Failed to create temp file for trunk config"
             rm -f "$_cfn_tmp" 2>/dev/null
             return 1
         }
 
-        # Reset Trunks section to defaults (nodes should never trunk)
-        if ! json_reset_trunks_section "$_cfn_tmp"; then
+        # Zero all trunks first (clean slate), then inject node trunk config
+        if json_reset_trunks_section "$_cfn_tmp"; then
+            # Collect all VLAN IDs from the SSID pool
+            _cfn_vlan_list=""
+            _cfn_vi=1
+            while [ "$_cfn_vi" -le 12 ]; do
+                _cfn_vid="$(json_get_flag "VLAN_$(printf '%02d' "$_cfn_vi")" "" "$_cfn_tmp")"
+                case "$_cfn_vid" in
+                    ""|none|*[!0-9]*) ;;
+                    *) _cfn_vlan_list="${_cfn_vlan_list}${_cfn_vlan_list:+,}${_cfn_vid}" ;;
+                esac
+                _cfn_vi=$((_cfn_vi + 1))
+            done
+            # Enable TRUNK1 for node backhaul with collected VLANs
+            if [ -n "$_cfn_vlan_list" ]; then
+                json_set_flag "TRUNK1" "1" "$_cfn_tmp"
+                json_set_flag "TAGGED_TRUNK1" "$_cfn_vlan_list" "$_cfn_tmp"
+                info -c cli,vlan "Node trunk config: TRUNK1=1, TAGGED=$_cfn_vlan_list"
+            fi
+        else
             warn -c cli,vlan "⚠️ Failed to reset trunks section, copying original file"
             rm -f "$_cfn_tmp" 2>/dev/null
             # Fallback to original file
