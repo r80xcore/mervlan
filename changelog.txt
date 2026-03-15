@@ -1,3 +1,36 @@
+mervlan v0.52.93
+
+hw_probe.sh - v0.48
+- Merge pull request #12 from agnithin/xt8-fix
+  Fix dual-band SSID resolution and AiMesh node VLAN support
+- Added the following model support:
+  RT-AXE95Q, RT-AX82U
+
+mervlan_manager.sh - v0.59
+- Merge pull request #12 from agnithin/xt8-fix
+  Fix dual-band SSID resolution and AiMesh node VLAN support
+
+sync_nodes.sh - v0.55
+- Merge pull request #12 from agnithin/xt8-fix
+  Fix dual-band SSID resolution and AiMesh node VLAN support
+
+device_support_mapper.sh - v0.50.3
+- Fixed a bug where wireless radio interfaces (e.g. eth4, eth5, eth6) could be
+  misidentified as WAN or LAN candidates on routers where radios share the eth[N]
+  naming scheme with physical ports (e.g. ZenWiFi ET8, and similar tri-band models).
+- Added nvram wl_ifnames reading in read_device_info(). The returned interface
+  names are stored in WL_IFNAMES and used as an exclusion list throughout the script.
+- Updated list_eth_ifaces() to skip any interface present in WL_IFNAMES, preventing
+  wireless radios from appearing as LAN candidates or in the carrier snapshot.
+- Added nvram wan0_ifname as the primary WAN detection method. On all Asuswrt-Merlin
+  routers this key authoritatively stores the configured WAN interface, making
+  detection instant, stateless, and immune to routing/bridge topology edge cases.
+- The existing ip route fallback and br0 tx-delta last-resort remain in place.
+  The br0 delta candidate list is also now filtered through WL_IFNAMES so wireless
+  radios can no longer win the delta race even if reached as a last resort.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.92
 
 hw_probe.sh
