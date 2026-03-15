@@ -893,6 +893,8 @@ find_if_by_ssid_any() {
   [ "$TARGET_NORM" = "unused-placeholder" ] && return 1
   TARGET_LOWER=$(to_lower "$TARGET_NORM")
 
+  EXACT_MATCHES=""
+  EXACT_COUNT=0
   FALLBACK_IFACE=""
   FALLBACK_LABELS=""
   FALLBACK_COUNT=0
@@ -920,11 +922,11 @@ find_if_by_ssid_any() {
         ssid_norm=$(normalize_ssid "$raw")
 
         if [ "$ssid_norm" = "$TARGET_NORM" ]; then
-          echo "$iface"
-          return 0
-        fi
-
-        if [ -n "$ssid_norm" ] && [ "$(to_lower "$ssid_norm")" = "$TARGET_LOWER" ]; then
+          # Collect exact match (don't return early — there may be more bands)
+          EXACT_MATCHES="${EXACT_MATCHES}${EXACT_MATCHES:+
+}${iface}"
+          EXACT_COUNT=$((EXACT_COUNT + 1))
+        elif [ -n "$ssid_norm" ] && [ "$(to_lower "$ssid_norm")" = "$TARGET_LOWER" ]; then
           if [ "$FALLBACK_COUNT" -eq 0 ]; then
             FALLBACK_IFACE="$iface"
             FALLBACK_LABELS="$ssid_norm -> $iface"
@@ -938,6 +940,12 @@ find_if_by_ssid_any() {
   done <<EOF
 $(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ssid=')
 EOF
+
+  # Return all exact matches (one per line) if any were found
+  if [ "$EXACT_COUNT" -ge 1 ]; then
+    printf '%s\n' "$EXACT_MATCHES"
+    return 0
+  fi
 
   if [ "$FALLBACK_COUNT" -eq 1 ]; then
     warn -c cli,vlan "Case-insensitive match for '$TARGET_NORM' -> $FALLBACK_IFACE"
@@ -1178,17 +1186,20 @@ bind_configured_ssids() {
 
     if [ "$ssid" != "unused-placeholder" ]; then
       validate_vlan_id "$vlan" || { i=$((i+1)); continue; }
-      # Find interface for this SSID (searches all bands/slots)
+      # Find ALL interfaces for this SSID (handles dual-band identical SSIDs)
       IFN="$(find_if_by_ssid_any "$ssid")"
       if [ -n "$IFN" ]; then
-        info -c cli,vlan "Resolved SSID '$ssid' -> $IFN"
-        if ! wait_for_interface "$IFN"; then
-          warn -c cli,vlan "$IFN did not appear within timeout"
-          i=$((i+1))
-          continue
-        fi
-        # Attach to appropriate bridge (br0, brVID, or trunk)
-        attach_to_bridge "$IFN" "$vlan" "SSID_$(printf "%02d" $i)"
+        while IFS= read -r _ifn; do
+          [ -n "$_ifn" ] || continue
+          info -c cli,vlan "Resolved SSID '$ssid' -> $_ifn"
+          if ! wait_for_interface "$_ifn"; then
+            warn -c cli,vlan "$_ifn did not appear within timeout"
+            continue
+          fi
+          attach_to_bridge "$_ifn" "$vlan" "SSID_$(printf "%02d" $i)"
+        done <<_SSID_EOF_
+$IFN
+_SSID_EOF_
       else
         warn -c cli,vlan "SSID_$(printf "%02d" $i) '$ssid' not found on any band"
       fi
@@ -1251,7 +1262,12 @@ resolve_and_attach() {
     return
   fi
 
-  attach_to_bridge "$IFN" "$VLAN" "$LABEL ($SSID)"
+  while IFS= read -r _ifn; do
+    [ -n "$_ifn" ] || continue
+    attach_to_bridge "$_ifn" "$VLAN" "$LABEL ($SSID)"
+  done <<_RAA_EOF_
+$IFN
+_RAA_EOF_
 }
 
 # --------------------------
@@ -1639,9 +1655,12 @@ main() {
     apiso=$(get_apiso_slot_value "$i" "$SETTINGS_FILE")
     # Apply AP isolation if SSID is configured and APISO value is set
     if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && [ -n "$apiso" ]; then
-      iface=$(find_if_by_ssid_any "$ssid")
-      if [ -n "$iface" ]; then
-        set_ap_isolation "$iface" "$apiso"
+      _apiso_iflist=$(find_if_by_ssid_any "$ssid")
+      if [ -n "$_apiso_iflist" ]; then
+        printf '%s\n' "$_apiso_iflist" | while IFS= read -r _apiso_ifn; do
+          [ -n "$_apiso_ifn" ] || continue
+          set_ap_isolation "$_apiso_ifn" "$apiso"
+        done
       fi
     fi
     i=$((i+1))

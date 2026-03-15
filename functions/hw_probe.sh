@@ -64,12 +64,15 @@ RADIOS=""
 GUEST_SLOTS=0
 MAX_SSIDS=0
 
+# AiMesh nodes remap wl interfaces to ethX; bypass /sys/class/net check for them
+is_node=$(nvram get re_mode 2>/dev/null)
+
 # Iterate through radio indices 0, 1, 2 (potential radio slots on Merlin)
 for radio in 0 1 2; do
     # Retrieve interface name from nvram (e.g., wl0_ifname, wl1_ifname, wl2_ifname)
     ifname=$(nvram get "wl${radio}_ifname" 2>/dev/null)
-    # Verify interface exists in kernel
-    if [ -n "$ifname" ] && [ -d "/sys/class/net/$ifname" ]; then
+    # Verify interface exists in kernel (or bypass check for AiMesh nodes)
+    if [ -n "$ifname" ] && { [ "$is_node" = "1" ] || [ -d "/sys/class/net/$ifname" ]; }; then
         # Map radio index to band name
         case $radio in
             0) band="2.4" ;;      # 2.4 GHz band
