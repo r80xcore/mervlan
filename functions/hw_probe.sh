@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: hw_probe.sh || version="0.48"                      #
+#                   - File: hw_probe.sh || version="0.50"                      #
 # ============================================================================ #
 # - Purpose:  Probe system hardware and record hardware keys in the central    #
 #             settings store (settings.json). Writes non-destructively via     #
@@ -107,23 +107,151 @@ RADIOS=$(echo $RADIOS | sed 's/^ //')
 [ $MAX_SSIDS -gt 12 ] && MAX_SSIDS=12
 
 # ============================================================================ #
+#                     HARDWARE OVERRIDE – IDENTITY & VALIDATION                #
+# Read device identity (IS_NODE / NODE_ID) and manual port mapping override    #
+# from Hardware_Override section in settings.json. If a valid override is      #
+# enabled for this device, it replaces the normal model-based port detection.  #
+# ============================================================================ #
+
+USE_MAP_OVERRIDE=0
+
+# Read device identity from General section
+_OVR_IS_NODE=$(json_get_section_value "General" "IS_NODE" "$SETTINGS_FILE" 2>/dev/null)
+_OVR_NODE_ID=$(json_get_section_value "General" "NODE_ID" "$SETTINGS_FILE" 2>/dev/null)
+
+# Determine override target key
+if [ "$_OVR_IS_NODE" = "1" ]; then
+  case "$_OVR_NODE_ID" in
+    1|2|3|4|5) _OVR_TARGET="NODE${_OVR_NODE_ID}" ;;
+    *) _OVR_TARGET="MAIN" ;;
+  esac
+else
+  _OVR_TARGET="MAIN"
+fi
+
+# Read override values for resolved target via two-level nested JSON helper
+_ovr_get() { json_get_section2_value "Hardware_Override" "$_OVR_TARGET" "$1" "$SETTINGS_FILE" 2>/dev/null; }
+
+OVERRIDE_MAP=$(_ovr_get "MAP_OVERRIDE")
+[ -z "$OVERRIDE_MAP" ] && OVERRIDE_MAP="0"
+
+if [ "$OVERRIDE_MAP" = "1" ]; then
+  OVERRIDE_WAN=$(_ovr_get "OVERRIDE_WAN")
+  OVERRIDE_MAX_ETH_PORTS=$(_ovr_get "OVERRIDE_MAX_ETH_PORTS")
+  [ -z "$OVERRIDE_WAN" ] && OVERRIDE_WAN="eth0"
+  [ -z "$OVERRIDE_MAX_ETH_PORTS" ] && OVERRIDE_MAX_ETH_PORTS="0"
+
+  # Read LAN slot values
+  _ovr_i=1
+  while [ "$_ovr_i" -le 8 ]; do
+    eval "OVERRIDE_LAN${_ovr_i}=\"\$(_ovr_get \"OVERRIDE_LAN${_ovr_i}\")\""
+    eval "[ -z \"\$OVERRIDE_LAN${_ovr_i}\" ] && OVERRIDE_LAN${_ovr_i}=\"none\""
+    _ovr_i=$((_ovr_i + 1))
+  done
+
+  # Trim whitespace from all override values
+  OVERRIDE_WAN=$(echo "$OVERRIDE_WAN" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  _ovr_i=1
+  while [ "$_ovr_i" -le 8 ]; do
+    eval "OVERRIDE_LAN${_ovr_i}=\$(echo \"\$OVERRIDE_LAN${_ovr_i}\" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    _ovr_i=$((_ovr_i + 1))
+  done
+
+  # Validate override
+  _ovr_valid=1
+  _ovr_reason=""
+
+  # MAX must be numeric 0-8
+  case "$OVERRIDE_MAX_ETH_PORTS" in
+    0|1|2|3|4|5|6|7|8) ;;
+    *) _ovr_valid=0; _ovr_reason="MAX_ETH_PORTS '$OVERRIDE_MAX_ETH_PORTS' is not 0-8" ;;
+  esac
+
+  # WAN must be non-empty after trim
+  if [ "$_ovr_valid" = "1" ] && [ -z "$OVERRIDE_WAN" ]; then
+    _ovr_valid=0
+    _ovr_reason="OVERRIDE_WAN is empty"
+  fi
+
+  # When MAX > 0, validate active LAN slots
+  if [ "$_ovr_valid" = "1" ] && [ "$OVERRIDE_MAX_ETH_PORTS" -gt 0 ]; then
+    _ovr_i=1
+    while [ "$_ovr_i" -le "$OVERRIDE_MAX_ETH_PORTS" ] && [ "$_ovr_valid" = "1" ]; do
+      eval "_ovr_lanval=\$OVERRIDE_LAN${_ovr_i}"
+      if [ -z "$_ovr_lanval" ] || [ "$_ovr_lanval" = "none" ]; then
+        _ovr_valid=0
+        _ovr_reason="OVERRIDE_LAN${_ovr_i} is empty or none"
+      fi
+      _ovr_i=$((_ovr_i + 1))
+    done
+  fi
+
+  # Duplicate check across WAN + active LAN slots (only when MAX > 0)
+  if [ "$_ovr_valid" = "1" ] && [ "$OVERRIDE_MAX_ETH_PORTS" -gt 0 ]; then
+    _ovr_all_ifaces="$OVERRIDE_WAN"
+    _ovr_i=1
+    while [ "$_ovr_i" -le "$OVERRIDE_MAX_ETH_PORTS" ]; do
+      eval "_ovr_lanval=\$OVERRIDE_LAN${_ovr_i}"
+      _ovr_all_ifaces="$_ovr_all_ifaces $_ovr_lanval"
+      _ovr_i=$((_ovr_i + 1))
+    done
+    _ovr_unique_count=$(echo "$_ovr_all_ifaces" | tr ' ' '\n' | sort -u | wc -l)
+    _ovr_total_count=$(echo "$_ovr_all_ifaces" | tr ' ' '\n' | wc -l)
+    if [ "$_ovr_unique_count" -ne "$_ovr_total_count" ]; then
+      _ovr_valid=0
+      _ovr_reason="duplicate interfaces detected"
+    fi
+  fi
+
+  if [ "$_ovr_valid" = "1" ]; then
+    USE_MAP_OVERRIDE=1
+    info "Hardware override enabled for $_OVR_TARGET"
+  else
+    warn "Hardware override for $_OVR_TARGET failed validation: $_ovr_reason — using normal detection"
+  fi
+fi
+
+# ============================================================================ #
 #                        MODEL-SPECIFIC PORT DETECTION                         #
 # Map product ID to specific router model and assign ethernet port layout      #
 # (interface names and labels). Models with native VLAN GUI skip port override.#
 # ============================================================================ #
+if [ "$USE_MAP_OVERRIDE" = "1" ]; then
+  # Override mode: use manual port mapping instead of model detection
+  MODEL="CUSTOM"
+  WAN_IF="$OVERRIDE_WAN"
+  MAX_ETH_PORTS="$OVERRIDE_MAX_ETH_PORTS"
+  ETH_PORTS=""
+  LAN_PORT_LABELS=""
+  if [ "$MAX_ETH_PORTS" -gt 0 ]; then
+    _ovr_i=1
+    while [ "$_ovr_i" -le "$MAX_ETH_PORTS" ]; do
+      eval "_ovr_lanval=\$OVERRIDE_LAN${_ovr_i}"
+      ETH_PORTS="$ETH_PORTS $_ovr_lanval"
+      LAN_PORT_LABELS="$LAN_PORT_LABELS LAN${_ovr_i}"
+      _ovr_i=$((_ovr_i + 1))
+    done
+    ETH_PORTS=$(echo $ETH_PORTS | sed 's/^ //')
+    LAN_PORT_LABELS=$(echo $LAN_PORT_LABELS | sed 's/^ //')
+  fi
+else
 case "$PRODUCTID" in
 # === Supported Models ===
 
-RT-AX95Q) MODEL="XT8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
+GT-AX6000) MODEL="GT-AX6000"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+RT-AX95Q) MODEL="RT-AX95Q"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 RT-AXE95Q) MODEL="RT-AXE95Q"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
-RT-ET8)   MODEL="ET8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
+RT-ET8)   MODEL="RT-ET8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 RT-AX58U) MODEL="RT-AX58U"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
 RT-AX82U) MODEL="RT-AX82U"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
 RT-AX86S) MODEL="RT-AX86S"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+RT-AX92U) MODEL="RT-AX92U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 RT-AC86U) MODEL="RT-AC86U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 RT-AX86U) MODEL="RT-AX86U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-AX88U) MODEL="RT-AX88U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; MAX_ETH_PORTS=1; WAN_IF="eth0" ;;
+
 
 # === Models that needs port layout testing/verification ===
 #RT-AX68U) MODEL="RT-AX68U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
@@ -140,7 +268,6 @@ RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; MAX_ETH_PO
 #TUF-AX5400) MODEL="TUF-AX5400"; ETH_PORTS="eth0 eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
 #GT-AX11000) MODEL="GT-AX11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 #GT-AXE11000) MODEL="GT-AXE11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
-#GT-AX6000) MODEL="GT-AX6000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 #XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 #GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 #GT-AXE16000) MODEL="GT-AXE16000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
@@ -170,6 +297,7 @@ RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; MAX_ETH_PO
         WAN_IF="eth0"
         ;;
 esac
+fi
 
 # ============================================================================ #
 #                        WAN INTERFACE VALIDATION                              #
@@ -212,6 +340,34 @@ json_set_flag "MAX_ETH_PORTS" "${MAX_ETH_PORTS}" "$HW_TARGET" || warn "Failed to
 json_set_array "RADIOS" "$RADIOS" "$HW_TARGET" || warn "Failed to write RADIOS"
 json_set_array "ETH_PORTS" "$ETH_PORTS" "$HW_TARGET" || warn "Failed to write ETH_PORTS"
 json_set_array "LAN_PORT_LABELS" "$LAN_PORT_LABELS" "$HW_TARGET" || warn "Failed to write LAN_PORT_LABELS"
+
+# ============================================================================ #
+#            NODE OVERRIDE PROPAGATION (main router only)                      #
+# When running on the main router, check each node's override and update       #
+# MAX_ETH_PORTS_NODEn in the Hardware section so the UI reflects overrides     #
+# without needing a full sync_nodes run.                                       #
+# ============================================================================ #
+if [ "$_OVR_IS_NODE" != "1" ]; then
+  _node_i=1
+  while [ "$_node_i" -le 5 ]; do
+    _nod_map=$(json_get_section2_value "Hardware_Override" "NODE${_node_i}" "MAP_OVERRIDE" "$HW_TARGET" 2>/dev/null)
+    if [ "$_nod_map" = "1" ]; then
+      _nod_max=$(json_get_section2_value "Hardware_Override" "NODE${_node_i}" "OVERRIDE_MAX_ETH_PORTS" "$HW_TARGET" 2>/dev/null)
+      [ -z "$_nod_max" ] && _nod_max="0"
+      case "$_nod_max" in
+        0|1|2|3|4|5|6|7|8)
+          if json_set_section_value "Hardware" "MAX_ETH_PORTS_NODE${_node_i}" "$_nod_max" "$HW_TARGET"; then
+            info "Override: MAX_ETH_PORTS_NODE${_node_i}=$_nod_max"
+          else
+            warn "Failed to write override MAX_ETH_PORTS_NODE${_node_i}"
+          fi
+          ;;
+        *) warn "Override NODE${_node_i} MAX_ETH_PORTS '$_nod_max' invalid (not 0-8), skipping" ;;
+      esac
+    fi
+    _node_i=$((_node_i + 1))
+  done
+fi
 
 # ============================================================================ #
 #                           REPORT & DEBUG OUTPUT                              #
