@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.50"                  #
+#          - File: service-event-handler.sh || version="0.51"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -123,7 +123,7 @@ case "${TYPE}_${EVENT}" in
   save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
   executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
   disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr|\
-  clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr)
+  clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr|hwprobe_vlanmgr)
     APP_EVENT=1
     ;;
 esac
@@ -303,6 +303,10 @@ case "${TYPE}_${EVENT}" in
   updatedev_vlanmgr)
     # Update MerVLAN addon from development channel (triggered by update request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update dev
+    ;;
+  hwprobe_vlanmgr)
+    # Re-run hardware probe to refresh the Hardware profile in settings.json
+    dispatch_if_executable "/jffs/addons/mervlan/functions/hw_probe.sh"
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
   # Wildcard patterns catch restart_* and service events (wireless, WAN, LAN, NET, FW, NAT, DNS)
