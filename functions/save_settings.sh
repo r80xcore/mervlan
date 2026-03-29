@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.49"                     #
+#               - File: save_settings.sh || version="0.50"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -536,15 +536,75 @@ enforce_trunk_eth_exclusivity() {
 enforce_trunk_eth_exclusivity
 
 # ============================================================================ #
+# STEP 2.8: Separate Hardware_Override keys from normal flat keys              #
+# Override keys use the flat convention OVERRIDE_<TARGET>_<FIELD> and must be  #
+# written into the nested Hardware_Override section via json_set_section2_value#
+# instead of flat json_set_flag. Split them into a separate file here.         #
+# ============================================================================ #
+
+TMP_OVERRIDE="${RESULTDIR}/vlanmgr_override.$$"
+TMP_NORMAL="${RESULTDIR}/vlanmgr_normal.$$"
+> "${TMP_OVERRIDE}"
+> "${TMP_NORMAL}"
+
+while IFS="$(printf '\t')" read -r key value; do
+    case "$key" in
+        OVERRIDE_*) printf '%s\t%s\n' "$key" "$value" >> "${TMP_OVERRIDE}" ;;
+        *)          printf '%s\t%s\n' "$key" "$value" >> "${TMP_NORMAL}" ;;
+    esac
+done < "${TMP_SORTED}"
+
+# Replace TMP_SORTED with normal-only keys for json_apply_kv_file
+cp "${TMP_NORMAL}" "${TMP_SORTED}"
+
+# ============================================================================ #
 # STEP 3: Merge into persistent settings.json                                   #
 # Update the stored configuration in-place without overwriting unrelated keys. #
 # ============================================================================ #
 
 if ! json_apply_kv_file "${TMP_SORTED}" "${SETTINGS_FILE}"; then
     error -c vlan "save_settings.sh: failed to update ${SETTINGS_FILE}"
-    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_NORMAL}"
     exit 1
 fi
+
+# ============================================================================ #
+# STEP 3.5: Apply Hardware_Override keys into nested section                   #
+# Map flat keys like OVERRIDE_MAIN_MAP_OVERRIDE → Hardware_Override.MAIN.MAP_OVERRIDE #
+# ============================================================================ #
+
+if [ -s "${TMP_OVERRIDE}" ]; then
+    _ovr_fail=0
+    while IFS="$(printf '\t')" read -r okey oval; do
+        # Parse: OVERRIDE_<TARGET>_<FIELD>
+        # TARGET is MAIN, NODE1..NODE5; FIELD is MAP_OVERRIDE, WAN, MAX_ETH_PORTS, LAN1..LAN8
+        _ovr_rest="${okey#OVERRIDE_}"
+        case "$_ovr_rest" in
+            MAIN_*)  _ovr_target="MAIN";  _ovr_field="${_ovr_rest#MAIN_}" ;;
+            NODE1_*) _ovr_target="NODE1"; _ovr_field="${_ovr_rest#NODE1_}" ;;
+            NODE2_*) _ovr_target="NODE2"; _ovr_field="${_ovr_rest#NODE2_}" ;;
+            NODE3_*) _ovr_target="NODE3"; _ovr_field="${_ovr_rest#NODE3_}" ;;
+            NODE4_*) _ovr_target="NODE4"; _ovr_field="${_ovr_rest#NODE4_}" ;;
+            NODE5_*) _ovr_target="NODE5"; _ovr_field="${_ovr_rest#NODE5_}" ;;
+            *) warn -c vlan "save_settings.sh: unrecognised override key: $okey"; continue ;;
+        esac
+        # Re-prefix FIELD to match JSON key names (OVERRIDE_WAN, OVERRIDE_LAN1, etc.)
+        # MAP_OVERRIDE stays as-is; WAN→OVERRIDE_WAN, MAX_ETH_PORTS→OVERRIDE_MAX_ETH_PORTS, LAN*→OVERRIDE_LAN*
+        case "$_ovr_field" in
+            MAP_OVERRIDE) _ovr_json_key="MAP_OVERRIDE" ;;
+            *)            _ovr_json_key="OVERRIDE_${_ovr_field}" ;;
+        esac
+        if ! json_set_section2_value "Hardware_Override" "$_ovr_target" "$_ovr_json_key" "$oval" "${SETTINGS_FILE}"; then
+            warn -c vlan "save_settings.sh: failed to set Hardware_Override.$_ovr_target.$_ovr_json_key"
+            _ovr_fail=1
+        fi
+    done < "${TMP_OVERRIDE}"
+    if [ "$_ovr_fail" = "0" ]; then
+        info -c vlan "save_settings.sh: Hardware_Override keys applied"
+    fi
+fi
+
+rm -f "${TMP_OVERRIDE}" "${TMP_NORMAL}"
 
 chmod 600 "${SETTINGS_FILE}"
 info -c vlan "save_settings.sh: updated ${SETTINGS_FILE}"
