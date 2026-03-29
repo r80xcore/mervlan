@@ -229,5 +229,87 @@
     "MAX_ETH_PORTS_NODE3": "0",
     "MAX_ETH_PORTS_NODE4": "0",
     "MAX_ETH_PORTS_NODE5": "0"
+  },
+
+  "Hardware_Override": {
+    "_description": "Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE5)",
+    "MAIN": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE1": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE2": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE3": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE4": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE5": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    }
   }
 }
