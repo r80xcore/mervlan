@@ -1,3 +1,62 @@
+mervlan v0.52.94
+
+NOTABLE FEATURES:
+
+Advanced Port Mapping Override (APMO):
+- New manual WAN/LAN port mapping override system.
+- Lets users define custom ethernet port assignments per device when
+  auto-detection gets the layout wrong or the model is not yet supported.
+- Configurable for the main router and each AiMesh node independently.
+- Each device slot (MAIN, NODE1-5) can override: WAN interface, number
+  of LAN ports (0-8), and individual LAN interface names.
+- Built-in validation prevents invalid or duplicate port assignments.
+- Node overrides require a Sync Nodes run afterwards so the updated
+  configuration is pushed and applied on each node.
+
+Override UI:
+- New modal accessible from the Experimental badge area.
+- Tab-based navigation to switch between MAIN and NODE1-5 targets.
+- Enable/disable toggle per target with field greying when disabled.
+- Preset dropdowns with optional custom freeform input for any field.
+- "Save" writes settings to disk. Tick "Auto-refresh HW Profile" to
+  also chain a hardware probe automatically (button becomes "Save & Apply").
+- Standalone "Refresh HW Profile" button for manual re-detection.
+
+
+UPDATED FILES:
+
+hw_probe.sh v0.50
+- Override identity resolution — each node reads IS_NODE/NODE_ID and
+  applies its own override from the shared settings.json.
+- Node override propagation on the main router updates node LAN port
+  counts without needing SSH, so the UI refreshes immediately.
+- Added support for the following models:
+  GT-AX6000, RT-AX86U_PRO, RT-AX92U
+
+settings.json
+- New "Hardware_Override" section with per-device override sub-objects.
+
+save_settings.sh v0.50
+- Override keys are separated and written into the nested
+  Hardware_Override section via two-level JSON helpers.
+
+service-event-handler.sh v0.51
+- New hwprobe_vlanmgr action for on-demand hardware profile refresh.
+
+mervlan.asp v0.50
+- hwprobe_vlanmgr added to policy sets. New MVM_hwprobe() wrapper.
+
+index.html v0.52.94
+- Updated version header.
+- Full APMO modal with tab navigation, validation, and state management.
+- Save pipeline extended for override keys with verification polling.
+- UI-side override enforcement on every settings load.
+- Fixed table rebuild issues when hardware values change.
+- Two save flows: normal "Save" and chained "Save & Apply".
+
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.93
 
 hw_probe.sh - v0.48
