@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: execute_nodes.sh || version="0.50"                    #
+#                - File: execute_nodes.sh || version="0.51"                    #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -664,8 +664,7 @@ if [ -z "$READY_NODES" ]; then
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
             # No nodes, so run with collect_clients included
-            sh "$local_script" >>"$CLI_LOG" 2>&1
-            local_success=$?
+            sh "$local_script" >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
         fi
     fi
 else
@@ -688,7 +687,8 @@ EOF2
         info -c cli,vlan "Launching execution on main router..."
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
-            sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 &
+            _main_rc_file="$TMPDIR/main_exec_rc.$$"
+            ( sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; echo $? > "$_main_rc_file" ) &
             main_pid=$!
         fi
     fi
@@ -700,12 +700,22 @@ EOF2
     
     # Check if main router succeeded (if we ran it)
     if [ "$MODE" != "nodesonly" ]; then
-        # wait already completed, check if script ran
-        if [ -f "$local_script" ]; then
-            info -c cli,vlan "✓ Main router execution completed"
-            local_success=true
-        else
+        if [ -n "${_main_rc_file:-}" ] && [ -f "$_main_rc_file" ]; then
+            _main_rc=$(cat "$_main_rc_file" 2>/dev/null)
+            rm -f "$_main_rc_file" 2>/dev/null
+            if [ "${_main_rc:-1}" = "0" ]; then
+                info -c cli,vlan "✓ Main router execution completed"
+                local_success=true
+            else
+                error -c cli,vlan "✗ Main router execution failed (rc=${_main_rc:-?})"
+                local_success=false
+            fi
+        elif [ -n "${local_script:-}" ] && [ ! -f "$local_script" ]; then
             error -c cli,vlan "✗ Local VLAN manager script missing"
+            local_success=false
+        else
+            # rc file missing (script may not have been launched)
+            warn -c cli,vlan "⚠ Main router exit status unavailable"
             local_success=false
         fi
     fi
