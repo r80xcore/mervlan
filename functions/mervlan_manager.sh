@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.59"                   #
+#               - File: mervlan_manager.sh || version="0.60"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -261,6 +261,8 @@ TOPOLOGY="switch"
 PERSISTENT=$(read_json_raw PERSISTENT "$SETTINGS_FILE")
 DRY_RUN=$(read_json_raw DRY_RUN "$SETTINGS_FILE")
 ENABLE_STP=$(read_json_raw ENABLE_STP "$SETTINGS_FILE")
+# Extract the override for tagging native SSIDs (wl0/wl1 directly to VLAN)
+ENABLE_NATIVE_SSID=$(read_json_raw ENABLE_NATIVE_SSID "$SETTINGS_FILE")
 
 # Extract NODE_ID early (before node-aware read_json wrapper is defined)
 NODE_ID=$(read_json_raw NODE_ID "$SETTINGS_FILE")
@@ -292,6 +294,11 @@ fi
 case "$ENABLE_STP" in
   1) ENABLE_STP=1 ;;
   *) ENABLE_STP=0 ;;
+esac
+
+case "$ENABLE_NATIVE_SSID" in
+  1) ENABLE_NATIVE_SSID=1 ;;
+  *) ENABLE_NATIVE_SSID=0 ;;
 esac
 
 # Temporarily force non-persistent mode until feature is fixed
@@ -513,6 +520,17 @@ is_wl_iface() {
   [ -n "$ifn" ] || return 1
   iface_exists "$ifn" || return 1
   wl -i "$ifn" status >/dev/null 2>&1
+}
+
+# is_native_radio — Check if interface is a primary/native radio
+# Args: $1=interface_name
+# Returns: 0 if native (wl0, wl1, wl2...), 1 if guest (wl0.1) or ethernet
+# Note: Moving native radios to VLAN bridges can break Broadcom firmware routing.
+is_native_radio() {
+  case "$1" in
+    wl[0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # validate_vlan_id — Check if VLAN ID is valid (1-4094 reserved range)
@@ -816,7 +834,8 @@ iface_bound() {
 # find_if_by_ssid — Locate interface on specific band by SSID name
 # Args: $1=band (0|1|2), $2=ssid_name
 # Returns: stdout interface_name (e.g., wl0, wl0.1), or empty if not found
-# Explanation: Tries base radio first (main SSID), then guest slots 1-9
+# Explanation: Resolves from nvram first, then callers wait for the interface
+#   to appear. This avoids dropping later-starting bands during boot/restart.
 find_if_by_ssid() {
   BAND="$1"
   TARGET="$2"
@@ -833,7 +852,7 @@ find_if_by_ssid() {
   SSID_BASE="$(nvram get wl${BAND}_ssid 2>/dev/null)"
   IF_BASE="$(nvram get wl${BAND}_ifname 2>/dev/null)"
   IF_BASE=$(normalize_iface "$IF_BASE")
-  if [ -n "$IF_BASE" ] && iface_exists "$IF_BASE"; then
+  if [ -n "$IF_BASE" ]; then
     BASE_NORM=$(normalize_ssid "$SSID_BASE")
     if [ "$BASE_NORM" = "$TARGET_NORM" ]; then
       echo "$IF_BASE"
@@ -851,7 +870,6 @@ find_if_by_ssid() {
     IFN="$(nvram get wl${BAND}.${slot}_ifname 2>/dev/null)"
     IFN=$(normalize_iface "$IFN")
     [ -n "$IFN" ] || continue
-    iface_exists "$IFN" || continue
     SSID_NORM=$(normalize_ssid "$SSID")
     if [ "$SSID_NORM" = "$TARGET_NORM" ]; then
       echo "$IFN"
@@ -883,8 +901,11 @@ find_if_by_ssid() {
 
 # find_if_by_ssid_any — Robust SSID lookup across all bands/slots (fallback)
 # Args: $1=ssid_name
-# Returns: stdout interface_name, or empty if not found
-# Explanation: Scans all NVRAM *_ssid entries, finds first matching interface
+# Returns: stdout interface_name(s), newline-delimited, or empty if not found
+# Explanation: Scans all NVRAM *_ssid entries and resolves candidate interfaces
+#   from nvram without requiring them to be fully alive yet. The caller handles
+#   waiting/verification so shared SSIDs across bands are not collapsed to the
+#   first radio that happens to be up.
 # Use case: Fallback when band/slot unknown, or user moves SSID between bands
 find_if_by_ssid_any() {
   ssid="$1"
@@ -915,9 +936,6 @@ find_if_by_ssid_any() {
         iface=$(normalize_iface "$iface")
         [ -n "$iface" ] || continue
         is_internal_vap "$iface" && continue
-        case "$iface" in
-          eth*) is_wl_iface "$iface" || continue ;;
-        esac
 
         ssid_norm=$(normalize_ssid "$raw")
 
@@ -1051,8 +1069,19 @@ EOF
     while IFS='|' read -r idx ssid; do
       [ -n "$idx" ] || continue
 
-      ifn="$(find_if_by_ssid_any "$ssid")"
-      if [ -n "$ifn" ] && iface_exists "$ifn"; then
+      # find_if_by_ssid_any may return multiple lines (dual-band identical SSIDs)
+      # Mark ready if ANY of the resolved interfaces is present in the kernel
+      _resolved="$(find_if_by_ssid_any "$ssid")"
+      _ssid_ready=0
+      if [ -n "$_resolved" ]; then
+        while IFS= read -r _boot_ifn; do
+          [ -n "$_boot_ifn" ] || continue
+          iface_exists "$_boot_ifn" && { _ssid_ready=1; break; }
+        done <<_BWAIT_EOF_
+$_resolved
+_BWAIT_EOF_
+      fi
+      if [ "$_ssid_ready" = "1" ]; then
         ready_count=$((ready_count + 1))
       else
         new_pending="${new_pending}
@@ -1192,8 +1221,19 @@ bind_configured_ssids() {
         while IFS= read -r _ifn; do
           [ -n "$_ifn" ] || continue
           info -c cli,vlan "Resolved SSID '$ssid' -> $_ifn"
+          # Mark as managed before waiting — prevents the br0 sweep from
+          # catching a slower-starting band if wait_for_interface times out
+          note_bound_iface "$_ifn"
           if ! wait_for_interface "$_ifn"; then
             warn -c cli,vlan "$_ifn did not appear within timeout"
+            continue
+          fi
+          # Native Radio Safeguard: wl0/wl1 moved to VLAN bridges can break
+          # Broadcom firmware routing. Fall back to untagged unless overridden.
+          if is_native_radio "$_ifn" && [ "$vlan" != "none" ] && [ "$ENABLE_NATIVE_SSID" != "1" ]; then
+            warn -c cli,vlan "Refusing to tag native radio $_ifn with VLAN $vlan. Firmware may reject this."
+            info -c cli,vlan "Use Guest Networks instead, or force via ENABLE_NATIVE_SSID=1. Falling back to untagged."
+            attach_to_bridge "$_ifn" "none" "SSID_$(printf "%02d" $i) (Native Radio Fallback)"
             continue
           fi
           attach_to_bridge "$_ifn" "$vlan" "SSID_$(printf "%02d" $i)"
@@ -1264,6 +1304,13 @@ resolve_and_attach() {
 
   while IFS= read -r _ifn; do
     [ -n "$_ifn" ] || continue
+    # Native Radio Safeguard: wl0/wl1 moved to VLAN bridges can break
+    # Broadcom firmware routing. Fall back to untagged unless overridden.
+    if is_native_radio "$_ifn" && [ "$VLAN" != "none" ] && [ "$ENABLE_NATIVE_SSID" != "1" ]; then
+      warn -c cli,vlan "Refusing to tag native radio $_ifn with VLAN $VLAN. Firmware may reject this."
+      attach_to_bridge "$_ifn" "none" "$LABEL ($SSID - Native Fallback)"
+      continue
+    fi
     attach_to_bridge "$_ifn" "$VLAN" "$LABEL ($SSID)"
   done <<_RAA_EOF_
 $IFN
