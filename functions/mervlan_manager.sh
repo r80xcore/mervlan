@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.60"                   #
+#               - File: mervlan_manager.sh || version="0.62"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -27,7 +27,6 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
-unset LIB_JSON_LOADED
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
@@ -221,8 +220,8 @@ TRUNK_APPLIED=0
 # ========================================================================== #
 
 # Verify required settings files exist; exit if missing
-[ -f "$HW_SETTINGS_FILE" ] || error -c cli,vlan "Missing $HW_SETTINGS_FILE"
-[ -f "$SETTINGS_FILE" ] || error -c cli,vlan "Missing $SETTINGS_FILE"
+[ -f "$HW_SETTINGS_FILE" ] || { error -c cli,vlan "Missing $HW_SETTINGS_FILE"; exit 1; }
+[ -f "$SETTINGS_FILE" ] || { error -c cli,vlan "Missing $SETTINGS_FILE"; exit 1; }
 
 # Extract hardware profile from hardware settings. Supports both a standalone
 # hw_settings.json (legacy) as well as the consolidated Hardware block inside
@@ -740,6 +739,22 @@ attach_to_bridge() {
   # Verify interface exists in kernel before attachment
   iface_exists "$IF" || { warn -c cli,vlan "$LABEL ($IF) - not present, skipping"; return; }
 
+  # DHCP-isolation gate: bring wl subinterfaces down BEFORE the bridge detach
+  # so no client can grab a br0 DHCP lease during the bridge-move window.
+  # Applies only to wl subinterfaces (wl0.1, wl1.1, …) being placed into a
+  # VLAN bridge. Base radios (wl0, wl1) and eth ports are excluded to avoid
+  # dropping all clients on a radio or severing the uplink.
+  _wl_gate=0
+  case "$VID" in
+    none|trunk) ;;
+    *)
+      if [ "$DRY_RUN" != "yes" ] && is_wl_iface "$IF" && ! is_native_radio "$IF"; then
+        wl -i "$IF" down 2>/dev/null && _wl_gate=1
+        [ "$_wl_gate" -eq 1 ] && info -c cli,vlan "DHCP gate: $IF down (bridge move pending)"
+      fi
+      ;;
+  esac
+
   # Detach from all bridges before reattachment (unless dry-run mode)
   [ "$DRY_RUN" = "yes" ] || remove_from_all_bridges "$IF"
 
@@ -766,15 +781,18 @@ attach_to_bridge() {
       ;;
     *)
       # Attach to VLAN bridge (e.g., br100 for VLAN 100)
-      ensure_vlan_bridge "$VID" || return 1
+      ensure_vlan_bridge "$VID" || { [ "$_wl_gate" -eq 1 ] && wl -i "$IF" up 2>/dev/null; return 1; }
       if [ "$DRY_RUN" = "yes" ]; then
         echo "[DRY-RUN] brctl addif br${VID} $IF"
         note_bound_iface "$IF"
       else
         brctl addif "br${VID}" "$IF" 2>/dev/null || {
           error -c cli,vlan "Failed to attach $IF to br${VID}"
+          [ "$_wl_gate" -eq 1 ] && wl -i "$IF" up 2>/dev/null
           return 1
         }
+        # Restore VAP now that it is correctly placed in its VLAN bridge
+        [ "$_wl_gate" -eq 1 ] && { wl -i "$IF" up 2>/dev/null; info -c cli,vlan "DHCP gate: $IF up (in br${VID})"; }
         info -c cli,vlan "$LABEL -> br${VID} (VLAN $VID)"
         track_change "Attached $IF to br${VID} (VLAN $VID)"
         if ! verify_interface_binding "$IF" "$VID"; then
@@ -1325,7 +1343,7 @@ show_configuration_summary() {
   
   # Display current bridge topology from brctl
   info -c cli,vlan "Current bridge status:"
-  brctl show 2>/dev/null | while read line; do
+  brctl show 2>/dev/null | while IFS= read -r line; do
     info -c cli,vlan "  $line"
   done
 
@@ -1502,17 +1520,33 @@ safe_service_restart() {
 }
 
 wait_for_rc_quiet() {
+  local need max_wait quiet start now
+
+  need="${1:-6}"
+  max_wait="${2:-30}"
   quiet=0
-  need=6
+  start=$(date +%s)
+
+  info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
+
   while :; do
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
       quiet=0
-      sleep 1
-      continue
+    else
+      quiet=$((quiet + 1))
+      [ "$quiet" -ge "$need" ] && {
+        info -c vlan "wait_for_rc_quiet: rc quiet for ${quiet}s; proceeding"
+        return 0
+      }
     fi
-    quiet=$((quiet + 1))
-    [ "$quiet" -ge "$need" ] && break
+
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$max_wait" ]; then
+      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s; continuing"
+      return 0
+    fi
+
     sleep 1
   done
 }
