@@ -1,3 +1,59 @@
+mervlan v0.52.95
+
+NOTABLE FEATURES:
+
+Multi-SSID Dual-Band Fix:
+- Rewrote interface resolution in find_if_by_ssid to use nvram-first lookup,
+  removing iface_exists guards that blocked resolution when interfaces had not
+  yet appeared after boot.
+- Fixed boot_wait_for_configured_ssids to correctly handle multi-line output
+  from find_if_by_ssid_any; dual-band identical SSIDs previously always timed
+  out because no single interface is named "wl0\nwl1".
+- Fixed br0 sweep race condition in bind_configured_ssids: note_bound_iface is
+  now called before wait_for_interface so both bands of a dual-band SSID are
+  reserved before the unconfigured-interface sweep can claim them.
+- Removed is_wl_iface gate from find_if_by_ssid_any; the gate silently dropped
+  eth-named WiFi radios (e.g. eth4, eth5) not yet up during boot.
+
+Enable Native SSID (ENS) Safeguard:
+- New is_native_radio helper identifies base radio interfaces (wl0, wl1) whose
+  placement on VLAN bridges can break Broadcom firmware routing.
+- New ENABLE_NATIVE_SSID flag (default: off) controls whether native radios may
+  be tagged. When off, bind_configured_ssids skips any interface matched by
+  is_native_radio and logs a warning. Toggle via the new ENS setting in the UI.
+- Settable via the new ENS toggle in the General Settings panel.
+
+
+UPDATED FILES:
+
+mervlan_manager.sh v0.60
+- Nvram-first resolution in find_if_by_ssid: removed iface_exists checks from
+  both the base radio check and the virtual interface slot loop.
+- Added is_native_radio() helper function.
+- Removed is_wl_iface gate from find_if_by_ssid_any.
+- Fixed boot_wait_for_configured_ssids: inner while+heredoc loop now iterates
+  each line of multi-line find_if_by_ssid_any output individually.
+- bind_configured_ssids: note_bound_iface called before wait_for_interface to
+  prevent br0 sweep race. Native radio safeguard block added after wait.
+- resolve_and_attach: native radio safeguard added (defensive).
+- ENABLE_NATIVE_SSID extracted and normalized from settings.json on init.
+
+settings.json
+- Added ENABLE_NATIVE_SSID: "0" to General block (default: safeguard active).
+
+index.html v0.52.95
+- Added ENS (Enable Native SSID) dropdown to General Settings panel.
+- Fixed status icon layout: each dropdown now has its status icon immediately
+  to its right. Previously STP status was left-anchored and DRY_RUN status was
+  right-anchored, with both status icons floating on opposite sides of the row.
+- ENABLE_NATIVE_SSID added to all settings load/save/verify paths:
+  flattenStructuredSettingsPayload, expandFlatSettingsToStructured,
+  structuredSettingsDefaultsTemplate, fillFormFromSettings,
+  formToSettingsJSON, CGI param collector, extractManagedKeys regex.
+
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.94
 
 NOTABLE FEATURES:
