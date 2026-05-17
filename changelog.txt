@@ -1,3 +1,118 @@
+mervlan v0.52.97
+
+This update hopefully closes a DHCP isolation gap where clients reconnecting during a
+restart_wireless event could obtain br0 leases and gain unintended LAN access.
+wl subinterfaces are now brought down before any bridge move in the manager,
+and the heal path pre-evicts leaked interfaces from br0 before invoking the
+manager — shrinking the exposure window from ~60s to near-zero. Also fixes
+heal reliability issues caused by missing rc-quiet helpers on node hardware,
+a stale lock reclaim bug that triggered double manager runs, and a spurious
+library reload caused by an incorrect initialization guard.
+
+Bug Fixes:
+
+heal_event.sh RC Helpers Implemented Inline:
+- heal_event.sh relied on an Asuswrt firmware utility for rc-activity monitoring
+  that behaves inconsistently across firmware versions and is absent on node
+  hardware, causing heals to proceed without waiting on nodes.
+- Fix: wait_for_rc_quiet(), rc_queue_has(), and rc_proc_busy() are now
+  implemented inline, mirroring the pattern already used in mervlan_manager.sh.
+
+execute_nodes.sh Parallel Exit-Code Capture:
+- In Phase 2 parallel execution, the main router's exit code was silently lost
+  because `wait` only reliably captures the last reaped background job, leading
+  to failed local applies being reported as success.
+- Fix: Main router is launched in a subshell that writes its exit code to a
+  temp file, read back and cleared after `wait`.
+
+execute_nodes.sh No-Nodes Path Success Flag:
+- In the no-nodes path, local_success could be set incorrectly on some BusyBox
+  sh versions when the script exited non-zero for non-error reasons.
+- Fix: Replaced with the explicit `&& local_success=true || local_success=false`
+  pattern for correct boolean evaluation.
+
+mervlan_manager.sh Spurious unset LIB_JSON_LOADED:
+- The initialization guard block erroneously included LIB_JSON_LOADED in its
+  unset call, clearing lib_json.sh's load flag on every invocation. In inherited
+  shell environments (e.g. called from execute_nodes.sh), this caused the library
+  to be re-sourced with function redefinition warnings and double-init side-effects.
+- Fix: Removed LIB_JSON_LOADED from the unset; block now only clears the
+  intended VAR/LOG guard pair.
+
+mervlan_manager.sh wait_for_rc_quiet Timeout:
+- wait_for_rc_quiet() had a hard-coded max-wait that callers could not override.
+  On slower hardware, this caused the manager to read bridge state mid-restart
+  and apply configuration against a partially-reconstructed topology.
+- Fix: Parameterized with need=$1 (default 6s) and max_wait=$2 (default 30s).
+  heal_event.sh now calls it with 120s for restart_wireless class events.
+
+Service-Event Stale-Lock Fix (service-event-handler.sh):
+- DEBOUNCE_SECONDS=3 was used as both the rapid-fire debounce threshold and the
+  stale-lock reclaim threshold. A second service-event call arriving >3s after
+  the first would force-remove the outer lock, queue behind the inner manager
+  lock, and run a full second manager pass — causing the double-run pattern.
+- Fix: Introduced STALE_LOCK_SECONDS=300 separate from DEBOUNCE_SECONDS=3.
+  Lock-failure branch now has three distinct cases: rapid re-fire (<3s, skip),
+  script still running (3s–300s, skip), orphaned lock (≥300s, reclaim).
+
+Lock Acquire/Release Audit Logging (service-event-handler.sh):
+- No visibility into lock lifecycles made field debugging difficult.
+- Fix: dispatch_if_executable now emits syslog entries on lock acquired
+  ("launching <script>") and lock released (normal or trap path).
+  `logread | grep VLANMgr` shows the full lifecycle for any action.
+
+Missing Settings File Exit (mervlan_manager.sh):
+- The HW_SETTINGS_FILE and SETTINGS_FILE pre-flight checks logged an error but
+  allowed execution to continue into an undefined state with empty variables.
+- Fix: Both checks now call `exit 1` immediately after logging the error.
+
+show_configuration_summary Read Safety (mervlan_manager.sh):
+- `while read line` in the brctl show pipeline stripped leading whitespace and
+  mis-handled backslashes in bridge output.
+- Fix: Changed to `while IFS= read -r line` for verbatim line reading.
+
+
+UPDATED FILES:
+
+execute_nodes.sh v0.51
+- Parallel exit-code capture via temp file for main router background job.
+- No-nodes local_success boolean fixed with explicit && / || pattern.
+
+mervlan_manager.sh v0.62
+- attach_to_bridge: DHCP-isolation gate for wl subinterfaces. Before the bridge
+  detach, wl subinterfaces (wl0.1, wl1.1, …) bound for a VLAN bridge are brought
+  down with `wl -i IF down` so clients cannot obtain a br0 DHCP lease during the
+  bridge-less gap. The VAP is restored with `wl -i IF up` only after brctl addif
+  succeeds. Base radios (wl0, wl1) and eth ports are excluded. Both error return
+  paths (ensure_vlan_bridge and brctl addif failures) restore the VAP before
+  returning so interfaces are never left permanently down.
+- Removed erroneous LIB_JSON_LOADED from initialization guard unset.
+- wait_for_rc_quiet parameterized: need=$1 (6s), max_wait=$2 (30s).
+- Missing-file guards now exit 1 after logging (were silently continuing).
+- show_configuration_summary: `while read line` → `while IFS= read -r line`.
+
+heal_event.sh v0.53
+- Added evict_wl_from_br0(): pre-eviction guard that immediately removes wl
+  subinterfaces from br0 before invoking the VLAN manager. Iterates
+  /sys/class/net/br0/brif/wl*.* — base radios and eth ports are not touched —
+  and calls `wl -i IF down` then `brctl delif br0 IF` for each match. This
+  closes the ~35-60s detection/confirmation window where firmware-dumped wl
+  interfaces sit in br0 and can hand out wrong DHCP leases to reconnecting
+  clients. Called at all three heal invocation sites: service event path, cron
+  escalation path, and manual --test path. Is a no-op when nothing is in br0.
+- Inline wait_for_rc_quiet(), rc_queue_has(), rc_proc_busy(); removed external
+  Asuswrt helper.sh dependency for rc monitoring.
+- Added evict_wl_from_br0() pre-eviction guard; called at all heal sites.
+
+service-event-handler.sh v0.52
+- STALE_LOCK_SECONDS=300 added; separated from DEBOUNCE_SECONDS=3.
+- Lock-failure branch split into three cases (debounce / running / stale).
+- `local elapsed` declaration added to prevent variable scope leak.
+- Syslog entries added on lock acquired and lock released (normal + trap).
+
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.96
 
 NOTABLE FEATURES:
