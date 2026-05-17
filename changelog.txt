@@ -1,3 +1,93 @@
+mervlan v0.52.96
+
+NOTABLE FEATURES:
+
+restart_wireless Race Condition Fix (Security):
+- Fixed a silent VLAN isolation failure where Asuswrt's restart_wireless event
+  (triggered by MAC filter changes, channel changes, etc.) could leave guest
+  and work VLAN wireless interfaces in br0, granting isolated clients full
+  access to the internal LAN until a manual apply was forced.
+- Root cause was two interacting flaws: trunk subinterfaces kept VLAN bridges
+  structurally alive, causing the bridge-presence validator to report a false-
+  positive healthy state even after all wl interfaces had been evicted; and
+  wait_for_rc_quiet was only ever called after a mismatch was detected, so the
+  firmware's delayed wireless reconstruction was never caught.
+- Three layered fixes were applied (see heal_event.sh below).
+
+Leak Detector — wl_leaked_to_br0():
+- New dual-condition function that detects the specific failure mode where
+  trunk subinterfaces keep VLAN bridges alive but wireless SSID subinterfaces
+  (wl*.*, ra*.*, ath*.*) have been evicted back to br0.
+- Only flags a leak when wl subinterfaces are present in br0 AND none are
+  found in any non-br0 VLAN bridge. The dual condition self-filters unmanaged
+  native Asuswrt guest networks (e.g. an unmanaged wl0.2 legitimately in br0
+  won't trigger an alert as long as MerVLAN's own managed interfaces are
+  correctly placed). Post-heal, once managed interfaces are restored, the
+  check clears automatically — no settings cross-reference required and no
+  infinite heal loop possible.
+- Called as a secondary test at the tail of check_vlan_config, after all
+  bridge-presence passes succeed.
+
+Wireless Event Wait Ordering (Fix 2):
+- wait_for_rc_quiet is now called before check_vlan_config for
+  restart_wireless class events (max_wait raised to 120s to cover slow
+  Broadcom DFS restarts on older hardware). Reading kernel bridge state
+  mid-restart was producing false-positive healthy results because the
+  firmware had not yet finished migrating wl interfaces.
+- Non-wireless events (firewall, WAN, NAT, etc.) are unaffected.
+
+Deferred Safety-Net Recheck (Fix 3):
+- After any wireless event completes its primary monitoring window, a
+  background subshell schedules a one-shot follow-up heal_event.sh call
+  90 seconds later. This catches the edge case where firmware rc yields
+  mid-restart (satisfying wait_for_rc_quiet) and then resumes and re-
+  migrates wl interfaces after the monitoring window has already closed.
+- The deferred event is routed through the full check_vlan_config and
+  wl_leaked_to_br0 pipeline. The existing cooldown prevents a double-apply
+  if the primary window already healed. Deferred events do not schedule
+  further deferred events (no daisy-chaining).
+
+Contributions:
+- agnithin: Stripped Windows carriage returns (\r) from update_mervlan.sh.
+- agnithin: Fixed pollUpdateLogOnce in index.html to use
+  lines.slice(-Math.min(5, lines.length)) for update completion detection.
+- agnithin: Fixed heal_event.sh early lock-guard trace log to correctly
+  resolve [${1:-initial}] instead of printing the literal shell variable.
+
+
+UPDATED FILES:
+
+heal_event.sh v0.50
+- Added wl_leaked_to_br0() function: dual-condition leak detector using
+  /sys/class/net glob expansion (no subshell). Detects the restart_wireless
+  race condition where trunk subinterfaces mask evicted wl interfaces.
+- check_vlan_config: added wl_leaked_to_br0 call after all monitoring passes
+  succeed. Returns 1 with a distinct log message on leak detection.
+- Main event dispatch: hoisted wait_for_rc_quiet 6 120 before check_vlan_config
+  for restart_wireless* and wl* event patterns.
+- should_heal_event: added deferred_* pattern to watchlist.
+- Main event dispatch: wireless events now spawn a background subshell that
+  fires heal_event.sh deferred_<event> after a 90s sleep. Skips if
+  MANAGER_LOCK is held. Does not recurse (deferred events don't match the
+  wireless-only case that spawns the subshell).
+- Early lock-guard trace log fixed to resolve [${1:-initial}] (agnithin).
+
+update_mervlan.sh
+- Stripped all invisible Windows carriage return (\r) characters throughout
+  the file (agnithin).
+
+index.html v0.52.96
+- pollUpdateLogOnce: changed completion detection to evaluate
+  lines.slice(-Math.min(5, lines.length)) so the check always examines the
+  last up-to-5 lines regardless of total log length (agnithin).
+
+hw_probe.sh
+- Added RT-AX5400 as supported: ETH_PORTS="eth3 eth2 eth1 eth0", WAN_IF=eth4.
+- Added TUF-AX3000_V2 as supported: ETH_PORTS="eth1 eth2 eth3 eth4", WAN_IF=eth0.
+
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.95
 
 NOTABLE FEATURES:
