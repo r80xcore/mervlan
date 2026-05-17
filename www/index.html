@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.52.94" -->
+  <!-- index.html version="0.52.95" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -10,6 +10,12 @@
     .button_gen:disabled {
       opacity: 0.45;
       cursor: not-allowed;
+    }
+
+    .gen-toggle-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
 
     .form-box--experimental {
@@ -214,16 +220,27 @@
       <div class="form-box controls-panel">
         <h2>General Settings</h2>
         <div class="button-row button-row-toggles">
-          <span id="statusENABLE_STP" class="status gen-status" title="❌ Missing/invalid value">❌</span>
-          <select id="stpToggle" name="ENABLE_STP" class="input_option" onchange="markEdited('ENABLE_STP')" title="STP: enable Spanning Tree Protocol with deterministic bridge MACs">
-            <option value="0">STP: Off</option>
-            <option value="1">STP: On</option>
-          </select>
-          <select id="dryRunToggle" name="DRY_RUN" class="input_option" onchange="markEdited('DRY_RUN')" title="Dry run: yes=simulate only, no changes">
-            <option value="no">Dry Run: Off</option>
-            <option value="yes">Dry Run: On</option>
-          </select>
-          <span id="statusDRY_RUN" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+          <div class="gen-toggle-group">
+            <select id="stpToggle" name="ENABLE_STP" class="input_option" onchange="markEdited('ENABLE_STP')" title="STP: enable Spanning Tree Protocol with deterministic bridge MACs">
+              <option value="0">STP: Off</option>
+              <option value="1">STP: On</option>
+            </select>
+            <span id="statusENABLE_STP" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+          </div>
+          <div class="gen-toggle-group">
+            <select id="dryRunToggle" name="DRY_RUN" class="input_option" onchange="markEdited('DRY_RUN')" title="Dry run: yes=simulate only, no changes">
+              <option value="no">Dry Run: Off</option>
+              <option value="yes">Dry Run: On</option>
+            </select>
+            <span id="statusDRY_RUN" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+          </div>
+          <div class="gen-toggle-group">
+            <select id="ensToggle" name="ENABLE_NATIVE_SSID" class="input_option" onchange="markEdited('ENABLE_NATIVE_SSID')" title="Enable tagging of native SSIDs. Disabled by default and might break tagging on some devices if set to ON. Using Guest SSIDs instead is highly recommended">
+              <option value="0">ENS: Off</option>
+              <option value="1">ENS: On</option>
+            </select>
+            <span id="statusENABLE_NATIVE_SSID" class="status gen-status" title="❌ Missing/invalid value">❌</span>
+          </div>
         </div>
         <div class="button-row button-row-actions">
           <button type="button" class="button_gen" onclick="uploadSettingsAndSave()" title="Upload settings.json and save (no CGI)">Save</button>
@@ -760,6 +777,7 @@
           flat.ENABLE_STP = stringOrDefault(general.ENABLE_STP, "0");
           flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
           flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
+          flat.ENABLE_NATIVE_SSID = stringOrDefault(general.ENABLE_NATIVE_SSID, "0");
 
           const nodes = ensurePlainObject(data.Nodes);
           for (let i = 1; i <= 5; i++) {
@@ -875,7 +893,8 @@
               BOOT_ENABLED: "0",
               DRY_RUN: "yes",
               ENABLE_STP: "0",
-              EXPERIMENTAL: "0"
+              EXPERIMENTAL: "0",
+              ENABLE_NATIVE_SSID: "0"
             },
             SSH: {
               _description: "SSH settings for main router and nodes",
@@ -947,6 +966,7 @@
           general.ENABLE_STP = stringOrDefault(flat.ENABLE_STP, general.ENABLE_STP ?? "0");
           general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
           general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
+          general.ENABLE_NATIVE_SSID = stringOrDefault(flat.ENABLE_NATIVE_SSID, general.ENABLE_NATIVE_SSID ?? "0");
 
           const nodes = target.Nodes = ensurePlainObject(target.Nodes);
           for (let i = 1; i <= 5; i++) {
@@ -3533,15 +3553,19 @@ async function runVlanManagerOnlyNodes() {
       const stpToggle = document.getElementById("stpToggle");
       const dryRunToggle = document.getElementById("dryRunToggle");
       const experimentalToggle = document.getElementById("experimentalToggle");
+      const ensToggle = document.getElementById("ensToggle");
 
       if (stpToggle) stpToggle.value = flat["ENABLE_STP"] || "0";
       if (dryRunToggle) dryRunToggle.value = flat["DRY_RUN"] || "yes";
       if (experimentalToggle) experimentalToggle.checked = flat["EXPERIMENTAL"] === "1";
+      if (ensToggle) ensToggle.value = flat["ENABLE_NATIVE_SSID"] || "0";
 
       const stpStatus = document.getElementById("statusENABLE_STP");
       const dryRunStatus = document.getElementById("statusDRY_RUN");
+      const ensStatus = document.getElementById("statusENABLE_NATIVE_SSID");
       if (stpStatus) stpStatus.textContent = "✅";
       if (dryRunStatus) dryRunStatus.textContent = "✅";
+      if (ensStatus) ensStatus.textContent = "✅";
 
       for (let i = 1; i <= 5; i++) {
         const k = "NODE" + i;
@@ -3722,6 +3746,7 @@ async function runVlanManagerOnlyNodes() {
       out["vlanmgr_DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
       out["vlanmgr_EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
+      out["vlanmgr_ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
 
       // Hardware_Override keys from settings cache
       if (CURRENT_SETTINGS_CACHE) {
@@ -3866,6 +3891,7 @@ async function runVlanManagerOnlyNodes() {
       flat["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
       flat["EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
+      flat["ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
 
       // Pull Hardware_Override flat keys from settings cache into flat object
       if (CURRENT_SETTINGS_CACHE) {
@@ -4768,7 +4794,7 @@ function normalizeToFlatSettings(obj) {
 // Only compare keys MerVLAN actually manages (ignore Hardware, timestamps, etc)
 function extractManagedKeys(flat) {
   const out = {};
-  const re = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|OVERRIDE_(MAIN|NODE[1-5])_(MAP_OVERRIDE|WAN|MAX_ETH_PORTS|LAN[1-8]))$/;
+  const re = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|OVERRIDE_(MAIN|NODE[1-5])_(MAP_OVERRIDE|WAN|MAX_ETH_PORTS|LAN[1-8]))$/;
   Object.keys(flat || {}).forEach(k => {
     if (re.test(k)) out[k] = String(flat[k] ?? "");
   });
