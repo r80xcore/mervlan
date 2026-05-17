@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.50"                     #
+#                  - File: heal_event.sh || version="0.51"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -296,6 +296,63 @@ actual_vlans_from_kernel() {
   done | sort -n
 }
 
+# ============================================================================ #
+# wl_leaked_to_br0                                                             #
+# Detect the restart_wireless race condition where firmware dumps wireless     #
+# SSID subinterfaces back into br0 while trunk subinterfaces keep VLAN bridges #
+# alive, causing bridge_has_members / actual_vlans_from_kernel to report a     #
+# false-positive healthy state.                                                #
+#                                                                              #
+# Logic: only flag a leak when BOTH conditions hold simultaneously:            #
+#   1. At least one wl*.* (or ra*.*|ath*.*) subinterface is present in br0    #
+#   2. No such subinterface exists in ANY non-br0 VLAN bridge                 #
+#                                                                              #
+# This dual condition self-filters unmanaged guest networks: if wl0.2 is a    #
+# native Asuswrt guest legitimately in br0, but MerVLAN's wl0.1 is correctly  #
+# in br5, condition 2 is false and no alert fires. Post-heal, once the managed #
+# interfaces are restored to their VLAN bridges, condition 2 flips false again #
+# and the check clears — no infinite loop.                                     #
+#                                                                              #
+# Returns 0 (true) if a leak is detected, 1 (false) otherwise.                #
+# ============================================================================ #
+wl_leaked_to_br0() {
+  local iface_path iface has_wl_in_br0 has_wl_in_vlan br_path
+
+  has_wl_in_br0=0
+  has_wl_in_vlan=0
+
+  # Condition 1: any wl*.* subinterface in br0?
+  for iface_path in /sys/class/net/br0/brif/*; do
+    [ -e "$iface_path" ] || continue
+    iface="${iface_path##*/}"
+    case "$iface" in
+      wl*.*|ra*.*|ath*.*)
+        has_wl_in_br0=1
+        break
+        ;;
+    esac
+  done
+
+  [ "$has_wl_in_br0" -eq 1 ] || return 1
+
+  # Condition 2: no wl*.* subinterface in any VLAN bridge (br1..br9*)?
+  for br_path in /sys/class/net/br[1-9]*/brif; do
+    [ -d "$br_path" ] || continue
+    for iface_path in "$br_path"/*; do
+      [ -e "$iface_path" ] || continue
+      iface="${iface_path##*/}"
+      case "$iface" in
+        wl*.*|ra*.*|ath*.*)
+          has_wl_in_vlan=1
+          break 2
+          ;;
+      esac
+    done
+  done
+
+  [ "$has_wl_in_vlan" -eq 0 ]
+}
+
 wait_for_rc_quiet() {
   local need max_wait quiet start now
 
@@ -515,6 +572,17 @@ check_vlan_config() {
 
   # Completed all checks without hitting heal threshold
   info -c vlan "VLAN monitoring complete: ${pass_count}/${max_checks} checks passed, ${mismatch_count} consecutive mismatches (below ${heal_threshold} threshold)"
+
+  # Secondary leak detector: trunk subinterfaces can keep VLAN bridges alive
+  # even after firmware dumps wireless SSID interfaces back into br0. The
+  # bridge-presence checks above will report a false-positive healthy state in
+  # that scenario. wl_leaked_to_br0 catches this by looking for the condition
+  # where wl*.* subinterfaces are in br0 AND none are in any VLAN bridge.
+  if wl_leaked_to_br0; then
+    warn -c vlan "VLAN bridges present (trunk alive) but wl subinterfaces detected in br0 — restart_wireless race condition suspected"
+    return 1
+  fi
+
   return 0
 }
 
@@ -839,6 +907,11 @@ should_heal_event() {
     reload|reload_*|restart_all|services_restart|service_restart|restart_services|service_reload)
       return 0
       ;;
+    # Deferred safety-net rechecks scheduled by Fix 3 (fires ~90s after a
+    # wireless event to catch firmware that settles after the main heal window)
+    deferred_*)
+      return 0
+      ;;
     # dnsmasq refresh
     dnsmasq|dnsmasq_*|restart_dnsmasq*|dnsmasq_restart*|dnsmasq_start*|dnsmasq_stop*)
       return 0
@@ -863,6 +936,21 @@ should_heal_event() {
 
 if should_heal_event "$EVENT"; then
   info -c vlan "Heal: event [$EVENT_LABEL] matched watchlist"
+
+  # For wireless restart events, wait for rc to settle BEFORE reading kernel
+  # state. Firmware's restart_wireless can take several minutes on some
+  # hardware; checking mid-restart produces a false-positive healthy result
+  # (trunk subinterfaces keep VLAN bridges alive while wl interfaces are
+  # still being torn down and rebuilt by the wireless driver). Use a generous
+  # 120s max_wait to cover slow Broadcom DFS restarts.
+  case "$EVENT" in
+    restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|\
+    wl*_restart|wl*_start|wl*_down|wl*_up)
+      info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
+      wait_for_rc_quiet 6 120
+      ;;
+  esac
+
   if ! check_vlan_config; then
     record_mismatch
     # VLAN config mismatch detected after event
@@ -879,6 +967,26 @@ if should_heal_event "$EVENT"; then
       info -c cli,vlan "Heal suppressed after [$EVENT_LABEL] (within ${COOLDOWN_SEC}s cooldown)"
     fi
   fi
+
+  # Fix 3 — Deferred safety-net recheck for wireless events.
+  # Firmware rc can yield mid-restart, satisfying wait_for_rc_quiet, then
+  # resume and dump wl interfaces back into br0 after the monitoring window
+  # closes. Schedule a one-shot follow-up check ~90s later so MerVLAN always
+  # gets the final word regardless of firmware behaviour.
+  # The cooldown in heal_allowed prevents a double-apply if healing already
+  # ran during the primary window.
+  case "$EVENT" in
+    restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|\
+    wl*_restart|wl*_start|wl*_down|wl*_up)
+      info -c vlan "Heal: scheduling deferred recheck in 90s for [$EVENT_LABEL]"
+      (
+        sleep 90
+        # Skip if manager is already running (concurrent apply in progress)
+        [ -d "$MANAGER_LOCK" ] && exit 0
+        "$MERV_BASE/functions/heal_event.sh" "deferred_${EVENT}"
+      ) >/dev/null 2>&1 &
+      ;;
+  esac
   # Service monitoring currently disabled (uncommitted check_services call)
   #check_services
 fi
