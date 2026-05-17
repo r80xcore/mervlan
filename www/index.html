@@ -3068,7 +3068,7 @@ function toggleCliFullsize() {
         logLineEl.textContent = lastLine;
         logLineEl.classList.remove("update-log-line--success", "update-log-line--error");
 
-        if (/MerVLAN update completed successfully/i.test(lastLine)) {
+        if (lines.slice(-Math.min(5, lines.length)).some(line => /MerVLAN update completed successfully/i.test(line))) {
           logLineEl.classList.add("update-log-line--success");
           isUpdateInProgress = false;
           stopUpdateSpinner("Update completed", "#7bd77b");

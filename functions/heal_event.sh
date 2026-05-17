@@ -152,7 +152,7 @@ fi
 # Skip if vlan manager already busy (avoid holding our lock needlessly)
 MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
 if [ -d "$MANAGER_LOCK" ]; then
-  info -c vlan "Heal: skipping [initial] because mervlan_manager is active"
+  info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active"
   exit 0
 fi
 
