@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.51"                  #
+#          - File: service-event-handler.sh || version="0.52"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -142,6 +142,9 @@ fi
 # Lockdir stores both lock dirs (.lock) and timestamp files (.last) for debounce
 LOCKDIR="/tmp/mervlan_tmp/locks"
 DEBOUNCE_SECONDS=3
+# Separate threshold for treating a held lock as stale (crashed script left it behind).
+# Must be longer than the longest script this handler can launch (~5 min = 300s).
+STALE_LOCK_SECONDS=300
 # Create lock directory structure (ignore errors if it already exists)
 mkdir -p "$LOCKDIR" 2>/dev/null || :
 
@@ -164,45 +167,53 @@ dispatch_if_executable() {
   # lock_dir/lock_root: where filesystem locks are stored
   # stamp: where last execution timestamp is recorded (for debounce window)
   # window: debounce interval in seconds (skip re-execution within this time)
-  local key lock_root lock_dir stamp now last window
+  # stale: seconds after which a held lock is considered orphaned (crashed script)
+  local key lock_root lock_dir stamp now last window stale elapsed
   key="${RAW:-${SCRIPT_PATH##*/}}"
   lock_root="${LOCKDIR%/}"
   lock_dir="${lock_root}/${key}.lock"
   stamp="${lock_root}/${key}.last"
   window="${DEBOUNCE_SECONDS:-0}"
+  stale="${STALE_LOCK_SECONDS:-300}"
 
   # Attempt to acquire lock by creating lock directory (atomic operation)
   # If mkdir fails, lock already exists (concurrent execution or recent invocation)
   if ! mkdir "$lock_dir" 2>/dev/null; then
-    # Lock acquisition failed: check if stale or within debounce window
-    # Allow stale lock cleanup if outside debounce window (prevents permanent lock)
-    if [ "$window" -gt 0 ] 2>/dev/null && [ -f "$stamp" ]; then
-      # Get current timestamp and last execution timestamp
+    # Lock acquisition failed: determine whether to skip or reclaim a stale lock.
+    # Two independent checks with different thresholds:
+    #   DEBOUNCE (window): reject rapid re-fires (e.g. firmware double-calling hook)
+    #   STALE   (stale):  reclaim locks abandoned by crashed scripts
+    if [ -f "$stamp" ]; then
       now="$(date +%s 2>/dev/null || echo 0)"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"
-      # Validate last timestamp is numeric (protect against garbage in file)
       case "$last" in ''|*[!0-9]*) last=0 ;; esac
-      # If last execution is outside debounce window, allow lock cleanup and retry
-      if [ $((now - last)) -ge "$window" ]; then
+      elapsed=$((now - last))
+      if [ "$window" -gt 0 ] 2>/dev/null && [ "$elapsed" -lt "$window" ]; then
+        # Still within debounce window — rapid re-fire; skip
+        logger -t "VLANMgr" "handler: ${key} debounced (${elapsed}s < ${window}s); skipping"
+        return 0
+      elif [ "$elapsed" -lt "$stale" ]; then
+        # Outside debounce but within stale threshold — script is still running; skip
+        logger -t "VLANMgr" "handler: ${key} already running (${elapsed}s < stale ${stale}s); skipping"
+        return 0
+      else
+        # Older than stale threshold — lock was abandoned by a crashed script; reclaim
+        logger -t "VLANMgr" "handler: ${key} lock stale (${elapsed}s >= ${stale}s); reclaiming"
         rmdir "$lock_dir" 2>/dev/null || :
         mkdir "$lock_dir" 2>/dev/null || {
           logger -t "VLANMgr" "handler: ${key} already running; skipping";
           return 0;
         }
-      else
-        # Still within debounce window: log skip and return
-        logger -t "VLANMgr" "handler: ${key} already running; skipping"
-        return 0
       fi
     else
-      # No timestamp tracking or no recent timestamp: lock is current
-      logger -t "VLANMgr" "handler: ${key} already running; skipping"
+      # No stamp file — lock is current (script just started or stamp write failed); skip
+      logger -t "VLANMgr" "handler: ${key} already running (no stamp); skipping"
       return 0
     fi
   fi
 
   # Lock acquired: register cleanup trap to remove lock on exit
-  trap 'rmdir "$lock_dir" 2>/dev/null' EXIT INT TERM
+  trap 'logger -t "VLANMgr" "handler: ${key} lock released (trap)"; rmdir "$lock_dir" 2>/dev/null' EXIT INT TERM
 
   # Debounce check: if within window, skip execution (prevent rapid re-invocation)
   if [ "$window" -gt 0 ] 2>/dev/null; then
@@ -227,6 +238,8 @@ dispatch_if_executable() {
     printf '%s' "$now" >"$stamp" 2>/dev/null || :
   fi
 
+  logger -t "VLANMgr" "handler: ${key} lock acquired; launching ${SCRIPT_PATH##*/}"
+
   # Execute script: try direct execution first (if +x bit set), fallback to sh
   if [ -x "$SCRIPT_PATH" ]; then
     "$SCRIPT_PATH" "$@"
@@ -237,6 +250,7 @@ dispatch_if_executable() {
   fi
 
   # Cleanup: remove lock directory and trap handlers
+  logger -t "VLANMgr" "handler: ${key} lock released"
   rmdir "$lock_dir" 2>/dev/null
   trap - EXIT INT TERM
 }
