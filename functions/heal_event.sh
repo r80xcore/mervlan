@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.51"                     #
+#                  - File: heal_event.sh || version="0.53"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -353,6 +353,38 @@ wl_leaked_to_br0() {
   [ "$has_wl_in_vlan" -eq 0 ]
 }
 
+# ============================================================================ #
+# evict_wl_from_br0                                                            #
+# Pre-eviction guard: immediately removes wl subinterfaces from br0 before    #
+# invoking the VLAN manager, closing the DHCP leak window that exists while   #
+# the manager is detecting and repairing bridges. Brings each subinterface    #
+# down first so clients cannot grab a br0 lease in the gap between the delif  #
+# and the manager's brctl addif into the correct VLAN bridge.                 #
+# Only acts on wl*.* sysfs paths; base radios and eth ports are not touched.  #
+# ============================================================================ #
+evict_wl_from_br0() {
+  local iface iface_path evicted
+  evicted=0
+  for iface_path in /sys/class/net/br0/brif/wl*.*; do
+    [ -e "$iface_path" ] || continue
+    iface="${iface_path##*/}"
+    wl -i "$iface" down 2>/dev/null
+    brctl delif br0 "$iface" 2>/dev/null
+    info -c vlan "Heal: pre-evicted $iface from br0 (DHCP gate)"
+    evicted=$((evicted + 1))
+  done
+  [ "$evicted" -gt 0 ] && info -c vlan "Heal: evicted ${evicted} wl subinterface(s) from br0"
+  return 0
+}
+
+rc_queue_has() {
+  [ -f /tmp/rc_service ] && grep -E "$1" /tmp/rc_service 2>/dev/null | grep -qv '^$'
+}
+
+rc_proc_busy() {
+  ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$1" >/dev/null 2>&1
+}
+
 wait_for_rc_quiet() {
   local need max_wait quiet start now
 
@@ -625,6 +657,7 @@ if [ "$1" = "--test" ] || [ "$1" = "test" ]; then
     if heal_allowed; then
       info -c cli,vlan "Manual check detected mismatch — invoking vlan_manager (cooldown ${COOLDOWN_SEC}s)"
       mark_heal
+      evict_wl_from_br0
       "$VLAN_MANAGER" >/dev/null 2>&1 &
     else
       info -c cli,vlan "Manual check mismatch but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
@@ -829,6 +862,7 @@ if [ "$EVENT" = "cron" ]; then
       if heal_allowed; then
         info -c cli,vlan "Cron: VLAN damage confirmed after escalation — healing (cooldown ${COOLDOWN_SEC}s)"
         mark_heal
+        evict_wl_from_br0
         "$VLAN_MANAGER" >/dev/null 2>&1 &
       else
         info -c cli,vlan "Cron: Damage confirmed but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
@@ -960,6 +994,8 @@ if should_heal_event "$EVENT"; then
       wait_for_rc_quiet
       # Mark heal time first (prevents rapid re-triggers)
       mark_heal
+      # Close DHCP leak window before manager runs
+      evict_wl_from_br0
       # Invoke VLAN manager in background to restore config
       "$VLAN_MANAGER" >/dev/null 2>&1 &
     else
