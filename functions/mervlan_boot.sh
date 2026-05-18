@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.55"                     #
+#                - File: mervlan_boot.sh || version="0.56"                     #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -626,6 +626,16 @@ case "$ACTION" in
     if [ -f "$SERVICES_START" ]; then
   remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || warn -c vlan,cli "Failed to remove addon boot entry"
     fi
+    # Tear down MERV_QT quarantine chain: flush rules, remove FORWARD/INPUT
+    # jumps, then delete chain. Strict ebtables order: -F before -D, -D before
+    # -X. No restart_wireless needed — rules vanish silently in milliseconds.
+    if type ebtables >/dev/null 2>&1; then
+      ebtables -t filter -F MERV_QT 2>/dev/null || true
+      ebtables -t filter -D FORWARD -j MERV_QT 2>/dev/null || true
+      ebtables -t filter -D INPUT   -j MERV_QT 2>/dev/null || true
+      ebtables -t filter -X MERV_QT 2>/dev/null || true
+      info -c vlan,cli "MERV_QT: quarantine chain torn down"
+    fi
     # Propagate setupdisable to all configured nodes via SSH
     handle_nodes_via_ssh "setupdisable"
     ;;
@@ -724,6 +734,14 @@ case "$ACTION" in
       if [ -f "$SERVICES_START" ]; then
         remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" \
           || warn -c vlan,cli "Failed to remove services-start block"
+      fi
+      # Tear down MERV_QT quarantine chain on this node
+      if type ebtables >/dev/null 2>&1; then
+        ebtables -t filter -F MERV_QT 2>/dev/null || true
+        ebtables -t filter -D FORWARD -j MERV_QT 2>/dev/null || true
+        ebtables -t filter -D INPUT   -j MERV_QT 2>/dev/null || true
+        ebtables -t filter -X MERV_QT 2>/dev/null || true
+        info -c vlan,cli "MERV_QT: quarantine chain torn down"
       fi
       exit 0
     fi
