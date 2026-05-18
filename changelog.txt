@@ -1,3 +1,73 @@
+mervlan v0.52.98
+
+Adds MERV_QT — a dedicated ebtables filter chain that provides true L2 quarantine
+for managed wl subinterfaces while they are members of br0. Completes the DHCP
+isolation work started in v0.52.97: where that release reduced the leakage window
+to near-zero via the DHCP gate and pre-eviction, MERV_QT closes it at the bridge
+layer. Any managed VAP temporarily in br0 (e.g. during a firmware restart_wireless)
+is immediately dark at L2 — DHCP discovery, ARP, and static-IP forwarding are all
+dropped. The --logical-in br0 constraint makes each rule automatically dormant once
+the interface is correctly placed in its VLAN bridge, requiring no per-interface
+cleanup for VLAN-bound ports.
+
+New Features:
+
+MERV_QT — L2 Quarantine Chain (mervlan_manager.sh):
+- ebt_quarantine_init(): creates the MERV_QT chain in the ebtables filter table
+  and inserts jump rules into FORWARD and INPUT. Idempotent: uses grep on -L
+  output to detect existing jumps before inserting, safe to call multiple times.
+- ebt_quarantine_flush(): flushes all per-interface rules from MERV_QT at the
+  start of each apply cycle without touching the chain or jumps. Discards stale
+  rules from the previous cycle before fresh ones are built from current NVRAM state.
+- ebt_quarantine_add(): adds a -i IF --logical-in br0 -j DROP rule for a given
+  wl subinterface. One rule covers both FORWARD and INPUT paths because both base
+  chains jump to MERV_QT. Native base radios (wl0, wl1, …) are excluded. If
+  --logical-in is unsupported by the firmware's ebtables binary, the add fails
+  silently and the system degrades gracefully to evict-only behaviour (the
+  heal_event.sh path already covers that case).
+- ebt_quarantine_release(): removes the DROP rule for a specific interface.
+  Called only in the none) case of attach_to_bridge after a successful brctl addif
+  br0, lifting quarantine for interfaces intentionally placed in br0 (unmanaged
+  SSIDs, native fallbacks). VLAN-bound interfaces never need this call — their
+  rules go dormant automatically via the --logical-in br0 constraint.
+- ebt_quarantine_teardown(): full chain removal in strict ebtables order: flush
+  rules → delete FORWARD/INPUT jump refs → delete chain. Used directly by
+  mervlan_boot.sh (inlined) and available for future callers in the manager.
+
+cleanup_existing_config() Integration (mervlan_manager.sh):
+- MERV_QT is armed as the very first action of every apply cycle, before any
+  bridge teardown or trunk rule cleanup. Enumerates all wl*.* registered in NVRAM
+  via grep on `nvram show` output, skipping native base radios. Any managed VAP
+  that lands in br0 mid-cycle due to a firmware restart_wireless event is dropped
+  at L2 immediately, closing the detection/confirmation gap that v0.52.97 narrowed
+  but could not fully close.
+
+setupdisable / nodedisable Teardown (mervlan_boot.sh):
+- Both disable paths now run an inline MERV_QT teardown sequence (F → D FORWARD
+  → D INPUT → X) before template removals. Chain is torn down silently with no
+  restart_wireless required. Inlined rather than sourced because mervlan_boot.sh
+  does not source mervlan_manager.sh.
+
+
+UPDATED FILES:
+
+mervlan_manager.sh v0.63
+- Added MERV_QT_CHAIN constant and five quarantine functions: ebt_quarantine_init,
+  ebt_quarantine_flush, ebt_quarantine_add, ebt_quarantine_release,
+  ebt_quarantine_teardown. Placed between ebt_cleanup_all_trunk_rules and
+  cleanup_existing_config.
+- cleanup_existing_config: quarantine flush/init/enumerate block added as the
+  first action, before ebt_cleanup_all_trunk_rules.
+- attach_to_bridge none): ebt_quarantine_release called after successful brctl
+  addif br0, lifting quarantine for interfaces correctly placed in br0.
+
+mervlan_boot.sh v0.56
+- setupdisable: inline MERV_QT teardown (F/D/D/X) added before
+  handle_nodes_via_ssh propagation.
+- nodedisable local path: same inline teardown sequence added before exit 0.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.97
 
 This update hopefully closes a DHCP isolation gap where clients reconnecting during a
