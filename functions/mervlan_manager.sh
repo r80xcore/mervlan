@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.62"                   #
+#               - File: mervlan_manager.sh || version="0.63"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -771,6 +771,9 @@ attach_to_bridge() {
         }
         info -c cli,vlan "$LABEL -> $DEFAULT_BRIDGE (untagged)"
         track_change "Attached $IF to $DEFAULT_BRIDGE (untagged)"
+        # Lift quarantine: this interface is correctly in br0. Remove its DROP
+        # rule so native br0 traffic (DHCP from main pool, etc.) flows normally.
+        ebt_quarantine_release "$IF"
       fi
       note_bound_iface "$IF"
       ;;
@@ -1405,6 +1408,80 @@ ebt_cleanup_all_trunk_rules() {
   rm -f /tmp/mervlan_tmp/ebtables/trunk.rules 2>/dev/null || :
 }
 
+# ==========================================================================
+# MERV_QT — L2 quarantine chain (ebtables filter table)
+# ==========================================================================
+# A dedicated chain that FORWARD and INPUT both jump to. Each managed wl*.*
+# gets one DROP rule scoped to --logical-in br0: fires only while the
+# interface is a br0 member, dormant once moved to a VLAN bridge. No
+# per-interface cleanup needed for VLAN-bound ports. Only interfaces
+# intentionally placed in br0 (unmanaged SSIDs, fallbacks) require an
+# explicit ebt_quarantine_release in attach_to_bridge's none) case.
+# ==========================================================================
+MERV_QT_CHAIN="MERV_QT"
+
+# ebt_quarantine_init — Create MERV_QT chain and insert FORWARD/INPUT jumps.
+# Idempotent: uses grep on -L output to avoid duplicate jump rules.
+ebt_quarantine_init() {
+  type ebtables >/dev/null 2>&1 || return 0
+  [ "$DRY_RUN" = "yes" ] && return 0
+  ebtables -t filter -N "$MERV_QT_CHAIN" 2>/dev/null || true
+  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_QT_CHAIN" || \
+    ebtables -t filter -I FORWARD -j "$MERV_QT_CHAIN" 2>/dev/null || true
+  ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_QT_CHAIN" || \
+    ebtables -t filter -I INPUT -j "$MERV_QT_CHAIN" 2>/dev/null || true
+}
+
+# ebt_quarantine_flush — Flush all rules from MERV_QT; keep chain and jumps.
+# Called at the top of each apply cycle to discard stale rules before the
+# cycle rebuilds fresh ones from current NVRAM state.
+ebt_quarantine_flush() {
+  type ebtables >/dev/null 2>&1 || return 0
+  [ "$DRY_RUN" = "yes" ] && return 0
+  ebtables -t filter -F "$MERV_QT_CHAIN" 2>/dev/null || true
+}
+
+# ebt_quarantine_add — Add a per-interface DROP rule scoped to --logical-in br0.
+# Args: $1=interface_name
+# One rule covers both FORWARD and INPUT (both chains jump to MERV_QT).
+# If --logical-in is unsupported, the add fails silently (2>/dev/null) and
+# the system degrades to evict-only behavior via heal_event.sh.
+ebt_quarantine_add() {
+  local _if="$1"
+  [ -n "$_if" ] || return 0
+  type ebtables >/dev/null 2>&1 || return 0
+  if [ "$DRY_RUN" = "yes" ]; then
+    info -c cli,vlan "[DRY-RUN] MERV_QT: would quarantine $_if in br0"
+    return 0
+  fi
+  ebtables -t filter -A "$MERV_QT_CHAIN" -i "$_if" --logical-in br0 -j DROP 2>/dev/null || true
+}
+
+# ebt_quarantine_release — Remove the quarantine rule for a specific interface.
+# Args: $1=interface_name
+# Called ONLY from attach_to_bridge none) after successful brctl addif br0.
+# Required for interfaces intentionally placed in br0. VLAN-bound interfaces
+# never need this — their rules go dormant via --logical-in br0 automatically.
+ebt_quarantine_release() {
+  local _if="$1"
+  [ -n "$_if" ] || return 0
+  type ebtables >/dev/null 2>&1 || return 0
+  [ "$DRY_RUN" = "yes" ] && return 0
+  ebtables -t filter -D "$MERV_QT_CHAIN" -i "$_if" --logical-in br0 -j DROP 2>/dev/null || true
+  info -c cli,vlan "MERV_QT: released quarantine for $_if (correctly in $DEFAULT_BRIDGE)"
+}
+
+# ebt_quarantine_teardown — Full MERV_QT chain teardown.
+# Strict ebtables order: flush rules → delete jump refs → delete chain.
+# Also inlined in mervlan_boot.sh setupdisable/nodedisable (no sourcing there).
+ebt_quarantine_teardown() {
+  type ebtables >/dev/null 2>&1 || return 0
+  ebtables -t filter -F "$MERV_QT_CHAIN" 2>/dev/null || true
+  ebtables -t filter -D FORWARD -j "$MERV_QT_CHAIN" 2>/dev/null || true
+  ebtables -t filter -D INPUT   -j "$MERV_QT_CHAIN" 2>/dev/null || true
+  ebtables -t filter -X "$MERV_QT_CHAIN" 2>/dev/null || true
+}
+
 # cleanup_existing_config — Remove VLAN infrastructure from previous runs
 # Args: none
 # Returns: none (logs all actions)
@@ -1412,6 +1489,28 @@ ebt_cleanup_all_trunk_rules() {
 # Preserves br0 (default LAN bridge)
 cleanup_existing_config() {
   info -c cli,vlan "Cleaning up existing VLAN config..."
+
+  # --- MERV_QT: arm L2 quarantine BEFORE touching any bridge ---------------
+  # Flush stale rules from the previous apply cycle, rebuild chain infra, then
+  # add a DROP rule (scoped to --logical-in br0) for every non-native wl*.*
+  # in NVRAM. Any managed VAP that lands in br0 during a mid-cycle
+  # restart_wireless event is immediately dark at L2: no DHCP, no ARP, no
+  # static-IP traffic. Rules go dormant automatically once each interface is
+  # correctly placed in its VLAN bridge — zero per-interface cleanup needed.
+  ebt_quarantine_flush
+  ebt_quarantine_init
+  _qt_count=0
+  for _qt_if in $(nvram show 2>/dev/null \
+                  | grep -E '^wl[0-9]+\.[0-9]+_ifname=' \
+                  | awk -F= '{print $2}' \
+                  | sort -u); do
+    [ -n "$_qt_if" ] || continue
+    is_native_radio "$_qt_if" && continue
+    ebt_quarantine_add "$_qt_if"
+    _qt_count=$((_qt_count + 1))
+  done
+  [ "$DRY_RUN" != "yes" ] && [ "$_qt_count" -gt 0 ] && \
+    info -c cli,vlan "MERV_QT: quarantine armed for $_qt_count wl*.* interface(s)"
 
   # --- ebtables: remove all MerVLAN trunk filter rules FIRST ---
   # Must run before bridge/VLAN teardown to prevent stale rules that reference
