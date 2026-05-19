@@ -1,3 +1,43 @@
+
+mervlan v0.53
+
+Bug Fixes:
+
+heal_event.sh — Active Shield Regression: Radios Permanently Down After MAC Blacklist Change:
+- v0.52.99 introduced evict_wl_from_br0() inside the wait_for_rc_quiet() loop
+  as part of the Active Shield. This caused a regression where WiFi went down
+  and did not recover without a manual apply.
+- Root cause: evict_wl_from_br0() calls `wl -i IF down` + `brctl delif br0 IF`
+  every second. During firmware's restart_wireless sequence, rc repeatedly adds
+  wl subinterfaces back to br0 as part of its normal rebuild. The shield
+  immediately evicted them again, creating a fight that lasted the full wait
+  window (up to 165s across both wait_for_rc_quiet calls). After this, radios
+  were left in a permanently down state. VLAN checks still passed 10/10 because
+  they inspect bridge structure, not radio state — so the heal completed without
+  detecting the dead radios.
+- Fix: removed evict_wl_from_br0() from the wait loop. Only restore_merv_qt_shield()
+  remains in the loop. It is passive (ebtables DROP rules only, no wl or brctl
+  calls) and does not interfere with firmware's restart sequence. The single
+  evict_wl_from_br0() call after wait_for_rc_quiet() returns (once rc is
+  confirmed quiet) is unaffected — that remains the correct clean sweep.
+
+
+CHANGED FILES:
+
+heal_event.sh v0.54
+- wait_for_rc_quiet(): removed evict_wl_from_br0 from the active shield loop.
+  restore_merv_qt_shield remains as the sole loop action. Added comment
+  explaining why evict is intentionally absent from the loop.
+
+index.html v0.53
+- Added clarification "Stand-alone AP units need steps 2-5 on each unit individually"
+  so the user better understands the different SSH installation needed when using
+  full AP-nodes with MerVLAN instead of AiMesh nodes. 
+- Added more information about SSH keys.
+- Cleaned up some CSS.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.99
 
 Bug Fixes:
