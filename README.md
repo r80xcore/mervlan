@@ -170,17 +170,27 @@ mkdir -p /tmp/mervlan_tmp && /usr/sbin/curl -fsL --retry 3 "https://raw.githubus
 
 Special thanks to everyone who contributed mappings.
 ```
-| Model        | Contributor        | From    | Added in version |
-| ------------ | ------------------ | ------- | ---------------- |
-| RT‑AC86U     | mistermoonlight1   | SNB     | v0.52.3          |
-| RT‑AX86U     | mistermoonlight1   | SNB     | v0.52.4          |
-| GT‑AX6000    | kstamand           | SNB     | v0.52.4          |
-| RT‑AX86S     | bieniu             | Github  | v0.52.3          |
-| RT‑AX58U     | commodoro          | SNB     | v0.52.4          |
-| RT‑AX88U**   | amplatfus          | SNB     | v0.52.4          |
-| RT‑AX88U_PRO | jksmurf            | SNB     | v0.52.4          |
+| Model         | Contributor             | From    | Added in version |
+| ------------- | ----------------------- | ------- | ---------------- |
+| RT‑AC86U      | mistermoonlight1        | SNB     | v0.52.3          |
+| RT‑AX86U      | mistermoonlight1        | SNB     | v0.52.4          |
+| GT‑AX6000     | kstamand                | SNB     | v0.52.4          |
+| RT‑AX86S      | bieniu                  | Github  | v0.52.3          |
+| RT‑AX58U      | commodoro               | SNB     | v0.52.4          |
+| RT‑AX82U      | pxdl                    | Github  | v0.52.93         |
+| RT‑AX86U_PRO  | davittoncat             | Github  | v0.52.94         |
+| RT‑AX88U**    | amplatfus               | SNB     | v0.52.4          |
+| RT‑AX88U_PRO  | jksmurf                 | SNB     | v0.52.4          |
+| RT‑AX92U      | RikshaDriver            | Github  | v0.52.94         |
+| RT‑AX92U      | Mudcrab353              | Github  | v0.52.96         |
+| RT‑AX92U      | franzatkiermeyereu      | Github  | v0.52.96         |
+| RT‑AX95Q      | mdraco11                | Github  | v0.52.93         |
+| RT‑AX5400     | tooty-1135              | Github  | v0.52.96         |
+| RT‑BE92U**    | brzd                    | SNB     | v0.52.92         |
+| TUF‑AX3000_V2 | piratak                 | Github  | v0.52.96         |
 ```
 **RT‑AX88U:** LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging.
+**RT‑BE92U:** LAN1–LAN4 share one VLAN bridge — no per-port isolation.
 
 ### Manual template (if you already know the mapping)
 
