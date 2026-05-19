@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-      <!-- help.html version="0.48" -->
+      <!-- help.html version="0.49" -->
   <meta charset="utf-8" />
   <title>MerVLAN VLAN Manager - Help & Usage Guide</title>
   <style>
@@ -343,6 +343,7 @@
     <div class="tab" data-tab="logs">Logs & Monitoring</div>
     <div class="tab" data-tab="unsupported">Device Support</div>
     <div class="tab" data-tab="support">Get Help</div>
+    <div class="tab" data-tab="wiki">Wiki</div>
   </div>
 
   <div class="content" id="content"></div>
@@ -356,8 +357,37 @@
       start: `<div class="help-section">
 <h2>GETTING STARTED WITH MERVLAN</h2>
 <span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">Welcome to MerVLAN — VLAN management for Asuswrt-Merlin. Segment your wireless and wired network with full multi-node support.</p>
+<p class="intro">MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, ebtables rules, and SSID-to-bridge bindings — locally on a single router or across multiple devices over SSH. Below is an overview of the supported network topologies before you start configuring.</p>
 
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>NETWORK TOPOLOGIES</h2>
+
+<div class="note-box" style="border-color:#E74C3C; background:#1a0808; color:#E74C3C;">
+  <strong>⛔ WIRELESS BACKHAUL IS NOT SUPPORTED</strong><br>
+  Wi-Fi backhaul cannot carry 802.1Q VLAN tags on Asus hardware. <strong>Ethernet backhaul is required between all devices in every topology.</strong> If any device in your setup connects to the main router over Wi-Fi, VLAN traffic will not be isolated correctly and the configuration will not work.
+</div>
+
+<div class="scenario-block">
+  <strong>1 — Single Device</strong>
+  MerVLAN is installed and configured on one router. No additional devices. VLANs are applied locally — no SSH, no nodes, no sync needed. Connects to a managed switch via Ethernet (WAN port). This is the simplest and most common use case.
+</div>
+
+<div class="scenario-block">
+  <strong>2 — Single Device with AiMesh Nodes</strong>
+  MerVLAN is installed and configured on the main router only. AiMesh nodes are added in the Nodes panel. SSH keys are generated and installed on the main router and automatically propagated to AiMesh nodes by the Asus firmware after a reboot — no manual key installation required on the nodes. All devices must be connected to a managed switch via Ethernet (WAN port). Apply reaches all nodes over SSH.
+</div>
+
+<div class="scenario-block">
+  <strong>3 — Single Device with Standalone APs (AP Mode)</strong>
+  MerVLAN is installed and configured on the main/master router. Standalone APs (non-AiMesh, running in AP mode) are added as nodes. Because these APs are not part of an AiMesh mesh, <strong>SSH keys must be manually installed on each AP</strong> — the firmware does not propagate them automatically. All devices must be connected to a managed switch via Ethernet (WAN port).
+</div>
+
+<div class="scenario-block">
+  <strong>4 — Daisy-Chained Nodes via Trunk Ports <span class="tag-warn">EXPERIMENTAL</span></strong>
+  An extension of topologies 2 or 3 where downstream APs are connected in a daisy-chain over Ethernet (e.g. switch → AP → AP) rather than all plugging directly into the same switch. The ports connecting devices must be configured as 802.1Q trunk ports in MerVLAN's LAN Setup, with the correct tagged VLANs. This is still early experimental — success is not guaranteed at this stage.
+</div>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
 <div class="note-box">
   <strong>⚠️ DRY RUN IS ON BY DEFAULT</strong><br>
   When you first install MerVLAN, Dry Run mode is enabled. Clicking [Apply] simulates the configuration but makes <strong>NO actual changes</strong> to your network.<br><br>
@@ -1050,12 +1080,99 @@ Use the APMO modal to configure your hardware profile manually.</p>
   <li>Star the GitHub repo to help with visibility</li>
 </ul>
 <p style="margin-top:18px; color:#666;">Happy VLANing! 🌐</p>
+</div>`,
+
+      wiki: `<div class="help-section">
+<h2>WIKI — REFERENCE &amp; GLOSSARY</h2>
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<p class="intro">Background reference for MerVLAN. Step-by-step guides are in the other tabs — this page covers what each script does, how they connect, and what technical terms mean.</p>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>SCRIPTS</h2>
+<p>MerVLAN is built from several shell scripts, each with a single responsibility.</p>
+<table class="device-table">
+  <thead><tr><th style="width:30%">Script</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>mervlan_manager.sh</code></td><td>The core apply engine. Resolves SSIDs to wireless interfaces, creates per-VLAN bridges, binds interfaces to those bridges, and applies LAN port VLANs. Called during apply, on boot, and by the heal system.</td></tr>
+    <tr><td><code>mervlan_trunk.sh</code></td><td>Handles trunk port configuration on the main router. Applies 802.1Q VLAN tagging rules on the designated LAN port. Called by the manager.</td></tr>
+    <tr><td><code>mervlan_boot_wrap.sh</code></td><td>The boot entry point called by services-start on reboot. Waits up to 30s for wireless interfaces to become available, then calls mervlan_boot.sh.</td></tr>
+    <tr><td><code>mervlan_boot.sh</code></td><td>Orchestrates the boot sequence. Calls the manager to re-apply VLANs and handles node boot coordination over SSH.</td></tr>
+    <tr><td><code>service-event-handler.sh</code></td><td>Intercepts Asus firmware service events (e.g. restart_wireless). Forwards events that can affect VLAN state to the heal system.</td></tr>
+    <tr><td><code>heal_event.sh</code></td><td>The VLAN health monitor. Runs every minute via cron. Checks whether bridges and interface bindings are intact. Triggers a re-apply via the manager if a persistent fault is detected.</td></tr>
+    <tr><td><code>sync_nodes.sh</code></td><td>Copies MerVLAN files to each configured node over SSH. Rewrites settings.json per node before sending — trunk config is stripped and the node flag is set on the remote copy.</td></tr>
+    <tr><td><code>execute_nodes.sh</code></td><td>Runs mervlan_manager.sh on each remote node via SSH. Used during "Local + Nodes" applies and remote enable/disable service commands.</td></tr>
+    <tr><td><code>dropbear_sshkey_gen.sh</code></td><td>Generates the ED25519 key pair used for all node SSH connections. Stores keys in <code>/jffs/addons/mervlan/.ssh/</code>.</td></tr>
+    <tr><td><code>hw_probe.sh</code></td><td>Probes the device to detect its hardware profile — identifies ethX interfaces, port count, and the WAN port.</td></tr>
+    <tr><td><code>device_support_mapper.sh</code></td><td>Maps detected interfaces to physical port labels using the built-in device database. Flags the device for APMO if it is not recognized.</td></tr>
+    <tr><td><code>save_settings.sh</code></td><td>Receives form data submitted from the UI and writes it to settings.json on the router.</td></tr>
+    <tr><td><code>collect_clients.sh</code></td><td>Gathers connected client data from the main router and all nodes for the Clients Overview panel in the UI.</td></tr>
+  </tbody>
+</table>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>HOW THE SCRIPTS CONNECT</h2>
+<div class="scenario-block">
+  <strong>Apply — single router</strong>
+  UI saves via save_settings.sh → settings.json updated → mervlan_manager.sh applies bridges and bindings → mervlan_trunk.sh applies trunk config (if enabled)
+</div>
+<div class="scenario-block">
+  <strong>Apply — with nodes</strong>
+  mervlan_manager.sh (local) → sync_nodes.sh pushes files to each node → execute_nodes.sh runs mervlan_manager.sh on each node remotely
+</div>
+<div class="scenario-block">
+  <strong>Boot — after reboot</strong>
+  services-start → mervlan_boot_wrap.sh (waits for SSIDs) → mervlan_boot.sh → mervlan_manager.sh
+</div>
+<div class="scenario-block">
+  <strong>Health monitoring — every minute</strong>
+  cron → heal_event.sh checks VLAN state → mervlan_manager.sh re-applies if a fault persists
+</div>
+<div class="scenario-block">
+  <strong>Firmware event — e.g. wireless restart</strong>
+  Asus firmware fires service-event → service-event-handler.sh intercepts → heal_event.sh runs a health check → mervlan_manager.sh re-applies if needed
+</div>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>GLOSSARY</h2>
+<p>Technical terms used across the guide, in plain language.</p>
+<table class="device-table">
+  <thead><tr><th style="width:22%">Term</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><strong>802.1Q</strong></td><td>IEEE standard for VLAN tagging on Ethernet frames. A small tag is added to each frame to indicate which VLAN it belongs to. Required by trunk ports and managed switches.</td></tr>
+    <tr><td><strong>AiMesh</strong></td><td>Asus's mesh networking system. AiMesh nodes are managed by the main router and receive SSH authorized keys from it automatically after a reboot.</td></tr>
+    <tr><td><strong>APMO</strong></td><td>Advanced Port Mapping Override. Lets you manually correct the hardware profile when automatic detection is wrong or the device is not in the built-in database.</td></tr>
+    <tr><td><strong>Authorized Keys</strong></td><td>A file on each router listing SSH public keys that are allowed to connect without a password. MerVLAN's public key must be present here on every node.</td></tr>
+    <tr><td><strong>Base radio</strong></td><td>The primary wireless interface for a band — wl0 (2.4 GHz), wl1 (5 GHz), wl2 (6 GHz). Assigning VLANs to base radios is possible but less stable than using Guest Network SSIDs.</td></tr>
+    <tr><td><strong>br0</strong></td><td>The router's default LAN bridge. All interfaces are in br0 out of the box. MerVLAN moves relevant interfaces out of br0 and into dedicated per-VLAN bridges during apply.</td></tr>
+    <tr><td><strong>Cron</strong></td><td>A time-based job scheduler built into the router OS. MerVLAN's health monitor runs as a cron job every minute when the service is enabled.</td></tr>
+    <tr><td><strong>Dropbear</strong></td><td>The SSH server and client built into Asuswrt-Merlin. MerVLAN uses Dropbear's SSH client to connect from the main router to nodes.</td></tr>
+    <tr><td><strong>Dry Run</strong></td><td>A MerVLAN mode where the full apply pipeline runs but no changes are committed to the network. ON by default — used to safely validate a config before going live.</td></tr>
+    <tr><td><strong>ebtables</strong></td><td>A packet filtering tool that works at Layer 2 (Ethernet level). MerVLAN uses it to enforce VLAN isolation and quarantine rules on network bridges.</td></tr>
+    <tr><td><strong>ED25519</strong></td><td>A modern SSH key algorithm. The type of key MerVLAN generates for authenticating from the main router to nodes.</td></tr>
+    <tr><td><strong>ENS</strong></td><td>Enable Native SSID. A MerVLAN toggle that allows VLANs to be assigned to base radios. OFF by default — Guest Network SSIDs are recommended instead.</td></tr>
+    <tr><td><strong>ethX</strong></td><td>Kernel names for Ethernet interfaces (eth0, eth1, eth2, etc.). Each physical LAN and WAN port on the router maps to one of these internally.</td></tr>
+    <tr><td><strong>Guest SSID</strong></td><td>A secondary Wi-Fi network created under Wireless → Guest Network in the Asus UI. Uses a separate virtual interface (wl0.1, wl1.1, etc.) and is the recommended type for VLAN assignment.</td></tr>
+    <tr><td><strong>Hardware profile</strong></td><td>A device-specific map of ethX interfaces to physical port labels, including which port is the WAN. MerVLAN needs this to know where to apply VLAN rules.</td></tr>
+    <tr><td><strong>JFFS</strong></td><td>A writable flash filesystem on Asus routers, mounted at /jffs. Where MerVLAN is installed, settings are stored, and SSH keys live. Can be wiped by a factory reset or firmware update.</td></tr>
+    <tr><td><strong>Node</strong></td><td>A secondary router or access point managed remotely by MerVLAN over SSH. Runs its own instance of MerVLAN in node mode.</td></tr>
+    <tr><td><strong>Service event</strong></td><td>A firmware-generated signal that something changed on the router — for example, restart_wireless or dhcpc-up. MerVLAN monitors these to detect when VLAN state may have been disrupted.</td></tr>
+    <tr><td><strong>services-start</strong></td><td>An Asuswrt-Merlin script that runs automatically when the router finishes booting. MerVLAN injects a call here to re-apply VLANs on every reboot.</td></tr>
+    <tr><td><strong>SSH</strong></td><td>Secure Shell. An encrypted protocol for running commands on a remote device. MerVLAN uses SSH to sync files and run the VLAN manager on nodes.</td></tr>
+    <tr><td><strong>SSID</strong></td><td>Service Set Identifier. The name of a Wi-Fi network as seen when scanning for networks.</td></tr>
+    <tr><td><strong>STP</strong></td><td>Spanning Tree Protocol. Prevents network loops in topologies where multiple paths exist between devices. Relevant in multi-node setups with redundant links — leave OFF for single-router setups.</td></tr>
+    <tr><td><strong>Trunk port</strong></td><td>An Ethernet port configured to carry tagged traffic for multiple VLANs simultaneously using 802.1Q. Requires a managed switch or downstream device that understands VLAN tags.</td></tr>
+    <tr><td><strong>VLAN</strong></td><td>Virtual Local Area Network. Logically divides one physical network into isolated segments. Devices on different VLANs cannot communicate unless explicitly routed between them.</td></tr>
+    <tr><td><strong>VLAN bridge</strong></td><td>A kernel network bridge dedicated to one VLAN (e.g. br20 for VLAN 20). MerVLAN creates one per VLAN ID and attaches the relevant wireless and wired interfaces to it.</td></tr>
+    <tr><td><strong>VLAN ID</strong></td><td>A number between 2 and 4094 that identifies a specific VLAN. Interfaces and ports sharing the same VLAN ID are on the same network segment.</td></tr>
+    <tr><td><strong>WAN</strong></td><td>Wide Area Network — the internet-facing port on the router. MerVLAN must correctly identify this port to avoid applying VLAN rules to it by mistake.</td></tr>
+  </tbody>
+</table>
 </div>`
     };
 
     const contentEl = document.getElementById('content');
     const tabs = document.querySelectorAll('.tab');
-    const HTML_SECTIONS = new Set(['start', 'ssid', 'lan', 'apply', 'ssh', 'logs', 'unsupported', 'support']);
+    const HTML_SECTIONS = new Set(['start', 'ssid', 'lan', 'apply', 'ssh', 'logs', 'unsupported', 'support', 'wiki']);
 
     function showTab(tabName) {
       tabs.forEach(t => t.classList.remove('active'));
