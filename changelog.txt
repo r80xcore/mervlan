@@ -1,3 +1,67 @@
+mervlan v0.52.99
+
+Bug Fixes:
+
+sync_nodes.sh — False Size Mismatch Warning on settings.json:
+- verify_file_on_node() compared the remote file size against the unmodified
+  local settings.json, but the file sent to nodes is always content-modified
+  (trunk config zeroed, TRUNK1 injected for backhaul). The size and md5 would
+  never match, producing a spurious warning on every sync.
+- Fix: copy_file_to_node() now saves the expected size and md5 of the actual
+  sent content to a per-node breadcrumb file before discarding the temp copy.
+  verify_file_on_node() reads the breadcrumb when verifying settings.json and
+  uses those values as the reference instead of the local original. The
+  breadcrumb is consumed immediately after reading. A trap on EXIT removes any
+  leftover breadcrumb files so they cannot persist across runs.
+
+
+Security:
+
+heal_event.sh — Active Shield for MERV_QT During RC Wait Window:
+- During wait_for_rc_quiet(), Asuswrt's rc daemon flushes ebtables as part of
+  its wireless rebuild sequence, silently wiping the MERV_QT chain for the
+  entire wait window — up to 120s for restart_wireless events. This left the
+  router with zero L2 quarantine protection while rc was active.
+- Fix: New restore_merv_qt_shield() function detects chain loss via
+  ebtables -t filter -L MERV_QT and immediately rebuilds the chain, re-inserts
+  FORWARD/INPUT jump rules (idempotent via grep guard), and re-adds DROP rules
+  for all guest wireless subinterfaces found in sysfs (wl*.*, ra*.*, ath*.*).
+  The function is called every second at the top of the wait_for_rc_quiet()
+  loop alongside evict_wl_from_br0(), converting the passive wait into an
+  Active Shield that reduces worst-case MERV_QT exposure from 120s to ~1s.
+  Fast path (chain intact) returns in sub-millisecond with no ebtables writes.
+
+Help:
+
+help.index
+- Added topology information and clarification.
+- Added wiki tab for answers to terminology and general question. Will be updated more.
+
+UPDATED FILES:
+
+sync_nodes.sh v0.56
+- copy_file_to_node: saves expected size+md5 of the trunk-modified temp file
+  to $TMPDIR/merv_sync_expected_${node_id} before deletion (success path only).
+- verify_file_on_node: reads and consumes the breadcrumb when verifying
+  settings/settings.json; overrides local_size and local_md5 with breadcrumb
+  values so the comparison reflects what was actually sent.
+- Added _cleanup_sync_tmp() + trap EXIT to remove all merv_sync_expected_*
+  files on script exit.
+
+heal_event.sh v0.54
+- Added restore_merv_qt_shield(): detects firmware ebtables flush via chain
+  lookup, rebuilds MERV_QT chain + FORWARD/INPUT jumps (idempotent) + DROP
+  rules for all sysfs guest wireless interfaces. Uses ebtables availability
+  guard (type ebtables) and jump idempotency check (grep -qF) matching the
+  manager's ebt_quarantine_init pattern.
+- wait_for_rc_quiet(): added evict_wl_from_br0 + restore_merv_qt_shield calls
+  at the top of the wait loop. Both callers (pre-check 120s window and
+  pre-manager 45s window) are covered by this single change.
+
+help.html version v0.49
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.52.98
 
 Adds MERV_QT — a dedicated ebtables filter chain that provides true L2 quarantine
