@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-      <!-- help.html version="0.49" -->
+      <!-- help.html version="0.50" -->
   <meta charset="utf-8" />
   <title>MerVLAN VLAN Manager - Help & Usage Guide</title>
   <style>
@@ -277,19 +277,25 @@
         background: #0e0e0e;
         border: 1px solid #2a2a2a;
         border-radius: 4px;
-        padding: 9px 14px;
+        padding: 9px 14px 9px 24px;   /* left was 14px → now 24px */
         margin: 6px 0 10px 0;
         font-size: 13px;
         color: #AAAAAA;
         line-height: 1.5;
     }
 
-    .scenario-block strong {
+    .scenario-block strong:first-of-type {
         color: #DADADA;
         display: block;
         margin-bottom: 4px;
+        margin-left: -10px;            /* pull header back to original edge */
     }
 
+    /* This allows any other strong tags inside the text to remain inline and bold */
+    .scenario-block strong {
+        color: #DADADA;
+        font-weight: bold;
+    }
     .nav-footer {
         margin-top: 18px;
         padding-top: 8px;
@@ -383,8 +389,8 @@
 </div>
 
 <div class="scenario-block">
-  <strong>4 — Daisy-Chained Nodes via Trunk Ports <span class="tag-warn">EXPERIMENTAL</span></strong>
-  An extension of topologies 2 or 3 where downstream APs are connected in a daisy-chain over Ethernet (e.g. switch → AP → AP) rather than all plugging directly into the same switch. The ports connecting devices must be configured as 802.1Q trunk ports in MerVLAN's LAN Setup, with the correct tagged VLANs. This is still early experimental — success is not guaranteed at this stage.
+  <strong>4 — Nodes Connected Directly to Main Router <span class="tag-warn">EXPERIMENTAL</span></strong>
+  An extension of topologies 2 or 3 where downstream APs are plugged directly into the LAN ports of the main MerVLAN router via Ethernet, instead of an external managed switch. Because node-to-node trunking is not supported at this stage, <strong>APs must connect to the main unit</strong>. The main router's WAN port still needs to be connected to your managed switch, while the specific LAN ports used for the APs must be configured as 802.1Q trunk ports in MerVLAN's LAN Setup. This topology is experimental. Compatibility and stability cannot be guaranteed—not recommended unless you are debugging or love to experiment.
 </div>
 
 <span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
@@ -934,7 +940,7 @@ Use the APMO modal to configure your hardware profile manually.</p>
       ssh: `<div class="help-section">
 <h2>SSH KEY INSTALL</h2>
 <span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node and apply VLAN configuration remotely. The key must be manually installed on each node — MerVLAN does not inject it automatically.</p>
+<p class="intro">SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node and apply VLAN configuration remotely. AiMesh nodes handle key propagation automatically, but standalone nodes (Full APs) require manual installation as MerVLAN cannot inject it automatically.</p>
 
 <span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
 <h2>HOW IT WORKS</h2>
@@ -1012,6 +1018,12 @@ Use the APMO modal to configure your hardware profile manually.</p>
 <h2>GET HELP &amp; SUPPORT</h2>
 <span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
 <p class="intro">Need help? Found a bug? Have a feature idea? The MerVLAN community is active and happy to assist.</p>
+
+<div class="note-box" style="border-color:#2a6496;">
+  <strong>🐛 Bugs and broken features → GitHub Issues, please</strong><br><br>
+  If you've found a bug, a broken feature, or something that behaves unexpectedly, please report it on <a href="https://github.com/r80xcore/mervlan/issues" target="_blank" style="color:#7ab3d4;">GitHub Issues</a> rather than the forums or Discord. Having everything in one place makes it much easier to track, prioritise, and avoid duplicates — and nothing gets lost in a chat scroll.<br><br>
+  SNB and Discord are great for setup questions and general help. GitHub is the right place for anything that needs to be fixed.
+</div>
 
 <span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
 <div class="link-block">
