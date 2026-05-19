@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.54"                     #
+#                  - File: heal_event.sh || version="0.55"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -408,7 +408,7 @@ restore_merv_qt_shield() {
     ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
   done
 
-  info -c vlan "Heal: MERV_QT flushed by firmware — actively restored"
+  info -c vlan "Heal: MERV_QT chain absent — arming quarantine shield"
 }
 
 rc_queue_has() {
@@ -430,11 +430,13 @@ wait_for_rc_quiet() {
   info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
 
   while :; do
-    # Active Shield: keep MERV_QT armed and br0 clean every second while
-    # Asuswrt's rc daemon is rebuilding. Firmware flushes ebtables at the
-    # start of its rebuild sequence, wiping MERV_QT. Without this, the
-    # router is fully exposed for the entire wait window (up to 120s).
-    evict_wl_from_br0
+    # Active Shield: restore MERV_QT chain if firmware flushed ebtables.
+    # restore_merv_qt_shield is passive (ebtables DROP rules only) and safe
+    # to call every second — it does not touch interface state.
+    # evict_wl_from_br0 is intentionally NOT called here: repeated wl -i down
+    # calls every second interfere with firmware's restart_wireless sequence,
+    # leaving radios permanently down. The single evict call after this
+    # function returns (once rc is confirmed quiet) is the correct sweep.
     restore_merv_qt_shield
 
     # If either queue or process is busy, reset quiet counter
