@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.55"                      #
+#               - File: sync_nodes.sh || version="0.56"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -87,6 +87,15 @@ dbg_var DRY_RUN DRY_RUN_FORCED DEBUG DEBUG_FORCED DEBUG_JSON
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 dbg_var SSH_NODE_USER SSH_NODE_PORT
+
+# Remove any per-node sync metadata breadcrumbs left by copy_file_to_node.
+# Fires on every exit path (normal, error, signal) so no stale files survive
+# across runs even if verification was skipped or the script was interrupted.
+_cleanup_sync_tmp() {
+    rm -f "$TMPDIR"/merv_sync_expected_* 2>/dev/null || :
+}
+trap '_cleanup_sync_tmp' EXIT
+
 # ========================================================================== #
 # FILE SYNC SETUP — Source/destination lists and synchronization parameters  #
 # ========================================================================== #
@@ -507,6 +516,19 @@ copy_file_to_node() {
 
         # Use cat piped with timeout wrapper for atomic file transfer
         if cat "$_cfn_tmp" | _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+            # Persist expected size+md5 of the sent (content-modified) file
+            # before discarding the temp copy. verify_file_on_node reads this
+            # breadcrumb so it validates against what actually landed on the
+            # node rather than the unmodified local original.
+            _cfn_exp_size=$(wc -c < "$_cfn_tmp" 2>/dev/null | tr -cd '0-9')
+            _cfn_exp_md5=""
+            if merv_has md5sum; then
+                _cfn_exp_md5=$(md5sum "$_cfn_tmp" 2>/dev/null | awk '{print $1}')
+            elif merv_has md5; then
+                _cfn_exp_md5=$(md5 -r "$_cfn_tmp" 2>/dev/null | awk '{print $1}')
+            fi
+            printf '%s\n%s\n' "$_cfn_exp_size" "$_cfn_exp_md5" \
+                > "$TMPDIR/merv_sync_expected_${node_id}" 2>/dev/null || true
             info -c cli,vlan "✓ Copied $file (trunk-safe) to NODE${node_id} ($node_ip):$remote_path"
             rm -f "$_cfn_tmp" 2>/dev/null
             return 0
@@ -548,7 +570,23 @@ verify_file_on_node() {
         # Remove any extra characters from size
         remote_size=$(echo "$remote_size" | tr -cd '0-9')
         local_size=$(echo "$local_size" | tr -cd '0-9')
-        
+
+        # If copy_file_to_node left a breadcrumb for this node+file, use its
+        # size and md5 as the reference values. The sent file was content-modified
+        # (e.g. settings.json had trunk config rewritten for the node), so
+        # comparing against the unmodified local original would always mismatch.
+        _vfn_exp_md5=""
+        if [ "$file" = "settings/settings.json" ]; then
+            _vfn_breadcrumb="$TMPDIR/merv_sync_expected_${node_id}"
+            if [ -f "$_vfn_breadcrumb" ]; then
+                _vfn_exp_size=$(sed -n '1p' "$_vfn_breadcrumb" | tr -cd '0-9')
+                _vfn_exp_md5=$(sed -n '2p' "$_vfn_breadcrumb" | tr -cd 'a-fA-F0-9')
+                rm -f "$_vfn_breadcrumb" 2>/dev/null || :
+                [ -n "$_vfn_exp_size" ] && [ "$_vfn_exp_size" -gt 0 ] && \
+                    local_size="$_vfn_exp_size"
+            fi
+        fi
+
         if [ "$remote_size" -eq "$local_size" ] && [ "$remote_size" -gt 0 ]; then
             local local_md5=""
             local remote_md5=""
@@ -558,6 +596,8 @@ verify_file_on_node() {
             elif merv_has md5; then
                 local_md5=$(md5 -r "$MERV_BASE/$file" 2>/dev/null | awk '{print $1}')
             fi
+            # Use breadcrumb md5 when available (content-modified file)
+            [ -n "$_vfn_exp_md5" ] && local_md5="$_vfn_exp_md5"
 
             if [ -n "$local_md5" ]; then
                 remote_md5=$(merv_ssh_exec "$node_id" "$node_ip" "if type md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \$1}'; elif type md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \$1}'; else echo NA; fi" 2>/dev/null)
