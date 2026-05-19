@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.53"                     #
+#                  - File: heal_event.sh || version="0.54"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -377,6 +377,40 @@ evict_wl_from_br0() {
   return 0
 }
 
+# ============================================================================ #
+# restore_merv_qt_shield                                                       #
+# Called every second inside wait_for_rc_quiet to re-arm the MERV_QT ebtables #
+# chain if Asuswrt's rc daemon flushed it during a rebuild sequence.           #
+# Recreates the chain, re-inserts FORWARD/INPUT jumps (idempotent), and       #
+# re-adds DROP rules for every guest wireless subinterface present in sysfs.  #
+# Returns immediately (no-op) if ebtables is unavailable or chain is intact.  #
+# ============================================================================ #
+restore_merv_qt_shield() {
+  type ebtables >/dev/null 2>&1 || return 0
+
+  # Fast path: chain still present — nothing was flushed
+  ebtables -t filter -L MERV_QT >/dev/null 2>&1 && return 0
+
+  # Chain is gone — rc flushed ebtables. Rebuild chain and jump rules.
+  ebtables -t filter -N MERV_QT 2>/dev/null || true
+  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
+    ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
+  ebtables -t filter -L INPUT 2>/dev/null | grep -qF 'MERV_QT' || \
+    ebtables -t filter -I INPUT   -j MERV_QT 2>/dev/null || true
+
+  # Re-add DROP rules for all guest wireless subinterfaces (wl*.*, ra*.*, ath*.*)
+  # --logical-in br0 scopes each rule so it only fires if the interface is in br0;
+  # rules for interfaces already in their VLAN bridge are automatically dormant.
+  local iface_path iface
+  for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
+    [ -e "$iface_path" ] || continue
+    iface="${iface_path##*/}"
+    ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
+  done
+
+  info -c vlan "Heal: MERV_QT flushed by firmware — actively restored"
+}
+
 rc_queue_has() {
   [ -f /tmp/rc_service ] && grep -E "$1" /tmp/rc_service 2>/dev/null | grep -qv '^$'
 }
@@ -396,6 +430,13 @@ wait_for_rc_quiet() {
   info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
 
   while :; do
+    # Active Shield: keep MERV_QT armed and br0 clean every second while
+    # Asuswrt's rc daemon is rebuilding. Firmware flushes ebtables at the
+    # start of its rebuild sequence, wiping MERV_QT. Without this, the
+    # router is fully exposed for the entire wait window (up to 120s).
+    evict_wl_from_br0
+    restore_merv_qt_shield
+
     # If either queue or process is busy, reset quiet counter
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
