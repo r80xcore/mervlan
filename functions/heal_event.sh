@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.55"                     #
+#                  - File: heal_event.sh || version="0.56"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -388,27 +388,46 @@ evict_wl_from_br0() {
 restore_merv_qt_shield() {
   type ebtables >/dev/null 2>&1 || return 0
 
-  # Fast path: chain still present — nothing was flushed
-  ebtables -t filter -L MERV_QT >/dev/null 2>&1 && return 0
+  local chain_exists=1
+  local jumps_exist=1
 
-  # Chain is gone — rc flushed ebtables. Rebuild chain and jump rules.
+  # 1. Did the chain survive?
+  ebtables -t filter -L MERV_QT >/dev/null 2>&1 || chain_exists=0
+
+  # 2. Did the jump rules survive?
+  # Must check even when chain exists — Asuswrt rc may flush the FORWARD/INPUT
+  # chains (ebtables -F FORWARD) without touching MERV_QT, leaving the chain
+  # intact but orphaned: DROP rules present but never reached.
+  if [ "$chain_exists" -eq 1 ]; then
+    ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || jumps_exist=0
+    ebtables -t filter -L INPUT   2>/dev/null | grep -qF 'MERV_QT' || jumps_exist=0
+  else
+    jumps_exist=0
+  fi
+
+  # Fast path: shield is completely intact — nothing to do
+  [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ] && return 0
+
+  # 3. Re-link jump rules (covers both orphaned-chain and full-wipe cases)
   ebtables -t filter -N MERV_QT 2>/dev/null || true
   ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
     ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -L INPUT 2>/dev/null | grep -qF 'MERV_QT' || \
+  ebtables -t filter -L INPUT   2>/dev/null | grep -qF 'MERV_QT' || \
     ebtables -t filter -I INPUT   -j MERV_QT 2>/dev/null || true
 
-  # Re-add DROP rules for all guest wireless subinterfaces (wl*.*, ra*.*, ath*.*)
-  # --logical-in br0 scopes each rule so it only fires if the interface is in br0;
-  # rules for interfaces already in their VLAN bridge are automatically dormant.
-  local iface_path iface
-  for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
-    [ -e "$iface_path" ] || continue
-    iface="${iface_path##*/}"
-    ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
-  done
-
-  info -c vlan "Heal: MERV_QT chain absent — arming quarantine shield"
+  # 4. Rebuild per-interface DROP rules only if the chain itself was wiped.
+  # If only jumps were flushed the chain and its rules are intact — skip rebuild.
+  if [ "$chain_exists" -eq 0 ]; then
+    local iface_path iface
+    for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
+      [ -e "$iface_path" ] || continue
+      iface="${iface_path##*/}"
+      ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
+    done
+    info -c vlan "Heal: MERV_QT chain flushed by rc — fully rebuilt shield"
+  else
+    info -c vlan "Heal: MERV_QT orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
+  fi
 }
 
 rc_queue_has() {
