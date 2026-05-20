@@ -1,4 +1,37 @@
 
+mervlan v0.53.01
+
+Bug Fixes:
+
+heal_event.sh — Active Shield Blind Spot: Orphaned MERV_QT Chain Not Detected:
+- restore_merv_qt_shield() checked only whether the MERV_QT chain existed
+  (ebtables -t filter -L MERV_QT). This missed a second firmware flush pattern
+  where Asuswrt rc runs ebtables -t filter -F FORWARD, deleting the jump rules
+  from FORWARD and INPUT without touching the MERV_QT chain itself.
+  Result: chain intact, per-interface DROP rules intact, but FORWARD and INPUT
+  no longer jump to MERV_QT — traffic bypasses quarantine entirely.
+  Confirmed by ebtables interceptor log showing "Jumps:1 Rules:12" during the
+  wait window and DHCP leaks on restart_wireless events.
+- Fix: restore_merv_qt_shield() now checks chain existence AND jump rule
+  presence in FORWARD/INPUT separately. Two distinct recovery paths:
+  (a) jumps flushed but chain intact — re-insert jump rules only, per-interface
+  DROP rules are untouched (they survived in the orphaned chain);
+  (b) chain wiped entirely — full rebuild: chain + jumps + per-interface rules.
+  Fast path exits only when both chain and jumps are confirmed present.
+
+
+CHANGED FILES:
+
+heal_event.sh v0.55
+- restore_merv_qt_shield(): rewritten to detect two distinct firmware flush
+  patterns: (a) FORWARD/INPUT chains flushed leaving MERV_QT orphaned —
+  re-inserts jump rules without touching per-interface DROP rules; (b) full
+  chain wipe — rebuilds chain + jumps + per-interface rules. Fast path now
+  requires both chain and jumps to be confirmed present.
+
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53
 
 Bug Fixes:
