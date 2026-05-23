@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.01" -->
+  <!-- index.html version="0.53.02" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -327,6 +327,7 @@
               <div class="clients-panel">
                 <div class="clients-header">
                   <span>Active VLAN Clients</span>
+                  <button type="button" class="button_gen" title="Clear and rebuild the per-client MAC shield database" onclick="runMacRefresh()">MAC Shield Refresh</button>
                   <button type="button" id="refreshClientsBtn" class="button_gen" title="Collect and refresh client list" onclick="refreshClients(this)">Refresh</button>
                 </div>
                 <div id="vlanOverview" class="clients-body"></div>
@@ -3535,6 +3536,14 @@ async function runVlanManagerOnlyNodes() {
   return queueServiceAction('executenodesonly_vlanmgr', {
     description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
+  });
+}
+
+async function runMacRefresh() {
+  document.getElementById('vlanManagerModal').style.display = 'none';
+  return queueServiceAction('macrefresh_vlanmgr', {
+    description: 'MAC Shield Refresh',
+    cooldownMs: 3000
   });
 }
 
