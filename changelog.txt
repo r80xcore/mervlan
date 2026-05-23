@@ -1,4 +1,248 @@
 
+mervlan v0.53.02
+
+Bug Fixes:
+
+sync_nodes.sh — Node Receives Auto-Injected TRUNK1 Even When All Trunks Are Zero:
+- sync_nodes.sh unconditionally rewrote the Trunks section of settings.json
+  before syncing to nodes, zeroing all trunks then forcing TRUNK1=1 with all
+  pool VLANs tagged whenever the VLAN pool was non-empty. This ignored the
+  user's explicit trunk configuration and produced a settings.json on the node
+  that contradicted what was set in the UI.
+- Fix: the auto-trunk injection is now gated on whether the main router itself
+  has at least one active trunk (TRUNK1-8 = "1"). If all trunks are "0" on
+  the main, the node receives the settings.json as-is with no rewrite. If any
+  trunk is active on the main, the existing backhaul-trunk injection runs
+  unchanged for backward compatibility.
+
+MERV_MAC — Structural Fingerprint for JFFS and ebtables-Churn Decisions:
+- merv_mac_merge_db used raw md5sum of the active db to decide whether to write
+  the JFFS checkpoint. merv_mac_snapshot used raw md5sum to decide whether to
+  rebuild ebtables rules. Because merv_mac_merge_db always refreshes timestamps
+  for seen clients (latest-timestamp-wins), the raw content changed on every
+  5-minute cron tick even when the same clients were on the same VLANs — causing
+  JFFS writes and ebtables flush+apply on every tick on a stable network.
+- Fix: both comparisons now use a structural fingerprint derived from the
+  mac+iface+vid fields only (awk '{print $2,$3,$4}' | sort | md5sum). Timestamps
+  are excluded. Result: a stable network produces zero JFFS writes and zero
+  ebtables churn per cron tick. Writes and rebuilds occur only when the MAC set
+  or their VLAN assignments actually change.
+
+New Features:
+
+MERV_MAC — Per-Client L2 Secondary Shield (Issue #22 mitigation):
+- Added a second ebtables chain (MERV_MAC) that enforces client MAC → VLAN
+  assignments independently of interface bridge placement. Specifically targets
+  the post-watchdog restart_wireless race where firmware can complete a second
+  wireless restart after heal_event.sh's monitoring window has closed, silently
+  moving wl SSID subinterfaces back to br0 while VLAN bridges remain alive
+  (trunk interfaces keep them up). In that window, previously-associated
+  clients can obtain br0/native DHCP leases.
+- MERV_MAC rule shape: -s <mac> --logical-in br0 -j DROP
+  Rules self-dormant when the client's wl interface is in its correct VLAN
+  bridge (--logical-in br0 only fires when enslaved to br0). Zero cleanup
+  required after correct bridge placement.
+- Persistent db: space-separated records (<epoch_ts> <mac> <iface> <vid>),
+  active at /tmp/mervlan_tmp/mac_shield.db, checkpointed to JFFS at
+  $MERV_BASE/tmp/mac_shield.db. Latest-per-MAC semantics; 48h max age prune.
+  Boot restores from JFFS before the first apply (closes the reboot gap).
+- wl assoclist snapshot: captured from each VLAN bridge after the post_rc_watchdog
+  correction window closes (~WATCHDOG_DELAY_SEC + 5s). Precondition check
+  confirms all expected wl interfaces are on their correct bridges before
+  snapshotting to avoid polluting the db with mid-restart state.
+
+check_wl_iface_placements() — Per-Interface Placement Detector:
+- Replaces wl_leaked_to_br0 as the secondary leak detector in check_vlan_config.
+  wl_leaked_to_br0 had a blind spot: its dual condition (wl in br0 AND none in
+  VLAN bridge) goes false when a native guest SSID legitimately lives in br0 and
+  at least one managed SSID is correctly placed. Partial leaks were invisible.
+- New function uses merv_mac_build_expected_iface_vid (settings + NVRAM derived)
+  to check each expected wl subinterface individually. Fires on ANY misplaced
+  managed interface, regardless of guest SSID state. Falls back to wl_leaked_to_br0
+  if lib_mervqt.sh is not loaded (graceful degradation on partial install).
+
+MAC Shield Refresh Button (UI):
+- Button in the clients panel header (left of the existing Refresh button).
+  Calls mac_refresh.sh via macrefresh_vlanmgr action. Clears both active and
+  JFFS db files, flushes the MERV_MAC chain, then runs a fresh wl assoclist
+  snapshot and rebuilds rules. Use when the db is suspected stale
+  (decommissioned devices, long outages, or snapshot missed because all clients
+  were disconnected when it ran).
+
+MERV_MAC — Periodic Snapshot via Existing mervlan_health Cron (every 5 min):
+- Piggybacked merv_mac_snapshot onto the existing mervlan_health cru job
+  (heal_event.sh cron, */5). Added at the end of the cron block, after VLAN
+  health checks, before exit 0. The precondition check inside merv_mac_snapshot
+  self-gates against mid-heal snapshots. With the structural fingerprint fix,
+  stable networks produce no I/O on these ticks.
+
+MERV_MAC — Enable/Disable Service Arms/Tears Down MAC Shield:
+- mervlan_boot.sh enable) now arms the MERV_MAC chain from the best available
+  db (JFFS checkpoint if /tmp is cold) after enable_cron_now.
+- mervlan_boot.sh disable) now tears down the MERV_MAC chain after
+  disable_cron_now. db files are retained so re-enable restores prior state.
+
+Service Status — MAC Shield State Visible in Status and Report:
+- Added check_mac_shield_state() helper in mervlan_boot.sh that queries
+  ebtables -L MERV_MAC and sets $mac_shield_state to "on(N)" or "off".
+- status) action: displays mac_shield=on(N)/off for main unit and each node.
+- report) action: appends mac_shield= to REPORT line (used by collect_node_status
+  for remote aggregation).
+
+MAC Shield Refresh — Propagates to Configured Nodes:
+- mac_refresh.sh now propagates the refresh to all configured nodes via SSH
+  after completing the local refresh. Uses MERV_NODE_CONTEXT=1 to prevent
+  recursive propagation. Skipped when running as a node or when lib_ssh is
+  unavailable.
+
+lib_mervqt.sh — Located in settings/:
+- Shared L2 shield enforcement library placed in settings/ alongside lib_json.sh,
+  lib_ssh.sh, and other lib_*.sh files. All sourcing paths reference settings/.
+
+
+Performance:
+
+heal_event.sh — Active Shield: Bootstrap Tick Probe (usleep/sleep Selection):
+- At startup, heal_event.sh probes for usleep availability. When present, sets
+  TICK_CMD="usleep 100000" and TICKS_PER_SEC=10 (100ms ticks per loop iteration).
+  Falls back to TICK_CMD="sleep 1" / TICKS_PER_SEC=1 on firmware without usleep.
+- wait_for_rc_quiet now runs at up to 10 ticks/sec on typical hardware: jump rules
+  are re-linked within 100ms of each rc flush instead of up to 1s. Both TICK_CMD
+  and TICKS_PER_SEC are exported so callers inherit the probed rate.
+
+heal_event.sh — Active Shield: Single Shared ebtables Dump per Tick:
+- Previously, restore_merv_qt_shield and restore_merv_mac_shield each issued
+  their own ebtables -t filter -L call on every tick (4-6 netlink round-trips/tick).
+- Fix: wait_for_rc_quiet fetches one shared dump per tick and passes it to both
+  restore functions as $1. Each function falls back to its own fetch when called
+  standalone. Reduces steady-state to 1 netlink call/tick.
+- Also eliminates date +%s forks from the wait loop; timing is now a pure-tick
+  counter (quiet_ticks and max_ticks derived from TICKS_PER_SEC arithmetic).
+
+heal_event.sh / lib_mervqt.sh — Active Shield: Repair Log Deduplication:
+- Both restore functions previously logged a repair message on every tick where
+  damage was detected. At 10 ticks/sec over a ~90s restart_wireless event: ~900
+  repair lines per shield per event (~1800 total). Individual events were invisible
+  in the noise.
+- Fix: Script-level _MERV_QT_SHIELD_STATE and _MERV_MAC_SHIELD_STATE track the
+  current repair state per process invocation. Repair messages fire only on state
+  transitions (first detection logs the damage type). A single recovery line fires
+  when each shield transitions back to stable. Repair ticks in between are silent.
+- Typical restart_wireless log: 1 "orphaned" line per shield on first detection,
+  silence throughout the sustained damage window, optionally 1 "stable" line per
+  shield when rc stops flushing. States: "" (initial) / "orphaned" / "wiped" / "ok".
+
+lib_mervqt.sh — restore_merv_mac_shield: Split Repair Path (mirrors MERV_QT):
+- Previously any damage (orphaned or wiped) triggered full flush → init → apply
+  from db: 11+ ebtables ops plus a db file read on every affected repair tick.
+- Fix: repair path now mirrors the two-case design already in restore_merv_qt_shield:
+  (a) Orphaned (chain intact, FORWARD/INPUT jumps flushed): call ebt_mac_shield_init
+      only. Chain and per-MAC DROP rules are untouched; only the 2 jump rules are
+      re-linked. ~3 ebtables ops, no db read. This is the common rc flush pattern.
+  (b) Wiped (chain gone): full flush → init → apply from db. Unchanged behavior.
+- Reduces per-tick repair cost for the common orphaned case from 11+ ops to 3.
+  ebt_mac_shield_init is idempotent: creates chain if missing, inserts jumps only
+  when absent (grep guard), safe to call without a prior flush.
+
+
+Cleanup:
+
+Partial-State Guard Consistency (all function scripts):
+- Each script has a guard that resets library load flags when the environment
+  is in a partially-initialized state. Several scripts had incomplete lists that
+  didn't cover all the libraries they actually source.
+- Updated all affected scripts to include their full set of library flags.
+  No functional change under normal operation — the guard only fires in
+  edge-case environments where initialization was interrupted.
+
+
+CHANGED FILES:
+
+settings/lib_mervqt.sh v0.2 (NEW)
+- Shared L2 shield enforcement library. Provides validators (mervqt_valid_mac,
+  mervqt_valid_wl_subif, mervqt_valid_vid), db path selection (merv_mac_best_db),
+  MERV_MAC ebtables chain lifecycle (init/flush/teardown/apply/init_and_apply),
+  and restore_merv_mac_shield() for use in heal_event.sh wait loop.
+- restore_merv_mac_shield(): now accepts shared ebtables dump as $1 (falls back
+  to its own fetch when called standalone). Jump count check uses grep -cF >= 2
+  (was grep -qF) to require both FORWARD and INPUT jumps before fast-pathing.
+- restore_merv_mac_shield(): split repair path — orphaned case (chain intact,
+  jumps flushed) calls ebt_mac_shield_init only; wiped case (chain gone) retains
+  full flush → init → apply. Mirrors restore_merv_qt_shield's two-case design.
+- _MERV_MAC_SHIELD_STATE: script-level state var (initialized at source time).
+  restore_merv_mac_shield reads/writes it to gate log output on state transitions.
+
+settings/mac_shield_snapshot.sh v0.1 (NEW)
+- MERV_MAC persistent db management. merv_mac_boot_init, merv_mac_build_expected_iface_vid,
+  merv_mac_snapshot_preconditions_ok, merv_mac_build_snapshot (wl assoclist),
+  merv_mac_merge_db (latest-MAC-wins, age prune, JFFS checkpoint), merv_mac_snapshot.
+- merv_mac_merge_db: JFFS checkpoint uses structural fingerprint (mac+iface+vid)
+  instead of raw md5sum. Eliminates write-every-5-min on stable networks.
+- merv_mac_snapshot: ebtables flush+apply uses structural fingerprint; skips
+  rebuild when MAC set and VLAN assignments are unchanged.
+
+functions/mac_refresh.sh v0.1 (NEW)
+- Maintenance script for MAC Shield Refresh UI button. Clears both db files,
+  flushes MERV_MAC chain, runs fresh merv_mac_snapshot. Propagates refresh to
+  all configured nodes via SSH (MERV_NODE_CONTEXT=1 prevents recursion).
+
+settings/var_settings.sh
+- Added MERV_MAC constants: MERV_MAC_CHAIN, MERV_MAC_DB_ACTIVE, MERV_MAC_DB_JFFS,
+  MERV_MAC_MAX_AGE_SEC.
+
+functions/mervlan_manager.sh
+- Sources lib_mervqt.sh and mac_shield_snapshot.sh.
+- Boot mode: calls merv_mac_boot_init after boot_wait_for_configured_ssids.
+- cleanup_existing_config: calls ebt_mac_shield_init_and_apply after MERV_QT arm.
+- main: launches async snapshot subshell (WATCHDOG_DELAY_SEC + 5s) after post_rc_watchdog.
+
+functions/heal_event.sh v0.56
+- Sources lib_mervqt.sh and mac_shield_snapshot.sh with graceful-degradation guards.
+- wait_for_rc_quiet loop: calls restore_merv_mac_shield every tick alongside
+  restore_merv_qt_shield.
+- Added check_wl_iface_placements() after wl_leaked_to_br0.
+- check_vlan_config: secondary section now uses check_wl_iface_placements when
+  lib_mervqt.sh is loaded, falls back to wl_leaked_to_br0 otherwise.
+- cron block: calls merv_mac_snapshot before exit 0 (gated by type check).
+- Bootstrap tick probe: usleep availability test at startup sets TICK_CMD and
+  TICKS_PER_SEC (10 ticks/sec with usleep, 1 tick/sec fallback).
+- wait_for_rc_quiet(): quiet_ticks/max_ticks derived from TICKS_PER_SEC; loop
+  sleep uses $TICK_CMD; date +%s forks eliminated; shared ebtables dump fetched
+  once per tick and passed to both restore functions.
+- restore_merv_qt_shield(): accepts shared dump as $1 with independent-fetch
+  fallback. Jump check upgraded to grep -cF count >= 2.
+- _MERV_QT_SHIELD_STATE: script-level state var gates repair log on transitions.
+
+functions/mervlan_boot.sh
+- Sources lib_mervqt.sh with graceful-degradation guard.
+- Added check_mac_shield_state() helper.
+- enable): arms MERV_MAC shield from best available db after enable_cron_now.
+- disable(): tears down MERV_MAC shield after disable_cron_now (db files retained).
+- setupdisable and nodedisable: calls ebt_mac_shield_teardown and removes both
+  MERV_MAC db files.
+- status(): calls check_mac_shield_state, displays mac_shield= for main and nodes.
+- report(): appends mac_shield=$mac_shield_state to REPORT line.
+
+functions/service-event-handler.sh
+- Added macrefresh_vlanmgr to APP_EVENT case and dispatch table
+  (maps to mac_refresh.sh).
+
+functions/sync_nodes.sh
+- Added lib_mervqt.sh, mac_shield_snapshot.sh to FILES_TO_COPY_CHMOD_644.
+- Added mac_refresh.sh to FILES_TO_COPY_CHMOD.
+- copy_file_to_node(): trunk auto-injection now gated on whether main has any
+  active trunk. Skips reset+inject when all trunks are "0", sends as-is.
+
+mervlan.asp
+- Added macrefresh_vlanmgr to MVM_NO_REFRESH and MVM_ALLOWED_ACTIONS.
+- Added MVM_macRefresh() wrapper function.
+
+www/index.html
+- Added MAC Shield Refresh button to clients panel header (left of Refresh).
+- Added runMacRefresh() async function.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.01
 
 Bug Fixes:
