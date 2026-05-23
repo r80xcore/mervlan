@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.63"                   #
+#               - File: mervlan_manager.sh || version="0.64"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -23,13 +23,15 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_STP_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
+[ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 # Optional CLI overrides:
 #   boot                 → boot mode (enables SSID readiness gate)
 #   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
@@ -1512,6 +1514,10 @@ cleanup_existing_config() {
   [ "$DRY_RUN" != "yes" ] && [ "$_qt_count" -gt 0 ] && \
     info -c cli,vlan "MERV_QT: quarantine armed for $_qt_count wl*.* interface(s)"
 
+  # Arm MERV_MAC secondary shield from last-known db (init-only on first run).
+  # ebt_mac_shield_init_and_apply is idempotent: safe to call on every apply.
+  ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
+
   # --- ebtables: remove all MerVLAN trunk filter rules FIRST ---
   # Must run before bridge/VLAN teardown to prevent stale rules that reference
   # chains on interfaces we are about to delete.
@@ -1749,6 +1755,9 @@ post_rc_watchdog() {
 main() {
   acquire_script_lock
 
+  # mervlan_manager always logs MAC shield activity regardless of the global default
+  MAC_SHIELD_VERBOSE=1
+
   # Clean up stale self-restart markers (older than 60s past expiry)
   # These markers prevent heal_event.sh loops but should not persist forever
   _stale_marker="$LOCKDIR/self_restart.marker"
@@ -1767,7 +1776,12 @@ main() {
   # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
   # This only runs when invoked with "boot" argument from services-start
   boot_wait_for_configured_ssids 30
-  
+
+  # Boot mode: restore MERV_MAC shield from JFFS checkpoint before first apply
+  if [ "$MERV_MANAGER_MODE" = "boot" ]; then
+    merv_mac_boot_init
+  fi
+
   # Log startup information
   info -c cli,vlan "Starting VLAN manager on $MODEL ($PRODUCTID)"
   info -c cli,vlan "WAN: $WAN_IF, Topology: $TOPOLOGY"
@@ -1862,6 +1876,13 @@ main() {
     bind_configured_ssids
 
     post_rc_watchdog
+
+    # MERV_MAC snapshot: runs after the watchdog correction window closes.
+    # Captures currently-associated clients per VLAN bridge and merges into
+    # the persistent db so heal_event.sh can re-arm the shield after any
+    # firmware-triggered restart_wireless that occurs post-watchdog.
+    _snap_delay=$(( ${WATCHDOG_DELAY_SEC:-25} + 5 ))
+    ( sleep "$_snap_delay"; merv_mac_snapshot ) &
   }
 
   run_trunk_if_configured
