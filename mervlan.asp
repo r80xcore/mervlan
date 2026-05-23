@@ -1,7 +1,7 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <!-- mervlan.asp version="0.49" -->
+  <!-- mervlan.asp version="0.50" -->
 <meta http-equiv="X-UA-Compatible" content="IE=Edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <meta http-equiv="Pragma" content="no-cache">
@@ -357,7 +357,8 @@ const MVM_NO_REFRESH = new Set([
   "enableservice_vlanmgr",
   "disableservice_vlanmgr",
   "checkservice_vlanmgr",
-  "hwprobe_vlanmgr"
+  "hwprobe_vlanmgr",
+  "macrefresh_vlanmgr"
 ]);
 
 const MVM_NO_LOADING = new Set([
@@ -383,7 +384,8 @@ const MVM_ALLOWED_ACTIONS = new Set([
   "clearclilog_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr",
-  "hwprobe_vlanmgr"
+  "hwprobe_vlanmgr",
+  "macrefresh_vlanmgr"
 ]);
 
 // Optional: actions that need a longer/shorter wait (seconds)
@@ -441,6 +443,7 @@ function MVM_clearCliLog(opts)               { return MVM_exec("clearclilog_vlan
 function MVM_update(opts)                    { return MVM_exec("update_vlanmgr",        null,        mvmOptsFor("update_vlanmgr",        opts)); }
 function MVM_updateDev(opts)                 { return MVM_exec("updatedev_vlanmgr",     null,        mvmOptsFor("updatedev_vlanmgr",     opts)); }
 function MVM_hwprobe(opts)                    { return MVM_exec("hwprobe_vlanmgr",       null,        mvmOptsFor("hwprobe_vlanmgr",       opts)); }
+function MVM_macRefresh(opts)                 { return MVM_exec("macrefresh_vlanmgr",    null,        mvmOptsFor("macrefresh_vlanmgr",    opts)); }
 
 // Convenience helper for silent saves invoked from the embedded SPA
 function MVM_save_quiet(settingsObj) {
