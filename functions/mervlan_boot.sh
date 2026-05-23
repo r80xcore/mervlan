@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.56"                     #
+#                - File: mervlan_boot.sh || version="0.57"                     #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -22,7 +22,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
@@ -30,6 +30,7 @@ fi
 . "$TEMPLATE_LIB"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
@@ -487,6 +488,18 @@ $NODE_IPS
 EOF
 }
 
+# check_mac_shield_state — Sets $mac_shield_state to "on(N)" or "off".
+# Used by status) and report) to surface MERV_MAC chain enforcement state.
+check_mac_shield_state() {
+  mac_shield_state="off"
+  if type ebtables >/dev/null 2>&1; then
+    _ms_rules=$(ebtables -t filter -L MERV_MAC 2>/dev/null | grep -c "^-s " 2>/dev/null || echo 0)
+    if [ "${_ms_rules:-0}" -gt 0 ]; then
+      mac_shield_state="on(${_ms_rules})"
+    fi
+  fi
+}
+
 enable_cron_now() {
   if [ -z "$CRU_BIN" ]; then
     warn -c vlan,cli "Cron enable skipped: cru command not available"
@@ -548,6 +561,12 @@ case "$ACTION" in
     # Enable cron job for periodic VLAN health checks (main + nodes)
     enable_cron_now
 
+    # Arm MERV_MAC secondary shield from best available db (JFFS checkpoint or active)
+    type ebt_mac_shield_init_and_apply >/dev/null 2>&1 && {
+      ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
+      info -c vlan,cli "MERV_MAC: secondary shield armed"
+    }
+
     # Propagate enable action to all configured nodes via SSH
     handle_nodes_via_ssh "enable"
     ;;
@@ -569,7 +588,13 @@ case "$ACTION" in
 
     # Disable cron job (main + nodes)
     disable_cron_now
-    
+
+    # Tear down MERV_MAC secondary shield (db files retained for re-enable)
+    type ebt_mac_shield_teardown >/dev/null 2>&1 && {
+      ebt_mac_shield_teardown
+      info -c vlan,cli "MERV_MAC: secondary shield torn down (db files retained)"
+    }
+
     # Propagate disable action to all configured nodes via SSH
     handle_nodes_via_ssh "disable"
     ;;
@@ -636,6 +661,10 @@ case "$ACTION" in
       ebtables -t filter -X MERV_QT 2>/dev/null || true
       info -c vlan,cli "MERV_QT: quarantine chain torn down"
     fi
+    # Tear down MERV_MAC secondary shield and remove persistent db files
+    ebt_mac_shield_teardown
+    info -c vlan,cli "MERV_MAC: secondary shield torn down"
+    rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null || true
     # Propagate setupdisable to all configured nodes via SSH
     handle_nodes_via_ssh "setupdisable"
     ;;
@@ -743,6 +772,10 @@ case "$ACTION" in
         ebtables -t filter -X MERV_QT 2>/dev/null || true
         info -c vlan,cli "MERV_QT: quarantine chain torn down"
       fi
+      # Tear down MERV_MAC secondary shield and remove persistent db files
+      ebt_mac_shield_teardown
+      info -c vlan,cli "MERV_MAC: secondary shield torn down"
+      rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null || true
       exit 0
     fi
 
@@ -827,6 +860,9 @@ case "$ACTION" in
       is_node_state=no
     fi
 
+    # MERV_MAC shield state
+    check_mac_shield_state
+
     # Get list of configured nodes for status aggregation
     NODE_IPS=$(get_node_ips)
     if [ -n "$NODE_IPS" ]; then
@@ -835,7 +871,7 @@ case "$ACTION" in
 
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
-      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state}"
+      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
       info -c vlan,cli "<--- Configured Nodes --->"
 
       # NODE_STATUS_OUTPUT is newline-separated entries: ip:hw=LABEL boot=1 addon=.. event=.. cron=..
@@ -851,16 +887,18 @@ case "$ACTION" in
         node_event=""
         node_cron=""
         node_is_node=""
+        node_mac_shield=""
 
         # Parse key=value pairs
         for kv in $rest; do
           case "$kv" in
-            hw=*)       node_hw="${kv#hw=}" ;;
-            boot=*)     node_boot_raw="${kv#boot=}" ;;
-            addon=*)    node_addon="${kv#addon=}" ;;
-            event=*)    node_event="${kv#event=}" ;;
-            cron=*)     node_cron="${kv#cron=}" ;;
-            is_node=*)  node_is_node="${kv#is_node=}" ;;
+            hw=*)           node_hw="${kv#hw=}" ;;
+            boot=*)         node_boot_raw="${kv#boot=}" ;;
+            addon=*)        node_addon="${kv#addon=}" ;;
+            event=*)        node_event="${kv#event=}" ;;
+            cron=*)         node_cron="${kv#cron=}" ;;
+            is_node=*)      node_is_node="${kv#is_node=}" ;;
+            mac_shield=*)   node_mac_shield="${kv#mac_shield=}" ;;
           esac
         done
 
@@ -870,13 +908,13 @@ case "$ACTION" in
           *) node_boot="$node_boot_raw" ;;
         esac
 
-        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} addon=${node_addon} event=${node_event} cron=${node_cron} is_node=${node_is_node}"
+        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} addon=${node_addon} event=${node_event} cron=${node_cron} is_node=${node_is_node} mac_shield=${node_mac_shield}"
       done
     else
       # No nodes configured; output local status only
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
-      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state}"
+      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
     fi
     ;;
 
@@ -940,7 +978,9 @@ case "$ACTION" in
     # var_settings.sh exposes HW_SETTINGS_FILE alias.)
     hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
 
-    echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state is_node=$is_node_state"
+    check_mac_shield_state
+
+    echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state is_node=$is_node_state mac_shield=$mac_shield_state"
     exit 0
     ;;
 
