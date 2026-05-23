@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.56"                      #
+#               - File: sync_nodes.sh || version="0.57"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -111,6 +111,8 @@ settings/lib_debug.sh
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
+settings/lib_mervqt.sh
+settings/mac_shield_snapshot.sh
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
@@ -119,6 +121,7 @@ functions/heal_event.sh
 functions/service-event-handler.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
+functions/mac_refresh.sh
 templates/mervlan_templates.sh
 "
 
@@ -132,6 +135,7 @@ functions/heal_event.sh
 functions/service-event-handler.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
+functions/mac_refresh.sh
 "
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
 FILES_TO_COPY_CHMOD_644="
@@ -142,6 +146,8 @@ settings/lib_debug.sh
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
 settings/lib_stp.sh
+settings/lib_mervqt.sh
+settings/mac_shield_snapshot.sh
 templates/mervlan_templates.sh
 "
 dbg_log "File synchronization manifest loaded"
@@ -482,8 +488,23 @@ copy_file_to_node() {
             return 1
         }
 
+        # Check if main has any active trunk ports (user intent gate).
+        # If all trunks are "0", the user explicitly wants no trunks — respect
+        # that and send the settings as-is. Only auto-inject when the main has
+        # at least one trunk enabled, which signals an active managed-switch
+        # topology where the node's backhaul port also needs trunk config.
+        _cfn_main_has_trunk="no"
+        _cfn_ti=1
+        while [ "$_cfn_ti" -le 8 ]; do
+            if [ "$(json_get_flag "TRUNK${_cfn_ti}" "0" "$MERV_BASE/$file")" = "1" ]; then
+                _cfn_main_has_trunk="yes"
+                break
+            fi
+            _cfn_ti=$((_cfn_ti + 1))
+        done
+
         # Zero all trunks first (clean slate), then inject node trunk config
-        if json_reset_trunks_section "$_cfn_tmp"; then
+        if [ "$_cfn_main_has_trunk" = "yes" ] && json_reset_trunks_section "$_cfn_tmp"; then
             # Collect all VLAN IDs from the SSID pool
             _cfn_vlan_list=""
             _cfn_vi=1
@@ -501,6 +522,8 @@ copy_file_to_node() {
                 json_set_flag "TAGGED_TRUNK1" "$_cfn_vlan_list" "$_cfn_tmp"
                 info -c cli,vlan "Node trunk config: TRUNK1=1, TAGGED=$_cfn_vlan_list"
             fi
+        elif [ "$_cfn_main_has_trunk" = "no" ]; then
+            info -c cli,vlan "Node trunk config: all trunks disabled on main — sending as-is (no auto-inject)"
         else
             warn -c cli,vlan "⚠️ Failed to reset trunks section, copying original file"
             rm -f "$_cfn_tmp" 2>/dev/null
