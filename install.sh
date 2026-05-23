@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.49"                      #
+#                    - File: install.sh || version="0.50"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1020,27 +1020,25 @@ download_mervlan() {
     return 1
   fi
 
-        # Permissions: BusyBox-safe (no find). 755 for all .sh except the two settings files -> 644
-    # First set 644 for settings/log_settings.sh and settings/var_settings.sh if present
+        # Permissions: BusyBox-safe glob (no find). Default 755 for all .sh; case statement
+    # overrides library/config files (settings/lib_*.sh, mac_shield_snapshot.sh,
+    # mervlan_templates.sh, log_settings.sh, var_settings.sh) to 644.
         echo "[download_mervlan] adjusting file permissions (.sh)"
     for depth in "" "*/" "*/*/"; do
         for f in $MERV_BASE/${depth}*.sh; do
             [ -f "$f" ] 2>/dev/null || continue
             base="$(basename "$f")"
-            if [ "$base" = "log_settings.sh" ] || [ "$base" = "var_settings.sh" ]; then
-                chmod 644 "$f" 2>/dev/null || :
-            fi
-        done
-    done
-
-    # Then apply 755 to all other .sh files
-    for depth in "" "*/" "*/*/"; do
-        for f in $MERV_BASE/${depth}*.sh; do
-            [ -f "$f" ] 2>/dev/null || continue
-            base="$(basename "$f")"
-            if [ "$base" != "log_settings.sh" ] && [ "$base" != "var_settings.sh" ]; then
-                chmod 755 "$f" 2>/dev/null || :
-            fi
+            case "$base" in
+                log_settings.sh|var_settings.sh|\
+                lib_debug.sh|lib_json.sh|lib_ssh.sh|\
+                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|\
+                mervlan_templates.sh|mac_shield_snapshot.sh)
+                    chmod 644 "$f" 2>/dev/null || :
+                    ;;
+                *)
+                    chmod 755 "$f" 2>/dev/null || :
+                    ;;
+            esac
         done
     done
         echo "[download_mervlan] permission step complete"
