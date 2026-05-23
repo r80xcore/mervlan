@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.56"                     #
+#                  - File: heal_event.sh || version="0.57"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -23,12 +23,16 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
+# Graceful-degradation: load MERV_MAC enforcement libs if present.
+# heal_event.sh degrades safely if the files are missing (partial install).
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
 
@@ -47,6 +51,20 @@ fi
 # Initialize SSID filter based on node identity (affects which VLAN slots we consider)
 MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 ssid_filter_init "$MERV_NODE_ID"
+# ====================================================== Bootstrap Tick Probe
+# Determine sub-second or fallback tick command dynamically.
+# 100,000 microseconds = 100ms (0.1s). Fallback is 1 second.
+if usleep 1 2>/dev/null; then
+  export TICK_CMD="usleep 100000"
+  export TICKS_PER_SEC=10
+  TICK_LABEL="usleep (100ms)"
+else
+  export TICK_CMD="sleep 1"
+  export TICKS_PER_SEC=1
+  TICK_LABEL="sleep (1s)"
+fi
+# ================================================= End of Bootstrap Tick Probe
+
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -354,6 +372,46 @@ wl_leaked_to_br0() {
 }
 
 # ============================================================================ #
+# check_wl_iface_placements                                                    #
+# Per-interface leak detector using settings-derived expected placements.      #
+# Checks each config-expected wl subinterface individually:                    #
+#   - If in br0: report a per-interface leak                                   #
+#   - If in correct VLAN bridge: report as correct                             #
+#   - If in neither: log at debug level (may be restarting; not a hard fail)  #
+#                                                                              #
+# Returns 0 if ALL expected interfaces are in their correct VLAN bridge.       #
+# Returns 1 on any mismatch (at least one interface is in br0).                #
+#                                                                              #
+# Unlike wl_leaked_to_br0, this fires even when only SOME interfaces leaked    #
+# (e.g. native guest SSID keeps condition 2 of wl_leaked_to_br0 false).       #
+# ============================================================================ #
+check_wl_iface_placements() {
+  local pairs iface vid ok
+
+  ok=1
+  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null) || return 0
+  [ -n "$pairs" ] || return 0
+
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+
+    if [ -e "/sys/class/net/br${vid}/brif/$iface" ]; then
+      # Correctly placed in its VLAN bridge
+      continue
+    elif [ -e "/sys/class/net/br0/brif/$iface" ]; then
+      warn -c vlan "Placement: $iface expected br${vid} but is in br0 — restart_wireless race suspected"
+      ok=0
+    else
+      dbg_log "Placement: $iface expected br${vid} but found in neither bridge (may be restarting)"
+    fi
+  done <<_PAIRS_
+$pairs
+_PAIRS_
+
+  [ "$ok" -eq 1 ]
+}
+
+# ============================================================================ #
 # evict_wl_from_br0                                                            #
 # Pre-eviction guard: immediately removes wl subinterfaces from br0 before    #
 # invoking the VLAN manager, closing the DHCP leak window that exists while   #
@@ -377,36 +435,54 @@ evict_wl_from_br0() {
   return 0
 }
 
+# Script-level state for repair-log deduplication — reset once per process invocation.
+_MERV_QT_SHIELD_STATE=""
+
 # ============================================================================ #
 # restore_merv_qt_shield                                                       #
-# Called every second inside wait_for_rc_quiet to re-arm the MERV_QT ebtables #
+# Called every tick inside wait_for_rc_quiet to re-arm the MERV_QT ebtables   #
 # chain if Asuswrt's rc daemon flushed it during a rebuild sequence.           #
 # Recreates the chain, re-inserts FORWARD/INPUT jumps (idempotent), and       #
 # re-adds DROP rules for every guest wireless subinterface present in sysfs.  #
+# Accepts an optional pre-fetched ebtables dump ($1) to avoid redundant reads. #
 # Returns immediately (no-op) if ebtables is unavailable or chain is intact.  #
 # ============================================================================ #
 restore_merv_qt_shield() {
   type ebtables >/dev/null 2>&1 || return 0
 
+  # Accept shared dump from wait_for_rc_quiet, or fetch independently
+  local full_rules="${1:-}"
+  [ -n "$full_rules" ] || full_rules=$(ebtables -t filter -L 2>/dev/null)
+
   local chain_exists=1
   local jumps_exist=1
 
   # 1. Did the chain survive?
-  ebtables -t filter -L MERV_QT >/dev/null 2>&1 || chain_exists=0
+  printf '%s' "$full_rules" | grep -qF 'Bridge chain: MERV_QT' || chain_exists=0
 
-  # 2. Did the jump rules survive?
+  # 2. Did both jump rules (FORWARD and INPUT) survive?
   # Must check even when chain exists — Asuswrt rc may flush the FORWARD/INPUT
   # chains (ebtables -F FORWARD) without touching MERV_QT, leaving the chain
   # intact but orphaned: DROP rules present but never reached.
+  # MERV_QT's own rules use -j DROP, so any ' -j MERV_QT' match originates
+  # exclusively from FORWARD/INPUT jump rules. Count >= 2 means both are present.
   if [ "$chain_exists" -eq 1 ]; then
-    ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || jumps_exist=0
-    ebtables -t filter -L INPUT   2>/dev/null | grep -qF 'MERV_QT' || jumps_exist=0
+    if [ "$(printf '%s' "$full_rules" | grep -cF ' -j MERV_QT')" -lt 2 ]; then
+      jumps_exist=0
+    fi
   else
     jumps_exist=0
   fi
 
   # Fast path: shield is completely intact — nothing to do
-  [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ] && return 0
+  if [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ]; then
+    case "$_MERV_QT_SHIELD_STATE" in
+      ""|"ok") ;;
+      *) info -c vlan "Heal: MERV_QT shield stable — firmware flushing stopped" ;;
+    esac
+    _MERV_QT_SHIELD_STATE="ok"
+    return 0
+  fi
 
   # 3. Re-link jump rules (covers both orphaned-chain and full-wipe cases)
   ebtables -t filter -N MERV_QT 2>/dev/null || true
@@ -424,9 +500,13 @@ restore_merv_qt_shield() {
       iface="${iface_path##*/}"
       ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
     done
-    info -c vlan "Heal: MERV_QT chain flushed by rc — fully rebuilt shield"
+    [ "$_MERV_QT_SHIELD_STATE" = "wiped" ] || \
+      info -c vlan "Heal: MERV_QT chain flushed by rc — fully rebuilt shield"
+    _MERV_QT_SHIELD_STATE="wiped"
   else
-    info -c vlan "Heal: MERV_QT orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
+    [ "$_MERV_QT_SHIELD_STATE" = "orphaned" ] || \
+      info -c vlan "Heal: MERV_QT orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
+    _MERV_QT_SHIELD_STATE="orphaned"
   fi
 }
 
@@ -439,24 +519,29 @@ rc_proc_busy() {
 }
 
 wait_for_rc_quiet() {
-  local need max_wait quiet start now
+  local need_sec max_wait_sec quiet_ticks max_ticks quiet current_tick _rules
 
-  need="${1:-6}"
-  max_wait="${2:-45}"
+  need_sec="${1:-6}"
+  max_wait_sec="${2:-45}"
+  quiet_ticks=$(( need_sec * TICKS_PER_SEC ))
+  max_ticks=$(( max_wait_sec * TICKS_PER_SEC ))
   quiet=0
-  start=$(date +%s)
+  current_tick=0
 
-  info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
+  info -c vlan "wait_for_rc_quiet: watching rc (need=${need_sec}s quiet, method=${TICK_LABEL})"
 
   while :; do
-    # Active Shield: restore MERV_QT chain if firmware flushed ebtables.
-    # restore_merv_qt_shield is passive (ebtables DROP rules only) and safe
-    # to call every second — it does not touch interface state.
+    # Fetch ebtables filter table once per tick; pass to both restore functions
+    # to avoid redundant netlink reads at tick rate. Gate on ebtables presence
+    # to avoid spawning a missing binary on every tick.
     # evict_wl_from_br0 is intentionally NOT called here: repeated wl -i down
-    # calls every second interfere with firmware's restart_wireless sequence,
+    # calls every tick interfere with firmware's restart_wireless sequence,
     # leaving radios permanently down. The single evict call after this
     # function returns (once rc is confirmed quiet) is the correct sweep.
-    restore_merv_qt_shield
+    _rules=""
+    type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
+    restore_merv_qt_shield "$_rules"
+    type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
 
     # If either queue or process is busy, reset quiet counter
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
@@ -464,19 +549,20 @@ wait_for_rc_quiet() {
       quiet=0
     else
       quiet=$((quiet + 1))
-      if [ "$quiet" -ge "$need" ]; then
-        info -c vlan "wait_for_rc_quiet: rc quiet for ${quiet}s; proceeding"
+      if [ "$quiet" -ge "$quiet_ticks" ]; then
+        info -c vlan "wait_for_rc_quiet: rc quiet threshold satisfied; proceeding"
         return 0
       fi
     fi
 
-    now=$(date +%s)
-    if [ $((now - start)) -ge "$max_wait" ]; then
-      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s; continuing"
+    current_tick=$((current_tick + 1))
+    if [ "$current_tick" -ge "$max_ticks" ]; then
+      warn -c vlan "wait_for_rc_quiet: timeout reached; continuing"
       return 0
     fi
 
-    sleep 1
+    # Unquoted: intentional POSIX word-split for two-token command
+    $TICK_CMD
   done
 }
 
@@ -667,14 +753,20 @@ check_vlan_config() {
   # Completed all checks without hitting heal threshold
   info -c vlan "VLAN monitoring complete: ${pass_count}/${max_checks} checks passed, ${mismatch_count} consecutive mismatches (below ${heal_threshold} threshold)"
 
-  # Secondary leak detector: trunk subinterfaces can keep VLAN bridges alive
-  # even after firmware dumps wireless SSID interfaces back into br0. The
-  # bridge-presence checks above will report a false-positive healthy state in
-  # that scenario. wl_leaked_to_br0 catches this by looking for the condition
-  # where wl*.* subinterfaces are in br0 AND none are in any VLAN bridge.
-  if wl_leaked_to_br0; then
-    warn -c vlan "VLAN bridges present (trunk alive) but wl subinterfaces detected in br0 — restart_wireless race condition suspected"
-    return 1
+  # Secondary leak detector: first try per-interface placement check (settings-derived,
+  # catches partial leaks where only some managed SSIDs moved to br0 while a native
+  # guest SSID keeps wl_leaked_to_br0's condition 2 false). Fall back to wl_leaked_to_br0
+  # for environments where the settings-derived resolver is unavailable.
+  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    if ! check_wl_iface_placements; then
+      warn -c vlan "VLAN bridges present (trunk alive) but wl subinterfaces misplaced — restart_wireless race suspected"
+      return 1
+    fi
+  else
+    if wl_leaked_to_br0; then
+      warn -c vlan "VLAN bridges present (trunk alive) but wl subinterfaces detected in br0 — restart_wireless race condition suspected"
+      return 1
+    fi
   fi
 
   return 0
@@ -935,6 +1027,10 @@ if [ "$EVENT" = "cron" ]; then
   else
     log_health_ok_if_needed
   fi
+
+  # Periodic MAC snapshot — preconditions guard against snapshotting mid-heal;
+  # on a stable network the db won't change so JFFS and ebtables are untouched.
+  type merv_mac_snapshot >/dev/null 2>&1 && merv_mac_snapshot
 
   exit 0
 fi
