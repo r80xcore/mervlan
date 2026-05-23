@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: var_settings.sh || version="0.49"                     #
+#                - File: var_settings.sh || version="0.50"                     #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -54,6 +54,15 @@ readonly LOCKDIR="$TMPDIR/locks"
 readonly RESULTDIR="$TMPDIR/results"
 readonly CHANGES="$TMPDIR/results/vlan_changes"
 readonly COLLECTDIR="$TMPDIR/client_collection"
+
+# ============================================================================
+# MERV_MAC — per-client L2 secondary shield
+# ============================================================================
+: "${MERV_MAC_CHAIN:=MERV_MAC}"
+: "${MERV_MAC_DB_ACTIVE:=$TMPDIR/mac_shield.db}"
+: "${MERV_MAC_DB_JFFS:=$MERV_BASE/tmp/mac_shield.db}"
+: "${MERV_MAC_MAX_AGE_SEC:=$((48 * 3600))}"
+: "${MAC_SHIELD_VERBOSE:=0}"  # 0 = silent on stable ticks; 1 = log every tick
 
 # Scripts & Configs
 readonly BOOT_SCRIPT="$FUNCDIR/mervlan_boot.sh"
