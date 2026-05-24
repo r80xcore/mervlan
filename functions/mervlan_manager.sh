@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.65"                   #
+#               - File: mervlan_manager.sh || version="0.66"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -449,6 +449,26 @@ wait_for_interface() {
   while [ $attempt -lt $max_attempts ]; do
     # Check if interface exists in /sys/class/net
     iface_exists "$iface" && return 0
+
+    # Active shield defense during backoff — a late rc wakeup during a long
+    # exponential wait can wipe ebtables while bind_configured_ssids is still
+    # waiting for a slow interface. Mirrors the manager's wait_for_rc_quiet
+    # inline restore logic: full rebuild if chain is wiped, re-link if orphaned.
+    if type ebtables >/dev/null 2>&1; then
+      _wf_rules=$(ebtables -t filter -L 2>/dev/null)
+      if ! printf '%s' "$_wf_rules" | grep -qF 'Bridge chain: MERV_QT'; then
+        ebt_quarantine_flush
+        ebt_quarantine_init
+        for _wf_if in $(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}'); do
+          [ -n "$_wf_if" ] || continue
+          ebt_quarantine_add "$_wf_if"
+        done
+      elif [ "$(printf '%s' "$_wf_rules" | grep -cF '-j MERV_QT')" -lt 2 ]; then
+        ebt_quarantine_init
+      fi
+      type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wf_rules"
+    fi
+
     # Exponential backoff: 1<<attempt seconds (BusyBox-safe)
     sleep $((1 << attempt))
     attempt=$((attempt + 1))
@@ -1635,6 +1655,26 @@ wait_for_rc_quiet() {
   info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
 
   while :; do
+    # Re-arm L2 shields on every tick — rc's restart_wireless wipes all ebtables,
+    # so MERV_QT and MERV_MAC need active re-arming while wl interfaces sit in br0.
+    # Uses manager-local ebt_quarantine_* for MERV_QT (restore_merv_qt_shield is in
+    # heal_event.sh scope) and lib_mervqt's restore_merv_mac_shield for MERV_MAC.
+    # Each path is idempotent: no-op when chains and jump rules are already intact.
+    if type ebtables >/dev/null 2>&1; then
+      _wq_rules=$(ebtables -t filter -L 2>/dev/null)
+      if ! printf '%s' "$_wq_rules" | grep -qF 'Bridge chain: MERV_QT'; then
+        ebt_quarantine_flush
+        ebt_quarantine_init
+        for _wq_if in $(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}'); do
+          [ -n "$_wq_if" ] || continue
+          ebt_quarantine_add "$_wq_if"
+        done
+      elif [ "$(printf '%s' "$_wq_rules" | grep -cF '-j MERV_QT')" -lt 2 ]; then
+        ebt_quarantine_init
+      fi
+      type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wq_rules"
+    fi
+
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
       quiet=0
@@ -1867,6 +1907,27 @@ main() {
 
     info -c cli,vlan "Waiting for rc/wlconf to go quiet..."
     wait_for_rc_quiet
+
+    # Explicit re-arm immediately when rc goes quiet — before the 2s settle sleep.
+    # The wait loop above restores shields every 1s tick, so this is largely
+    # belt-and-suspenders, but it guarantees a clean slate is committed the
+    # moment the manager confirms rc is done with restart_wireless.
+    if type ebtables >/dev/null 2>&1; then
+      info -c cli,vlan "Re-arming L2 shields post-restart_wireless..."
+      ebt_quarantine_flush
+      ebt_quarantine_init
+      _post_qt_count=0
+      _post_qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+      for _post_qt_if in $_post_qt_ifaces; do
+        [ -n "$_post_qt_if" ] || continue
+        ebt_quarantine_add "$_post_qt_if"
+        _post_qt_count=$((_post_qt_count + 1))
+      done
+      [ "$_post_qt_count" -gt 0 ] && \
+        info -c cli,vlan "MERV_QT: re-armed for $_post_qt_count interface(s) post-restart"
+      ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
+    fi
+
     sleep 2
 
     # Second pass for new VAPs that appear after wireless restart
