@@ -1,3 +1,25 @@
+mervlan v0.53.03
+
+heal_event.sh — MAC Escape Window Fixes:
+- Fix A: cron handler now performs a one-shot ebtables read and calls
+  restore_merv_qt_shield / restore_merv_mac_shield at entry, before the fast
+  VLAN check. Re-links orphaned FORWARD/INPUT jump rules on every cron tick
+  (max 60s exposure) even when no service-event has fired.
+- Fix B: cron handler now calls check_wl_iface_placements when check_vlan_config_fast
+  passes. Detects the restart_wireless race where VLAN bridges remain alive via
+  trunk subinterfaces but wl subinterfaces have leaked to br0 — a condition the
+  fast check is blind to. Triggers evict + manager if placement is wrong.
+- Fix C: non-wireless events (dnsmasq, firewall, lan, wan, deferred, etc.) now
+  perform a one-shot shield restore before check_vlan_config. If rc is
+  concurrently busy with restart_wireless (e.g. MAC binding change triggered
+  both a dnsmasq and a wireless restart), the full wait_for_rc_quiet 6 30 loop
+  runs instead to keep re-linking chains throughout the wireless restart sequence.
+
+update_mervlan.sh
+- now preserves the merv_mac database when updated.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.02
 
 Bug Fixes:
