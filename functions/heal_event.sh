@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.58"                     #
+#                  - File: heal_event.sh || version="0.59"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -478,10 +478,12 @@ restore_merv_qt_shield() {
   # Must check even when chain exists — Asuswrt rc may flush the FORWARD/INPUT
   # chains (ebtables -F FORWARD) without touching MERV_QT, leaving the chain
   # intact but orphaned: DROP rules present but never reached.
-  # MERV_QT's own rules use -j DROP, so any ' -j MERV_QT' match originates
+  # MERV_QT's own rules use -j DROP, so any '-j MERV_QT' match originates
   # exclusively from FORWARD/INPUT jump rules. Count >= 2 means both are present.
+  # NOTE: no leading space — ebtables outputs unconditional jumps as '-j CHAIN'
+  # (start of line). A leading space in the pattern would never match.
   if [ "$chain_exists" -eq 1 ]; then
-    if [ "$(printf '%s' "$full_rules" | grep -cF ' -j MERV_QT')" -lt 2 ]; then
+    if [ "$(printf '%s' "$full_rules" | grep -cF '-j MERV_QT')" -lt 2 ]; then
       jumps_exist=0
     fi
   else
@@ -771,7 +773,19 @@ check_vlan_config() {
 
     # Continue to next check (unless this was the last one)
     if [ "$check" -lt "$max_checks" ]; then
-      sleep "$settle_delay"
+      # Active settle: restore L2 shields on every tick so rc cannot flush
+      # and leak traffic during the inter-check pause. Mirrors the dump+restore
+      # pattern in wait_for_rc_quiet to avoid redundant netlink reads per tick.
+      local s=0
+      local tick_target=$(( settle_delay * TICKS_PER_SEC ))
+      while [ "$s" -lt "$tick_target" ]; do
+        _rules=""
+        type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
+        restore_merv_qt_shield "$_rules"
+        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
+        $TICK_CMD
+        s=$((s + 1))
+      done
     fi
     check=$((check + 1))
   done
