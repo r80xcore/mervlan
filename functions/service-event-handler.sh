@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.53"                  #
+#          - File: service-event-handler.sh || version="0.54"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -349,6 +349,23 @@ case "${TYPE}_${EVENT}" in
       exit 0
     fi
     printf '%s\n' "$now" >"$HEAL_STAMP" 2>/dev/null || :
+
+    # Inline shield re-link: runs synchronously in the event handler (~50ms)
+    # BEFORE the fire-and-forget sleep delay. Closes the ~3-8s unprotected
+    # window between rc flushing ebtables and heal_event.sh's first tick.
+    # Only re-links jump rules for existing chains — never creates chains
+    # (chain creation and DROP rule rebuild remain heal_event.sh's job).
+    # BusyBox-safe: chain name patterns don't start with '-', no grep flag clash.
+    if type ebtables >/dev/null 2>&1; then
+      for _se_chain in MERV_QT MERV_MAC; do
+        if ebtables -t filter -L "$_se_chain" >/dev/null 2>&1; then
+          ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$_se_chain" || \
+            ebtables -t filter -I FORWARD -j "$_se_chain" 2>/dev/null || true
+          ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$_se_chain" || \
+            ebtables -t filter -I INPUT -j "$_se_chain" 2>/dev/null || true
+        fi
+      done
+    fi
 
     # Fire-and-forget heal so rc can continue applying its own changes
     logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async)"
