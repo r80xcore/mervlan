@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.64"                   #
+#               - File: mervlan_manager.sh || version="0.65"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -1494,20 +1494,20 @@ cleanup_existing_config() {
 
   # --- MERV_QT: arm L2 quarantine BEFORE touching any bridge ---------------
   # Flush stale rules from the previous apply cycle, rebuild chain infra, then
-  # add a DROP rule (scoped to --logical-in br0) for every non-native wl*.*
-  # in NVRAM. Any managed VAP that lands in br0 during a mid-cycle
-  # restart_wireless event is immediately dark at L2: no DHCP, no ARP, no
-  # static-IP traffic. Rules go dormant automatically once each interface is
-  # correctly placed in its VLAN bridge — zero per-interface cleanup needed.
+  # add a DROP rule (scoped to --logical-in br0) for every MERVLAN-managed
+  # wl*.* derived from settings + NVRAM. Any managed VAP that lands in br0
+  # during a mid-cycle restart_wireless event is immediately dark at L2: no
+  # DHCP, no ARP, no static-IP traffic. Rules go dormant automatically once
+  # each interface is correctly placed in its VLAN bridge — zero per-interface
+  # cleanup needed. Only MERVLAN-managed interfaces are quarantined; firmware-
+  # owned subinterfaces (e.g. AiMesh management SSIDs like wl0.1 on nodes)
+  # are excluded so they can continue handling AiMesh provisioning traffic.
   ebt_quarantine_flush
   ebt_quarantine_init
   _qt_count=0
-  for _qt_if in $(nvram show 2>/dev/null \
-                  | grep -E '^wl[0-9]+\.[0-9]+_ifname=' \
-                  | awk -F= '{print $2}' \
-                  | sort -u); do
+  _qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+  for _qt_if in $_qt_ifaces; do
     [ -n "$_qt_if" ] || continue
-    is_native_radio "$_qt_if" && continue
     ebt_quarantine_add "$_qt_if"
     _qt_count=$((_qt_count + 1))
   done
