@@ -1,3 +1,32 @@
+mervlan v0.53.06
+
+Shield gap during service-event debounce delay (service-event-handler.sh):
+- Between rc flushing ebtables and heal_event.sh's first protective tick there
+  was a ~3-8s unprotected window: 3s MERV_HEAL_DELAY sleep + script startup.
+  During this window both MERV_QT and MERV_MAC jump rules were orphaned and
+  any associated client could reach br0 unguarded.
+- Fix: service-event-handler.sh now runs an inline re-link pass synchronously
+  for system events (restart_wireless and similar), after the debounce check
+  passes but before the fire-and-forget subshell is launched. Only re-links
+  existing chains' FORWARD/INPUT jump rules (~50ms); chain creation and DROP
+  rule rebuild remain heal_event.sh's responsibility. This reduces the
+  unprotected window from ~3-8s to ~50ms.
+
+Trunk configuration delays placement detection by ~27s (heal_event.sh):
+- On routers with a trunk port (e.g. RT-AX86U with eth5 trunk), VLAN bridge
+  subinterfaces (eth5.X) keep br2/br3/br4/br5 structurally alive even after
+  restart_wireless moves all wl interfaces back to br0. check_vlan_config's
+  bridge-presence loop therefore passes 10/10, and the placement check that
+  detects wl misplacement only ran at the tail — after the full 27s monitoring
+  window. Total exposure: ~47s from event to heal trigger.
+- Fix: check_vlan_config now runs check_wl_iface_placements once at entry,
+  before the monitoring loop. If wl subinterfaces are already misplaced when
+  called (after wait_for_rc_quiet confirms rc is done), it returns 1
+  immediately without running the 27s window. For trunk-configured routers
+  this reduces heal latency from ~47s to ~13s (dominated by wait_for_rc_quiet).
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.05
 
 Hotfix:
@@ -8,6 +37,7 @@ BusyBox grep compatibility — orphaned-jump detection silently broken on older 
   '[: bad number' errors appeared on stderr, and the orphaned-chain re-link path
   never fired. Fixed by dropping the leading dash: 'j MERV_QT' matches the same
   jump rules without triggering option parsing.
+
 
 ################ END OF CURRENT CHANGELOG
 
