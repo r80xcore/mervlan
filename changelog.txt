@@ -1,3 +1,16 @@
+mervlan v0.53.05
+
+Hotfix:
+
+BusyBox grep compatibility — orphaned-jump detection silently broken on older firmware:
+- grep patterns starting with '-j' were misinterpreted as option flags by BusyBox
+  v1.25.1 (RT-AX86U and similar). The count returned garbage instead of a number,
+  '[: bad number' errors appeared on stderr, and the orphaned-chain re-link path
+  never fired. Fixed by dropping the leading dash: 'j MERV_QT' matches the same
+  jump rules without triggering option parsing.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.04
 
 Bug Fixes:
