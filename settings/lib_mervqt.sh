@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.2"                      #
+#                  - File: lib_mervqt.sh || version="0.3"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -217,11 +217,13 @@ restore_merv_mac_shield() {
   printf '%s' "$full_rules" | grep -qF "Bridge chain: $MERV_MAC_CHAIN" || chain_exists=0
 
   # 2. Did both jump rules (FORWARD and INPUT) survive?
-  # MERV_MAC's own rules use -j DROP, so any ' -j $MERV_MAC_CHAIN' match
+  # MERV_MAC's own rules use -j DROP, so any '-j $MERV_MAC_CHAIN' match
   # originates exclusively from FORWARD/INPUT jump rules.
   # Count >= 2 means both are present.
+  # NOTE: no leading space — ebtables outputs unconditional jumps as '-j CHAIN'
+  # (start of line). A leading space in the pattern would never match.
   if [ "$chain_exists" -eq 1 ]; then
-    if [ "$(printf '%s' "$full_rules" | grep -cF " -j $MERV_MAC_CHAIN")" -lt 2 ]; then
+    if [ "$(printf '%s' "$full_rules" | grep -cF "-j $MERV_MAC_CHAIN")" -lt 2 ]; then
       jumps_exist=0
     fi
   else
