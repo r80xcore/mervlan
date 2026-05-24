@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.54"                   #
+#                - File: update_mervlan.sh || version="0.55"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -109,11 +109,15 @@ readonly STAGE_DIR="$TMP_BASE/stage"
 readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
 
+# Staging directory for node MAC shield db files during node updates (RAM)
+readonly NODE_DB_STAGE="$TMP_DIR/node_db_stage"
+
 # Persistent backup root on flash (for rollback archives)
 # Example (default): /jffs/addons/mervlan_backups
 MERVLAN_BACKUP_DIR="${MERV_BASE%/*}/mervlan_backups"
 
-BACKUP_LIST="settings/settings.json"
+BACKUP_LIST="settings/settings.json
+tmp/mac_shield.db"
 
 SSH_KEY_RELATIVE=""
 # Preserve the configured private key so we can restore it after the swap
@@ -752,6 +756,77 @@ EOF
     return 0
 }
 
+backup_remote_node_dbs() {
+    nodes=$(list_configured_nodes)
+    if [ -z "$nodes" ]; then
+        return 0
+    fi
+    if ! ssh_keys_effectively_installed; then
+        return 0
+    fi
+
+    mkdir -p "$NODE_DB_STAGE" 2>/dev/null || {
+        warn -c cli,vlan "Could not create node db staging dir; skipping MAC shield backup for nodes"
+        return 0
+    }
+
+    while read -r node_id node_ip; do
+        [ -n "$node_ip" ] || continue
+        local_file="$NODE_DB_STAGE/node${node_id}.db"
+
+        if _merv_timeout_run "$MERV_SSH_TIMEOUT" \
+            dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+            "${SSH_NODE_USER}@${node_ip}" \
+            "cat /tmp/mervlan_tmp/mac_shield.db 2>/dev/null || cat /jffs/addons/mervlan/tmp/mac_shield.db 2>/dev/null" \
+            > "$local_file" 2>/dev/null && [ -s "$local_file" ]
+        then
+            info -c cli,vlan "MAC shield db backed up from NODE${node_id} ($node_ip)"
+        else
+            rm -f "$local_file" 2>/dev/null || :
+            warn -c cli,vlan "MAC shield db not found or unreachable on NODE${node_id} ($node_ip); skipping"
+        fi
+    done <<EOF
+$nodes
+EOF
+
+    return 0
+}
+
+restore_remote_node_dbs() {
+    nodes=$(list_configured_nodes)
+    if [ -z "$nodes" ]; then
+        rm -rf "$NODE_DB_STAGE" 2>/dev/null || :
+        return 0
+    fi
+    if ! ssh_keys_effectively_installed; then
+        rm -rf "$NODE_DB_STAGE" 2>/dev/null || :
+        return 0
+    fi
+
+    while read -r node_id node_ip; do
+        [ -n "$node_ip" ] || continue
+        local_file="$NODE_DB_STAGE/node${node_id}.db"
+
+        [ -s "$local_file" ] || continue
+
+        if _merv_timeout_run "$MERV_SSH_TIMEOUT" \
+            dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
+            "${SSH_NODE_USER}@${node_ip}" \
+            "mkdir -p /jffs/addons/mervlan/tmp && cat > /jffs/addons/mervlan/tmp/mac_shield.db" \
+            < "$local_file" 2>/dev/null
+        then
+            info -c cli,vlan "MAC shield db restored to NODE${node_id} ($node_ip)"
+        else
+            warn -c cli,vlan "MAC shield db restore failed for NODE${node_id} ($node_ip); node will rebuild on next cron tick"
+        fi
+    done <<EOF
+$nodes
+EOF
+
+    rm -rf "$NODE_DB_STAGE" 2>/dev/null || :
+    return 0
+}
+
 # ========================================================================== #
 # BACKUP ORIGINAL FILES                                                      #
 # ========================================================================== #
@@ -1011,6 +1086,7 @@ fi
 
 # Refresh node files when SSH keys and nodes are configured
 if ssh_keys_effectively_installed && has_configured_nodes; then
+	backup_remote_node_dbs
 	clean_remote_addon_dirs
 	if [ -x "$SYNC_SCRIPT" ]; then
 		info -c cli,vlan "Syncing nodes via sync_nodes.sh"
@@ -1020,6 +1096,7 @@ if ssh_keys_effectively_installed && has_configured_nodes; then
 	else
 		warn -c cli,vlan "sync_nodes.sh not executable; skipping node sync"
 	fi
+	restore_remote_node_dbs
 else
 	info -c cli,vlan "Node sync skipped (no nodes configured or SSH keys absent)"
 fi
