@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.59"                     #
+#                  - File: heal_event.sh || version="0.60"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -480,10 +480,11 @@ restore_merv_qt_shield() {
   # intact but orphaned: DROP rules present but never reached.
   # MERV_QT's own rules use -j DROP, so any '-j MERV_QT' match originates
   # exclusively from FORWARD/INPUT jump rules. Count >= 2 means both are present.
-  # NOTE: no leading space — ebtables outputs unconditional jumps as '-j CHAIN'
-  # (start of line). A leading space in the pattern would never match.
+  # Pattern 'j MERV_QT' (no leading dash): matches '-j MERV_QT' jump rules but NOT
+  # 'Bridge chain: MERV_QT' (preceding char is ':' not 'j'). Avoids BusyBox v1.25.1
+  # grep misinterpreting a leading '-j' pattern as an option flag.
   if [ "$chain_exists" -eq 1 ]; then
-    if [ "$(printf '%s' "$full_rules" | grep -cF '-j MERV_QT')" -lt 2 ]; then
+    if [ "$(printf '%s' "$full_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
       jumps_exist=0
     fi
   else
