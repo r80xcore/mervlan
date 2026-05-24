@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.60"                     #
+#                  - File: heal_event.sh || version="0.61"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -724,6 +724,19 @@ check_vlan_config() {
     return 0
   fi
   exp_str=$(printf '%s\n' "$exp" | xargs 2>/dev/null)
+
+  # Fast-path placement check: if wl subinterfaces are already misplaced at
+  # check entry (called after wait_for_rc_quiet confirms rc is done), skip
+  # the 27s monitoring window and heal immediately. Without this, trunk
+  # configurations keep VLAN bridges alive via subinterfaces regardless of
+  # wl placement, so the bridge-presence loop passes 10/10 and placement is
+  # only detected at the tail — adding ~27s of unnecessary delay.
+  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    if ! check_wl_iface_placements; then
+      warn -c vlan "wl subinterfaces already misplaced at check entry — skipping monitoring window"
+      return 1
+    fi
+  fi
 
   # Multi-check validation with full monitoring window
   # - Always performs all max_checks to ensure VLANs remain stable
