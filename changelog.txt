@@ -1,3 +1,39 @@
+mervlan v0.53.04
+
+Bug Fixes:
+
+IoT/VLAN clients escaping to br0 during manager-triggered wireless restart:
+- During a full VLAN apply, the manager restarts wireless services and then
+  waits for the system to settle before rebinding interfaces. This wait loop
+  had no shield enforcement, leaving a window where client traffic could reach
+  br0 unguarded. The loop now re-arms the L2 shields on every tick so the
+  window is closed within ~1 second of the restart completing.
+- The explicit re-arm pass that fires once rc goes quiet was also moved earlier
+  so it runs before the settle delay rather than after.
+
+False "orphaned chain - re-linked" log spam on every cron tick:
+- A pattern mismatch in the orphan detection check caused it to always report
+  the MERV_QT and MERV_MAC chains as orphaned, even when the shields were
+  healthy. The re-link path was idempotent so no actual damage was done, but
+  every cron run produced noisy warning logs. Pattern corrected.
+
+Shield blind spot during VLAN health monitoring window:
+- Between each of the 10 monitoring passes in check_vlan_config there is a
+  3-second pause. During that pause the shields were not being policed, so a
+  second rc event arriving mid-window could flush the chains and leak traffic
+  for the full 3 seconds undetected. The pause is now an active tick loop that
+  restores both shields every 100ms, matching the same protection already in
+  place during the rc-quiet wait.
+
+Shield blind spot while waiting for a slow interface to appear:
+- When a wireless subinterface takes a long time to appear after a wireless
+  restart, the manager waits with exponential backoff (up to 63 seconds). No
+  shield enforcement ran during this wait, so a late rc wakeup could flush the
+  chains while the manager was simply sleeping. Each backoff sleep is now
+  preceded by a full shield restore check.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.03
 
 heal_event.sh — MAC Escape Window Fixes:
