@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.57"                     #
+#                  - File: heal_event.sh || version="0.58"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -418,14 +418,28 @@ _PAIRS_
 # the manager is detecting and repairing bridges. Brings each subinterface    #
 # down first so clients cannot grab a br0 lease in the gap between the delif  #
 # and the manager's brctl addif into the correct VLAN bridge.                 #
-# Only acts on wl*.* sysfs paths; base radios and eth ports are not touched.  #
+# Scoped to MERVLAN-managed interfaces only — firmware-owned interfaces (e.g. #
+# AiMesh management SSIDs like wl0.1 on nodes) that legitimately belong in    #
+# br0 are never touched.                                                       #
 # ============================================================================ #
 evict_wl_from_br0() {
-  local iface iface_path evicted
+  local iface iface_path evicted managed_ifaces
   evicted=0
+
+  # Resolve MERVLAN-managed wl interfaces from settings + NVRAM.
+  # Only these can leak to br0; firmware-owned AiMesh SSIDs must be left alone.
+  managed_ifaces=""
+  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    managed_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+  fi
+  # Nothing to evict if no MERVLAN-managed wl interfaces are configured.
+  [ -n "$managed_ifaces" ] || return 0
+
   for iface_path in /sys/class/net/br0/brif/wl*.*; do
     [ -e "$iface_path" ] || continue
     iface="${iface_path##*/}"
+    # Skip firmware-owned interfaces (not in MERVLAN-managed set)
+    printf '%s\n' "$managed_ifaces" | grep -qxF "$iface" || continue
     wl -i "$iface" down 2>/dev/null
     brctl delif br0 "$iface" 2>/dev/null
     info -c vlan "Heal: pre-evicted $iface from br0 (DHCP gate)"
@@ -495,11 +509,23 @@ restore_merv_qt_shield() {
   # If only jumps were flushed the chain and its rules are intact — skip rebuild.
   if [ "$chain_exists" -eq 0 ]; then
     local iface_path iface
-    for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
-      [ -e "$iface_path" ] || continue
-      iface="${iface_path##*/}"
-      ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
-    done
+    # Install DROP rules only for MERVLAN-managed interfaces. Firmware-owned
+    # wl subinterfaces (e.g. AiMesh management SSIDs like wl0.1 on nodes)
+    # legitimately reside in br0 and must never receive a DROP rule here.
+    # Fall back to the sysfs scan only when the settings resolver is absent
+    # (partial install / test environment).
+    if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+      merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r _qt_iface _qt_vid; do
+        [ -n "$_qt_iface" ] || continue
+        ebtables -t filter -A MERV_QT -i "$_qt_iface" --logical-in br0 -j DROP 2>/dev/null || true
+      done
+    else
+      for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
+        [ -e "$iface_path" ] || continue
+        iface="${iface_path##*/}"
+        ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
+      done
+    fi
     [ "$_MERV_QT_SHIELD_STATE" = "wiped" ] || \
       info -c vlan "Heal: MERV_QT chain flushed by rc — fully rebuilt shield"
     _MERV_QT_SHIELD_STATE="wiped"
@@ -1005,6 +1031,16 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # Fix A: one-shot shield restore at cron entry.
+  # Re-links MERV_QT/MERV_MAC FORWARD/INPUT jump rules if firmware's rc flushed
+  # them during a restart_wireless that our event handler missed or fired late.
+  # Single ebtables read shared by both restore calls — not a loop, not polling.
+  if type ebtables >/dev/null 2>&1; then
+    _cron_rules=$(ebtables -t filter -L 2>/dev/null)
+    restore_merv_qt_shield "$_cron_rules"
+    type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_cron_rules"
+  fi
+
   # Phase 1: Fast sensor check
   if ! check_vlan_config_fast; then
     record_mismatch
@@ -1026,6 +1062,24 @@ if [ "$EVENT" = "cron" ]; then
     fi
   else
     log_health_ok_if_needed
+    # Fix B: fast check passed (bridges alive via trunk) but wl subinterfaces may
+    # still be in br0 due to a restart_wireless race. The trunk keeps VLAN bridges
+    # alive so check_vlan_config_fast cannot detect this; check placement directly.
+    # Single synchronous call — no loop, no polling overhead.
+    if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+      if ! check_wl_iface_placements; then
+        warn -c vlan "Cron: wl placement mismatch despite healthy bridges — restart_wireless race"
+        record_mismatch
+        if heal_allowed; then
+          info -c cli,vlan "Cron: wl subinterface(s) misplaced — healing (cooldown ${COOLDOWN_SEC}s)"
+          mark_heal
+          evict_wl_from_br0
+          "$VLAN_MANAGER" >/dev/null 2>&1 &
+        else
+          info -c cli,vlan "Cron: wl placement mismatch but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+        fi
+      fi
+    fi
   fi
 
   # Periodic MAC snapshot — preconditions guard against snapshotting mid-heal;
@@ -1135,11 +1189,31 @@ if should_heal_event "$EVENT"; then
   # (trunk subinterfaces keep VLAN bridges alive while wl interfaces are
   # still being torn down and rebuilt by the wireless driver). Use a generous
   # 120s max_wait to cover slow Broadcom DFS restarts.
+  # Fix C: for all other matched events (dnsmasq from MAC-binding changes,
+  # firewall, lan, wan, deferred, etc.) perform a one-shot shield restore
+  # before the VLAN check — these events skip wait_for_rc_quiet so orphaned
+  # chains would otherwise stay unrepaired for the full 27s check window.
+  # Single ebtables read; no loop, no CPU concern.
   case "$EVENT" in
     restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|\
     wl*_restart|wl*_start|wl*_down|wl*_up)
       info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
       wait_for_rc_quiet 6 120
+      ;;
+    *)
+      # If restart_wireless is concurrently running (e.g. MAC binding change
+      # triggered both dnsmasq and wireless restarts and we caught the dnsmasq
+      # event first), use the full restore loop so we keep re-linking chains as
+      # firmware flushes them throughout the wireless restart sequence.
+      # If rc is already quiet, a single read is sufficient — no polling overhead.
+      if rc_queue_has 'restart_wireless' || rc_proc_busy 'restart_wireless|wlconf'; then
+        info -c vlan "Heal: non-wireless event but wireless rc active — waiting for rc quiet (max 30s)"
+        wait_for_rc_quiet 6 30
+      elif type ebtables >/dev/null 2>&1; then
+        _evt_rules=$(ebtables -t filter -L 2>/dev/null)
+        restore_merv_qt_shield "$_evt_rules"
+        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_evt_rules"
+      fi
       ;;
   esac
 
