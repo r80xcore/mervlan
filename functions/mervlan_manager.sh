@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.66"                   #
+#               - File: mervlan_manager.sh || version="0.67"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -463,7 +463,7 @@ wait_for_interface() {
           [ -n "$_wf_if" ] || continue
           ebt_quarantine_add "$_wf_if"
         done
-      elif [ "$(printf '%s' "$_wf_rules" | grep -cF '-j MERV_QT')" -lt 2 ]; then
+      elif [ "$(printf '%s' "$_wf_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
         ebt_quarantine_init
       fi
       type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wf_rules"
@@ -1669,7 +1669,7 @@ wait_for_rc_quiet() {
           [ -n "$_wq_if" ] || continue
           ebt_quarantine_add "$_wq_if"
         done
-      elif [ "$(printf '%s' "$_wq_rules" | grep -cF '-j MERV_QT')" -lt 2 ]; then
+      elif [ "$(printf '%s' "$_wq_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
         ebt_quarantine_init
       fi
       type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wq_rules"
