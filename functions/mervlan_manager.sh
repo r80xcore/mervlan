@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.67"                   #
+#               - File: mervlan_manager.sh || version="0.68"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -760,6 +760,19 @@ attach_to_bridge() {
   is_internal_vap "$IF" && { warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"; return; }
   # Verify interface exists in kernel before attachment
   iface_exists "$IF" || { warn -c cli,vlan "$LABEL ($IF) - not present, skipping"; return; }
+
+  # Idempotency guard for br0 attachments: if the interface is already in
+  # br0 and the target is also br0 (VID=none), skip remove+reattach.
+  # Briefly detaching native radios (wl0, wl1) from br0 causes Broadcom
+  # firmware to reset nas auth state for that interface, destroying the
+  # PSK association. VLAN-bound interfaces always move unconditionally so
+  # correct placement is enforced after firmware resets.
+  if [ "$VID" = "none" ] && [ "$DRY_RUN" != "yes" ] && member_of_bridge "$DEFAULT_BRIDGE" "$IF"; then
+    info -c cli,vlan "$LABEL -> $DEFAULT_BRIDGE (already; no-op)"
+    ebt_quarantine_release "$IF"
+    note_bound_iface "$IF"
+    return 0
+  fi
 
   # DHCP-isolation gate: bring wl subinterfaces down BEFORE the bridge detach
   # so no client can grab a br0 DHCP lease during the bridge-move window.
@@ -1731,10 +1744,11 @@ restart_services() {
     info -c cli,vlan "VLAN changes applied. Refresh your browser to see UI updates."
   fi
 
-  if type eapd >/dev/null 2>&1 && [ -x /usr/sbin/eapd ]; then
-    killall eapd 2>/dev/null
-    /usr/sbin/eapd 2>/dev/null
-  fi
+  # eapd is intentionally NOT restarted here. restart_wireless already starts
+  # eapd with the correct firmware arguments. Calling /usr/sbin/eapd bare
+  # (without arguments) after the fact reinitialises native radio auth with
+  # empty state on Broadcom platforms and destroys the PSK configuration
+  # for wl0/wl1 that restart_wireless just set up correctly.
 
   # Optional per-VAP bounce could be added here when specific VAPs changed.
 }
