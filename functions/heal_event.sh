@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.61"                     #
+#                  - File: heal_event.sh || version="0.62"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -493,6 +493,15 @@ restore_merv_qt_shield() {
 
   # Fast path: shield is completely intact — nothing to do
   if [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ]; then
+    # Opportunistic stale-gate sweep: if a previous crash left the emergency
+    # DHCP gate rule in FORWARD, remove it now. -D is a no-op (exit 0) when
+    # the rule is absent, so this costs one ebtables syscall per tick during
+    # normal healthy operation — negligible. Without this, a crash between
+    # gate-install and gate-remove in step 3 would leave the DROP rule
+    # permanently blocking br0 DHCP even after the chain is fully restored,
+    # because a healthy chain never re-enters step 3.
+    ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+      --logical-in br0 -j DROP 2>/dev/null || true
     case "$_MERV_QT_SHIELD_STATE" in
       ""|"ok") ;;
       *) info -c vlan "Heal: MERV_QT shield stable — firmware flushing stopped" ;;
@@ -502,11 +511,21 @@ restore_merv_qt_shield() {
   fi
 
   # 3. Re-link jump rules (covers both orphaned-chain and full-wipe cases)
+  # Reactive DHCP gate: temporarily block DHCP DISCOVER/REQUEST in br0
+  # while inserting jump rules so the <2ms re-link window cannot be
+  # exploited by a client sending DHCP before MERV_QT is back in FORWARD.
+  # Stale-gate cleanup is idempotent: -D is a no-op if the rule is absent.
+  ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+    --logical-in br0 -j DROP 2>/dev/null || true
+  ebtables -t filter -I FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+    --logical-in br0 -j DROP 2>/dev/null || true
   ebtables -t filter -N MERV_QT 2>/dev/null || true
   ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
     ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
   ebtables -t filter -L INPUT   2>/dev/null | grep -qF 'MERV_QT' || \
     ebtables -t filter -I INPUT   -j MERV_QT 2>/dev/null || true
+  ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+    --logical-in br0 -j DROP 2>/dev/null || true
 
   # 4. Rebuild per-interface DROP rules only if the chain itself was wiped.
   # If only jumps were flushed the chain and its rules are intact — skip rebuild.
@@ -1225,6 +1244,42 @@ if should_heal_event "$EVENT"; then
   case "$EVENT" in
     restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|\
     wl*_restart|wl*_start|wl*_down|wl*_up)
+      # Pre-entry wait: actively poll for evidence the wireless restart has
+      # begun rather than relying on a blind sleep in service-event-handler.
+      # service-event-handler uses delay=0 for wireless events, so heal
+      # starts immediately (~50ms) but holds here until either:
+      #   1. ebtables is flushed (_MERV_QT_SHIELD_STATE transitions from ok)
+      #   2. rc shows restart_wireless / wlconf as active
+      # restore_merv_qt_shield + restore_merv_mac_shield run every tick so
+      # any orphaned chains are repaired continuously while waiting.
+      # 5s max fallback covers the case where nothing is detectable (same
+      # worst-case latency as the old 3s sleep + heal init time).
+      info -c vlan "Heal: wireless event [$EVENT_LABEL] — pre-entry wait (max 5s)"
+      _pw_ticks=0
+      _pw_max=$((5 * TICKS_PER_SEC))
+      while [ "$_pw_ticks" -lt "$_pw_max" ]; do
+        _pw_rules=""
+        type ebtables >/dev/null 2>&1 && _pw_rules=$(ebtables -t filter -L 2>/dev/null)
+        restore_merv_qt_shield "$_pw_rules"
+        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_pw_rules"
+        # ebtables was flushed this tick — firmware restart has begun
+        case "$_MERV_QT_SHIELD_STATE" in
+          orphaned|wiped)
+            info -c vlan "Heal: ebtables flush detected (${_MERV_QT_SHIELD_STATE}) after ${_pw_ticks} ticks"
+            break
+            ;;
+        esac
+        # rc visibly processing wireless restart
+        if rc_queue_has 'restart_wireless|start_lan|stop_lan' || \
+           rc_proc_busy  'restart_wireless|wlconf'; then
+          info -c vlan "Heal: rc restart activity detected after ${_pw_ticks} ticks"
+          break
+        fi
+        $TICK_CMD
+        _pw_ticks=$((_pw_ticks + 1))
+      done
+      [ "$_pw_ticks" -ge "$_pw_max" ] && \
+        info -c vlan "Heal: pre-entry timeout (5s) — proceeding to rc wait"
       info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
       wait_for_rc_quiet 6 120
       ;;
