@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.54"                  #
+#          - File: service-event-handler.sh || version="0.55"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -357,6 +357,15 @@ case "${TYPE}_${EVENT}" in
     # (chain creation and DROP rule rebuild remain heal_event.sh's job).
     # BusyBox-safe: chain name patterns don't start with '-', no grep flag clash.
     if type ebtables >/dev/null 2>&1; then
+      # Proactive DHCP gate: block DHCP DISCOVER/REQUEST in br0 while
+      # re-linking MERV_QT/MERV_MAC jump rules. Closes the ~2ms re-link
+      # window where FORWARD has no chain jump but per-interface DROP rules
+      # are intact (orphan state). Transient — removed after re-link.
+      # Remove any stale gate first so duplicate rules never accumulate.
+      ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+        --logical-in br0 -j DROP 2>/dev/null || true
+      ebtables -t filter -I FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+        --logical-in br0 -j DROP 2>/dev/null || true
       for _se_chain in MERV_QT MERV_MAC; do
         if ebtables -t filter -L "$_se_chain" >/dev/null 2>&1; then
           ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$_se_chain" || \
@@ -365,12 +374,26 @@ case "${TYPE}_${EVENT}" in
             ebtables -t filter -I INPUT -j "$_se_chain" 2>/dev/null || true
         fi
       done
+      ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+        --logical-in br0 -j DROP 2>/dev/null || true
     fi
 
-    # Fire-and-forget heal so rc can continue applying its own changes
-    logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async)"
+    # Fire-and-forget heal so rc can continue applying its own changes.
+    # Wireless events use delay=0: heal_event.sh has a pre-entry wait loop
+    # that actively polls for restart activity instead of a blind sleep.
+    # All other system events keep the default delay so they fire after the
+    # relevant service has had time to begin its work.
+    case "$COMBINED_NORM" in
+      *wireless*|*restart_wl*|*wl_restart*|*wl_start*|*wl_stop*)
+        _se_heal_delay=0
+        ;;
+      *)
+        _se_heal_delay="${MERV_HEAL_DELAY:-3}"
+        ;;
+    esac
+    logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async, delay=${_se_heal_delay}s)"
     (
-      sleep "${MERV_HEAL_DELAY:-3}"
+      sleep "$_se_heal_delay"
       /jffs/addons/mervlan/functions/heal_event.sh "$COMBINED_NORM"
     ) >/dev/null 2>&1 &
     ;;
