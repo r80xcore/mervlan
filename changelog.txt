@@ -1,3 +1,63 @@
+mervlan v0.53.07
+
+Bug Fixes:
+
+Native SSID passwords destroyed after every VLAN apply or heal (mervlan_manager.sh):
+- After a VLAN apply completed, the native SSIDs (wl0/wl1) lost their Wi-Fi
+  passwords and clients could no longer connect. VLAN SSIDs were unaffected.
+  Resetting the password in the router UI restored connectivity until the next
+  apply or heal triggered the issue again.
+- Root cause 1: The manager was restarting the eapd authentication daemon bare
+  (without firmware arguments) after restart_wireless had already started it
+  correctly. On Broadcom platforms this reinitialises native radio authentication
+  with an empty state, wiping the PSK that restart_wireless had just set up.
+  Fix: eapd restart removed from the manager. restart_wireless handles it
+  correctly on its own.
+- Root cause 2: The unconfigured-interface sweep at the end of each apply briefly
+  detached native radios (wl0, wl1) from br0 and immediately re-added them, even
+  when they were already correctly placed. On Broadcom hardware this brief detach
+  is enough to reset the authentication state for that radio.
+  Fix: Native radios already in br0 are now left in place — the sweep skips the
+  remove+reattach cycle when the interface is already where it belongs.
+
+Shield gap on wireless events reduced (heal_event.sh, service-event-handler.sh):
+- Wireless events had a fixed 3-second delay before heal_event.sh was launched.
+  During that window the ebtables chains could be orphaned and clients left
+  unguarded while the heal hadn't started yet.
+- Fix: The 3-second delay is removed for wireless events — heal_event.sh now
+  starts immediately. A DHCP gate rule (blocking UDP port 67) is installed in
+  the inline re-link pass in service-event-handler.sh so no client can grab a
+  br0 lease during the brief window before the heal takes over.
+- To avoid acting on a stale healthy snapshot, heal_event.sh now polls for
+  real evidence that the restart has begun (ebtables chains flushed or rc
+  showing wireless activity) before running the main VLAN check. Shield restore
+  runs on every poll tick. A 5-second ceiling prevents stalling if the restart
+  is undetectable.
+
+
+CHANGED FILES:
+
+functions/mervlan_manager.sh
+- restart_services(): removed bare eapd restart. Added comment explaining why
+  eapd is intentionally absent and why restart_wireless handles it correctly.
+- attach_to_bridge(): added idempotency guard for interfaces already in br0 with
+  VID=none. Skips the bridge detach+reattach and goes straight to quarantine
+  release, preventing the Broadcom auth reset on native radios.
+
+functions/heal_event.sh
+- Wireless event branch: replaced fixed sleep with an active pre-entry poll loop
+  (max 5s, 100ms ticks). Each tick runs the shield restore for both MERV_QT and
+  MERV_MAC. Breaks early on first confirmed sign of restart activity.
+
+functions/service-event-handler.sh
+- Wireless events now use a delay of 0 instead of MERV_HEAL_DELAY before firing
+  heal_event.sh.
+- Inline re-link pass: installs a DHCP gate (UDP dport 67 DROP rule on br0)
+  around the chain re-link so no client can obtain a br0 lease during the
+  ~50ms window before heal_event.sh takes over.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.06
 
 Shield gap during service-event debounce delay (service-event-handler.sh):
