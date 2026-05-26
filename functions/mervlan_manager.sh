@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.68"                   #
+#               - File: mervlan_manager.sh || version="0.69"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -32,6 +32,7 @@ fi
 [ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
+[ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 # Optional CLI overrides:
 #   boot                 → boot mode (enables SSID readiness gate)
 #   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
@@ -216,6 +217,7 @@ to_lower() {
 BOUND_IFACES=""
 WATCH_IFACES=""
 TRUNK_APPLIED=0
+WATCHDOG_HOLD_OWNED=0
 
 # ========================================================================== #
 # INITIALIZATION & HARDWARE DETECTION — Load configs and validate setup       #
@@ -456,16 +458,7 @@ wait_for_interface() {
     # inline restore logic: full rebuild if chain is wiped, re-link if orphaned.
     if type ebtables >/dev/null 2>&1; then
       _wf_rules=$(ebtables -t filter -L 2>/dev/null)
-      if ! printf '%s' "$_wf_rules" | grep -qF 'Bridge chain: MERV_QT'; then
-        ebt_quarantine_flush
-        ebt_quarantine_init
-        for _wf_if in $(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}'); do
-          [ -n "$_wf_if" ] || continue
-          ebt_quarantine_add "$_wf_if"
-        done
-      elif [ "$(printf '%s' "$_wf_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
-        ebt_quarantine_init
-      fi
+      ebt_quarantine_ensure_expected_rules
       type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wf_rules"
     fi
 
@@ -1454,6 +1447,7 @@ ebt_cleanup_all_trunk_rules() {
 # explicit ebt_quarantine_release in attach_to_bridge's none) case.
 # ==========================================================================
 MERV_QT_CHAIN="MERV_QT"
+MERV_DHCP_HOLD_CHAIN="MERV_DHCP_HOLD"
 
 # ebt_quarantine_init — Create MERV_QT chain and insert FORWARD/INPUT jumps.
 # Idempotent: uses grep on -L output to avoid duplicate jump rules.
@@ -1467,15 +1461,6 @@ ebt_quarantine_init() {
     ebtables -t filter -I INPUT -j "$MERV_QT_CHAIN" 2>/dev/null || true
 }
 
-# ebt_quarantine_flush — Flush all rules from MERV_QT; keep chain and jumps.
-# Called at the top of each apply cycle to discard stale rules before the
-# cycle rebuilds fresh ones from current NVRAM state.
-ebt_quarantine_flush() {
-  type ebtables >/dev/null 2>&1 || return 0
-  [ "$DRY_RUN" = "yes" ] && return 0
-  ebtables -t filter -F "$MERV_QT_CHAIN" 2>/dev/null || true
-}
-
 # ebt_quarantine_add — Add a per-interface DROP rule scoped to --logical-in br0.
 # Args: $1=interface_name
 # One rule covers both FORWARD and INPUT (both chains jump to MERV_QT).
@@ -1483,13 +1468,41 @@ ebt_quarantine_flush() {
 # the system degrades to evict-only behavior via heal_event.sh.
 ebt_quarantine_add() {
   local _if="$1"
+  local _qt_rules
   [ -n "$_if" ] || return 0
   type ebtables >/dev/null 2>&1 || return 0
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "[DRY-RUN] MERV_QT: would quarantine $_if in br0"
     return 0
   fi
+
+  _qt_rules=$(ebtables -t filter -L "$MERV_QT_CHAIN" 2>/dev/null)
+  if printf '%s\n' "$_qt_rules" | grep -qF -- "-i $_if" && \
+     printf '%s\n' "$_qt_rules" | grep -qF -- "logical-in br0"; then
+    return 0
+  fi
+
   ebtables -t filter -A "$MERV_QT_CHAIN" -i "$_if" --logical-in br0 -j DROP 2>/dev/null || true
+}
+
+ebt_quarantine_ensure_expected_rules() {
+  local _if _vid
+
+  type ebtables >/dev/null 2>&1 || return 0
+  [ "$DRY_RUN" = "yes" ] && return 0
+
+  ebt_quarantine_init
+  merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r _if _vid; do
+    [ -n "$_if" ] && [ -n "$_vid" ] || continue
+    # Only quarantine VLAN-bound interfaces (real VID >= 2, purely numeric).
+    # Intentionally-native/br0 interfaces (none, trunk, 0, 1) are excluded.
+    # *[!0-9]* catches malformed resolver output (e.g. "187,188", "vlan187").
+    case "$_vid" in
+      ''|none|trunk|0|1|*[!0-9]*) continue ;;
+    esac
+    [ "$_vid" -ge 2 ] 2>/dev/null || continue
+    ebt_quarantine_add "$_if"
+  done
 }
 
 # ebt_quarantine_release — Remove the quarantine rule for a specific interface.
@@ -1526,8 +1539,10 @@ cleanup_existing_config() {
   info -c cli,vlan "Cleaning up existing VLAN config..."
 
   # --- MERV_QT: arm L2 quarantine BEFORE touching any bridge ---------------
-  # Flush stale rules from the previous apply cycle, rebuild chain infra, then
-  # add a DROP rule (scoped to --logical-in br0) for every MERVLAN-managed
+  # Keep MERV_QT additive/idempotent so we never create an empty-chain gap.
+  # Ensure chain/jumps exist and expected DROP rules are present for every
+  # MERVLAN-managed interface.
+  # Add a DROP rule (scoped to --logical-in br0) for every MERVLAN-managed
   # wl*.* derived from settings + NVRAM. Any managed VAP that lands in br0
   # during a mid-cycle restart_wireless event is immediately dark at L2: no
   # DHCP, no ARP, no static-IP traffic. Rules go dormant automatically once
@@ -1535,13 +1550,11 @@ cleanup_existing_config() {
   # cleanup needed. Only MERVLAN-managed interfaces are quarantined; firmware-
   # owned subinterfaces (e.g. AiMesh management SSIDs like wl0.1 on nodes)
   # are excluded so they can continue handling AiMesh provisioning traffic.
-  ebt_quarantine_flush
-  ebt_quarantine_init
+  ebt_quarantine_ensure_expected_rules
   _qt_count=0
   _qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
   for _qt_if in $_qt_ifaces; do
     [ -n "$_qt_if" ] || continue
-    ebt_quarantine_add "$_qt_if"
     _qt_count=$((_qt_count + 1))
   done
   [ "$DRY_RUN" != "yes" ] && [ "$_qt_count" -gt 0 ] && \
@@ -1609,6 +1622,136 @@ rc_proc_busy() {
   ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$pattern" >/dev/null 2>&1
 }
 
+merv_dhcp_hold_arm() {
+  local _hold_rules _changed _quiet
+
+  _quiet="${1:-0}"
+  _changed=0
+
+  type ebtables >/dev/null 2>&1 || return 0
+
+  ebtables -t filter -N "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null && _changed=1
+
+  _hold_rules=$(ebtables -t filter -L "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
+  if ! printf '%s\n' "$_hold_rules" | grep -qF 'DROP'; then
+    ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || true
+    _changed=1
+  fi
+
+  if ! ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
+    ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+    _changed=1
+  fi
+
+  if ! ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
+    ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+    _changed=1
+  fi
+
+  echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
+  [ "$_changed" -eq 1 ] && [ "$_quiet" != "quiet" ] && \
+    info -c vlan "DHCP hold: armed for manager critical section"
+}
+
+merv_dhcp_hold_release() {
+  type ebtables >/dev/null 2>&1 || return 0
+
+  while ebtables -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
+  while ebtables -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
+
+  ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+  ebtables -t filter -X "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+
+  rm -f "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
+  info -c vlan "DHCP hold: released by manager"
+}
+
+merv_dhcp_hold_restore_if_active() {
+  [ -f "$LOCKDIR/merv_dhcp_hold.active" ] || return 0
+  merv_dhcp_hold_arm quiet
+}
+
+merv_native_auth_snapshot() {
+  local _auth_file _radio _key _nv
+  _auth_file="$LOCKDIR/native_auth.snapshot.$$"
+  : > "$_auth_file"
+
+  for _radio in wl0 wl1 wl2; do
+    for _key in ssid auth_mode_x crypto wpa_psk akm; do
+      _nv="${_radio}_${_key}"
+      printf '%s=%s\n' "$_nv" "$(nvram get "$_nv" 2>/dev/null)" >> "$_auth_file"
+    done
+  done
+
+  MERV_NATIVE_AUTH_SNAPSHOT="$_auth_file"
+  export MERV_NATIVE_AUTH_SNAPSHOT
+}
+
+merv_native_auth_audit() {
+  local _nv _old _new
+  [ -f "${MERV_NATIVE_AUTH_SNAPSHOT:-}" ] || return 0
+
+  while IFS='=' read -r _nv _old; do
+    _new="$(nvram get "$_nv" 2>/dev/null)"
+    if [ "$_new" != "$_old" ]; then
+      warn -c cli,vlan "Native auth changed during manager: $_nv"
+    fi
+  done < "$MERV_NATIVE_AUTH_SNAPSHOT"
+
+  rm -f "$MERV_NATIVE_AUTH_SNAPSHOT" 2>/dev/null || true
+}
+
+merv_manager_final_security_check() {
+  local bad iface vid pairs i ssid vlan have_vlan_ssid
+
+  bad=0
+  have_vlan_ssid=0
+
+  i=1
+  while [ "$i" -le "$MAX_SSIDS" ]; do
+    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
+    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
+    case "$vlan" in
+      ''|none|trunk) ;;
+      *[!0-9]*) ;;
+      *)
+        if [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ] && [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ]; then
+          have_vlan_ssid=1
+          break
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null)
+  if [ -z "$pairs" ]; then
+    if [ "$have_vlan_ssid" -eq 1 ]; then
+      error -c cli,vlan "SECURITY FAIL: no expected managed VAP list available"
+      return 1
+    fi
+    return 0
+  fi
+
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+
+    if [ -e "/sys/class/net/br0/brif/$iface" ]; then
+      error -c cli,vlan "SECURITY FAIL: managed VAP $iface is still in br0 after manager"
+      bad=1
+    fi
+
+    if [ ! -e "/sys/class/net/br${vid}/brif/$iface" ]; then
+      error -c cli,vlan "SECURITY FAIL: managed VAP $iface is not in expected br${vid}"
+      bad=1
+    fi
+  done <<_PAIRS_
+$pairs
+_PAIRS_
+
+  [ "$bad" -eq 0 ]
+}
+
 run_service_with_timeout() {
   # $1 = literal 'service' subcommand string (e.g., 'restart_wireless' or 'switch restart')
   # $2 = timeout seconds
@@ -1628,6 +1771,9 @@ run_service_with_timeout() {
 
   elapsed=0
   while kill -0 "$spid" 2>/dev/null; do
+    # Keep broad DHCP hold alive while the service command is still active.
+    merv_dhcp_hold_restore_if_active
+
     if [ "$elapsed" -ge "$tmax" ]; then
       warn -c cli,vlan "service $cmd_string exceeded ${tmax}s; continuing without waiting"
       return 124
@@ -1667,6 +1813,10 @@ wait_for_rc_quiet() {
 
   info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
 
+  # Enforce expected MERV_QT rules once before the tick loop — ebt_quarantine_ensure_expected_rules
+  # calls merv_mac_build_expected_iface_vid (expensive). Per-tick calls multiply that cost
+  # across every sleep interval. restore_merv_mac_shield handles per-tick chain repair.
+  ebt_quarantine_ensure_expected_rules
   while :; do
     # Re-arm L2 shields on every tick — rc's restart_wireless wipes all ebtables,
     # so MERV_QT and MERV_MAC need active re-arming while wl interfaces sit in br0.
@@ -1675,18 +1825,12 @@ wait_for_rc_quiet() {
     # Each path is idempotent: no-op when chains and jump rules are already intact.
     if type ebtables >/dev/null 2>&1; then
       _wq_rules=$(ebtables -t filter -L 2>/dev/null)
-      if ! printf '%s' "$_wq_rules" | grep -qF 'Bridge chain: MERV_QT'; then
-        ebt_quarantine_flush
-        ebt_quarantine_init
-        for _wq_if in $(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}'); do
-          [ -n "$_wq_if" ] || continue
-          ebt_quarantine_add "$_wq_if"
-        done
-      elif [ "$(printf '%s' "$_wq_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
-        ebt_quarantine_init
-      fi
       type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wq_rules"
     fi
+
+    # During rc/wlconf we restore shields only.
+    # Do not brctl-delif VAPs here; that can fight Broadcom restart handling.
+    merv_dhcp_hold_restore_if_active
 
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
@@ -1722,6 +1866,21 @@ restart_services() {
   info -c cli,vlan "Restarting WiFi & bridge services..."
   # Skip if dry-run mode
   [ "$DRY_RUN" = "yes" ] && return
+
+  # Runtime NVRAM scrub is experimental.
+  # It uses live "nvram set" only (no commit), but services still read live
+  # NVRAM during switch/wireless restarts. Default is disabled.
+  # Enable manually for testing with: MERV_BR0_GUARD_SCRUB=1
+  if [ "${MERV_BR0_GUARD_SCRUB:-0}" = "1" ]; then
+    type merv_scrub_br0_nvram_ifnames >/dev/null 2>&1 && \
+      merv_scrub_br0_nvram_ifnames "manager-pre-restart"
+  else
+    info -c vlan "BR0 guard[manager-pre-restart]: runtime NVRAM scrub disabled by default"
+  fi
+
+  # Bridge-only sweep before service restart begins.
+  type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+    merv_soft_evict_wl_from_br0 "manager-pre-restart"
 
   # Create self-restart marker with expiry timestamp to prevent heal_event.sh from
   # triggering event loops when our service restarts fire service-event callbacks.
@@ -1764,39 +1923,60 @@ post_rc_watchdog() {
       return 0
       ;;
   esac
-  (
-    sleep "${WATCHDOG_DELAY_SEC:-25}"
-    info -c cli,vlan "watchdog: starting verification for: $WATCH_IFACES"
-    for pair in $WATCH_IFACES; do
-      iface="${pair%,*}"
-      vid="${pair#*,}"
-      [ -n "$iface" ] || continue
-      [ "$vid" = "none" ] && continue
-      [ "$vid" = "trunk" ] && continue
-      if [ ! -d "/sys/class/net/$iface" ]; then
-        info -c cli,vlan "watchdog: ${iface} no longer exists, skipping"
+
+  WATCHDOG_HOLD_OWNED=1
+  sleep "${WATCHDOG_DELAY_SEC:-25}"
+
+  merv_dhcp_hold_arm
+  ebt_quarantine_ensure_expected_rules
+
+  info -c cli,vlan "watchdog: starting verification for: $WATCH_IFACES"
+  for pair in $WATCH_IFACES; do
+    iface="${pair%,*}"
+    vid="${pair#*,}"
+    [ -n "$iface" ] || continue
+    [ "$vid" = "none" ] && continue
+    [ "$vid" = "trunk" ] && continue
+    if [ ! -d "/sys/class/net/$iface" ]; then
+      info -c cli,vlan "watchdog: ${iface} no longer exists, skipping"
+      continue
+    fi
+    if member_of_bridge "br${vid}" "$iface"; then
+      info -c cli,vlan "watchdog: ${iface} already on br${vid}, no action"
+    elif member_of_bridge "br0" "$iface"; then
+      info -c cli,vlan "watchdog: ${iface} on br0, hard-gating and moving to br${vid}"
+      case "$iface" in
+        wl*.*|ra*.*|ath*.*)
+          wl -i "$iface" down 2>/dev/null || true
+          ;;
+      esac
+      brctl delif br0 "$iface" 2>/dev/null || true
+      if ! ensure_vlan_bridge "$vid"; then
+        warn -c cli,vlan "watchdog: ensure_vlan_bridge br${vid} failed; cannot move ${iface}"
         continue
       fi
-      if member_of_bridge "br${vid}" "$iface"; then
-        info -c cli,vlan "watchdog: ${iface} already on br${vid}, no action"
-      elif member_of_bridge "br0" "$iface"; then
-        info -c cli,vlan "watchdog: ${iface} on br0, moving to br${vid}"
-        brctl delif br0 "$iface" 2>/dev/null
-        if ! ensure_vlan_bridge "$vid"; then
-          warn -c cli,vlan "watchdog: ensure_vlan_bridge br${vid} failed; cannot move ${iface}"
-          continue
-        fi
-        if brctl addif "br${vid}" "$iface" 2>/dev/null; then
-          info -c cli,vlan "watchdog: moved ${iface} -> br${vid}"
-        else
-          warn -c cli,vlan "watchdog: failed to move ${iface} -> br${vid}"
-        fi
+      if brctl addif "br${vid}" "$iface" 2>/dev/null; then
+        case "$iface" in
+          wl*.*|ra*.*|ath*.*)
+            wl -i "$iface" up 2>/dev/null || true
+            ;;
+        esac
+        info -c cli,vlan "watchdog: moved ${iface} -> br${vid}"
       else
-        info -c cli,vlan "watchdog: ${iface} not found on br0 or br${vid} (likely settled elsewhere), no action"
+        warn -c cli,vlan "watchdog: failed to move ${iface} -> br${vid}"
       fi
-    done
-    info -c cli,vlan "watchdog: verification complete"
-  ) &
+    else
+      info -c cli,vlan "watchdog: ${iface} not found on br0 or br${vid}"
+    fi
+  done
+
+  if merv_manager_final_security_check; then
+    merv_dhcp_hold_release
+  else
+    error -c cli,vlan "SECURITY FAIL: watchdog keeping DHCP hold armed"
+  fi
+
+  info -c cli,vlan "watchdog: verification complete"
 }
 
 # ========================================================================== #
@@ -1808,6 +1988,11 @@ post_rc_watchdog() {
 # Returns: none (exit code via mervlan_manager.sh script)
 main() {
   acquire_script_lock
+
+  # Manager critical section starts here.
+  # Keep broad br0 DHCP hold active until final placement verification passes.
+  [ "$DRY_RUN" = "yes" ] || merv_dhcp_hold_arm
+  merv_native_auth_snapshot
 
   # mervlan_manager always logs MAC shield activity regardless of the global default
   MAC_SHIELD_VERBOSE=1
@@ -1919,8 +2104,21 @@ main() {
     # Restart WiFi services to pick up new VAP configuration
     restart_services
 
-    info -c cli,vlan "Waiting for rc/wlconf to go quiet..."
-    wait_for_rc_quiet
+    # Immediate bridge-only sweep after restart_services returns:
+    # rc/wlconf may already have recreated VAPs and attached them to br0.
+    type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+      merv_soft_evict_wl_from_br0 "manager-post-restart"
+
+    if is_ap_mode; then
+      info -c cli,vlan "Waiting briefly for AP-mode switch rc to go quiet..."
+      wait_for_rc_quiet 2 10
+    else
+      info -c cli,vlan "Waiting for rc/wlconf to go quiet..."
+      wait_for_rc_quiet 6 30
+    fi
+
+    type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+      merv_soft_evict_wl_from_br0 "manager-post-quiet"
 
     # Explicit re-arm immediately when rc goes quiet — before the 2s settle sleep.
     # The wait loop above restores shields every 1s tick, so this is largely
@@ -1928,19 +2126,21 @@ main() {
     # moment the manager confirms rc is done with restart_wireless.
     if type ebtables >/dev/null 2>&1; then
       info -c cli,vlan "Re-arming L2 shields post-restart_wireless..."
-      ebt_quarantine_flush
-      ebt_quarantine_init
+      ebt_quarantine_ensure_expected_rules
       _post_qt_count=0
       _post_qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
       for _post_qt_if in $_post_qt_ifaces; do
         [ -n "$_post_qt_if" ] || continue
-        ebt_quarantine_add "$_post_qt_if"
         _post_qt_count=$((_post_qt_count + 1))
       done
       [ "$_post_qt_count" -gt 0 ] && \
         info -c cli,vlan "MERV_QT: re-armed for $_post_qt_count interface(s) post-restart"
       ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
     fi
+
+    # Bridge-only sweep after shields are re-armed, before the settle sleep.
+    type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+      merv_soft_evict_wl_from_br0 "manager-post-shield"
 
     sleep 2
 
@@ -1961,6 +2161,18 @@ main() {
   }
 
   run_trunk_if_configured
+
+  merv_native_auth_audit
+
+  if [ "$DRY_RUN" != "yes" ]; then
+    if [ "$WATCHDOG_HOLD_OWNED" = "1" ]; then
+      info -c cli,vlan "watchdog completed; DHCP hold decision handled in watchdog"
+    elif merv_manager_final_security_check; then
+      merv_dhcp_hold_release
+    else
+      error -c cli,vlan "SECURITY FAIL: keeping DHCP hold armed because final placement verification failed"
+    fi
+  fi
 
   # Summary: display final configuration status
   show_configuration_summary
