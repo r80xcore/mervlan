@@ -1,3 +1,87 @@
+mervlan v0.53.08
+
+Security / Leak Protection:
+
+DHCP safety hold during heal and manager runs (heal_event.sh, mervlan_manager.sh):
+- DHCP on br0 is blocked for the full duration of a heal or apply cycle so a
+  VLAN client cannot grab a native LAN lease during the repair window. The hold
+  is armed at event detection and released only after the watchdog confirms all
+  staged VAPs are in the correct bridges.
+
+Active eviction of firmware-leaked wireless interfaces (heal_event.sh):
+- After restart_wireless, Broadcom temporarily puts managed VLAN VAPs back into
+  br0. MerVLAN now detects and evicts these before rebuilding VLANs.
+
+Improved MERV_QT chain recovery (heal_event.sh):
+- Handles the common "orphaned chain" case (FORWARD/INPUT jumps flushed, chain
+  rules intact) without bridge surgery. The wiped-chain rebuild delegates to the
+  same VID-filtered ensure function, so native br0 interfaces like wl2.5 can
+  never receive a DROP rule during a full rebuild.
+
+Stricter VID-based quarantine filtering (heal_event.sh, mervlan_manager.sh):
+- All MERV_QT DROP rule paths now require VID >= 2 and purely numeric. VIDs of
+  none, trunk, 0, 1, or any non-numeric value are skipped, preventing accidental
+  quarantine of br0-resident native interfaces.
+
+Watchdog hold release is now fail-closed (mervlan_manager.sh):
+- The watchdog runs synchronously; the DHCP hold cannot be released by a racing
+  subshell before VAP placement is confirmed.
+
+Stability / Native Wi-Fi Fixes:
+
+Removed unsafe bare eapd restart (mervlan_manager.sh):
+- Manager no longer restarts eapd without firmware arguments. On Broadcom this
+  wiped native SSID credentials. restart_wireless handles eapd correctly.
+
+Runtime NVRAM scrubbing disabled by default (mervlan_manager.sh):
+- Off by default to avoid disturbing live wireless state. Re-enable with
+  MERV_BR0_GUARD_SCRUB=1 for testing.
+
+Performance / Timing:
+
+Removed expensive resolver calls from per-tick loops (heal_event.sh, mervlan_manager.sh):
+- merv_mac_build_expected_iface_vid was called on every 100ms tick, taking
+  several seconds per call and turning a 3-second settle window into minutes.
+  Now called once before each loop; per-tick work is cheap restore ops only.
+
+Recovery / Verification:
+
+Post-restart watchdog for VLAN interface placement (mervlan_manager.sh):
+- After services restart, watchdog checks each staged VAP and hard-moves any
+  that firmware returned to br0. Runs synchronously so the DHCP hold stays
+  active until placement is verified.
+
+Manager-active guard (heal_event.sh):
+- heal_event.sh skips destructive actions while mervlan_manager is running,
+  preventing the two from racing over bridge membership.
+
+Consistent VLAN-bound vs native quarantine policy (heal_event.sh, mervlan_manager.sh):
+- MERV_QT DROP rules are only installed for VLAN-bound interfaces. All rebuild
+  and ensure paths apply the same VID policy, so a deferred heal recheck cannot
+  re-add a DROP rule for an interface the manager placed in br0.
+
+
+CHANGED FILES:
+
+functions/heal_event.sh
+- restore_merv_qt_shield(): wiped-chain rebuild delegates to
+  merv_qt_ensure_expected_rules(); VID-filtered fallback and sysfs last-resort
+  retained with "unsafe for production" note.
+- merv_qt_ensure_expected_rules(): VID filter adds *[!0-9]* and -ge 2 guard;
+  moved out of per-tick loops, called once per loop entry.
+- merv_dhcp_hold_arm(): quiet mode added; idempotent (grep-before-insert).
+- wait_for_rc_quiet(), settle loop, pre-entry wait: per-tick body is cheap
+  restore ops only.
+
+functions/mervlan_manager.sh
+- ebt_quarantine_ensure_expected_rules(): VID filter tightened to match heal.
+- ebt_quarantine_add(): idempotent; skips if rule already present.
+- post_rc_watchdog(): synchronous; WATCHDOG_HOLD_OWNED coordinates hold release.
+- wait_for_rc_quiet(): ensure call moved before loop; per-tick body trimmed.
+- merv_dhcp_hold_arm(): quiet/idempotent pattern matching heal version.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.07
 
 Bug Fixes:
