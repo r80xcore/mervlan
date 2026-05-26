@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.57"                      #
+#               - File: sync_nodes.sh || version="0.58"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -113,6 +113,7 @@ settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
 settings/mac_shield_snapshot.sh
+settings/lib_br0_guard.sh
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
@@ -148,6 +149,7 @@ settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
 settings/mac_shield_snapshot.sh
+settings/lib_br0_guard.sh
 templates/mervlan_templates.sh
 "
 dbg_log "File synchronization manifest loaded"
