@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.62"                     #
+#                  - File: heal_event.sh || version="0.63"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -33,6 +33,7 @@ fi
 # heal_event.sh degrades safely if the files are missing (partial install).
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
+[ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
 
@@ -451,6 +452,7 @@ evict_wl_from_br0() {
 
 # Script-level state for repair-log deduplication — reset once per process invocation.
 _MERV_QT_SHIELD_STATE=""
+MERV_DHCP_HOLD_CHAIN="MERV_DHCP_HOLD"
 
 # ============================================================================ #
 # restore_merv_qt_shield                                                       #
@@ -536,12 +538,25 @@ restore_merv_qt_shield() {
     # legitimately reside in br0 and must never receive a DROP rule here.
     # Fall back to the sysfs scan only when the settings resolver is absent
     # (partial install / test environment).
-    if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    if type merv_qt_ensure_expected_rules >/dev/null 2>&1; then
+      # Delegate to the VID-filtered authoritative ensure function.
+      # Prevents native/br0 interfaces (e.g. wl2.5 none) from receiving DROP rules.
+      merv_qt_ensure_expected_rules
+    elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+      # Defensive fallback: VID-filtered inline loop (same policy as ensure function).
       merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r _qt_iface _qt_vid; do
-        [ -n "$_qt_iface" ] || continue
+        [ -n "$_qt_iface" ] && [ -n "$_qt_vid" ] || continue
+        case "$_qt_vid" in
+          ''|none|trunk|0|1|*[!0-9]*) continue ;;
+        esac
+        [ "$_qt_vid" -ge 2 ] 2>/dev/null || continue
         ebtables -t filter -A MERV_QT -i "$_qt_iface" --logical-in br0 -j DROP 2>/dev/null || true
       done
     else
+      # Last-resort sysfs scan. This is intentionally unsafe for production because
+      # it cannot distinguish VLAN-bound VAPs from br0-intended VAPs. It exists only
+      # for partial-install/test recovery when merv_mac_build_expected_iface_vid is
+      # unavailable.
       for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
         [ -e "$iface_path" ] || continue
         iface="${iface_path##*/}"
@@ -556,6 +571,89 @@ restore_merv_qt_shield() {
       info -c vlan "Heal: MERV_QT orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
     _MERV_QT_SHIELD_STATE="orphaned"
   fi
+}
+
+merv_qt_ensure_expected_rules() {
+  local iface vid qt_rules
+
+  type ebtables >/dev/null 2>&1 || return 0
+
+  ebtables -t filter -N MERV_QT 2>/dev/null || true
+  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
+    ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
+  ebtables -t filter -L INPUT 2>/dev/null | grep -qF 'MERV_QT' || \
+    ebtables -t filter -I INPUT -j MERV_QT 2>/dev/null || true
+
+  merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+
+    # Only quarantine VLAN-bound VAPs (real VID >= 2, purely numeric).
+    # Never quarantine intentionally-native/br0 interfaces.
+    # *[!0-9]* catches malformed resolver output (e.g. "187,188", "vlan187").
+    case "$vid" in
+      ''|none|trunk|0|1|*[!0-9]*) continue ;;
+    esac
+    [ "$vid" -ge 2 ] 2>/dev/null || continue
+
+    qt_rules=$(ebtables -t filter -L MERV_QT 2>/dev/null)
+    if printf '%s\n' "$qt_rules" | grep -qF -- "-i $iface" &&
+       printf '%s\n' "$qt_rules" | grep -qF -- "logical-in br0"; then
+      continue
+    fi
+
+    ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
+  done
+}
+
+merv_dhcp_hold_arm() {
+  # Temporary critical-section DHCP kill switch.
+  # Blocks DHCP requests entering br0 while heal/manager is active.
+  local _hold_rules _changed _quiet
+
+  _quiet="${1:-0}"
+  _changed=0
+
+  type ebtables >/dev/null 2>&1 || return 0
+
+  ebtables -t filter -N "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null && _changed=1
+
+  _hold_rules=$(ebtables -t filter -L "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
+  if ! printf '%s\n' "$_hold_rules" | grep -qF 'DROP'; then
+    ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || true
+    _changed=1
+  fi
+
+  if ! ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
+    ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+    _changed=1
+  fi
+
+  if ! ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
+    ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+    _changed=1
+  fi
+
+  echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
+  [ "$_changed" -eq 1 ] && [ "$_quiet" != "quiet" ] && \
+    info -c vlan "DHCP hold: armed for br0 critical section"
+}
+
+merv_dhcp_hold_release() {
+  type ebtables >/dev/null 2>&1 || return 0
+
+  while ebtables -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
+  while ebtables -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
+
+  ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+  ebtables -t filter -X "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
+
+  rm -f "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
+  info -c vlan "DHCP hold: released"
+}
+
+merv_dhcp_hold_restore_if_active() {
+  [ -f "$LOCKDIR/merv_dhcp_hold.active" ] || return 0
+  merv_dhcp_hold_arm quiet
 }
 
 rc_queue_has() {
@@ -578,18 +676,24 @@ wait_for_rc_quiet() {
 
   info -c vlan "wait_for_rc_quiet: watching rc (need=${need_sec}s quiet, method=${TICK_LABEL})"
 
+  # Enforce expected MERV_QT rules once before entering the tick loop.
+  # merv_qt_ensure_expected_rules calls merv_mac_build_expected_iface_vid which
+  # is expensive (~2-5s). Calling it per-tick at 100ms cadence multiplies each
+  # tick into seconds. restore_merv_qt_shield handles per-tick chain/jump repair.
+  merv_qt_ensure_expected_rules
   while :; do
     # Fetch ebtables filter table once per tick; pass to both restore functions
     # to avoid redundant netlink reads at tick rate. Gate on ebtables presence
     # to avoid spawning a missing binary on every tick.
-    # evict_wl_from_br0 is intentionally NOT called here: repeated wl -i down
-    # calls every tick interfere with firmware's restart_wireless sequence,
-    # leaving radios permanently down. The single evict call after this
-    # function returns (once rc is confirmed quiet) is the correct sweep.
+    # During rc/wlconf we only restore L2 shields.
+    # Do NOT run brctl delif or wl down here.
+    # Bridge surgery inside this loop makes restart_wireless take far longer because
+    # rc/wlconf and MerVLAN fight over bridge membership.
     _rules=""
     type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
     restore_merv_qt_shield "$_rules"
     type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
+    merv_dhcp_hold_restore_if_active
 
     # If either queue or process is busy, reset quiet counter
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
@@ -811,11 +915,14 @@ check_vlan_config() {
       # pattern in wait_for_rc_quiet to avoid redundant netlink reads per tick.
       local s=0
       local tick_target=$(( settle_delay * TICKS_PER_SEC ))
+      # Enforce expected rules once before the settle tick loop (expensive NVRAM call).
+      merv_qt_ensure_expected_rules
       while [ "$s" -lt "$tick_target" ]; do
         _rules=""
         type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
         restore_merv_qt_shield "$_rules"
         type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
+        merv_dhcp_hold_restore_if_active
         $TICK_CMD
         s=$((s + 1))
       done
@@ -1228,7 +1335,13 @@ should_heal_event() {
 # ============================================================================ #
 
 if should_heal_event "$EVENT"; then
+  _MANAGER_STARTED=0
+  _HOLD_RELEASED=0
   info -c vlan "Heal: event [$EVENT_LABEL] matched watchlist"
+
+  # Security-first: block native br0 DHCP during the whole heal decision window.
+  # This runs before rc wait and before reading bridge state.
+  merv_dhcp_hold_arm
 
   # For wireless restart events, wait for rc to settle BEFORE reading kernel
   # state. Firmware's restart_wireless can take several minutes on some
@@ -1257,11 +1370,14 @@ if should_heal_event "$EVENT"; then
       info -c vlan "Heal: wireless event [$EVENT_LABEL] — pre-entry wait (max 5s)"
       _pw_ticks=0
       _pw_max=$((5 * TICKS_PER_SEC))
+      # Enforce expected rules once before the pre-entry tick loop (expensive NVRAM call).
+      merv_qt_ensure_expected_rules
       while [ "$_pw_ticks" -lt "$_pw_max" ]; do
         _pw_rules=""
         type ebtables >/dev/null 2>&1 && _pw_rules=$(ebtables -t filter -L 2>/dev/null)
         restore_merv_qt_shield "$_pw_rules"
         type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_pw_rules"
+        merv_dhcp_hold_restore_if_active
         # ebtables was flushed this tick — firmware restart has begun
         case "$_MERV_QT_SHIELD_STATE" in
           orphaned|wiped)
@@ -1282,6 +1398,11 @@ if should_heal_event "$EVENT"; then
         info -c vlan "Heal: pre-entry timeout (5s) — proceeding to rc wait"
       info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
       wait_for_rc_quiet 6 120
+
+      # rc/wlconf is now quiet enough to stop fighting firmware.
+      # Bridge surgery is allowed after wait_for_rc_quiet returns.
+      type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+        merv_soft_evict_wl_from_br0 "heal-post-rc"
       ;;
     *)
       # If restart_wireless is concurrently running (e.g. MAC binding change
@@ -1295,6 +1416,7 @@ if should_heal_event "$EVENT"; then
       elif type ebtables >/dev/null 2>&1; then
         _evt_rules=$(ebtables -t filter -L 2>/dev/null)
         restore_merv_qt_shield "$_evt_rules"
+        merv_qt_ensure_expected_rules
         type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_evt_rules"
       fi
       ;;
@@ -1302,21 +1424,48 @@ if should_heal_event "$EVENT"; then
 
   if ! check_vlan_config; then
     record_mismatch
-    # VLAN config mismatch detected after event
+    # VLAN config mismatch detected after event.
+    # A mismatch here means at least one managed VAP is confirmed in br0.
+    # Do NOT wait again before evicting: the second wait_for_rc_quiet was the
+    # direct cause of the 9-10s confirmed exposure window seen in field logs.
     if heal_allowed; then
-      info -c cli,vlan "VLAN config missing after [$EVENT_LABEL] — waiting for rc quiet, then healing (cooldown ${COOLDOWN_SEC}s)"
-      # Allow rc to finish wireless/LAN/httpd work so interfaces exist
-      wait_for_rc_quiet
-      # Mark heal time first (prevents rapid re-triggers)
+      info -c cli,vlan "VLAN config missing after [$EVENT_LABEL] — hard-evicting br0 leaks immediately, then healing (cooldown ${COOLDOWN_SEC}s)"
+
+      # Mark first to prevent rapid re-triggers while we close the leak.
       mark_heal
-      # Close DHCP leak window before manager runs
-      evict_wl_from_br0
-      # Invoke VLAN manager in background to restore config
+
+      # Hard evict once: wl down + brctl delif. Only runs on confirmed mismatch.
+      if type merv_hard_evict_wl_from_br0 >/dev/null 2>&1; then
+        merv_hard_evict_wl_from_br0 "heal-confirmed"
+      else
+        evict_wl_from_br0
+      fi
+
+      # No second rc wait here. Mismatch is already confirmed.
+      type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+        merv_soft_evict_wl_from_br0 "heal-pre-manager"
+
+      # Invoke VLAN manager in background to restore full VLAN/bridge config.
       "$VLAN_MANAGER" >/dev/null 2>&1 &
+      _MANAGER_STARTED=1
     else
-      # Cooldown is active
+      # Cooldown is active — do not run manager again.
+      # Still hard-evict so confirmed br0 leaks are not left sitting.
+      if type merv_hard_evict_wl_from_br0 >/dev/null 2>&1; then
+        merv_hard_evict_wl_from_br0 "heal-cooldown"
+      else
+        evict_wl_from_br0
+      fi
+      merv_dhcp_hold_release
+      _HOLD_RELEASED=1
       info -c cli,vlan "Heal suppressed after [$EVENT_LABEL] (within ${COOLDOWN_SEC}s cooldown)"
     fi
+  fi
+
+  if [ "$_MANAGER_STARTED" -eq 0 ] && [ "$_HOLD_RELEASED" -eq 0 ]; then
+    type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+      merv_soft_evict_wl_from_br0 "heal-final-no-manager"
+    merv_dhcp_hold_release
   fi
 
   # Fix 3 — Deferred safety-net recheck for wireless events.
