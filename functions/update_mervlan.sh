@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.55"                   #
+#                - File: update_mervlan.sh || version="0.56"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -992,7 +992,8 @@ for rel_path in \
 	"settings/lib_ssid_filter.sh" \
 	"settings/lib_stp.sh" \
 	"settings/lib_mervqt.sh" \
-	"settings/mac_shield_snapshot.sh"
+	"settings/mac_shield_snapshot.sh" \
+	"settings/lib_br0_guard.sh"
 do
 	target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
 	[ -f "$target" ] && chmod 644 "$target" 2>/dev/null || :
