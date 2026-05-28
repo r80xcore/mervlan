@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.1"                #
+#               - File: mac_shield_snapshot.sh || version="0.2"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -295,6 +295,63 @@ merv_mac_merge_db() {
 }
 
 # ============================================================================
+# merv_mac_maybe_trigger_heal_on_precondition_fail
+# Self-recovery hook called when snapshot preconditions fail (an expected VAP
+# is missing from its bridge, in the wrong bridge, or detached entirely).
+#
+# Without this, periodic snapshot ticks would only log the precondition
+# warning and clients on the detached VAP stayed unreachable until a manual
+# reboot or another service event. We now queue a heal — strictly gated to
+# avoid recursion or storms:
+#   - Skip if mervlan_manager is currently applying config
+#   - Skip if a heal is already in flight (vlan_event.lock present)
+#   - Per-(LOCKDIR) debounce: at most one trigger per MERV_MAC_HEAL_TRIGGER_DEBOUNCE
+#     seconds (default 60s) regardless of how many snapshot ticks fire
+# Heal is launched fire-and-forget so the snapshot caller is never blocked.
+# ============================================================================
+merv_mac_maybe_trigger_heal_on_precondition_fail() {
+  local now last age debounce stamp
+
+  # Honour explicit opt-out for users who want logs only.
+  [ "${MERV_MAC_HEAL_TRIGGER:-1}" = "0" ] && return 0
+
+  # Required directories / binaries
+  [ -n "$LOCKDIR" ] || return 0
+  [ -n "$MERV_BASE" ] || return 0
+  [ -x "$MERV_BASE/functions/heal_event.sh" ] || return 0
+
+  # Don't pile on a running apply.
+  if [ -d "$LOCKDIR/mervlan_manager.lock" ]; then
+    info -c vlan "MERV_MAC: precondition fail — heal not queued (mervlan_manager active)"
+    return 0
+  fi
+
+  # Don't pile on an in-flight heal — its own pre-entry checks will catch it.
+  if [ -d "$LOCKDIR/vlan_event.lock" ]; then
+    info -c vlan "MERV_MAC: precondition fail — heal not queued (heal already running)"
+    return 0
+  fi
+
+  debounce="${MERV_MAC_HEAL_TRIGGER_DEBOUNCE:-60}"
+  case "$debounce" in ''|*[!0-9]*) debounce=60 ;; esac
+  stamp="$LOCKDIR/mac_precondition_heal.last"
+  now=$(date +%s 2>/dev/null || echo 0)
+  case "$now" in ''|*[!0-9]*) now=0 ;; esac
+  last=$(cat "$stamp" 2>/dev/null || echo 0)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  age=$(( now - last ))
+  if [ "$last" -gt 0 ] && [ "$age" -lt "$debounce" ]; then
+    info -c vlan "MERV_MAC: precondition fail — heal trigger debounced (last=${age}s ago, window=${debounce}s)"
+    return 0
+  fi
+
+  printf '%s\n' "$now" > "$stamp" 2>/dev/null || :
+  info -c vlan "MERV_MAC: precondition fail — queueing heal_event [mac_precondition_orphan]"
+  ( "$MERV_BASE/functions/heal_event.sh" "mac_precondition_orphan" ) >/dev/null 2>&1 &
+  return 0
+}
+
+# ============================================================================
 # merv_mac_snapshot
 # Full snapshot orchestration. Called from an async subshell after the
 # post_rc_watchdog correction window closes.
@@ -311,6 +368,7 @@ merv_mac_snapshot() {
 
   if ! merv_mac_snapshot_preconditions_ok; then
     warn -c vlan "MERV_MAC: snapshot skipped — interfaces not fully settled (db unchanged)"
+    merv_mac_maybe_trigger_heal_on_precondition_fail
     return 0
   fi
 
