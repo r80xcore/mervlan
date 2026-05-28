@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.63"                     #
+#                  - File: heal_event.sh || version="0.64"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -178,13 +178,33 @@ fi
 # Ensure locks directory exists for all lock/cooldown files
 mkdir -p "$LOCKDIR" 2>/dev/null
 
-# Simple lock using mkdir (atomic operation) to avoid concurrent runs
+# Hard mutex using mkdir (atomic on POSIX). Replaces the previous silent
+# exit-on-contention so we can diagnose pile-ups. Adds stale-lock recovery:
+# if the lock directory's mtime exceeds HEAL_LOCK_STALE_SEC (default 600s),
+# a previous heal almost certainly crashed without cleaning up — reclaim it
+# rather than blocking every subsequent event forever.
 LOCK="$LOCKDIR/vlan_event.lock"
-if mkdir "$LOCK" 2>/dev/null; then
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
-else
-  exit 0
+HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-600}"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  # Check age of the existing lock for staleness recovery.
+  _lock_mtime=$(stat -c %Y "$LOCK" 2>/dev/null || echo 0)
+  case "$_lock_mtime" in ''|*[!0-9]*) _lock_mtime=0 ;; esac
+  _lock_now=$(date +%s 2>/dev/null || echo 0)
+  case "$_lock_now" in ''|*[!0-9]*) _lock_now=0 ;; esac
+  _lock_age=$(( _lock_now - _lock_mtime ))
+  if [ "$_lock_mtime" -gt 0 ] && [ "$_lock_age" -ge "$HEAL_LOCK_STALE_SEC" ]; then
+    warn -c vlan "Heal: vlan_event.lock stale (age=${_lock_age}s >= ${HEAL_LOCK_STALE_SEC}s) — reclaiming"
+    rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null
+    if ! mkdir "$LOCK" 2>/dev/null; then
+      info -c vlan "Heal: skipping [${1:-initial}] — another instance acquired lock after reclaim"
+      exit 0
+    fi
+  else
+    info -c vlan "Heal: skipping [${1:-initial}] — another instance holds vlan_event.lock (age=${_lock_age}s)"
+    exit 0
+  fi
 fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 
 # ============================================================================ #
 #                         COOLDOWN & DEBOUNCE LOGIC                            #
@@ -403,7 +423,12 @@ check_wl_iface_placements() {
       warn -c vlan "Placement: $iface expected br${vid} but is in br0 — restart_wireless race suspected"
       ok=0
     else
-      dbg_log "Placement: $iface expected br${vid} but found in neither bridge (may be restarting)"
+      # Called after wait_for_rc_quiet — rc is settled, so "no bridge" means
+      # the VAP detached (firmware brought it down or a flush left it orphan).
+      # Treat as a hard mismatch so heal re-applies bridge membership instead
+      # of leaving the client population stranded until the next reboot.
+      warn -c vlan "Placement: $iface expected br${vid} but found in neither bridge — VAP detached"
+      ok=0
     fi
   done <<_PAIRS_
 $pairs
