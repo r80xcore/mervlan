@@ -10,10 +10,10 @@ Heal mutex hardened with stale-lock recovery (heal_event.sh):
   lock if its mtime exceeds HEAL_LOCK_STALE_SEC (default 600s).
 
 Broader service-event coverage for MAC blacklist commits (service-event-handler.sh):
-- Added explicit *acl*, *wlc_filter*, *wl_filter* patterns to both the
-  watchlist and the wireless-event fast-path (delay=0). Firmware paths that
-  fire bare "acl" or "wl_filter" events instead of restart_wireless are now
-  caught and healed promptly.
+- Intentionally NOT added. ACL / wl_filter events fire on every MAC blacklist
+  change (e.g. adding a new device); routing them through heal would cascade
+  to restart_wireless and drop the native SSID password state on Broadcom
+  hardware. MAC-shield rebuild is driven by the snapshot tick instead.
 
 DHCP hold re-armed immediately after rc restart (mervlan_manager.sh):
 - restart_services() now re-arms merv_dhcp_hold_arm before returning. Closes
