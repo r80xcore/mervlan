@@ -1,3 +1,41 @@
+mervlan v0.53.09
+
+Stability / Self-Recovery:
+
+Heal mutex hardened with stale-lock recovery (heal_event.sh):
+- The vlan_event.lock previously had no age check. A heal process that was
+  SIGKILL'd or crashed mid-tick would leave the lock dir orphaned, silently
+  blocking every subsequent event indefinitely. Now logs explicitly when
+  refusing entry (instead of silent exit 0) and automatically reclaims the
+  lock if its mtime exceeds HEAL_LOCK_STALE_SEC (default 600s).
+
+Broader service-event coverage for MAC blacklist commits (service-event-handler.sh):
+- Added explicit *acl*, *wlc_filter*, *wl_filter* patterns to both the
+  watchlist and the wireless-event fast-path (delay=0). Firmware paths that
+  fire bare "acl" or "wl_filter" events instead of restart_wireless are now
+  caught and healed promptly.
+
+DHCP hold re-armed immediately after rc restart (mervlan_manager.sh):
+- restart_services() now re-arms merv_dhcp_hold_arm before returning. Closes
+  the ~4s ebtables FORWARD-flush window between safe_service_restart and
+  wait_for_rc_quiet's per-tick restore, during which an IoT client racing
+  reassociation could grab a br0 lease and wedge across the wrong bridge.
+
+Detached VAP detection in placement check (heal_event.sh):
+- check_wl_iface_placements now treats "expected br<vid> but in neither bridge"
+  as a hard mismatch (previously dbg-only). After wait_for_rc_quiet, an
+  interface in no bridge is structurally broken — heal re-applies bridge
+  membership instead of leaving clients stranded until a reboot.
+
+MAC precondition triggers gated heal (settings/mac_shield_snapshot.sh):
+- When merv_mac_snapshot's preconditions fail (a managed VAP is missing,
+  misplaced, or detached), the snapshot tick now queues a heal instead of
+  only logging a warning. Strictly gated: skipped while mervlan_manager is
+  applying, skipped while another heal holds vlan_event.lock, and
+  per-LOCKDIR debounced by MERV_MAC_HEAL_TRIGGER_DEBOUNCE (default 60s).
+  Disable with MERV_MAC_HEAL_TRIGGER=0.
+
+
 mervlan v0.53.08
 
 Security / Leak Protection:
