@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.55"                  #
+#          - File: service-event-handler.sh || version="0.56"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -329,7 +329,7 @@ case "${TYPE}_${EVENT}" in
   # System event handlers (triggered by Asuswrt-Merlin events)
   # Wildcard patterns catch restart_* and service events (wireless, WAN, LAN, NET, FW, NAT, DNS)
   # NOTE: httpd intentionally excluded — httpd restarts don't affect VLANs and cause event floods
-  *restart*|*wireless*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*)
+  *restart*|*wireless*|*wan*|*lan*|*net*|*firewall*|*nat*|*reload*|*dnsmasq*|*acl*|*wlc_filter*|*wl_filter*)
     # Skip httpd events that slip through via *restart* pattern
     case "$COMBINED_NORM" in
       *httpd*) 
@@ -384,7 +384,7 @@ case "${TYPE}_${EVENT}" in
     # All other system events keep the default delay so they fire after the
     # relevant service has had time to begin its work.
     case "$COMBINED_NORM" in
-      *wireless*|*restart_wl*|*wl_restart*|*wl_start*|*wl_stop*)
+      *wireless*|*restart_wl*|*wl_restart*|*wl_start*|*wl_stop*|*acl*|*wlc_filter*|*wl_filter*)
         _se_heal_delay=0
         ;;
       *)
