@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.69"                   #
+#               - File: mervlan_manager.sh || version="0.70"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -1908,6 +1908,13 @@ restart_services() {
   # (without arguments) after the fact reinitialises native radio auth with
   # empty state on Broadcom platforms and destroys the PSK configuration
   # for wl0/wl1 that restart_wireless just set up correctly.
+
+  # Re-arm DHCP hold immediately on return from rc restarts. The ebtables
+  # FORWARD chain was flushed by service restart, leaving a ~4s leak window
+  # before wait_for_rc_quiet enters its per-tick restore loop. Any IoT client
+  # racing reassociation in that window could pull a br0 lease and end up
+  # wedged across the wrong bridge after the watchdog reorganises VAPs.
+  type merv_dhcp_hold_arm >/dev/null 2>&1 && merv_dhcp_hold_arm quiet
 
   # Optional per-VAP bounce could be added here when specific VAPs changed.
 }
