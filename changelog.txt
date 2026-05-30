@@ -1,3 +1,136 @@
+mervlan v0.53.10
+
+Security / Leak Protection:
+
+Boot-time DHCP shield (mervlan_boot_wrap.sh, templates/mervlan_templates.sh):
+- Added a new "shield" mode to mervlan_boot_wrap.sh that runs synchronously
+  at services-start before the manager. It arms MERV_DHCP_HOLD on br0 and
+  replays the persistent MERV_MAC db, closing the reboot gap where clients
+  could get a br0 lease before the first full apply completes.
+- A detached watchdog re-arms both chains every second up to MERV_BOOT_SHIELD_MAX_SEC
+  (120s). The shield is removed automatically once the manager apply returns.
+
+Emergency DHCP gate covers both FORWARD and INPUT (service-event-handler.sh):
+- The inline DHCP gate inserted during ebtables re-link events previously only
+  covered the FORWARD chain. Now drops on INPUT as well, closing a path where
+  a client could send DHCP directly to the router's br0 interface.
+
+L2 guard tick during wait_for_interface (mervlan_manager.sh):
+- While waiting for a slow wl subinterface to appear after wireless restart,
+  the manager now calls merv_guard_tick on each backoff iteration so shields
+  are kept alive even during long interface-appearance waits.
+
+Stability / Self-Recovery:
+
+Manager lock hardened with stale-lock recovery and deadlock protection (mervlan_manager.sh, lib_mervqt.sh):
+- acquire_script_lock now writes a PID and creation timestamp into the lock
+  directory. On acquisition failure it checks liveness (kill -0) and age
+  before deciding to wait or reclaim. Bounded to 30 retries × 2s — will
+  never spin forever. Stale reclaim threshold is MERV_MANAGER_LOCK_STALE_SEC
+  (default 420s).
+- merv_lock_state() added to lib_mervqt.sh (was merv_manager_lock_state, alias
+  kept): generic observer for any lock dir; returns active / stale /
+  unknown_recent / absent. Used by heal, snapshot, and manager.
+
+heal_event.sh all stale-blind checks replaced (heal_event.sh):
+- All three raw [ -d "$MANAGER_LOCK" ] guards (entry, mid-body, deferred
+  recheck subshell) replaced with merv_lock_state case-statements. Stale
+  locks no longer block healing indefinitely.
+
+Manager courtesy-yield to in-flight heal (mervlan_manager.sh):
+- At apply start, if the heal lock is active, manager sleeps 3s then always
+  proceeds. Never aborts — escape surface unchanged.
+
+Non-blocking self-locks for sync_nodes, mac_refresh, execute_nodes:
+- All three scripts now take a non-blocking lock on entry; a second concurrent
+  run skips cleanly. sync_nodes also skips if the manager lock is active.
+  All locks release on EXIT/INT/TERM.
+
+mac_shield_snapshot.sh stale-lock awareness (mac_shield_snapshot.sh):
+- Snapshot precondition check now uses merv_manager_lock_state instead of
+  a bare lock-dir test, so a crashed manager can't permanently suppress
+  snapshot ticks.
+
+New variables (var_settings.sh):
+- MERV_MANAGER_LOCK_STALE_SEC (420s), MERV_HEAL_LOCK_STALE_SEC (180s),
+  MERV_SYNC_LOCK_STALE_SEC (60s), MERV_MAC_REFRESH_LOCK_STALE_SEC (60s),
+  MERV_BOOT_SHIELD_MAX_SEC (120s).
+
+Performance:
+
+Scoped iface→VID result cache during apply (mac_shield_snapshot.sh, lib_mervqt.sh, lib_br0_guard.sh, mervlan_manager.sh):
+- merv_mac_build_expected_iface_vid was called 5+ times back-to-back during
+  a single apply run, each call taking ~5s on the AX95Q. A new merv_iface_vid_list()
+  wrapper caches the result in-memory for the hot path.
+- Cache is invalidated after restart_services (NVRAM may change) and disabled
+  before post_rc_watchdog so the security check always reads fresh state.
+- Saves ~15s per apply.
+
+SSID slot pre-scan in bind_configured_ssids (mervlan_manager.sh):
+- Pre-scan builds the populated+allowed slot list once; the bind loop iterates
+  only those slots, skipping ~9 wasted sed scans per pass (called twice per apply).
+- Saves ~10s across both passes.
+
+Total apply time reduced from ~170s to ~120s on RT-AX95Q (3 VLANs, 1 node).
+
+sync_nodes.sh tar-batch SSH optimization (~7× speedup):
+- All files are bundled into one tar stream per node over a single SSH
+  connection instead of one scp call per file. Checksums and permissions
+  set in a second SSH pass. Full multi-node sync now completes in ~10s (was ~60-70s).
+
+
+CHANGED FILES:
+
+settings/var_settings.sh
+- Added MERV_MANAGER_LOCK_STALE_SEC, MERV_HEAL_LOCK_STALE_SEC, MERV_SYNC_LOCK_STALE_SEC,
+  MERV_MAC_REFRESH_LOCK_STALE_SEC, MERV_BOOT_SHIELD_MAX_SEC.
+
+settings/lib_mervqt.sh
+- Added merv_lock_state() (was merv_manager_lock_state, alias kept), merv_boot_shield_lan_configured().
+- merv_qt_ensure_expected_rules() and restore_merv_qt_shield() use cached wrapper.
+
+settings/mac_shield_snapshot.sh
+- Stale-aware manager-lock check via merv_lock_state().
+- Added merv_iface_vid_list(), merv_iface_vid_cache_enable/invalidate/disable().
+
+settings/lib_br0_guard.sh
+- merv_managed_wl_ifaces() uses cached wrapper when available.
+
+functions/mervlan_manager.sh
+- acquire_script_lock/release_script_lock: PID+timestamp, liveness check, stale reclaim.
+- acquire_script_lock: courtesy-yield (sleep 3) when heal lock is active.
+- merv_guard_tick called per backoff tick in wait_for_interface.
+- ebt_quarantine_ensure_expected_rules() uses cached wrapper.
+- apply_vlan: cache lifecycle (enable → invalidate post-restart → disable pre-watchdog).
+- bind_configured_ssids: pre-scan replaces full 12-slot iteration loop.
+
+functions/heal_event.sh
+- All stale-blind manager-lock checks replaced with merv_lock_state case-statements.
+
+functions/sync_nodes.sh
+- Tar-batch SSH: all files bundled per node into one tar stream, single SSH connection.
+- Non-blocking self-lock; skips if manager lock is active.
+
+functions/mac_refresh.sh
+- Non-blocking self-lock (MERV_MAC_REFRESH_LOCK_STALE_SEC=60s).
+
+functions/execute_nodes.sh
+- Sourced lib_mervqt.sh; non-blocking self-lock.
+
+functions/service-event-handler.sh
+- Emergency DHCP gate now inserts paired DROP rules in both FORWARD and INPUT.
+
+functions/mervlan_boot_wrap.sh
+- New _mode_shield(): boot DHCP hold + MERV_MAC replay + detached watchdog.
+- _mode_manager: removes shield marker after manager returns.
+- Added shield to dispatch case.
+
+templates/mervlan_templates.sh
+- services-start now runs mervlan_boot_wrap.sh shield synchronously before
+  the backgrounded manager/cron.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.09
 
 Stability / Self-Recovery:
