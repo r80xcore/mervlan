@@ -1916,7 +1916,10 @@ post_rc_watchdog() {
   esac
 
   WATCHDOG_HOLD_OWNED=1
-  sleep "${WATCHDOG_DELAY_SEC:-25}"
+  # Guard-tick every second during the settle window so that any rc ebtables
+  # flush (secondary wireless event, lan restart, etc.) is caught immediately
+  # and the DHCP hold rule is re-inserted before we do placement verification.
+  merv_guarded_sleep "${WATCHDOG_DELAY_SEC:-25}"
 
   merv_dhcp_hold_arm
   ebt_quarantine_ensure_expected_rules
@@ -2151,7 +2154,9 @@ main() {
     type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
       merv_soft_evict_wl_from_br0 "manager-post-shield"
 
-    sleep 2
+    # Guard-tick during the 2s settle so an rc ebtables flush here is restored
+    # within 1s rather than surviving until the next explicit re-arm point.
+    merv_guarded_sleep 2
 
     # Second pass for new VAPs that appear after wireless restart
   info -c cli,vlan "Second pass for new VAPs..."
