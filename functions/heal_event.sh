@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.64"                     #
+#                  - File: heal_event.sh || version="0.65"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -168,43 +168,65 @@ if ! any_vlan_configured; then
   exit 0
 fi
 
-# Skip if vlan manager already busy (avoid holding our lock needlessly)
+# Skip if vlan manager already busy (avoid holding our lock needlessly).
+# Uses the shared lock-state helper so a CRASHED manager (lock dir left behind
+# with a dead/absent PID) cannot block every future heal forever — that was the
+# old failure mode that required a manual cleanup or reboot.
 MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
-if [ -d "$MANAGER_LOCK" ]; then
-  info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active"
-  exit 0
+if type merv_lock_state >/dev/null 2>&1; then
+  _mgr_state=$(merv_lock_state "$MANAGER_LOCK")
+else
+  # lib_mervqt failed to load — fall back to the legacy blunt check.
+  _mgr_state="legacy"
 fi
+case "$_mgr_state" in
+  active|unknown_recent)
+    info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active (${_mgr_state})"
+    exit 0
+    ;;
+  stale)
+    warn -c vlan "Heal: mervlan_manager.lock is stale — reclaiming and continuing"
+    rm -rf "$MANAGER_LOCK" 2>/dev/null || :
+    ;;
+  legacy)
+    if [ -d "$MANAGER_LOCK" ]; then
+      info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active"
+      exit 0
+    fi
+    ;;
+  absent)
+    :
+    ;;
+esac
 
 # Ensure locks directory exists for all lock/cooldown files
 mkdir -p "$LOCKDIR" 2>/dev/null
 
-# Hard mutex using mkdir (atomic on POSIX). Replaces the previous silent
-# exit-on-contention so we can diagnose pile-ups. Adds stale-lock recovery:
-# if the lock directory's mtime exceeds HEAL_LOCK_STALE_SEC (default 600s),
-# a previous heal almost certainly crashed without cleaning up — reclaim it
-# rather than blocking every subsequent event forever.
+# Hard mutex via the shared lock primitive (lib_mervqt.sh). This is the same
+# implementation the manager uses: mkdir + pid + a `created` epoch stamp, with
+# age derived from that stamp via merv_lock_age — NOT `stat -c %Y`, which is
+# unreliable on BusyBox and previously produced bogus ages (~1.7e9s) that broke
+# stale detection. Non-blocking (max_wait_iters=0): heal skips on contention
+# rather than queueing. A crashed heal is reclaimed once HEAL_LOCK_STALE_SEC
+# elapses instead of wedging every future event.
 LOCK="$LOCKDIR/vlan_event.lock"
-HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-600}"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  # Check age of the existing lock for staleness recovery.
-  _lock_mtime=$(stat -c %Y "$LOCK" 2>/dev/null || echo 0)
-  case "$_lock_mtime" in ''|*[!0-9]*) _lock_mtime=0 ;; esac
-  _lock_now=$(date +%s 2>/dev/null || echo 0)
-  case "$_lock_now" in ''|*[!0-9]*) _lock_now=0 ;; esac
-  _lock_age=$(( _lock_now - _lock_mtime ))
-  if [ "$_lock_mtime" -gt 0 ] && [ "$_lock_age" -ge "$HEAL_LOCK_STALE_SEC" ]; then
-    warn -c vlan "Heal: vlan_event.lock stale (age=${_lock_age}s >= ${HEAL_LOCK_STALE_SEC}s) — reclaiming"
-    rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null
-    if ! mkdir "$LOCK" 2>/dev/null; then
-      info -c vlan "Heal: skipping [${1:-initial}] — another instance acquired lock after reclaim"
-      exit 0
-    fi
+HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-${MERV_HEAL_LOCK_STALE_SEC:-180}}"
+if type merv_lock_acquire >/dev/null 2>&1; then
+  if merv_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
+    trap 'merv_lock_release "$LOCK" 2>/dev/null' EXIT INT TERM
   else
-    info -c vlan "Heal: skipping [${1:-initial}] — another instance holds vlan_event.lock (age=${_lock_age}s)"
+    info -c vlan "Heal: skipping [${1:-initial}] — vlan_event.lock held by another instance"
     exit 0
   fi
+else
+  # lib_mervqt unavailable — degrade to a plain non-stale mutex. No buggy
+  # stat-based age math here; better to occasionally skip than to wedge.
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    info -c vlan "Heal: skipping [${1:-initial}] — vlan_event.lock present (lib unavailable)"
+    exit 0
+  fi
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 
 # ============================================================================ #
 #                         COOLDOWN & DEBOUNCE LOGIC                            #
@@ -476,210 +498,11 @@ evict_wl_from_br0() {
 }
 
 # Script-level state for repair-log deduplication — reset once per process invocation.
-_MERV_QT_SHIELD_STATE=""
-MERV_DHCP_HOLD_CHAIN="MERV_DHCP_HOLD"
-
-# ============================================================================ #
-# restore_merv_qt_shield                                                       #
-# Called every tick inside wait_for_rc_quiet to re-arm the MERV_QT ebtables   #
-# chain if Asuswrt's rc daemon flushed it during a rebuild sequence.           #
-# Recreates the chain, re-inserts FORWARD/INPUT jumps (idempotent), and       #
-# re-adds DROP rules for every guest wireless subinterface present in sysfs.  #
-# Accepts an optional pre-fetched ebtables dump ($1) to avoid redundant reads. #
-# Returns immediately (no-op) if ebtables is unavailable or chain is intact.  #
-# ============================================================================ #
-restore_merv_qt_shield() {
-  type ebtables >/dev/null 2>&1 || return 0
-
-  # Accept shared dump from wait_for_rc_quiet, or fetch independently
-  local full_rules="${1:-}"
-  [ -n "$full_rules" ] || full_rules=$(ebtables -t filter -L 2>/dev/null)
-
-  local chain_exists=1
-  local jumps_exist=1
-
-  # 1. Did the chain survive?
-  printf '%s' "$full_rules" | grep -qF 'Bridge chain: MERV_QT' || chain_exists=0
-
-  # 2. Did both jump rules (FORWARD and INPUT) survive?
-  # Must check even when chain exists — Asuswrt rc may flush the FORWARD/INPUT
-  # chains (ebtables -F FORWARD) without touching MERV_QT, leaving the chain
-  # intact but orphaned: DROP rules present but never reached.
-  # MERV_QT's own rules use -j DROP, so any '-j MERV_QT' match originates
-  # exclusively from FORWARD/INPUT jump rules. Count >= 2 means both are present.
-  # Pattern 'j MERV_QT' (no leading dash): matches '-j MERV_QT' jump rules but NOT
-  # 'Bridge chain: MERV_QT' (preceding char is ':' not 'j'). Avoids BusyBox v1.25.1
-  # grep misinterpreting a leading '-j' pattern as an option flag.
-  if [ "$chain_exists" -eq 1 ]; then
-    if [ "$(printf '%s' "$full_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
-      jumps_exist=0
-    fi
-  else
-    jumps_exist=0
-  fi
-
-  # Fast path: shield is completely intact — nothing to do
-  if [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ]; then
-    # Opportunistic stale-gate sweep: if a previous crash left the emergency
-    # DHCP gate rule in FORWARD, remove it now. -D is a no-op (exit 0) when
-    # the rule is absent, so this costs one ebtables syscall per tick during
-    # normal healthy operation — negligible. Without this, a crash between
-    # gate-install and gate-remove in step 3 would leave the DROP rule
-    # permanently blocking br0 DHCP even after the chain is fully restored,
-    # because a healthy chain never re-enters step 3.
-    ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-      --logical-in br0 -j DROP 2>/dev/null || true
-    case "$_MERV_QT_SHIELD_STATE" in
-      ""|"ok") ;;
-      *) info -c vlan "Heal: MERV_QT shield stable — firmware flushing stopped" ;;
-    esac
-    _MERV_QT_SHIELD_STATE="ok"
-    return 0
-  fi
-
-  # 3. Re-link jump rules (covers both orphaned-chain and full-wipe cases)
-  # Reactive DHCP gate: temporarily block DHCP DISCOVER/REQUEST in br0
-  # while inserting jump rules so the <2ms re-link window cannot be
-  # exploited by a client sending DHCP before MERV_QT is back in FORWARD.
-  # Stale-gate cleanup is idempotent: -D is a no-op if the rule is absent.
-  ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-    --logical-in br0 -j DROP 2>/dev/null || true
-  ebtables -t filter -I FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-    --logical-in br0 -j DROP 2>/dev/null || true
-  ebtables -t filter -N MERV_QT 2>/dev/null || true
-  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -L INPUT   2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I INPUT   -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-    --logical-in br0 -j DROP 2>/dev/null || true
-
-  # 4. Rebuild per-interface DROP rules only if the chain itself was wiped.
-  # If only jumps were flushed the chain and its rules are intact — skip rebuild.
-  if [ "$chain_exists" -eq 0 ]; then
-    local iface_path iface
-    # Install DROP rules only for MERVLAN-managed interfaces. Firmware-owned
-    # wl subinterfaces (e.g. AiMesh management SSIDs like wl0.1 on nodes)
-    # legitimately reside in br0 and must never receive a DROP rule here.
-    # Fall back to the sysfs scan only when the settings resolver is absent
-    # (partial install / test environment).
-    if type merv_qt_ensure_expected_rules >/dev/null 2>&1; then
-      # Delegate to the VID-filtered authoritative ensure function.
-      # Prevents native/br0 interfaces (e.g. wl2.5 none) from receiving DROP rules.
-      merv_qt_ensure_expected_rules
-    elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
-      # Defensive fallback: VID-filtered inline loop (same policy as ensure function).
-      merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r _qt_iface _qt_vid; do
-        [ -n "$_qt_iface" ] && [ -n "$_qt_vid" ] || continue
-        case "$_qt_vid" in
-          ''|none|trunk|0|1|*[!0-9]*) continue ;;
-        esac
-        [ "$_qt_vid" -ge 2 ] 2>/dev/null || continue
-        ebtables -t filter -A MERV_QT -i "$_qt_iface" --logical-in br0 -j DROP 2>/dev/null || true
-      done
-    else
-      # Last-resort sysfs scan. This is intentionally unsafe for production because
-      # it cannot distinguish VLAN-bound VAPs from br0-intended VAPs. It exists only
-      # for partial-install/test recovery when merv_mac_build_expected_iface_vid is
-      # unavailable.
-      for iface_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
-        [ -e "$iface_path" ] || continue
-        iface="${iface_path##*/}"
-        ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
-      done
-    fi
-    [ "$_MERV_QT_SHIELD_STATE" = "wiped" ] || \
-      info -c vlan "Heal: MERV_QT chain flushed by rc — fully rebuilt shield"
-    _MERV_QT_SHIELD_STATE="wiped"
-  else
-    [ "$_MERV_QT_SHIELD_STATE" = "orphaned" ] || \
-      info -c vlan "Heal: MERV_QT orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
-    _MERV_QT_SHIELD_STATE="orphaned"
-  fi
-}
-
-merv_qt_ensure_expected_rules() {
-  local iface vid qt_rules
-
-  type ebtables >/dev/null 2>&1 || return 0
-
-  ebtables -t filter -N MERV_QT 2>/dev/null || true
-  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -L INPUT 2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I INPUT -j MERV_QT 2>/dev/null || true
-
-  merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r iface vid; do
-    [ -n "$iface" ] && [ -n "$vid" ] || continue
-
-    # Only quarantine VLAN-bound VAPs (real VID >= 2, purely numeric).
-    # Never quarantine intentionally-native/br0 interfaces.
-    # *[!0-9]* catches malformed resolver output (e.g. "187,188", "vlan187").
-    case "$vid" in
-      ''|none|trunk|0|1|*[!0-9]*) continue ;;
-    esac
-    [ "$vid" -ge 2 ] 2>/dev/null || continue
-
-    qt_rules=$(ebtables -t filter -L MERV_QT 2>/dev/null)
-    if printf '%s\n' "$qt_rules" | grep -qF -- "-i $iface" &&
-       printf '%s\n' "$qt_rules" | grep -qF -- "logical-in br0"; then
-      continue
-    fi
-
-    ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
-  done
-}
-
-merv_dhcp_hold_arm() {
-  # Temporary critical-section DHCP kill switch.
-  # Blocks DHCP requests entering br0 while heal/manager is active.
-  local _hold_rules _changed _quiet
-
-  _quiet="${1:-0}"
-  _changed=0
-
-  type ebtables >/dev/null 2>&1 || return 0
-
-  ebtables -t filter -N "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null && _changed=1
-
-  _hold_rules=$(ebtables -t filter -L "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
-  if ! printf '%s\n' "$_hold_rules" | grep -qF 'DROP'; then
-    ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || true
-    _changed=1
-  fi
-
-  if ! ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
-    ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-    _changed=1
-  fi
-
-  if ! ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
-    ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-    _changed=1
-  fi
-
-  echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
-  [ "$_changed" -eq 1 ] && [ "$_quiet" != "quiet" ] && \
-    info -c vlan "DHCP hold: armed for br0 critical section"
-}
-
-merv_dhcp_hold_release() {
-  type ebtables >/dev/null 2>&1 || return 0
-
-  while ebtables -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
-  while ebtables -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
-
-  ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-  ebtables -t filter -X "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-
-  rm -f "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
-  info -c vlan "DHCP hold: released"
-}
-
-merv_dhcp_hold_restore_if_active() {
-  [ -f "$LOCKDIR/merv_dhcp_hold.active" ] || return 0
-  merv_dhcp_hold_arm quiet
-}
+# restore_merv_qt_shield, merv_qt_ensure_expected_rules and the merv_dhcp_hold_*
+# helpers now live in settings/lib_mervqt.sh (sourced above) so heal_event.sh,
+# mervlan_manager.sh and the MERV_MAC snapshot all share one implementation and
+# can never drift apart. The shared functions read MERV_DHCP_HOLD_CHAIN from
+# var_settings.sh.
 
 rc_queue_has() {
   [ -f /tmp/rc_service ] && grep -E "$1" /tmp/rc_service 2>/dev/null | grep -qv '^$'
@@ -1176,8 +999,18 @@ EVENT=$(printf '%s' "$RAW_EVENT" | tr 'A-Z' 'a-z' | tr ' ' '_' | tr '-' '_')
 EVENT=$(printf '%s' "$EVENT" | tr -s '_' '_' | sed 's/^_//; s/_$//')
 EVENT_LABEL="$EVENT"
 
-# Skip heal attempts while mervlan_manager is already applying changes
-if [ -d "$MANAGER_LOCK" ]; then
+# Skip heal attempts while mervlan_manager is already applying changes.
+# Use the shared lock-state helper (not a raw [ -d ]) so a CRASHED manager that
+# left mervlan_manager.lock behind with a dead/absent PID cannot block every
+# subsequent heal event here — the same stale-safe guarantee applied at entry.
+if type merv_lock_state >/dev/null 2>&1; then
+  case "$(merv_lock_state "$MANAGER_LOCK")" in
+    active|unknown_recent)
+      info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active"
+      exit 0
+      ;;
+  esac
+elif [ -d "$MANAGER_LOCK" ]; then
   info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active"
   exit 0
 fi
@@ -1506,8 +1339,16 @@ if should_heal_event "$EVENT"; then
       info -c vlan "Heal: scheduling deferred recheck in 90s for [$EVENT_LABEL]"
       (
         sleep 90
-        # Skip if manager is already running (concurrent apply in progress)
-        [ -d "$MANAGER_LOCK" ] && exit 0
+        # Skip if manager is genuinely running (concurrent apply in progress).
+        # Use the stale-safe helper so a crashed manager's leftover lock does
+        # not suppress the deferred recheck; the child heal re-checks anyway.
+        if type merv_lock_state >/dev/null 2>&1; then
+          case "$(merv_lock_state "$MANAGER_LOCK")" in
+            active|unknown_recent) exit 0 ;;
+          esac
+        elif [ -d "$MANAGER_LOCK" ]; then
+          exit 0
+        fi
         "$MERV_BASE/functions/heal_event.sh" "deferred_${EVENT}"
       ) >/dev/null 2>&1 &
       ;;
