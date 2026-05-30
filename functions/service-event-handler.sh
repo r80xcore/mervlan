@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.56"                  #
+#          - File: service-event-handler.sh || version="0.57"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -22,6 +22,28 @@
 # ========================================================================== #
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
+
+# ========================================================================== #
+# HANDLER TUNABLES (self-contained)                                          #
+# ========================================================================== #
+# All timing knobs for this handler live here so they can be found and tuned
+# in one place. These are deliberately NOT sourced from settings/var_settings.sh:
+# the handler runs in the DHCP-sensitive hot path and must stay dependency-free
+# and lightweight. Each uses ${VAR:-default} so an env override still wins for
+# testing.
+#
+#   LOCKDIR              — shared lock/stamp directory (matches var_settings.sh)
+#   DEBOUNCE_SECONDS     — reject the same event re-firing within this window
+#   STALE_LOCK_SECONDS   — reclaim a held .lock left behind by a crashed script.
+#                          Must exceed the longest script this handler launches.
+#   MERV_HEAL_EVENT_DEBOUNCE — handler-level debounce for heal storms (rc floods)
+#   MERV_HEAL_DELAY      — fire-and-forget delay before launching heal_event.sh
+#                          for non-wireless system events
+LOCKDIR="${LOCKDIR:-/tmp/mervlan_tmp/locks}"
+DEBOUNCE_SECONDS="${DEBOUNCE_SECONDS:-3}"
+STALE_LOCK_SECONDS="${STALE_LOCK_SECONDS:-300}"
+MERV_HEAL_EVENT_DEBOUNCE="${MERV_HEAL_EVENT_DEBOUNCE:-5}"
+MERV_HEAL_DELAY="${MERV_HEAL_DELAY:-3}"
 
 # ========================================================================== #
 # PARAMETER EXTRACTION & VALIDATION — Parse event action from arguments      #
@@ -139,12 +161,9 @@ fi
 
 # Lightweight debounce/lock mechanism prevents concurrent execution of same event
 # Uses directory creation as atomic lock (mkdir fails if dir exists = already locked)
-# Lockdir stores both lock dirs (.lock) and timestamp files (.last) for debounce
-LOCKDIR="/tmp/mervlan_tmp/locks"
-DEBOUNCE_SECONDS=3
-# Separate threshold for treating a held lock as stale (crashed script left it behind).
-# Must be longer than the longest script this handler can launch (~5 min = 300s).
-STALE_LOCK_SECONDS=300
+# Lockdir stores both lock dirs (.lock) and timestamp files (.last) for debounce.
+# Timing knobs (LOCKDIR, DEBOUNCE_SECONDS, STALE_LOCK_SECONDS) are defined in the
+# HANDLER TUNABLES block at the top of this file.
 # Create lock directory structure (ignore errors if it already exists)
 mkdir -p "$LOCKDIR" 2>/dev/null || :
 
@@ -340,7 +359,7 @@ case "${TYPE}_${EVENT}" in
 
     # Handler-level debounce for system events (prevents heal storms from rc event floods)
     HEAL_STAMP="$LOCKDIR/heal_event.last"
-    HEAL_WINDOW="${MERV_HEAL_EVENT_DEBOUNCE:-5}"
+    HEAL_WINDOW="$MERV_HEAL_EVENT_DEBOUNCE"
     now="$(date +%s 2>/dev/null || echo 0)"
     last="$(cat "$HEAL_STAMP" 2>/dev/null || echo 0)"
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -364,7 +383,11 @@ case "${TYPE}_${EVENT}" in
       # Remove any stale gate first so duplicate rules never accumulate.
       ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
         --logical-in br0 -j DROP 2>/dev/null || true
+      ebtables -t filter -D INPUT -p IPv4 --ip-proto udp --ip-dport 67 \
+        --logical-in br0 -j DROP 2>/dev/null || true
       ebtables -t filter -I FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+        --logical-in br0 -j DROP 2>/dev/null || true
+      ebtables -t filter -I INPUT -p IPv4 --ip-proto udp --ip-dport 67 \
         --logical-in br0 -j DROP 2>/dev/null || true
       for _se_chain in MERV_QT MERV_MAC; do
         if ebtables -t filter -L "$_se_chain" >/dev/null 2>&1; then
@@ -375,6 +398,8 @@ case "${TYPE}_${EVENT}" in
         fi
       done
       ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
+        --logical-in br0 -j DROP 2>/dev/null || true
+      ebtables -t filter -D INPUT -p IPv4 --ip-proto udp --ip-dport 67 \
         --logical-in br0 -j DROP 2>/dev/null || true
     fi
 
@@ -388,7 +413,7 @@ case "${TYPE}_${EVENT}" in
         _se_heal_delay=0
         ;;
       *)
-        _se_heal_delay="${MERV_HEAL_DELAY:-3}"
+        _se_heal_delay="$MERV_HEAL_DELAY"
         ;;
     esac
     logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async, delay=${_se_heal_delay}s)"
