@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                 - File: mac_refresh.sh || version="0.1"                      #
+#                 - File: mac_refresh.sh || version="0.2"                      #
 # ============================================================================ #
 # Purpose: Clear the MERV_MAC client db and rebuild from a fresh wl assoclist
 #   snapshot. Called from the UI "MAC Shield Refresh" button.
@@ -47,6 +47,26 @@ DRY_RUN="no"
 # SSID filter must be initialized for get_ssid_slot_value / get_vlan_slot_value
 MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 ssid_filter_init "$MERV_NODE_ID"
+
+# ----------------------------------------------------------- Concurrency lock --
+# This flushes and rebuilds the MERV_MAC db + ebtables chain. Two concurrent
+# refreshes would race the same db files and chain, so take a NON-BLOCKING
+# self-lock: a second refresh skips rather than corrupting state. Skip-on-
+# contention can never deadlock, and a crashed refresh is reclaimed after the
+# stale window. Best-effort — if the lib is somehow absent we proceed unguarded
+# rather than block a security-relevant rebuild.
+MAC_REFRESH_LOCK="$LOCKDIR/mac_refresh.lock"
+MAC_REFRESH_LOCK_ACQUIRED=0
+if type merv_lock_acquire >/dev/null 2>&1; then
+  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  if merv_lock_acquire "$MAC_REFRESH_LOCK" "${MERV_MAC_REFRESH_LOCK_STALE_SEC:-60}" 0 "mac_refresh"; then
+    MAC_REFRESH_LOCK_ACQUIRED=1
+    trap '[ "$MAC_REFRESH_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$MAC_REFRESH_LOCK" 2>/dev/null' EXIT INT TERM
+  else
+    info -c cli,vlan "MAC Refresh: another refresh is in progress — skipping"
+    exit 0
+  fi
+fi
 
 # -------------------------------------------------------------- Main action --
 _mac_pre_f="${MERV_MAC_DB_ACTIVE}.pre.$$"
