@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.2"                #
+#               - File: mac_shield_snapshot.sh || version="0.3"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -132,6 +132,50 @@ $nvram_ssids
 _NVRAM_
 
   done | awk '!seen[$1]++'
+}
+
+# ============================================================================
+# merv_iface_vid_list — cached wrapper for merv_mac_build_expected_iface_vid
+#
+# Returns the same output as the underlying builder. When the cache is enabled
+# (merv_iface_vid_cache_enable) the result is computed once and reused until
+# either the cache is invalidated (merv_iface_vid_cache_invalidate) or
+# disabled (merv_iface_vid_cache_disable).
+#
+# Cache scope: in-memory shell variable. Process-local. Subshells (pipelines)
+# do NOT mutate the parent's cache, so callers that consume output via a pipe
+# still benefit because the parent shell populates the cache before the pipe.
+#
+# Callers that MUST see fresh state (final security check, snapshot
+# preconditions) should call merv_mac_build_expected_iface_vid directly and
+# bypass this wrapper.
+# ============================================================================
+_MERV_IFACE_VID_CACHE=""
+_MERV_IFACE_VID_CACHE_ON=0
+
+merv_iface_vid_cache_enable() {
+  _MERV_IFACE_VID_CACHE_ON=1
+  _MERV_IFACE_VID_CACHE=""
+}
+
+merv_iface_vid_cache_invalidate() {
+  _MERV_IFACE_VID_CACHE=""
+}
+
+merv_iface_vid_cache_disable() {
+  _MERV_IFACE_VID_CACHE_ON=0
+  _MERV_IFACE_VID_CACHE=""
+}
+
+merv_iface_vid_list() {
+  if [ "${_MERV_IFACE_VID_CACHE_ON:-0}" = "1" ]; then
+    if [ -z "$_MERV_IFACE_VID_CACHE" ]; then
+      _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null)
+    fi
+    [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+    return 0
+  fi
+  merv_mac_build_expected_iface_vid 2>/dev/null
 }
 
 # ============================================================================
@@ -320,8 +364,21 @@ merv_mac_maybe_trigger_heal_on_precondition_fail() {
   [ -n "$MERV_BASE" ] || return 0
   [ -x "$MERV_BASE/functions/heal_event.sh" ] || return 0
 
-  # Don't pile on a running apply.
-  if [ -d "$LOCKDIR/mervlan_manager.lock" ]; then
+  # Don't pile on a running apply — but never let a CRASHED manager (stale lock
+  # directory with a dead/absent PID) suppress MERV_MAC-triggered recovery
+  # forever. Use the shared lock-state helper; fall back to the blunt check if
+  # lib_mervqt is somehow not loaded in this context.
+  if type merv_lock_state >/dev/null 2>&1; then
+    case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
+      active|unknown_recent)
+        info -c vlan "MERV_MAC: precondition fail — heal not queued (mervlan_manager active)"
+        return 0
+        ;;
+      stale)
+        warn -c vlan "MERV_MAC: mervlan_manager.lock stale — ignoring for heal trigger"
+        ;;
+    esac
+  elif [ -d "$LOCKDIR/mervlan_manager.lock" ]; then
     info -c vlan "MERV_MAC: precondition fail — heal not queued (mervlan_manager active)"
     return 0
   fi
