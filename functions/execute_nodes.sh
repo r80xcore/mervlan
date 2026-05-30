@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: execute_nodes.sh || version="0.52"                    #
+#                - File: execute_nodes.sh || version="0.53"                    #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -28,9 +28,29 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+
+# ----------------------------------------------------------- Concurrency lock --
+# execute_nodes orchestrates a local manager apply plus remote node runs. The
+# local manager self-locks, but two overlapping execute_nodes invocations (e.g.
+# UI double-submit) would still fire redundant remote work. Take a NON-BLOCKING
+# self-lock so the second invocation skips cleanly. Lower urgency than sync/
+# mac_refresh (no local config files are overwritten here), hence best-effort.
+EXEC_NODES_LOCK="$LOCKDIR/execute_nodes.lock"
+EXEC_NODES_LOCK_ACQUIRED=0
+if type merv_lock_acquire >/dev/null 2>&1; then
+  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  if merv_lock_acquire "$EXEC_NODES_LOCK" "${MERV_SYNC_LOCK_STALE_SEC:-600}" 0 "execute_nodes"; then
+    EXEC_NODES_LOCK_ACQUIRED=1
+    trap '[ "$EXEC_NODES_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null' EXIT INT TERM
+  else
+    warn -c cli,vlan "Execute: another execute_nodes run is in progress — skipping"
+    exit 0
+  fi
+fi
 # ============================================================================ #
 #                          INITIALIZATION & LOGGING                            #
 # Display welcome message and prepare for node execution. Log script           #
