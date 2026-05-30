@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: settings/lib_br0_guard.sh || version="0.1"              #
+#             - File: settings/lib_br0_guard.sh || version="0.2"              #
 # ============================================================================ #
 # - Purpose:    Runtime br0 bridge membership guard.                           #
 #               Protects against Asuswrt/Broadcom restart_wireless races      #
@@ -54,7 +54,11 @@ _merv_guard_log() {
 # Returns nothing (and is safe) if that function is not loaded.                #
 # ---------------------------------------------------------------------------- #
 merv_managed_wl_ifaces() {
-  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+  if type merv_iface_vid_list >/dev/null 2>&1; then
+    merv_iface_vid_list \
+      | awk '{print $1}' \
+      | grep -E '^(wl|ra|ath)[0-9].*\.[0-9]+$'
+  elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
     merv_mac_build_expected_iface_vid 2>/dev/null \
       | awk '{print $1}' \
       | grep -E '^(wl|ra|ath)[0-9].*\.[0-9]+$'
