@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.70"                   #
+#               - File: mervlan_manager.sh || version="0.70.1"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -379,28 +379,45 @@ fi
 LOCK_ACQUIRED=0
 
 acquire_script_lock() {
-  # Prevent concurrent runs from stomping on bridges/interfaces (mkdir-based lock)
-  # Skip lock acquisition in dry-run mode
+  # Prevent concurrent runs from stomping on bridges/interfaces. The lock
+  # primitive (mkdir + pid + created stamp + kill -0 liveness + stale reclaim)
+  # lives in lib_mervqt.sh so heal, MERV_MAC refresh and this manager all share
+  # one proven implementation. Without it, a crashed/killed manager would leave
+  # a directory that blocks every future heal forever.
   [ "$DRY_RUN" = "yes" ] && return 0
   [ -n "$LOCK_PATH" ] || return 0
-  attempts=0
-  while ! mkdir "$LOCK_PATH" 2>/dev/null; do
-    if [ $attempts -ge 30 ]; then
-      error -c cli,vlan "Another mervlan_manager run appears active; aborting"
-      exit 1
-    fi
-    warn -c cli,vlan "Another run in progress (lock $LOCK_PATH); waiting..."
-    sleep 2
-    attempts=$((attempts + 1))
-  done
-  LOCK_ACQUIRED=1
+
+  # Courtesy yield to an in-flight heal: heal is non-blocking and short-lived,
+  # so a single brief wait lets it finish reading interface state before we
+  # start mutating bridges. This is a BEST-EFFORT yield only — we NEVER abort
+  # or reclaim heal's lock here. A crashed heal that left vlan_event.lock behind
+  # must not delay or block the manager beyond this one short sleep, so we do
+  # not loop, do not honour 'stale', and do not exit. This deliberately keeps
+  # the manager's escape surface unchanged: the manager always proceeds.
+  if type merv_lock_state >/dev/null 2>&1; then
+    case "$(merv_lock_state "$LOCKDIR/vlan_event.lock")" in
+      active|unknown_recent)
+        info -c cli,vlan "Manager: heal in flight — yielding briefly before apply"
+        sleep 3
+        ;;
+    esac
+  fi
+
+  local stale
+  stale="${MERV_MANAGER_LOCK_STALE_SEC:-420}"
+  if merv_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
+    LOCK_ACQUIRED=1
+  else
+    error -c cli,vlan "Could not acquire mervlan_manager lock; aborting"
+    exit 1
+  fi
 }
 
 release_script_lock() {
   # No-op in dry-run
   [ "$DRY_RUN" = "yes" ] && return 0
   [ "$LOCK_ACQUIRED" -eq 1 ] || return
-  rmdir "$LOCK_PATH" 2>/dev/null || :
+  merv_lock_release "$LOCK_PATH"
   LOCK_ACQUIRED=0
 }
 
@@ -454,13 +471,10 @@ wait_for_interface() {
 
     # Active shield defense during backoff — a late rc wakeup during a long
     # exponential wait can wipe ebtables while bind_configured_ssids is still
-    # waiting for a slow interface. Mirrors the manager's wait_for_rc_quiet
-    # inline restore logic: full rebuild if chain is wiped, re-link if orphaned.
-    if type ebtables >/dev/null 2>&1; then
-      _wf_rules=$(ebtables -t filter -L 2>/dev/null)
-      ebt_quarantine_ensure_expected_rules
-      type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wf_rules"
-    fi
+    # waiting for a slow interface. One unified guard tick restores QT + MAC +
+    # DHCP hold from a single ebtables read, each path fast-pathing to a no-op
+    # when its chain and jumps are intact (no expensive rebuild per attempt).
+    merv_guard_tick
 
     # Exponential backoff: 1<<attempt seconds (BusyBox-safe)
     sleep $((1 << attempt))
@@ -1226,15 +1240,22 @@ set_ap_isolation() {
 # Initial pass is immediate; the post-restart second pass acts as the VAP safety net.
 # Also restores unconfigured SSIDs to br0 (prevents orphaning on VLAN changes)
 bind_configured_ssids() {
-  # Build a quick summary of which SSID slots pass the filter
+  # Pre-scan: build the list of configured + filter-allowed slot numbers in a
+  # single pass. The bind loop below iterates only this list, avoiding the
+  # double JSON read (get_ssid_slot_value + get_vlan_slot_value) for empty or
+  # filter-denied slots on every apply. On a 12-slot config with 3 populated
+  # SSIDs this skips ~18 sed scans per pass (called twice per apply).
   _filter_allowed=""
   _filter_denied=""
+  _configured_slots=""
   _fi=1
   while [ "$_fi" -le "$MAX_SSIDS" ]; do
     if is_ssid_slot_allowed "$_fi" "$SETTINGS_FILE"; then
       _fs=$(get_ssid_slot_value "$_fi" "$SETTINGS_FILE")
-      [ "$_fs" != "unused-placeholder" ] && [ -n "$_fs" ] && \
+      if [ -n "$_fs" ] && [ "$_fs" != "unused-placeholder" ]; then
         _filter_allowed="${_filter_allowed} $(printf '%02d' "$_fi"):${_fs}"
+        _configured_slots="${_configured_slots} $_fi"
+      fi
     else
       _filter_denied="${_filter_denied} $(printf '%02d' "$_fi")"
     fi
@@ -1247,55 +1268,54 @@ bind_configured_ssids() {
   fi
   [ -z "$_filter_denied" ] || info -c vlan "SSID filter [${_SSID_FILTER_TOKEN}] denied slots:${_filter_denied}"
 
-  i=1
-  # Loop through all SSID slots (SSID_01, SSID_02, etc. up to MAX_SSIDS)
-  while [ $i -le "$MAX_SSIDS" ]; do
-    # Read SSID and VLAN settings via filter (respects node assignment)
+  # Fatal-filter check: the pre-scan above already invoked get_ssid_slot_value
+  # for slot 1, so SSID_FILTER_FATAL is set (or not) by the time we reach here.
+  if [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
+    error -c cli,vlan "bind_configured_ssids: aborting due to SSID filter fatal condition"
+    return 1
+  fi
+
+  # Bind loop: only configured + allowed slots. Unused/denied slots are not
+  # re-read and no longer emit a per-slot "skipped" log line — the pre-scan
+  # summary above already covers them.
+  for i in $_configured_slots; do
     ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
     vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
-    # Check for fatal filter condition after first accessor call
-    if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
-      error -c cli,vlan "bind_configured_ssids: aborting due to SSID filter fatal condition"
-      return 1
-    fi
-    # Apply defaults: empty SSID = placeholder, empty VLAN = untagged (none)
-    [ -z "$ssid" ] && ssid="unused-placeholder"
+    # Apply defaults: empty VLAN = untagged (none). Empty SSID is impossible
+    # here because the pre-scan filters those out, but keep the guard for
+    # robustness against race conditions on settings.json.
+    [ -z "$ssid" ] || [ "$ssid" = "unused-placeholder" ] && continue
     [ -z "$vlan" ] && vlan="none"
 
-    if [ "$ssid" != "unused-placeholder" ]; then
-      validate_vlan_id "$vlan" || { i=$((i+1)); continue; }
-      # Find ALL interfaces for this SSID (handles dual-band identical SSIDs)
-      IFN="$(find_if_by_ssid_any "$ssid")"
-      if [ -n "$IFN" ]; then
-        while IFS= read -r _ifn; do
-          [ -n "$_ifn" ] || continue
-          info -c cli,vlan "Resolved SSID '$ssid' -> $_ifn"
-          # Mark as managed before waiting — prevents the br0 sweep from
-          # catching a slower-starting band if wait_for_interface times out
-          note_bound_iface "$_ifn"
-          if ! wait_for_interface "$_ifn"; then
-            warn -c cli,vlan "$_ifn did not appear within timeout"
-            continue
-          fi
-          # Native Radio Safeguard: wl0/wl1 moved to VLAN bridges can break
-          # Broadcom firmware routing. Fall back to untagged unless overridden.
-          if is_native_radio "$_ifn" && [ "$vlan" != "none" ] && [ "$ENABLE_NATIVE_SSID" != "1" ]; then
-            warn -c cli,vlan "Refusing to tag native radio $_ifn with VLAN $vlan. Firmware may reject this."
-            info -c cli,vlan "Use Guest Networks instead, or force via ENABLE_NATIVE_SSID=1. Falling back to untagged."
-            attach_to_bridge "$_ifn" "none" "SSID_$(printf "%02d" $i) (Native Radio Fallback)"
-            continue
-          fi
-          attach_to_bridge "$_ifn" "$vlan" "SSID_$(printf "%02d" $i)"
-        done <<_SSID_EOF_
+    validate_vlan_id "$vlan" || continue
+    # Find ALL interfaces for this SSID (handles dual-band identical SSIDs)
+    IFN="$(find_if_by_ssid_any "$ssid")"
+    if [ -n "$IFN" ]; then
+      while IFS= read -r _ifn; do
+        [ -n "$_ifn" ] || continue
+        info -c cli,vlan "Resolved SSID '$ssid' -> $_ifn"
+        # Mark as managed before waiting — prevents the br0 sweep from
+        # catching a slower-starting band if wait_for_interface times out
+        note_bound_iface "$_ifn"
+        if ! wait_for_interface "$_ifn"; then
+          warn -c cli,vlan "$_ifn did not appear within timeout"
+          continue
+        fi
+        # Native Radio Safeguard: wl0/wl1 moved to VLAN bridges can break
+        # Broadcom firmware routing. Fall back to untagged unless overridden.
+        if is_native_radio "$_ifn" && [ "$vlan" != "none" ] && [ "$ENABLE_NATIVE_SSID" != "1" ]; then
+          warn -c cli,vlan "Refusing to tag native radio $_ifn with VLAN $vlan. Firmware may reject this."
+          info -c cli,vlan "Use Guest Networks instead, or force via ENABLE_NATIVE_SSID=1. Falling back to untagged."
+          attach_to_bridge "$_ifn" "none" "SSID_$(printf "%02d" $i) (Native Radio Fallback)"
+          continue
+        fi
+        attach_to_bridge "$_ifn" "$vlan" "SSID_$(printf "%02d" $i)"
+      done <<_SSID_EOF_
 $IFN
 _SSID_EOF_
-      else
-        warn -c cli,vlan "SSID_$(printf "%02d" $i) '$ssid' not found on any band"
-      fi
     else
-      info -c cli,vlan "SSID_$(printf "%02d" $i) skipped"
+      warn -c cli,vlan "SSID_$(printf "%02d" $i) '$ssid' not found on any band"
     fi
-    i=$((i+1))
   done
 
   BOUND_SET=" $BOUND_IFACES "
@@ -1486,13 +1506,18 @@ ebt_quarantine_add() {
 }
 
 ebt_quarantine_ensure_expected_rules() {
-  local _if _vid
+  local _if _vid _pairs
 
   type ebtables >/dev/null 2>&1 || return 0
   [ "$DRY_RUN" = "yes" ] && return 0
 
   ebt_quarantine_init
-  merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r _if _vid; do
+  if type merv_iface_vid_list >/dev/null 2>&1; then
+    _pairs=$(merv_iface_vid_list)
+  else
+    _pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null)
+  fi
+  printf '%s\n' "$_pairs" | while IFS=' ' read -r _if _vid; do
     [ -n "$_if" ] && [ -n "$_vid" ] || continue
     # Only quarantine VLAN-bound interfaces (real VID >= 2, purely numeric).
     # Intentionally-native/br0 interfaces (none, trunk, 0, 1) are excluded.
@@ -1552,7 +1577,11 @@ cleanup_existing_config() {
   # are excluded so they can continue handling AiMesh provisioning traffic.
   ebt_quarantine_ensure_expected_rules
   _qt_count=0
-  _qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+  if type merv_iface_vid_list >/dev/null 2>&1; then
+    _qt_ifaces=$(merv_iface_vid_list | awk '{print $1}')
+  else
+    _qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+  fi
   for _qt_if in $_qt_ifaces; do
     [ -n "$_qt_if" ] || continue
     _qt_count=$((_qt_count + 1))
@@ -1622,54 +1651,9 @@ rc_proc_busy() {
   ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$pattern" >/dev/null 2>&1
 }
 
-merv_dhcp_hold_arm() {
-  local _hold_rules _changed _quiet
-
-  _quiet="${1:-0}"
-  _changed=0
-
-  type ebtables >/dev/null 2>&1 || return 0
-
-  ebtables -t filter -N "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null && _changed=1
-
-  _hold_rules=$(ebtables -t filter -L "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
-  if ! printf '%s\n' "$_hold_rules" | grep -qF 'DROP'; then
-    ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || true
-    _changed=1
-  fi
-
-  if ! ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
-    ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-    _changed=1
-  fi
-
-  if ! ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
-    ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-    _changed=1
-  fi
-
-  echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
-  [ "$_changed" -eq 1 ] && [ "$_quiet" != "quiet" ] && \
-    info -c vlan "DHCP hold: armed for manager critical section"
-}
-
-merv_dhcp_hold_release() {
-  type ebtables >/dev/null 2>&1 || return 0
-
-  while ebtables -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
-  while ebtables -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
-
-  ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-  ebtables -t filter -X "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-
-  rm -f "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
-  info -c vlan "DHCP hold: released by manager"
-}
-
-merv_dhcp_hold_restore_if_active() {
-  [ -f "$LOCKDIR/merv_dhcp_hold.active" ] || return 0
-  merv_dhcp_hold_arm quiet
-}
+# merv_dhcp_hold_arm / merv_dhcp_hold_release / merv_dhcp_hold_restore_if_active
+# now live in settings/lib_mervqt.sh (sourced at the top of this script) so the
+# manager, heal_event.sh and the MERV_MAC snapshot share one implementation.
 
 merv_native_auth_snapshot() {
   local _auth_file _radio _key _nv
@@ -1771,8 +1755,12 @@ run_service_with_timeout() {
 
   elapsed=0
   while kill -0 "$spid" 2>/dev/null; do
-    # Keep broad DHCP hold alive while the service command is still active.
-    merv_dhcp_hold_restore_if_active
+    # restart_wireless / wlconf / switch restart can flush ebtables WHILE the
+    # service process is still alive. Restoring only the DHCP hold here would
+    # leave MERV_QT and MERV_MAC missing for the whole restart (30-90s) — an
+    # open L2 escape window for ARP/static-IP traffic, not just DHCP. Restore
+    # every guard layer each second (all fast-path to no-ops when intact).
+    merv_guard_tick
 
     if [ "$elapsed" -ge "$tmax" ]; then
       warn -c cli,vlan "service $cmd_string exceeded ${tmax}s; continuing without waiting"
@@ -1815,22 +1803,18 @@ wait_for_rc_quiet() {
 
   # Enforce expected MERV_QT rules once before the tick loop — ebt_quarantine_ensure_expected_rules
   # calls merv_mac_build_expected_iface_vid (expensive). Per-tick calls multiply that cost
-  # across every sleep interval. restore_merv_mac_shield handles per-tick chain repair.
+  # across every sleep interval. The per-tick guard tick below handles cheap chain repair.
   ebt_quarantine_ensure_expected_rules
   while :; do
-    # Re-arm L2 shields on every tick — rc's restart_wireless wipes all ebtables,
-    # so MERV_QT and MERV_MAC need active re-arming while wl interfaces sit in br0.
-    # Uses manager-local ebt_quarantine_* for MERV_QT (restore_merv_qt_shield is in
-    # heal_event.sh scope) and lib_mervqt's restore_merv_mac_shield for MERV_MAC.
-    # Each path is idempotent: no-op when chains and jump rules are already intact.
-    if type ebtables >/dev/null 2>&1; then
-      _wq_rules=$(ebtables -t filter -L 2>/dev/null)
-      type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_wq_rules"
-    fi
-
-    # During rc/wlconf we restore shields only.
-    # Do not brctl-delif VAPs here; that can fight Broadcom restart handling.
-    merv_dhcp_hold_restore_if_active
+    # Re-arm ALL L2 shields on every tick — rc's restart_wireless wipes ebtables,
+    # so MERV_QT, MERV_MAC and the DHCP hold all need active re-arming while wl
+    # interfaces sit in br0. merv_guard_tick reads the ebtables table once and
+    # repairs each layer; every path fast-paths to a no-op when intact, and only
+    # rebuilds expected DROP rules if a chain was fully wiped.
+    #
+    # During rc/wlconf we restore shields only. Do NOT brctl-delif VAPs here;
+    # that fights Broadcom restart handling and lengthens restart_wireless.
+    merv_guard_tick
 
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
@@ -2067,6 +2051,13 @@ main() {
   done
 
   # Cleanup phase: remove old VLAN infrastructure from previous runs
+  # Enable the iface→VID cache for the duration of the apply hot path. The
+  # cache is shared by ebt_quarantine_ensure_expected_rules, merv_managed_wl_ifaces
+  # (via lib_br0_guard.sh) and merv_qt_ensure_expected_rules. It is invalidated
+  # below after restart_services returns because rc/wlconf can reshuffle
+  # wl*.*_ifname NVRAM mappings, and disabled before the final security check
+  # and snapshot so they always see fresh state.
+  type merv_iface_vid_cache_enable >/dev/null 2>&1 && merv_iface_vid_cache_enable
   cleanup_existing_config
 
   # Configuration phase 1: Attach Ethernet LAN ports to appropriate bridges
@@ -2111,6 +2102,13 @@ main() {
     # Restart WiFi services to pick up new VAP configuration
     restart_services
 
+    # rc/wlconf may have reshuffled wl*.*_ifname NVRAM mappings during the
+    # restart. Invalidate the iface→VID cache so the next read rebuilds from
+    # post-rc NVRAM. The cache stays enabled and is repopulated on first use
+    # below — that one rebuild is then reused across all post-restart shield
+    # re-arm calls (soft evict + ebt_quarantine_ensure + post_qt rebuild).
+    type merv_iface_vid_cache_invalidate >/dev/null 2>&1 && merv_iface_vid_cache_invalidate
+
     # Immediate bridge-only sweep after restart_services returns:
     # rc/wlconf may already have recreated VAPs and attached them to br0.
     type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
@@ -2135,7 +2133,11 @@ main() {
       info -c cli,vlan "Re-arming L2 shields post-restart_wireless..."
       ebt_quarantine_ensure_expected_rules
       _post_qt_count=0
-      _post_qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+      if type merv_iface_vid_list >/dev/null 2>&1; then
+        _post_qt_ifaces=$(merv_iface_vid_list | awk '{print $1}')
+      else
+        _post_qt_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+      fi
       for _post_qt_if in $_post_qt_ifaces; do
         [ -n "$_post_qt_if" ] || continue
         _post_qt_count=$((_post_qt_count + 1))
@@ -2156,6 +2158,10 @@ main() {
   WATCHDOG_QUEUE_LOG=1
   export WATCHDOG_QUEUE_LOG
     bind_configured_ssids
+
+    # Disable the iface→VID cache so post_rc_watchdog, the final security
+    # check, and the backgrounded MERV_MAC snapshot all see fresh NVRAM.
+    type merv_iface_vid_cache_disable >/dev/null 2>&1 && merv_iface_vid_cache_disable
 
     post_rc_watchdog
 
