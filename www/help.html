@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-      <!-- help.html version="0.50" -->
+      <!-- help.html version="0.51" -->
   <meta charset="utf-8" />
   <title>MerVLAN VLAN Manager - Help & Usage Guide</title>
   <style>
@@ -347,6 +347,7 @@
     <div class="tab" data-tab="apply">Apply Changes</div>
     <div class="tab" data-tab="ssh">SSH Key Install</div>
     <div class="tab" data-tab="logs">Logs & Monitoring</div>
+    <div class="tab" data-tab="cli">CLI Usage</div>
     <div class="tab" data-tab="unsupported">Device Support</div>
     <div class="tab" data-tab="support">Get Help</div>
     <div class="tab" data-tab="wiki">Wiki</div>
@@ -563,7 +564,7 @@ RT-AX95Q 192.168.186.201:boot=enabled addon=node-on event=active cron=present is
 <p>Controls which devices in your network manage each SSID.</p>
 <ul>
   <li><strong>MAIN</strong> = the main router</li>
-  <li><strong>NODE1–NODE5</strong> = your configured access points or AiMesh nodes</li>
+  <li><strong>NODE1–NODE10</strong> = your configured access points or AiMesh nodes</li>
   <li>Multiple nodes can be selected per SSID</li>
   <li>Nodes without hardware detection are shown greyed out</li>
   <li>Defaults to MAIN — single-router users can ignore this entirely</li>
@@ -837,6 +838,119 @@ NODE2 (192.168.1.51):  br30</div>
   </tbody>
 </table>
 <div class="nav-footer">Need help? See the "Get Help" tab for support links →</div>
+</div>`,
+      cli: `<div class="help-section">
+<h2>CLI USAGE</h2>
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<p class="intro">These commands are useful when working over SSH on the main router. Most users should use the web UI first; CLI commands are mainly for recovery, manual updates, testing, and advanced troubleshooting.</p>
+
+<div class="note-box">
+  <strong>Run commands from the addon directory unless shown otherwise:</strong><br>
+  <code>cd /jffs/addons/mervlan</code>
+</div>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>MANUAL UPDATE COMMANDS</h2>
+<table class="device-table">
+  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>sh functions/update_mervlan.sh</code></td><td>Update from the stable/main channel.</td></tr>
+    <tr><td><code>sh functions/update_mervlan.sh dev</code></td><td>Update from the development channel.</td></tr>
+    <tr><td><code>sh functions/update_mervlan.sh update dev</code></td><td>Explicit development-channel update. Same intent as the UI dev update button.</td></tr>
+    <tr><td><code>sh functions/update_mervlan.sh restore</code></td><td>Open the restore flow and select one of the local MerVLAN backups.</td></tr>
+  </tbody>
+</table>
+
+<div class="info-box">
+  Updates preserve settings, SSH keys, MAC shield databases, and local backups where possible. After updating, the script refreshes the public web UI files and reapplies service hooks.
+</div>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>INSTALL, REINSTALL, AND UNINSTALL</h2>
+<table class="device-table">
+  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>sh install.sh full</code></td><td>Fresh install from the stable/main channel. Downloads the package, installs files, runs hardware probe, and sets up the UI.</td></tr>
+    <tr><td><code>sh install.sh full dev</code></td><td>Fresh install from the development channel.</td></tr>
+    <tr><td><code>TMP_DIR=/tmp/mervlan_staging sh install.sh download</code></td><td>Download a MerVLAN tarball to a staging folder without installing it.</td></tr>
+    <tr><td><code>TMP_DIR=/tmp/mervlan_staging sh install.sh tarball</code></td><td>Install from a previously downloaded tarball in the staging folder.</td></tr>
+    <tr><td><code>sh install.sh credentials</code></td><td>Update stored SSH username and SSH port only.</td></tr>
+    <tr><td><code>sh uninstall.sh</code></td><td>Remove the web UI entry and service hooks, but keep the addon files and data.</td></tr>
+    <tr><td><code>sh uninstall.sh full</code></td><td>Full uninstall. Removes web UI, hooks, addon files, data, and node-side install where possible.</td></tr>
+    <tr><td><code>sh uninstall.sh &amp;&amp; sh install.sh</code></td><td>Manual UI refresh/reinstall from the already-installed local files. Useful after manually changing <code>mervlan.asp</code>, public UI files, or install wiring without doing a full update.</td></tr>
+  </tbody>
+</table>
+
+<div class="note-box">
+  <strong>Be careful with full uninstall:</strong> it is intended for a clean removal or clean reinstall. Use normal uninstall + install when you only need to refresh the web UI mount and public files.
+</div>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>SERVICE AND BOOT CONTROL</h2>
+<table class="device-table">
+  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>sh functions/mervlan_boot.sh status</code></td><td>Show boot, addon, service-event, cron, node, and MAC shield state.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh enable</code></td><td>Enable MerVLAN at boot and enable the health cron.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh disable</code></td><td>Disable boot persistence and tear down active shield chains, while keeping settings and databases.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh setupenable</code></td><td>Install or repair service-event and services-start hooks.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh setupdisable</code></td><td>Remove MerVLAN hook blocks from service-event and services-start.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh cronenable</code></td><td>Enable the periodic health check cron job.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh crondisable</code></td><td>Disable the periodic health check cron job.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh nodeenable</code></td><td>Propagate node service setup to configured nodes over SSH.</td></tr>
+    <tr><td><code>sh functions/mervlan_boot.sh nodedisable</code></td><td>Remove MerVLAN service hooks from configured nodes over SSH.</td></tr>
+  </tbody>
+</table>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>MANUAL APPLY AND NODE OPERATIONS</h2>
+<table class="device-table">
+  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>sh functions/mervlan_manager.sh</code></td><td>Apply the current settings locally on the router.</td></tr>
+    <tr><td><code>sh functions/mervlan_manager.sh --dry-run</code></td><td>Run the manager without making live network changes.</td></tr>
+    <tr><td><code>sh functions/sync_nodes.sh</code></td><td>Copy MerVLAN files and node-filtered settings to configured nodes.</td></tr>
+    <tr><td><code>sh functions/execute_nodes.sh</code></td><td>Run the node apply workflow over SSH.</td></tr>
+    <tr><td><code>sh functions/execute_nodes.sh nodesonly</code></td><td>Run only the node-side apply workflow.</td></tr>
+    <tr><td><code>sh functions/hw_probe.sh</code></td><td>Refresh the local hardware profile in settings.json.</td></tr>
+  </tbody>
+</table>
+
+<div class="info-box">
+  The normal UI Apply path handles save, sync, local apply, and node apply in the expected order. Use these CLI commands when debugging or recovering from a partial state.
+</div>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>CLIENT LIST AND MAC SHIELD</h2>
+<table class="device-table">
+  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>sh functions/collect_clients.sh</code></td><td>Rebuild the Active VLAN Clients JSON from the main router and configured nodes.</td></tr>
+    <tr><td><code>sh functions/mac_refresh.sh</code></td><td>Clear and rebuild the MAC shield database from currently connected VLAN clients. Use after moving devices back to br0 so they do not stay blocked by old shield entries.</td></tr>
+    <tr><td><code>sh functions/mac_client_meta.sh</code></td><td>Materialize client display names and MAC shield overrides after metadata changes. Normally triggered by the UI.</td></tr>
+    <tr><td><code>cat /tmp/mervlan_tmp/mac_shield.db</code></td><td>Show the active in-RAM MAC shield database.</td></tr>
+    <tr><td><code>cat /jffs/addons/mervlan/tmp/mac_shield.db</code></td><td>Show the persistent JFFS MAC shield checkpoint.</td></tr>
+    <tr><td><code>cat /jffs/addons/mervlan/tmp/mac_shield_override.db</code></td><td>Show MACs that are unlocked from MAC shield blocking.</td></tr>
+    <tr><td><code>cat /jffs/addons/mervlan/tmp/client_name_override.db</code></td><td>Show friendly client-name mappings used by the UI.</td></tr>
+  </tbody>
+</table>
+
+<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<h2>LOGS AND QUICK DEBUGGING</h2>
+<table class="device-table">
+  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>tail -n 80 /tmp/mervlan_tmp/logs/cli_output.log</code></td><td>Show recent CLI output from UI-triggered actions.</td></tr>
+    <tr><td><code>tail -n 120 /tmp/mervlan_tmp/logs/vlan_manager.log</code></td><td>Show recent manager, heal, MAC shield, and service logs.</td></tr>
+    <tr><td><code>tail -n 80 /tmp/mervlan_tmp/logs/boot_wrap.log</code></td><td>Show recent boot wrapper activity.</td></tr>
+    <tr><td><code>cat /tmp/mervlan_tmp/results/vlan_clients.json</code></td><td>View the generated client inventory JSON used by the Active VLAN Clients panel.</td></tr>
+    <tr><td><code>: &gt; /tmp/mervlan_tmp/logs/cli_output.log</code></td><td>Clear the CLI output log manually.</td></tr>
+  </tbody>
+</table>
+
+<div class="note-box">
+  <strong>Do not run <code>service-event-handler.sh</code> directly.</strong> It expects firmware-provided service-event variables and is meant to be called by Asuswrt-Merlin, not by hand.
+</div>
 </div>`,
       unsupported: `<div class="help-section">
 
@@ -1184,7 +1298,7 @@ Use the APMO modal to configure your hardware profile manually.</p>
 
     const contentEl = document.getElementById('content');
     const tabs = document.querySelectorAll('.tab');
-    const HTML_SECTIONS = new Set(['start', 'ssid', 'lan', 'apply', 'ssh', 'logs', 'unsupported', 'support', 'wiki']);
+    const HTML_SECTIONS = new Set(['start', 'ssid', 'lan', 'apply', 'ssh', 'logs', 'cli', 'unsupported', 'support', 'wiki']);
 
     function showTab(tabName) {
       tabs.forEach(t => t.classList.remove('active'));
