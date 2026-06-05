@@ -29,11 +29,21 @@
     "NODE3": "none",
     "NODE4": "none",
     "NODE5": "none",
+    "NODE6": "none",
+    "NODE7": "none",
+    "NODE8": "none",
+    "NODE9": "none",
+    "NODE10": "none",
     "NODE1_ALIAS": "Node 1",
     "NODE2_ALIAS": "Node 2",
     "NODE3_ALIAS": "Node 3",
     "NODE4_ALIAS": "Node 4",
-    "NODE5_ALIAS": "Node 5"
+    "NODE5_ALIAS": "Node 5",
+    "NODE6_ALIAS": "Node 6",
+    "NODE7_ALIAS": "Node 7",
+    "NODE8_ALIAS": "Node 8",
+    "NODE9_ALIAS": "Node 9",
+    "NODE10_ALIAS": "Node 10"
   },
 
   "WiFi": {
@@ -67,19 +77,19 @@
       "APISO_12": "0"
     },
     "SSIDassign": {
-      "_description": "Node assignment per SSID slot (comma-separated: MAIN,NODE1..NODE5 or none)",
-      "SSIDassign_01": "MAIN,none,none,none,none,none",
-      "SSIDassign_02": "MAIN,none,none,none,none,none",
-      "SSIDassign_03": "MAIN,none,none,none,none,none",
-      "SSIDassign_04": "MAIN,none,none,none,none,none",
-      "SSIDassign_05": "MAIN,none,none,none,none,none",
-      "SSIDassign_06": "MAIN,none,none,none,none,none",
-      "SSIDassign_07": "MAIN,none,none,none,none,none",
-      "SSIDassign_08": "MAIN,none,none,none,none,none",
-      "SSIDassign_09": "MAIN,none,none,none,none,none",
-      "SSIDassign_10": "MAIN,none,none,none,none,none",
-      "SSIDassign_11": "MAIN,none,none,none,none,none",
-      "SSIDassign_12": "MAIN,none,none,none,none,none"
+      "_description": "Node assignment per SSID slot (comma-separated: MAIN,NODE1..NODE10 or none)",
+      "SSIDassign_01": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_02": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_03": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_04": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_05": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_06": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_07": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_08": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_09": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_10": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_11": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_12": "MAIN,none,none,none,none,none,none,none,none,none,none"
     }
   },
 
@@ -115,7 +125,7 @@
     },
 
     "Node_overrides": {
-      "_description": "Optional per-node Ethernet port VLAN overrides (NODE1..NODE5)",
+      "_description": "Optional per-node Ethernet port VLAN overrides (NODE1..NODE10)",
       "NODE1": {
         "NODE1_Ethernet_ports": {
           "NODE1_ETH1_VLAN": "none",
@@ -175,6 +185,66 @@
           "NODE5_ETH7_VLAN": "none",
           "NODE5_ETH8_VLAN": "none"
         }
+      },
+      "NODE6": {
+        "NODE6_Ethernet_ports": {
+          "NODE6_ETH1_VLAN": "none",
+          "NODE6_ETH2_VLAN": "none",
+          "NODE6_ETH3_VLAN": "none",
+          "NODE6_ETH4_VLAN": "none",
+          "NODE6_ETH5_VLAN": "none",
+          "NODE6_ETH6_VLAN": "none",
+          "NODE6_ETH7_VLAN": "none",
+          "NODE6_ETH8_VLAN": "none"
+        }
+      },
+      "NODE7": {
+        "NODE7_Ethernet_ports": {
+          "NODE7_ETH1_VLAN": "none",
+          "NODE7_ETH2_VLAN": "none",
+          "NODE7_ETH3_VLAN": "none",
+          "NODE7_ETH4_VLAN": "none",
+          "NODE7_ETH5_VLAN": "none",
+          "NODE7_ETH6_VLAN": "none",
+          "NODE7_ETH7_VLAN": "none",
+          "NODE7_ETH8_VLAN": "none"
+        }
+      },
+      "NODE8": {
+        "NODE8_Ethernet_ports": {
+          "NODE8_ETH1_VLAN": "none",
+          "NODE8_ETH2_VLAN": "none",
+          "NODE8_ETH3_VLAN": "none",
+          "NODE8_ETH4_VLAN": "none",
+          "NODE8_ETH5_VLAN": "none",
+          "NODE8_ETH6_VLAN": "none",
+          "NODE8_ETH7_VLAN": "none",
+          "NODE8_ETH8_VLAN": "none"
+        }
+      },
+      "NODE9": {
+        "NODE9_Ethernet_ports": {
+          "NODE9_ETH1_VLAN": "none",
+          "NODE9_ETH2_VLAN": "none",
+          "NODE9_ETH3_VLAN": "none",
+          "NODE9_ETH4_VLAN": "none",
+          "NODE9_ETH5_VLAN": "none",
+          "NODE9_ETH6_VLAN": "none",
+          "NODE9_ETH7_VLAN": "none",
+          "NODE9_ETH8_VLAN": "none"
+        }
+      },
+      "NODE10": {
+        "NODE10_Ethernet_ports": {
+          "NODE10_ETH1_VLAN": "none",
+          "NODE10_ETH2_VLAN": "none",
+          "NODE10_ETH3_VLAN": "none",
+          "NODE10_ETH4_VLAN": "none",
+          "NODE10_ETH5_VLAN": "none",
+          "NODE10_ETH6_VLAN": "none",
+          "NODE10_ETH7_VLAN": "none",
+          "NODE10_ETH8_VLAN": "none"
+        }
       }
     },
 
@@ -218,6 +288,11 @@
     "PRODUCTID_NODE3": "",
     "PRODUCTID_NODE4": "",
     "PRODUCTID_NODE5": "",
+    "PRODUCTID_NODE6": "",
+    "PRODUCTID_NODE7": "",
+    "PRODUCTID_NODE8": "",
+    "PRODUCTID_NODE9": "",
+    "PRODUCTID_NODE10": "",
     "MAX_SSIDS": "0",
     "RADIOS": [],
     "GUEST_SLOTS": "0",
@@ -229,11 +304,16 @@
     "MAX_ETH_PORTS_NODE2": "0",
     "MAX_ETH_PORTS_NODE3": "0",
     "MAX_ETH_PORTS_NODE4": "0",
-    "MAX_ETH_PORTS_NODE5": "0"
+    "MAX_ETH_PORTS_NODE5": "0",
+    "MAX_ETH_PORTS_NODE6": "0",
+    "MAX_ETH_PORTS_NODE7": "0",
+    "MAX_ETH_PORTS_NODE8": "0",
+    "MAX_ETH_PORTS_NODE9": "0",
+    "MAX_ETH_PORTS_NODE10": "0"
   },
 
   "Hardware_Override": {
-    "_description": "Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE5)",
+    "_description": "Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE10)",
     "MAIN": {
       "MAP_OVERRIDE": "0",
       "OVERRIDE_WAN": "eth0",
@@ -311,6 +391,77 @@
       "OVERRIDE_LAN6": "none",
       "OVERRIDE_LAN7": "none",
       "OVERRIDE_LAN8": "none"
+    },
+    "NODE6": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE7": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE8": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE9": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
+    },
+    "NODE10": {
+      "MAP_OVERRIDE": "0",
+      "OVERRIDE_WAN": "eth0",
+      "OVERRIDE_MAX_ETH_PORTS": "0",
+      "OVERRIDE_LAN1": "none",
+      "OVERRIDE_LAN2": "none",
+      "OVERRIDE_LAN3": "none",
+      "OVERRIDE_LAN4": "none",
+      "OVERRIDE_LAN5": "none",
+      "OVERRIDE_LAN6": "none",
+      "OVERRIDE_LAN7": "none",
+      "OVERRIDE_LAN8": "none"
     }
+  },
+
+  "ClientMeta": {
+    "_description": "MAC shield override and client display name configuration",
+    "MAC_SHIELD_OVERRIDES": "",
+    "CLIENT_NAME_OVERRIDES": ""
   }
 }
