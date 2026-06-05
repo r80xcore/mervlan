@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.56"                   #
+#                - File: update_mervlan.sh || version="0.57"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -117,7 +117,9 @@ readonly NODE_DB_STAGE="$TMP_DIR/node_db_stage"
 MERVLAN_BACKUP_DIR="${MERV_BASE%/*}/mervlan_backups"
 
 BACKUP_LIST="settings/settings.json
-tmp/mac_shield.db"
+tmp/mac_shield.db
+tmp/mac_shield_override.db
+tmp/client_name_override.db"
 
 SSH_KEY_RELATIVE=""
 # Preserve the configured private key so we can restore it after the swap
@@ -146,6 +148,7 @@ changelog.txt
 README.md
 mervlan.asp
 functions/mervlan_boot.sh
+functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
 functions/heal_event.sh
 functions/service-event-handler.sh
@@ -160,6 +163,7 @@ functions/update_mervlan.sh
 settings/settings.json
 settings/var_settings.sh
 settings/log_settings.sh
+settings/lib_br0_guard.sh
 settings/lib_debug.sh
 settings/lib_json.sh
 settings/lib_ssh.sh
@@ -168,6 +172,7 @@ settings/lib_stp.sh
 settings/lib_mervqt.sh
 settings/mac_shield_snapshot.sh
 functions/mac_refresh.sh
+functions/mac_client_meta.sh
 templates/mervlan_templates.sh
 www/index.html
 www/help.html
@@ -717,9 +722,7 @@ fi
 
 list_configured_nodes() {
 	[ -f "$SETTINGS_FILE" ] || return 1
-	grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-		sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-		awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
+	merv_node_list
 }
 
 has_configured_nodes() {
