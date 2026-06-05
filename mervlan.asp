@@ -1,7 +1,7 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <!-- mervlan.asp version="0.50" -->
+  <!-- mervlan.asp version="0.51" -->
 <meta http-equiv="X-UA-Compatible" content="IE=Edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <meta http-equiv="Pragma" content="no-cache">
@@ -199,7 +199,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
 
   var wantLoading = (opts.loading !== false);
   var minLoadingMs = (opts.minLoadingMs != null) ? opts.minLoadingMs : 0;
-  
+
   if (wantLoading) {
     // Lock the loading overlay so ASUS firmware cannot dismiss it early
     if (minLoadingMs > 0 && typeof window._mvmHoldLoadingFor === "function") {
@@ -358,7 +358,8 @@ const MVM_NO_REFRESH = new Set([
   "disableservice_vlanmgr",
   "checkservice_vlanmgr",
   "hwprobe_vlanmgr",
-  "macrefresh_vlanmgr"
+  "macrefresh_vlanmgr",
+  "macclientmeta_vlanmgr"
 ]);
 
 const MVM_NO_LOADING = new Set([
@@ -385,7 +386,8 @@ const MVM_ALLOWED_ACTIONS = new Set([
   "update_vlanmgr",
   "updatedev_vlanmgr",
   "hwprobe_vlanmgr",
-  "macrefresh_vlanmgr"
+  "macrefresh_vlanmgr",
+  "macclientmeta_vlanmgr"
 ]);
 
 // Optional: actions that need a longer/shorter wait (seconds)
@@ -398,7 +400,8 @@ const MVM_WAIT_OVERRIDE = {
 // Optional: actions that need a minimum loading screen time (milliseconds)
 const MVM_MIN_LOADING_MS = {
   "save_vlanmgr": 8000,  // Show loading for at least 8s to allow clear+reload verification
-  "hwprobe_vlanmgr": 8000  // Show loading for at least 8s while hw_probe runs
+  "hwprobe_vlanmgr": 8000,  // Show loading for at least 8s while hw_probe runs
+  "macclientmeta_vlanmgr": 8000  // Show loading while DBs are written, shield reloads, inventory refreshes
 };
 
 /* Build final opts for an action using the policy + any per-call override */
@@ -444,6 +447,7 @@ function MVM_update(opts)                    { return MVM_exec("update_vlanmgr",
 function MVM_updateDev(opts)                 { return MVM_exec("updatedev_vlanmgr",     null,        mvmOptsFor("updatedev_vlanmgr",     opts)); }
 function MVM_hwprobe(opts)                    { return MVM_exec("hwprobe_vlanmgr",       null,        mvmOptsFor("hwprobe_vlanmgr",       opts)); }
 function MVM_macRefresh(opts)                 { return MVM_exec("macrefresh_vlanmgr",    null,        mvmOptsFor("macrefresh_vlanmgr",    opts)); }
+function MVM_macClientMeta(opts)             { return MVM_exec("macclientmeta_vlanmgr", null,        mvmOptsFor("macclientmeta_vlanmgr", opts)); }
 
 // Convenience helper for silent saves invoked from the embedded SPA
 function MVM_save_quiet(settingsObj) {
@@ -500,16 +504,16 @@ function MVM_save_quiet(settingsObj) {
             <div class="formfonttitle">Merlin VLAN Manager</div>
             <div style="margin:10px 0 10px 5px;" class="splitLine"></div>
 
-            <!-- THE IFRAME (STATIC HEIGHT + SINGLE SCROLL) -->
+            <!-- THE IFRAME (AUTO-RESIZED BY JS; TALL VALUE IS EMERGENCY FALLBACK ONLY) -->
             <iframe
               id="vlan_iframe"
               src="/user/mervlan/index.html"
               style="
                 width:100%;
-                height:1300px;          /* <-- change this number to tune */
+                height:1750px;
                 border:0;
                 background:transparent;
-                overflow:hidden;        /* no inner scrollbar */
+                overflow:hidden;
                 display:block;
               "
               frameborder="0"
@@ -527,7 +531,7 @@ function MVM_save_quiet(settingsObj) {
                   f.setAttribute("scrolling","no");
                   f.style.overflow = "hidden";
                   f.style.display = "block";
-                  // height is static; you tune it above
+                  // height is owned by MVM_resizeVlanIframe; do not reset it here
                 }catch(e){}
               }
 
@@ -539,6 +543,29 @@ function MVM_save_quiet(settingsObj) {
                 f.attachEvent("onload", apply);
               }
             })();
+
+            var MVM_IFRAME_FALLBACK_HEIGHT = 1750;
+            var MVM_IFRAME_MIN_HEIGHT = 500;
+            var MVM_IFRAME_MAX_HEIGHT = 5000;
+            var MVM_IFRAME_PADDING = 24;
+
+            function MVM_resizeVlanIframe(contentHeight) {
+              var f = document.getElementById("vlan_iframe");
+              if (!f) return;
+              var h = parseInt(contentHeight, 10);
+              if (!h || h < 1) return;
+              var desired = h + MVM_IFRAME_PADDING;
+              if (desired < MVM_IFRAME_MIN_HEIGHT) desired = MVM_IFRAME_MIN_HEIGHT;
+              if (desired > MVM_IFRAME_MAX_HEIGHT) {
+                desired = MVM_IFRAME_MAX_HEIGHT;
+                if (window.console && typeof console.warn === "function") {
+                  console.warn("[MVM] iframe height clamped", contentHeight, desired);
+                }
+              }
+              var current = parseInt(f.style.height, 10) || f.offsetHeight || MVM_IFRAME_FALLBACK_HEIGHT;
+              if (Math.abs(current - desired) < 4) return;
+              f.style.height = desired + "px";
+            }
             </script>
 
           </td>
