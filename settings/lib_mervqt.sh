@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.5"                      #
+#                  - File: lib_mervqt.sh || version="0.51"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -83,6 +83,41 @@ mervqt_valid_vid() {
 }
 
 # ============================================================================
+# MAC shield override list
+# The override DB (MERV_MAC_OVERRIDE_DB) lists MACs whose MERV_MAC DROP rule is
+# suppressed cluster-wide. It is a plain newline-separated list of lowercase
+# MACs (one per line; blank lines and '#' comments ignored). MACs stay in the
+# shield db; only their DROP rule is withheld while overridden.
+# ============================================================================
+
+# mervqt_override_list_read [db_path]
+# Print a normalized, space-padded single-line override list: " mac1 mac2 ...".
+# Leading/trailing spaces let mervqt_mac_is_overridden do exact substring match.
+# Prints a single space (empty list) when the db is absent or empty.
+mervqt_override_list_read() {
+  local db="${1:-$MERV_MAC_OVERRIDE_DB}"
+  local line mac out=' '
+  [ -n "$db" ] && [ -f "$db" ] || { printf ' '; return 0; }
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    mac=$(mervqt_mac_lower "$line")
+    mervqt_valid_mac "$mac" || continue
+    case "$out" in *" $mac "*) continue ;; esac
+    out="${out}${mac} "
+  done < "$db"
+  printf '%s' "$out"
+}
+
+# mervqt_mac_is_overridden <mac> <list>
+# Return 0 if <mac> appears in the space-padded <list>, else 1.
+mervqt_mac_is_overridden() {
+  local mac; mac=$(mervqt_mac_lower "$1")
+  local list="$2"
+  case "$list" in *" $mac "*) return 0 ;; esac
+  return 1
+}
+
+# ============================================================================
 # DB path selection
 # Kept in lib_mervqt.sh because both enforcement (restore_merv_mac_shield)
 # and snapshot (mac_shield_snapshot.sh) need this function. Placing it here
@@ -148,6 +183,10 @@ ebt_mac_shield_teardown() {
 # Validates all 4 fields per record. Uses mervqt_mac_lower before validation.
 # Silently skips malformed records. Logs armed count and skip count.
 #
+# Override-aware: MACs listed in MERV_MAC_OVERRIDE_DB are kept in the shield db
+# but their DROP rule is suppressed (no rule armed). Removing the override and
+# reloading re-locks the MAC. The override list is read once up-front.
+#
 # Rule shape: -s <mac> --logical-in br0 -j DROP
 #   Fires only while the client's wl interface is enslaved to br0.
 #   Goes dormant automatically once the interface is in its correct VLAN bridge.
@@ -159,7 +198,10 @@ ebt_mac_shield_apply() {
   local db="${1:-$MERV_MAC_DB_ACTIVE}"
   [ -f "$db" ] || return 0
 
-  local ts mac iface vid rules=0 skipped=0
+  local _ovr_list
+  _ovr_list=$(mervqt_override_list_read 2>/dev/null)
+
+  local ts mac iface vid rules=0 skipped=0 overridden=0
 
   while IFS=' ' read -r ts mac iface vid; do
     [ -n "$ts" ] && [ -n "$mac" ] && [ -n "$iface" ] && [ -n "$vid" ] || {
@@ -171,12 +213,17 @@ ebt_mac_shield_apply() {
     mervqt_valid_wl_subif "$iface" || { skipped=$((skipped+1)); continue; }
     mervqt_valid_vid      "$vid"   || { skipped=$((skipped+1)); continue; }
 
+    if mervqt_mac_is_overridden "$mac" "$_ovr_list"; then
+      overridden=$((overridden + 1))
+      continue
+    fi
+
     ebtables -t filter -A "$MERV_MAC_CHAIN" \
       -s "$mac" --logical-in br0 -j DROP 2>/dev/null || true
     rules=$((rules + 1))
   done < "$db"
 
-  info -c vlan "MERV_MAC: armed ${rules} rule(s) from $(basename "$db") (skipped malformed: ${skipped})"
+  info -c vlan "MERV_MAC: armed ${rules} rule(s) from $(basename "$db") (overridden: ${overridden}, skipped malformed: ${skipped})"
 }
 
 # ebt_mac_shield_init_and_apply [db_path]
@@ -563,7 +610,10 @@ merv_lock_age() {
 merv_lock_state() {
   local _lock _stale _pid _age
   _lock="${1:-$LOCKDIR/mervlan_manager.lock}"
-  _stale="${MERV_MANAGER_LOCK_STALE_SEC:-900}"
+  # Optional $2: caller-supplied stale threshold (e.g. MERV_MAC_SNAPSHOT_LOCK_STALE_SEC).
+  # Falls back to MERV_MANAGER_LOCK_STALE_SEC for backward compatibility with callers
+  # that pass only the lock path (manager, heal, sync, etc.).
+  _stale="${2:-${MERV_MANAGER_LOCK_STALE_SEC:-900}}"
   case "$_stale" in ''|*[!0-9]*) _stale=900 ;; esac
 
   [ -d "$_lock" ] || { printf 'absent'; return 0; }
@@ -646,8 +696,21 @@ merv_lock_acquire() {
     _oldpid=$(cat "$_lock/pid" 2>/dev/null || echo "")
     case "$_oldpid" in *[!0-9]*) _oldpid="" ;; esac
 
-    # Owner alive — honour it within the bounded wait budget.
+    # Owner alive — honour it within the bounded wait budget, BUT reclaim
+    # if the lock age has blown past the stale window. On embedded routers
+    # with limited PID namespaces (~32768 slots) a dead holder's PID is quickly
+    # recycled by an unrelated process (daemon, cron job), making kill -0
+    # return success indefinitely. A well-behaved holder MUST release within
+    # the stale window, so an aged live-PID lock is almost certainly a reuse.
     if [ -n "$_oldpid" ] && kill -0 "$_oldpid" 2>/dev/null; then
+      _age=$(merv_lock_age "$_lock")
+      case "$_age" in ''|*[!0-9]*) _age=0 ;; esac
+      if [ "$_age" -ge "$_stale" ]; then
+        _merv_lock_log warn "lock ${_label} stale (age=${_age}s, PID=${_oldpid} likely reused); reclaiming"
+        rm -rf "$_lock" 2>/dev/null || :
+        _attempts=$((_attempts + 1))
+        continue
+      fi
       if [ "$_attempts" -ge "$_maxiters" ]; then
         _merv_lock_log warn "lock ${_label} held by live PID ${_oldpid}; giving up"
         return 1
