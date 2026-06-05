@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.70.1"                   #
+#               - File: mervlan_manager.sh || version="0.70.2"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -276,8 +276,8 @@ fi
 
 # Normalize invalid NODE_IDs to prevent unexpected behavior
 case "$NODE_ID" in
-  none|1|2|3|4|5) : ;;
-  *) NODE_ID="none" ;;
+  none|'') : ;;
+  *) merv_is_valid_node_id "$NODE_ID" 2>/dev/null || NODE_ID="none" ;;
 esac
 
 # Apply defaults for unconfigured values
@@ -330,8 +330,7 @@ read_json() {
   local idx okey val
 
   # Only redirect ETH port VLAN reads, only for settings.json, only on nodes
-  case "$NODE_ID" in
-    1|2|3|4|5)
+  if merv_is_valid_node_id "$NODE_ID" 2>/dev/null; then
       if [ "$file" = "$SETTINGS_FILE" ]; then
         case "$key" in
           ETH[1-8]_VLAN)
@@ -346,8 +345,7 @@ read_json() {
             ;;
         esac
       fi
-      ;;
-  esac
+  fi
 
   # Main unit (NODE_ID=none) or non-ETH keys: normal read
   read_json_raw "$key" "$file"
@@ -2021,14 +2019,11 @@ main() {
   info -c cli,vlan "Dry Run: $DRY_RUN, Persistent: $PERSISTENT"
   
   # Log NODE_ID mode
-  case "$NODE_ID" in
-    1|2|3|4|5)
-      info -c cli,vlan "Node Mode: Using NODE${NODE_ID} Ethernet port overrides"
-      ;;
-    *)
-      info -c cli,vlan "Node Mode: Using main Ethernet port configuration"
-      ;;
-  esac
+  if merv_is_valid_node_id "$NODE_ID" 2>/dev/null; then
+    info -c cli,vlan "Node Mode: Using NODE${NODE_ID} Ethernet port overrides"
+  else
+    info -c cli,vlan "Node Mode: Using main Ethernet port configuration"
+  fi
 
   # Validation phase 1: check all VLAN IDs for syntax errors before any changes
   info -c cli,vlan "Validating VLAN settings..."
