@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.65"                     #
+#                  - File: heal_event.sh || version="0.66"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -1094,9 +1094,13 @@ if [ "$EVENT" = "cron" ]; then
     fi
   fi
 
-  # Periodic MAC snapshot — preconditions guard against snapshotting mid-heal;
-  # on a stable network the db won't change so JFFS and ebtables are untouched.
-  type merv_mac_snapshot >/dev/null 2>&1 && merv_mac_snapshot
+  # Periodic MAC snapshot — runs in a background subshell so that
+  # vlan_event.lock is released BEFORE any SSH work begins. With cluster sync
+  # enabled, merv_mac_snapshot performs SSH collect+push for every node; doing
+  # that inline while holding the lock would block every subsequent 5-minute
+  # cron tick for the full SSH retry window (~96s worst case per node).
+  # The snapshot has its own mac_snapshot.lock to prevent concurrent runs.
+  type merv_mac_snapshot >/dev/null 2>&1 && ( merv_mac_snapshot ) &
 
   exit 0
 fi
