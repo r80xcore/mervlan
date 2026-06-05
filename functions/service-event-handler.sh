@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.57"                  #
+#          - File: service-event-handler.sh || version="0.58"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -145,7 +145,8 @@ case "${TYPE}_${EVENT}" in
   save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
   executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
   disableservice_vlanmgr|checkservice_vlanmgr|collectclients_vlanmgr|\
-  clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr|hwprobe_vlanmgr|macrefresh_vlanmgr)
+  clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr|hwprobe_vlanmgr|macrefresh_vlanmgr|\
+  macclientmeta_vlanmgr)
     APP_EVENT=1
     ;;
 esac
@@ -168,6 +169,80 @@ fi
 mkdir -p "$LOCKDIR" 2>/dev/null || :
 
 # ========================================================================== #
+# LOCK METADATA HELPERS (self-contained — no lib_mervqt.sh dependency)        #
+# ========================================================================== #
+# These give each mkdir-based event lock the same pid+created robustness the
+# central locks have, WITHOUT sourcing the shared lock library (this handler
+# runs in the DHCP-sensitive hot path and must stay dependency-free). The
+# metadata closes the "no-stamp orphan" gap: if a handler dies after mkdir but
+# before the .last stamp is written (DEBOUNCE_SECONDS=0, SIGKILL, or /tmp full),
+# later events can still tell whether the holder is alive or the lock is stale.
+
+# _se_write_lock_meta <lock_dir>
+# Record pid + created stamp in an already-acquired lock dir. Called right after
+# every successful mkdir so metadata exists before anything can interrupt us.
+_se_write_lock_meta() {
+  echo "$$"   > "$1/pid"     2>/dev/null || :
+  date +%s    > "$1/created" 2>/dev/null || :
+}
+
+# _se_cleanup_lock_dir <lock_dir>
+# Remove ONLY the known metadata files, then rmdir. Never recursively deletes:
+# if the dir still has unexpected contents, rmdir fails and we leave it for a
+# human to inspect rather than blindly wiping it (key is event-derived input).
+_se_cleanup_lock_dir() {
+  rm -f "$1/pid" "$1/created" 2>/dev/null || :
+  rmdir "$1" 2>/dev/null || :
+}
+
+# _se_lock_age <lock_dir>
+# Seconds since the lock was created. Prefers the created stamp; falls back to
+# directory mtime. Returns 0 when age is unknown OR when the clock appears to
+# have moved backward (NTP step at boot), so a negative age never masks a stale
+# lock as fresh.
+_se_lock_age() {
+  local _now _created _mtime _age
+  _now=$(date +%s 2>/dev/null || echo 0)
+  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+
+  _created=$(cat "$1/created" 2>/dev/null || echo "")
+  case "$_created" in ''|*[!0-9]*) _created="" ;; esac
+  if [ -n "$_created" ] && [ "$_now" -gt 0 ]; then
+    _age=$(( _now - _created ))
+    [ "$_age" -lt 0 ] 2>/dev/null && _age=0
+    printf '%s' "$_age"
+    return 0
+  fi
+
+  _mtime=$(stat -c %Y "$1" 2>/dev/null || echo 0)
+  case "$_mtime" in ''|*[!0-9]*) _mtime=0 ;; esac
+  if [ "$_mtime" -gt 0 ] && [ "$_now" -gt 0 ]; then
+    _age=$(( _now - _mtime ))
+    [ "$_age" -lt 0 ] 2>/dev/null && _age=0
+    printf '%s' "$_age"
+  else
+    printf '0'
+  fi
+}
+
+# _se_reclaim_lock_dir <lock_dir> <key>
+# Clean known metadata, then re-acquire. Prints nothing; returns:
+#   0 = reclaimed (caller may proceed, meta must be (re)written by caller)
+#   1 = could not reclaim (foreign contents or lost race) — caller must skip
+_se_reclaim_lock_dir() {
+  _se_cleanup_lock_dir "$1"
+  if [ -d "$1" ]; then
+    logger -t "VLANMgr" "handler: ${2} lock dir not empty after cleanup — skipping"
+    return 1
+  fi
+  if ! mkdir "$1" 2>/dev/null; then
+    logger -t "VLANMgr" "handler: ${2} already running (lost reclaim race); skipping"
+    return 1
+  fi
+  return 0
+}
+
+# ========================================================================== #
 # DISPATCH HELPER FUNCTION — Execute scripts with debounce and locking       #
 # ========================================================================== #
 
@@ -188,6 +263,7 @@ dispatch_if_executable() {
   # window: debounce interval in seconds (skip re-execution within this time)
   # stale: seconds after which a held lock is considered orphaned (crashed script)
   local key lock_root lock_dir stamp now last window stale elapsed
+  local _se_pid _se_age
   key="${RAW:-${SCRIPT_PATH##*/}}"
   lock_root="${LOCKDIR%/}"
   lock_dir="${lock_root}/${key}.lock"
@@ -218,21 +294,46 @@ dispatch_if_executable() {
       else
         # Older than stale threshold — lock was abandoned by a crashed script; reclaim
         logger -t "VLANMgr" "handler: ${key} lock stale (${elapsed}s >= ${stale}s); reclaiming"
-        rmdir "$lock_dir" 2>/dev/null || :
-        mkdir "$lock_dir" 2>/dev/null || {
-          logger -t "VLANMgr" "handler: ${key} already running; skipping";
-          return 0;
-        }
+        _se_reclaim_lock_dir "$lock_dir" "$key" || return 0
       fi
     else
-      # No stamp file — lock is current (script just started or stamp write failed); skip
-      logger -t "VLANMgr" "handler: ${key} already running (no stamp); skipping"
-      return 0
+      # No stamp file — fall back to pid + created metadata written at acquire
+      # time. This covers DEBOUNCE_SECONDS=0 (stamp never written by design), a
+      # SIGKILL between mkdir and stamp write, and stamp write failures.
+      _se_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+      case "$_se_pid" in ''|*[!0-9]*) _se_pid="" ;; esac
+      _se_age=$(_se_lock_age "$lock_dir")
+      case "$_se_age" in ''|*[!0-9]*) _se_age=0 ;; esac
+      if [ -n "$_se_pid" ] && kill -0 "$_se_pid" 2>/dev/null; then
+        # Holder PID is alive. Honour it UNLESS the lock has aged past the stale
+        # window — on a busy router a crashed holder's PID is quickly recycled
+        # by an unrelated process, so an aged live-PID lock is likely a reuse.
+        if [ "$_se_age" -ge "$stale" ]; then
+          logger -t "VLANMgr" "handler: ${key} live PID ${_se_pid} but age=${_se_age}s >= stale=${stale}s (likely reused); reclaiming"
+          _se_reclaim_lock_dir "$lock_dir" "$key" || return 0
+        else
+          logger -t "VLANMgr" "handler: ${key} already running (pid=${_se_pid} live, age=${_se_age}s); skipping"
+          return 0
+        fi
+      else
+        # PID dead or absent — decide purely on lock age.
+        if [ "$_se_age" -ge "$stale" ]; then
+          logger -t "VLANMgr" "handler: ${key} orphaned lock (no live pid, age=${_se_age}s >= stale=${stale}s); reclaiming"
+          _se_reclaim_lock_dir "$lock_dir" "$key" || return 0
+        else
+          logger -t "VLANMgr" "handler: ${key} young orphan lock (age=${_se_age}s < stale=${stale}s); skipping"
+          return 0
+        fi
+      fi
     fi
   fi
 
+  # Lock acquired (fresh, or reclaimed above) — record ownership metadata before
+  # anything can interrupt us, then register the cleanup trap.
+  _se_write_lock_meta "$lock_dir"
+
   # Lock acquired: register cleanup trap to remove lock on exit
-  trap 'logger -t "VLANMgr" "handler: ${key} lock released (trap)"; rmdir "$lock_dir" 2>/dev/null' EXIT INT TERM
+  trap 'logger -t "VLANMgr" "handler: ${key} lock released (trap)"; _se_cleanup_lock_dir "$lock_dir"' EXIT INT TERM
 
   # Debounce check: if within window, skip execution (prevent rapid re-invocation)
   if [ "$window" -gt 0 ] 2>/dev/null; then
@@ -249,7 +350,7 @@ dispatch_if_executable() {
     # If within debounce window, skip execution
     if [ $((now - last)) -lt "$window" ]; then
       logger -t "VLANMgr" "handler: debounced ${key} (window=${window}s); skipping"
-      rmdir "$lock_dir" 2>/dev/null
+      _se_cleanup_lock_dir "$lock_dir"
       trap - EXIT INT TERM
       return 0
     fi
@@ -270,7 +371,7 @@ dispatch_if_executable() {
 
   # Cleanup: remove lock directory and trap handlers
   logger -t "VLANMgr" "handler: ${key} lock released"
-  rmdir "$lock_dir" 2>/dev/null
+  _se_cleanup_lock_dir "$lock_dir"
   trap - EXIT INT TERM
 }
 
@@ -344,6 +445,10 @@ case "${TYPE}_${EVENT}" in
   macrefresh_vlanmgr)
     # Clear and rebuild the MERV_MAC per-client shield db from a fresh snapshot
     dispatch_if_executable "/jffs/addons/mervlan/functions/mac_refresh.sh"
+    ;;
+  macclientmeta_vlanmgr)
+    # Materialize MAC override + client name DBs, re-enforce shield, refresh inventory
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mac_client_meta.sh"
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
   # Wildcard patterns catch restart_* and service events (wireless, WAN, LAN, NET, FW, NAT, DNS)
