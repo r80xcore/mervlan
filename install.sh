@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.51"                      #
+#                    - File: install.sh || version="0.52"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -717,24 +717,24 @@ ssh_keys_effectively_installed() {
 # ========================================================================== #
 # (Embedded subset in this script to avoid external dependencies)
 
-# has_configured_nodes — Report if any NODE1..NODE5 entries contain IPs
+# has_configured_nodes — Report if any NODE1..NODE10 entries contain IPs
 # Returns: 0 when at least one valid IPv4 is present, 1 otherwise
 # Explanation: Allows installer to decide whether to call nodeenable later
 has_configured_nodes() {
     [ -f "$SETTINGS_FILE" ] || return 1
-    local nodes
-    nodes=$(grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-        grep -v "none" | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
-    [ -n "$nodes" ]
+    local _MERV_MAX_NODES_LOCAL=10
+    grep -o '"NODE[0-9][0-9]*"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*"NODE\([0-9][0-9]*\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1 \2/p' | \
+        awk -v max="$_MERV_MAX_NODES_LOCAL" \
+          '$2!="none" && $2~/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1>=1 && $1<=max {found=1} END{exit !found}'
 }
 
 count_configured_nodes() {
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-        grep -v "none" | \
-        grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    local _MERV_MAX_NODES_LOCAL=10
+    grep -o '"NODE[0-9][0-9]*"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*"NODE\([0-9][0-9]*\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1 \2/p' | \
+        awk -v max="$_MERV_MAX_NODES_LOCAL" \
+          '$2!="none" && $2~/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1>=1 && $1<=max {c++} END{print c+0}'
 }
 
 # ========================================================================== #
@@ -1227,7 +1227,23 @@ case "$MODE" in
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
         ;;
     *)
-        # Standard / upgrade install: no special pre-work
+        # Standard / upgrade install: verify addon files are already present
+        for _req in \
+            mervlan.asp \
+            www/index.html \
+            www/vlan_index_style.css \
+            www/vlan_form_style.css \
+            www/help.html \
+            www/view_logs.html \
+            settings/settings.json
+        do
+            [ -f "$MERV_BASE/$_req" ] || {
+                echo "[install] ERROR: Missing required file: $MERV_BASE/$_req" >&2
+                echo "[install] The addon files are not installed yet." >&2
+                echo "[install] For a first install, run: sh install.sh full" >&2
+                exit 1
+            }
+        done
         ;;
 esac
 
@@ -1344,7 +1360,12 @@ mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
 # 7. Record metadata (optional but good practice)
 am_settings_set mervlan_page "$am_webui_page"
 am_settings_set mervlan_state "enabled"
-am_settings_set mervlan_version "v0.46"
+MERVLAN_VERSION="$(awk 'NF { print $NF; exit }' "$MERV_BASE/changelog.txt" 2>/dev/null)"
+case "$MERVLAN_VERSION" in
+    v*) : ;;
+    *) MERVLAN_VERSION="unknown" ;;
+esac
+am_settings_set mervlan_version "$MERVLAN_VERSION"
 
 logger -t "$ADDON" "Installed tab 'MerVLAN' under LAN -> $am_webui_page"
 echo "[install] Web UI tab installed: LAN -> MerVLAN ($am_webui_page)"
