@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_local_clients.sh || version="0.47"            #
+#                - File: collect_local_clients.sh || version="0.48"            #
 # ============================================================================ #
 # - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local    #
 #               node so it can be collected by collect_clients.sh.             #
@@ -60,12 +60,12 @@ cleanup_local_collect() {
   # Remove per-bridge temp files
   rm -f "$COLLECTDIR"/mac_br*.lst "$COLLECTDIR"/mac_exclude.lst 2>/dev/null
   rm -f "$COLLECTDIR"/mac_br*.lst.tmp "$COLLECTDIR"/mac_counts.tmp 2>/dev/null
+  rm -f "$COLLECTDIR"/portmap_br*.lst 2>/dev/null
 }
 trap 'cleanup_local_collect' EXIT INT TERM
 
 info -c vlan "Collecting VLAN clients (MAC-only) on $NODE_NAME"
-info -c cli  "Collecting VLAN clients (MAC-only) on $NODE_NAME"
-info -c cli  "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT'"
+info -c vlan "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT'"
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -207,8 +207,10 @@ init_trunk_detection() {
 
 # ============================================================================ #
 # collect_macs_for_bridge                                                      #
-# Query bridge FDB and extract non-local (learned) MAC addresses. Retry        #
-# multiple times in case FDB is incomplete on first read. Deduplicate output.  #
+# Query bridge FDB and extract non-local (learned) MAC addresses together with #
+# the bridge port number and FDB ageing timer they were learned on. Retry      #
+# multiple times in case FDB is incomplete on first read. Per MAC the freshest #
+# observation (smallest ageing timer) wins. Output lines: "mac port_no age".   #
 # ============================================================================ #
 collect_macs_for_bridge() {
   local bridge="$1"
@@ -217,22 +219,90 @@ collect_macs_for_bridge() {
   local tmp
   # Temporary file for accumulating MACs across retries
   tmp="${out}.tmp"
-  info -c cli "collect_local_clients: collecting bridge='$bridge' out='$out' tmp='$tmp'"
+  info -c vlan "collect_local_clients: collecting bridge='$bridge' out='$out' tmp='$tmp'"
   # Initialize temporary file as empty
   : > "$tmp"
   # Retry loop: collect FDB multiple times to handle transient reads
   while [ $i -lt "$FDB_RETRIES" ]; do
-    # Extract non-local MACs from brctl output (column 3 == "no" means not local)
     # brctl showmacs format: port_no mac_addr is_local age_in_secs
-    brctl showmacs "$bridge" 2>/dev/null | awk '$3=="no"{print tolower($2)}' >> "$tmp"
+    # Keep only non-local (learned) entries; emit "mac port_no age".
+    brctl showmacs "$bridge" 2>/dev/null \
+      | awk '$3=="no"{printf "%s %s %s\n", tolower($2), $1, $4}' >> "$tmp"
     i=$((i+1))
     # Sleep between retries if more attempts remain
     [ $i -lt "$FDB_RETRIES" ] && sleep "$FDB_RETRY_SLEEP"
   done
-  # Deduplicate and sort MACs; write to final output file
-  sort -u "$tmp" > "$out"
+  # Deduplicate by MAC keeping the freshest (smallest ageing timer) observation,
+  # preserving the port number that observation was learned on.
+  awk '{
+         a=$3+0
+         if (!($1 in age) || a < age[$1]) { age[$1]=a; port[$1]=$2 }
+       }
+       END { for (m in age) printf "%s %s %s\n", m, port[m], age[m] }' "$tmp" \
+    | sort > "$out"
   # Clean up temporary file
   rm -f "$tmp"
+}
+
+# ============================================================================ #
+# classify_source                                                              #
+# Map a bridge member interface to a client source descriptor used to grade    #
+# location confidence. Returns: "type|port|confidence".                        #
+#   ssid          → direct   (wireless client physically on this device)       #
+#   access        → direct   (wired client on a non-trunk LAN port / robo sw)  #
+#   trunk-tagged  → relayed  (learned through a tagged trunk/backhaul)          #
+#   trunk-native  → relayed  (bare LAN port that is also a trunk base)          #
+#   vlan-if       → relayed  (internal VLAN forwarding path)                    #
+#   unknown       → unknown  (unmappable / legacy)                             #
+# NOTE: eth0 is the Asus robo-switch fabric carrying the local wired LAN ports, #
+#       so a bare eth0 hit is treated as direct wired access; only tagged       #
+#       eth0.<vid> sub-interfaces are relayed trunk paths.                      #
+# ============================================================================ #
+classify_source() {
+  local iface="$1"
+  case "$iface" in
+    wl[0-9]*)
+      echo "ssid|$iface|direct" ;;
+    eth0)
+      echo "access|eth0|direct" ;;
+    eth0.[0-9]*)
+      echo "trunk-tagged|eth0|relayed" ;;
+    eth[1-9].[0-9]*|eth[1-9][0-9].[0-9]*)
+      base_port="${iface%%.*}"
+      echo "trunk-tagged|$base_port|relayed" ;;
+    eth[1-9]|eth[1-9][0-9])
+      # Bare LAN port: trunk-native if it is also a trunk base, else access.
+      if echo " $TRUNK_PORTS " | grep -q " $iface "; then
+        echo "trunk-native|$iface|relayed"
+      else
+        echo "access|$iface|direct"
+      fi ;;
+    vlan[0-9]*)
+      echo "vlan-if|$iface|relayed" ;;
+    *)
+      echo "unknown|$iface|unknown" ;;
+  esac
+}
+
+# ============================================================================ #
+# build_port_map                                                               #
+# Write a "port_no iface" map for a bridge to $1 by reading the kernel's        #
+# per-member port_no files. Lets us translate brctl showmacs port numbers back #
+# to the interface the MAC was learned on. Empty file when no members resolve.  #
+# ============================================================================ #
+build_port_map() {
+  local bridge="$1"
+  local mapfile="$2"
+  local d pn iface
+  : > "$mapfile"
+  for d in "/sys/class/net/$bridge/brif/"*; do
+    [ -e "$d/port_no" ] || continue
+    pn=$(cat "$d/port_no" 2>/dev/null)
+    # Normalize (handles decimal or 0x-prefixed values) to a plain integer.
+    pn=$((pn))
+    iface="${d##*/}"
+    printf '%s %s\n' "$pn" "$iface" >> "$mapfile"
+  done
 }
 
 # ============================================================================ #
@@ -278,20 +348,29 @@ BR_LIST="$(get_bridges)"
 for BR in $BR_LIST; do
   # Per-bridge MAC list file (will be deduplicated within collect_macs_for_bridge)
   MACS_FILE="$COLLECTDIR/mac_${BR}.lst"
-  info -c cli "collect_local_clients: bridge=$BR macs_file='$MACS_FILE'"
+  info -c vlan "collect_local_clients: bridge=$BR macs_file='$MACS_FILE'"
   # Collect MACs from this bridge's FDB with retries
   collect_macs_for_bridge "$BR" "$MACS_FILE"
 done
 
 # ============================================================================ #
-# PASS 2: Identify trunk ports and upstream MACs                               #
-# Find MACs that appear on 2+ bridges. For trunk ports, don't exclude MACs     #
-# that appear on multiple VLANs of the same physical trunk.                    #
+# PASS 2: Trunk port detection (metadata only)                                 #
+# Detect trunk ports and the VLANs they carry. This drives interface           #
+# classification and the per-client location-confidence grading in PASS 3.     #
+#                                                                              #
+# NOTE: We intentionally no longer build a blanket "exclude" list for MACs      #
+# that appear on multiple bridges. The old heuristic dropped legitimate        #
+# clients whenever any tagged trunk existed. Instead, every observation is now  #
+# emitted with source evidence (iface/type/port/age/confidence) and the        #
+# cluster-wide merge resolver in collect_clients.sh decides the active          #
+# location. A multi-bridge MAC is graded per observation: direct (ssid/access) #
+# vs relayed (trunk-tagged/native), so it is never silently kept active        #
+# everywhere.                                                                   #
 # ============================================================================ #
 
 # Initialize trunk port detection
 init_trunk_detection
-info -c cli "Detected trunk ports: ${TRUNK_PORTS:-none}"
+info -c vlan "Detected trunk ports: ${TRUNK_PORTS:-none}"
 
 # Build a mapping of which VLANs each trunk port carries
 # Format: trunk_eth1_vlans="10,20,30"
@@ -300,39 +379,8 @@ for trunk in $TRUNK_PORTS; do
   native=$(get_trunk_native_vlan "$trunk")
   eval "trunk_${trunk}_tagged=\"$vlans\""
   eval "trunk_${trunk}_native=\"$native\""
-  info -c cli "Trunk $trunk: tagged=[$vlans] native=[$native]"
+  info -c vlan "Trunk $trunk: tagged=[$vlans] native=[$native]"
 done
-
-# File to store MACs seen on multiple bridges (potential upstream)
-EXC_FILE="$COLLECTDIR/mac_exclude.lst"
-# Combine all per-bridge MAC lists, count occurrences
-cat "$COLLECTDIR"/mac_br*.lst 2>/dev/null | awk 'NF' | sort | uniq -c > "$COLLECTDIR/mac_counts.tmp"
-
-# Only exclude MACs on 2+ bridges that are NOT explained by trunk ports
-# A MAC on multiple bridges is OK if those bridges all connect via same trunk
-: > "$EXC_FILE"
-while read -r count mac; do
-  [ "$count" -lt 2 ] && continue
-  
-  # Check if this MAC can be explained by a trunk port
-  is_trunk_client=0
-  for trunk in $TRUNK_PORTS; do
-    tagged_vlans=$(eval echo "\$trunk_${trunk}_tagged")
-    # Check if this MAC appears only on VLANs this trunk carries
-    # (Complex check - for now, be conservative and don't exclude trunk MACs)
-    # Future: verify MAC only appears on bridges matching trunk's VLANs
-    if [ -n "$tagged_vlans" ]; then
-      is_trunk_client=1
-      break
-    fi
-  done
-  
-  # Only exclude if not a potential trunk client
-  if [ "$is_trunk_client" -eq 0 ]; then
-    echo "$mac" >> "$EXC_FILE"
-  fi
-done < "$COLLECTDIR/mac_counts.tmp"
-rm -f "$COLLECTDIR/mac_counts.tmp"
 
 # ============================================================================ #
 # PASS 3: Generate JSON output per VLAN with interface info                    #
@@ -382,25 +430,46 @@ for BR in $BR_LIST; do
     echo '      "clients": ['
   } >> "$OUT"
 
+  # Build a port_no -> iface map for this bridge so we can attribute each MAC
+  # to the interface it was learned on and grade its location confidence.
+  PORTMAP="$COLLECTDIR/portmap_${BR}.lst"
+  build_port_map "$BR" "$PORTMAP"
+
   # Track whether this is first client in VLAN (no leading comma)
   FIRST_CLIENT=true
   # Counter for clients in this specific VLAN
   VLAN_CLIENTS=0
-  # Iterate through deduplicated MACs collected for this bridge
-  while read -r MAC; do
-    # Skip excluded MACs (upstream traffic, but not trunk clients)
-    if [ -s "$EXC_FILE" ] && grep -q "^$MAC$" "$EXC_FILE" 2>/dev/null; then
-      continue
+  # Iterate observations collected for this bridge: "mac port_no age"
+  while read -r MAC PORTNO AGE; do
+    [ -n "$MAC" ] || continue
+    # Resolve the learning interface from the port number, then classify it.
+    SRC_IFACE=$(awk -v p="$PORTNO" '$1==p{print $2; exit}' "$PORTMAP" 2>/dev/null)
+    if [ -n "$SRC_IFACE" ]; then
+      CS=$(classify_source "$SRC_IFACE")
+      SRC_TYPE="${CS%%|*}"
+      CS_REST="${CS#*|}"
+      SRC_PORT="${CS_REST%%|*}"
+      SRC_CONF="${CS_REST#*|}"
+    else
+      SRC_IFACE=""
+      SRC_TYPE="unknown"
+      SRC_PORT=""
+      SRC_CONF="unknown"
     fi
+    # Normalize the ageing timer to an integer number of seconds (-1 = unknown).
+    AGE_INT=$(printf '%s' "$AGE" | sed 's/\..*$//')
+    case "$AGE_INT" in ''|*[!0-9]*) AGE_INT=-1 ;; esac
     # Add comma separator between clients (not before first)
     if [ "$FIRST_CLIENT" = true ]; then FIRST_CLIENT=false; else echo ',' >> "$OUT"; fi
-    # Write client object as JSON line
-    printf '        {"mac": "%s"}' "$MAC" >> "$OUT"
+    # Write client object with source evidence on a single line.
+    printf '        {"mac": "%s", "source_iface": "%s", "source_type": "%s", "source_port": "%s", "fdb_age": %s, "location_confidence": "%s"}' \
+      "$MAC" "$SRC_IFACE" "$SRC_TYPE" "$SRC_PORT" "$AGE_INT" "$SRC_CONF" >> "$OUT"
     echo "" >> "$OUT"
     # Increment both total and per-VLAN counters
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
     VLAN_CLIENTS=$((VLAN_CLIENTS + 1))
   done < "$MACS_FILE"
+  rm -f "$PORTMAP" 2>/dev/null
 
   # Close clients array and VLAN object
   {
@@ -409,7 +478,7 @@ for BR in $BR_LIST; do
   } >> "$OUT"
 
   # Log client count for this VLAN
-  info -c cli "VLAN $VLAN_ID: $VLAN_CLIENTS clients"
+  info -c vlan "VLAN $VLAN_ID: $VLAN_CLIENTS clients"
 done
 
 # ============================================================================ #
@@ -427,10 +496,8 @@ done
 # Log final summary (different messages for empty vs populated results)
 if [ "$TOTAL_COUNT" -eq 0 ]; then
   info -c vlan "No active clients found on $NODE_NAME"
-  info -c cli  "No active clients found on $NODE_NAME"
 else
   info -c vlan "Found $TOTAL_COUNT clients on $NODE_NAME"
-  info -c cli  "Found $TOTAL_COUNT clients on $NODE_NAME"
 fi
 
 # Signal successful completion
