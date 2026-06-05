@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: var_settings.sh || version="0.51"                     #
+#                - File: var_settings.sh || version="0.52"                     #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -63,6 +63,21 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 : "${MERV_MAC_DB_JFFS:=$MERV_BASE/tmp/mac_shield.db}"
 : "${MERV_MAC_MAX_AGE_SEC:=$((48 * 3600))}"
 : "${MAC_SHIELD_VERBOSE:=0}"  # 0 = silent on stable ticks; 1 = log every tick
+# Cross-node MAC shield sync. When 1 (default) the main collects client MACs
+# from every configured node during each snapshot, merges them into one db, and
+# pushes the merged db back to the nodes so a device known to ANY unit is
+# blocked on br0 across the whole mesh. Set 0 to keep each unit's shield local
+# (e.g. when SSH keys are not installed or isolated per-node dbs are desired).
+: "${MERV_MAC_NODE_SYNC:=1}"
+
+# Override DB: suppresses the MERV_MAC DROP rule for listed MACs.
+# Applies cluster-wide: pushed to nodes wherever the MAC shield DB is enforced.
+# MACs remain in mac_shield.db; removing an override re-locks on next reload.
+: "${MERV_MAC_OVERRIDE_DB:=$MERV_BASE/tmp/mac_shield_override.db}"
+
+# Client name DB: tab-separated "mac<TAB>name". Display-only, main-router only.
+# Not pushed to nodes (annotation happens after merged client collection).
+: "${MERV_CLIENT_NAME_DB:=$MERV_BASE/tmp/client_name_override.db}"
 
 # ============================================================================
 # L2 guard chains — canonical names shared by manager, heal, snapshot, lib
@@ -96,6 +111,17 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 # recovering from crashes quickly.
 : "${MERV_SYNC_LOCK_STALE_SEC:=60}"
 : "${MERV_MAC_REFRESH_LOCK_STALE_SEC:=60}"
+
+# Stale-lock reclaim threshold for the unified mac_snapshot.lock. This single
+# lock serializes every MAC snapshot path — the cron tick (heal_event.sh), the
+# post-apply async snapshot (mervlan_manager.sh) and the manual MAC Refresh
+# (mac_refresh.sh) — so the destructive refresh rebuild can never interleave
+# with a concurrent snapshot. All holders are non-blocking (skip / retry on
+# contention), so this only governs how long a CRASHED holder's lock blocks the
+# next run. A full cross-node collect+push over SSH can reach ~60s worst case
+# (3 retries × 10s timeout × collect+push per node); 120s gives headroom for
+# slow nodes while still reclaiming crashed holders within 2 minutes.
+: "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:=120}"
 
 # Maximum lifetime of the boot-time DHCP shield watchdog spawned by
 # mervlan_boot_wrap.sh shield. Hard ceiling — when this elapses the shield
@@ -134,6 +160,15 @@ readonly SERVICE_EVENT_WRAPPER="$SCRIPTS_DIR/service-event"
 # Logs
 readonly LOGFILE="$LOGDIR/mervlan.log"
 readonly CLI_LOG="$LOGDIR/cli_output.log"
+
+# Maximum number of supported satellite nodes (NODE1..NODE<MERV_MAX_NODES>).
+: "${MERV_MAX_NODES:=10}"
+
+# merv_is_valid_node_id <id> : true if <id> is an integer in 1..MERV_MAX_NODES.
+merv_is_valid_node_id() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le "$MERV_MAX_NODES" ] 2>/dev/null
+}
 
 
 # Flag: settings loaded
