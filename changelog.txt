@@ -127,7 +127,7 @@ Install guard for non-full install
 - Added a guard in install.sh that prevents the addon the get badly installed
   if the base files are not present. This prevents accidental bad installations
   should a user forget to add "full" to the install.sh on an empty system.
-  
+
 ################ END OF CURRENT CHANGELOG
 
 mervlan v0.53.10
