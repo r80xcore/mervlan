@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: uninstall.sh || version: 0.46                      #
+#                   - File: uninstall.sh || version: 0.47                      #
 # ============================================================================ #
 # - Purpose:    Disable the MerVLAN addon and clean up necessary files.        #
 #                                                                              #
@@ -694,10 +694,11 @@ ssh_keys_effectively_installed() {
 
 list_configured_nodes() {
     [ -f "$SETTINGS_FILE" ] || return 1
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-        sed -n "s/.*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | \
-        grep -v "none" | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    _MERV_MAX_NODES_LOCAL=10
+    grep -o '"NODE[0-9][0-9]*"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/"NODE\([0-9][0-9]*\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
+        awk -v max="$_MERV_MAX_NODES_LOCAL" \
+          '$2!="none" && $2~/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1>=1 && $1<=max { print $2 }'
 }
 
 # ============================================================================ #
