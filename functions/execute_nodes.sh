@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: execute_nodes.sh || version="0.53"                    #
+#                - File: execute_nodes.sh || version="0.54"                    #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -127,14 +127,11 @@ info -c cli,vlan "✓ SSH key verification passed"
 
 # ============================================================================ #
 # get_node_ips                                                                 #
-# Extract NODE1-NODE5 IP addresses from settings.json. Parse JSON format       #
+# Extract NODE1-NODE10 IP addresses from settings.json. Parse JSON format       #
 # and filter out "none" entries and invalid IP addresses.                      #
 # ============================================================================ #
 get_node_ips() {
-    # Extract NODE entries matching JSON "NODE[1-5]": "IP" format
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
+    merv_node_list
 }
 
 NODE_IPS=$(get_node_ips)
