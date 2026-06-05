@@ -188,6 +188,7 @@ Special thanks to everyone who contributed mappings.
 | RT‑AX5400     | tooty-1135              | Github  | v0.52.96         |
 | RT‑BE92U**    | brzd                    | SNB     | v0.52.92         |
 | TUF‑AX3000_V2 | piratak                 | Github  | v0.52.96         |
+| GT‑AX11000_PRO| bigadron                | Github  | v0.53.10         |
 ```
 **RT‑AX88U:** LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging.
 **RT‑BE92U:** LAN1–LAN4 share one VLAN bridge — no per-port isolation.
