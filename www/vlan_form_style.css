@@ -485,6 +485,7 @@
 
 .ssid-node-assign {
         display: flex;
+        flex-wrap: wrap;
         gap: 2px;
         justify-content: center;
         align-items: center;
