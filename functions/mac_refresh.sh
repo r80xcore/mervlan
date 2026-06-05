@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                 - File: mac_refresh.sh || version="0.2"                      #
+#                 - File: mac_refresh.sh || version="0.21"                      #
 # ============================================================================ #
 # Purpose: Clear the MERV_MAC client db and rebuild from a fresh wl assoclist
 #   snapshot. Called from the UI "MAC Shield Refresh" button.
@@ -49,12 +49,15 @@ MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 ssid_filter_init "$MERV_NODE_ID"
 
 # ----------------------------------------------------------- Concurrency lock --
-# This flushes and rebuilds the MERV_MAC db + ebtables chain. Two concurrent
-# refreshes would race the same db files and chain, so take a NON-BLOCKING
-# self-lock: a second refresh skips rather than corrupting state. Skip-on-
-# contention can never deadlock, and a crashed refresh is reclaimed after the
-# stale window. Best-effort — if the lib is somehow absent we proceed unguarded
-# rather than block a security-relevant rebuild.
+# Two concurrent manual refreshes would race the same rebuild, so take a
+# NON-BLOCKING self-lock: a second refresh skips rather than corrupting state.
+# Skip-on-contention can never deadlock, and a crashed refresh is reclaimed
+# after the stale window. Best-effort — if the lib is somehow absent we proceed
+# unguarded rather than block a security-relevant rebuild.
+#
+# We no longer pre-acquire mac_snapshot.lock here: merv_mac_snapshot now owns
+# the entire destructive critical section (reset/empty-clear happen inside it)
+# and takes that lock itself, reporting MERV_MAC_LAST_STATUS=busy on contention.
 MAC_REFRESH_LOCK="$LOCKDIR/mac_refresh.lock"
 MAC_REFRESH_LOCK_ACQUIRED=0
 if type merv_lock_acquire >/dev/null 2>&1; then
@@ -69,77 +72,59 @@ if type merv_lock_acquire >/dev/null 2>&1; then
 fi
 
 # -------------------------------------------------------------- Main action --
-_mac_pre_f="${MERV_MAC_DB_ACTIVE}.pre.$$"
-_mac_post_f="${MERV_MAC_DB_ACTIVE}.post.$$"
+_old_count=0
+[ -f "$MERV_MAC_DB_ACTIVE" ] && \
+  _old_count=$(awk 'NF==4' "$MERV_MAC_DB_ACTIVE" 2>/dev/null | wc -l | tr -d ' ')
 
-# Snapshot the current MAC set before clearing (empty sorted file if db absent)
-if [ -f "$MERV_MAC_DB_ACTIVE" ]; then
-  awk 'NF==4{print $2}' "$MERV_MAC_DB_ACTIVE" 2>/dev/null | sort -u > "$_mac_pre_f" 2>/dev/null
-else
-  : > "$_mac_pre_f"
-fi
-_old_count=$(wc -l < "$_mac_pre_f" 2>/dev/null | tr -d ' ')
+# Drive the single snapshot engine in manual/reset mode. The engine owns the
+# whole lifecycle: preconditions → build → node collect → merge/reset →
+# init_and_apply → node push. The db is only cleared AFTER a valid, COMPLETE
+# observation, so a precondition failure or an unreachable node leaves the
+# existing shield intact (the engine downgrades reset → merge automatically).
+MERV_MAC_SNAPSHOT_VERBOSE=1
+MERV_MAC_SNAPSHOT_LOG_CHANNELS=cli,vlan
+MERV_MAC_SNAPSHOT_RESET=1
+MERV_MAC_SNAPSHOT_ALLOW_EMPTY=1
+export MERV_MAC_SNAPSHOT_VERBOSE MERV_MAC_SNAPSHOT_LOG_CHANNELS \
+       MERV_MAC_SNAPSHOT_RESET MERV_MAC_SNAPSHOT_ALLOW_EMPTY
 
-info -c cli,vlan "MAC Refresh: starting — db has ${_old_count:-0} MAC(s), flushing and rebuilding"
+info -c cli,vlan "MAC Refresh: starting — reset mode, current db has ${_old_count:-0} MAC(s)"
 
-rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null || true
-
-# Flush the chain rules (chain stays alive — no enforcement gap)
-ebt_mac_shield_flush
-
-# Build fresh snapshot from current VLAN bridge state and reload rules.
-# If preconditions fail (e.g. wireless mid-restart), merv_mac_snapshot logs
-# the skip reason and returns 0. Chain remains empty until next heal cycle.
 merv_mac_snapshot
 
-# Build post-snapshot MAC set for diff reporting
-if [ -f "$MERV_MAC_DB_ACTIVE" ]; then
-  awk 'NF==4{print $2}' "$MERV_MAC_DB_ACTIVE" 2>/dev/null | sort -u > "$_mac_post_f" 2>/dev/null
-else
-  : > "$_mac_post_f"
-fi
-_new_count=$(wc -l < "$_mac_post_f" 2>/dev/null | tr -d ' ')
+# Summarize from the engine's same-process status globals (we call snapshot
+# inline, so the MERV_MAC_LAST_* values reflect what actually happened).
+case "${MERV_MAC_LAST_STATUS:-}" in
+  changed|reloaded|unchanged|empty)
+    info -c cli,vlan "MAC Refresh: complete — status=${MERV_MAC_LAST_STATUS} active db=${MERV_MAC_LAST_DB_COUNT:-0} MAC(s) (local=${MERV_MAC_LAST_LOCAL_COUNT:-0} node=${MERV_MAC_LAST_NODE_COUNT:-0})"
+    [ "${MERV_MAC_LAST_NODES_TOTAL:-0}" -gt 0 ] && \
+      info -c cli,vlan "MAC Refresh: nodes collected ${MERV_MAC_LAST_NODES_OK:-0}/${MERV_MAC_LAST_NODES_TOTAL:-0}, pushed ${MERV_MAC_LAST_PUSH_OK:-0}/${MERV_MAC_LAST_PUSH_TOTAL:-0}"
+    [ "${MERV_MAC_LAST_NODES_FAILED:-0}" -gt 0 ] && \
+      warn -c cli,vlan "MAC Refresh: ${MERV_MAC_LAST_NODES_FAILED} node(s) unreachable during collection — db preserved from existing entries"
+    ;;
+  precondition_failed)
+    warn -c cli,vlan "MAC Refresh: aborted — ${MERV_MAC_LAST_REASON:-interfaces not settled}; existing db kept (${_old_count:-0} MAC(s))"
+    ;;
+  clear_failed)
+    warn -c cli,vlan "MAC Refresh: failed — could not clear active db; existing db preserved"
+    ;;
+  merge_failed)
+    warn -c cli,vlan "MAC Refresh: failed — db write error; existing db preserved"
+    ;;
+  busy)
+    info -c cli,vlan "MAC Refresh: a MAC snapshot is already running — try again in 15-20 seconds"
+    ;;
+  *)
+    warn -c cli,vlan "MAC Refresh: completed with unknown status (${MERV_MAC_LAST_STATUS:-none})"
+    ;;
+esac
 
-# Diff: comm requires sorted inputs — both files are sorted -u above
-_added=$(  comm -13 "$_mac_pre_f" "$_mac_post_f" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-_removed=$(comm -23 "$_mac_pre_f" "$_mac_post_f" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-_unch=$(   comm -12 "$_mac_pre_f" "$_mac_post_f" 2>/dev/null | wc -l | tr -d ' ')
-rm -f "$_mac_pre_f" "$_mac_post_f" 2>/dev/null
-
-if [ -n "$_added" ] || [ -n "$_removed" ]; then
-  [ -n "$_added"   ] && info -c cli,vlan "MAC Refresh: added   — ${_added}"
-  [ -n "$_removed" ] && info -c cli,vlan "MAC Refresh: removed — ${_removed}"
-  info -c cli,vlan "MAC Refresh: shield rebuilt — ${_new_count:-0} MAC(s) active (${_unch:-0} unchanged)"
-elif [ "${_new_count:-0}" -eq 0 ]; then
-  info -c cli,vlan "MAC Refresh: shield empty — no clients in VLAN bridges (snapshot skipped or no clients)"
-else
-  info -c cli,vlan "MAC Refresh: MAC set unchanged — ${_new_count:-0} MAC(s)"
-fi
-
-# Propagate MAC refresh to all configured nodes (skip when running as a node)
-if [ "${MERV_NODE_CONTEXT:-0}" != "1" ] && \
-   [ "$(json_get_flag "IS_NODE" "0" "$SETTINGS_FILE" 2>/dev/null)" != "1" ] && \
-   [ ! -f "$MERV_BASE/.is_node" ] && \
-   type merv_ssh_exec >/dev/null 2>&1; then
-  _node_ips=$(grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }')
-  if [ -n "$_node_ips" ]; then
-    info -c cli,vlan "MAC Refresh: propagating to nodes..."
-    while read -r _nid _nip; do
-      [ -n "$_nip" ] || continue
-      if merv_ssh_exec "$_nid" "$_nip" \
-           "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mac_refresh.sh" \
-           >/dev/null 2>&1; then
-        info -c cli,vlan "MAC Refresh: ✓ node ${_nip} refreshed"
-      else
-        warn -c cli,vlan "MAC Refresh: ✗ node ${_nip} failed or unreachable"
-      fi
-    done <<EOF
-$_node_ips
-EOF
-  fi
+# Refresh the client inventory in the BACKGROUND so the UI's locked/override
+# badges reflect the freshly rebuilt shield db. Background is intentional: the
+# service-event handler dispatch must not block on a collection that can take
+# up to 90s when nodes are slow. Best-effort, fire-and-forget.
+if [ -x "$MERV_BASE/functions/collect_clients.sh" ]; then
+  sh "$MERV_BASE/functions/collect_clients.sh" >/dev/null 2>&1 &
 fi
 
-info -c cli,vlan "MAC Refresh: complete"
 exit 0
