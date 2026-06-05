@@ -1,3 +1,135 @@
+mervlan v0.53.11
+
+Multi-node support expanded:
+- MerVLAN now supports up to 10 configured nodes instead of 5.
+- The UI now generates node fields, node LAN tabs, SSID assignment buttons,
+  hardware override targets, and node aliases from the shared node limit.
+- Settings load/save, sync, apply, execute, hardware detection, and client
+  collection paths were updated to handle NODE1..NODE10 consistently.
+- SSID assignment values are normalized to the full node range so older
+  settings files continue to load cleanly.
+
+Settings save reliability:
+- Save payloads are now split by purpose to avoid hitting the Merlin payload
+  size limit on larger multi-node setups.
+- Normal Save only sends normal VLAN/node settings, hardware override save
+  only sends hardware override fields, and client metadata save only sends
+  client name/MAC shield metadata.
+- Save verification now checks only the keys that were actually saved, which
+  prevents false mismatch warnings after scoped saves.
+
+Client metadata and MAC Shield overrides:
+- Added client metadata support for friendly client names and MAC Shield
+  overrides.
+- Friendly names can replace raw MAC addresses in the Active VLAN Clients view.
+- MAC Shield overrides allow selected devices to move between VLANs and br0
+  without being blocked by the MAC shield.
+- Client metadata is saved persistently and applied through the normal addon
+  service flow.
+
+Active VLAN Clients badge system:
+- The Active VLAN Clients view now shows clearer device state badges.
+- Devices can show active, stale, inactive/duplicate, relayed, relay-only,
+  ambiguous, locked, unlocked, or unshielded states.
+- This makes it easier to see which clients are currently protected by the
+  MAC Shield and which observations are only diagnostic.
+- Inactive and relayed observations are hidden by default and can be shown
+  with a dedicated toggle.
+
+Client refresh behavior:
+- The addon now auto-collects VLAN client data on first page load when VLANs
+  are configured.
+- Auto-refresh is rate-limited with a 5 minute cooldown so the page stays fresh
+  without repeatedly running client collection while the user is working.
+- Manual Refresh still forces a visible client list update when needed.
+
+INFO panel UI improvements:
+- The INFO panel client area was reorganized for a cleaner layout.
+- Client refresh was moved to a compact icon button, while metadata editing,
+  inactive-client visibility, and MAC Shield rebuild actions now sit in the
+  client panel footer.
+- Button tooltips were clarified, especially the MAC Shield rebuild action,
+  so users know when to use it after moving devices back to br0.
+
+INFO panel scrolling improvements:
+- Active VLAN Clients now uses the same styled scrollbar as the CLI window.
+- Mouse wheel scrolling now works inside the Active VLAN Clients panel.
+- Nested client lists were simplified so the main client panel owns scrolling.
+- When the client panel reaches the top or bottom, scrolling can continue on
+  the main page like a normal web page.
+
+Addon height and page scrolling:
+- The addon iframe now auto-resizes to the rendered UI height instead of using
+  one fixed height for every layout.
+- Expanding Nodes, opening INFO, changing client views, and opening modals no
+  longer hide the bottom of the addon behind the container.
+- A tall fallback height remains for extreme no-JS/error cases, but normal use
+  now follows the actual rendered content height.
+
+MAC Shield — Mesh-wide client blocking:
+- The MAC Shield is now mesh-wide. When a refresh or cron snapshot runs, the
+  main router collects client MACs from every node, merges them into a single
+  database, and pushes it back to all nodes. A device known to any unit is
+  blocked across the whole mesh within one snapshot cycle.
+- Sleeping and idle devices (Wi-Fi power-save, screen off) are now reliably
+  captured via the bridge forwarding table, not just the active association
+  list. They stay in the database and keep their block rule even if they are
+  not actively transmitting when the snapshot runs.
+- Push to nodes only fires when the MAC set actually changes, so a stable
+  network generates no extra SSH traffic.
+- Can be turned off per-unit with MERV_MAC_NODE_SYNC=0. Degrades cleanly to
+  local-only if SSH keys are not set up.
+
+MAC Refresh — redesigned as a clean rebuild:
+- The Refresh button now fully delegates to the snapshot engine instead of
+  doing its own database manipulation. This removes a class of bugs where the
+  old approach could leave the shield in a half-rebuilt state.
+- Reset only clears the old database after every node has been successfully
+  heard from. If any node is unreachable, the refresh falls back to a safe
+  merge so no known clients are dropped by accident.
+- After a successful rebuild, the merged database is pushed to all nodes and
+  their shields are reloaded in the same operation — no extra step needed.
+- The refresh now reports a clear outcome: changed (MAC set updated),
+  reloaded (same clients, shield reapplied), or unchanged (nothing to do).
+  Node collection and push counts are shown in the log.
+- Verbose per-step logging is on during a manual refresh and silent during
+  the background cron tick, keeping logs readable in both cases.
+
+MAC Shield — SSH toolchain fix:
+- The snapshot engine previously relied on callers to load the SSH library,
+  which meant cron and manager invocations were running without it, producing
+  a spurious "SSH toolchain unavailable" warning every 5 minutes even on a
+  fully working setup.
+- Push to nodes was also silently skipping on some firmware builds due to a
+  binary lookup incompatibility. Both issues are fixed; push now works
+  reliably on all supported hardware.
+
+MAC Shield — snapshot concurrency lock:
+- A single lock now prevents the cron tick, the post-apply snapshot, and a
+  manual refresh from running at the same time. If a snapshot is already
+  running when the Refresh button is pressed, the user gets a clear message
+  to retry in a few seconds instead of the two operations racing each other.
+
+Lock reliability improvements:
+- Lock stale detection now accounts for PID reuse on the router's small PID
+  namespace, so a crashed process can no longer leave a lock stuck forever.
+- A dead snapshot lock now clears in 2 minutes instead of 15.
+- The cron-triggered snapshot runs in the background so it does not hold the
+  heal lock during its SSH work.
+
+Event handler reliability:
+- Service event locks now record a creation timestamp alongside the PID.
+  Previously, if a handler crashed before writing its timestamp, every
+  future event of the same type would be silently skipped forever. This is
+  now detected and the lock is reclaimed automatically.
+
+Install guard for non-full install
+- Added a guard in install.sh that prevents the addon the get badly installed
+  if the base files are not present. This prevents accidental bad installations
+  should a user forget to add "full" to the install.sh on an empty system.
+  
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.10
 
 Security / Leak Protection:
