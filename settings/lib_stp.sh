@@ -11,11 +11,11 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_stp.sh || version="0.57"                          #
+#                - File: lib_stp.sh || version="0.58"                          #
 # ============================================================================ #
 # - Purpose:    Deterministic STP Bridge-ID (bridge MAC) generation for        #
 #               MerVLAN VLAN bridges. Guarantees unique, stable Bridge IDs     #
-#               across Main router + up to 5 AiMesh nodes.                     #
+#               across Main router + configured AiMesh node range.             #
 # ============================================================================ #
 #                                                                              #
 # DESIGN DECISION — Option A (unit_id + vlan_id only)                          #
@@ -29,7 +29,7 @@
 #                                                                              #
 # MAC layout (6 bytes, locally-administered unicast):                          #
 #   Byte1: 02              — LA unicast prefix                                 #
-#   Byte2: A0 + unit_id    — unit identity (A0=main, A1..A5=nodes)             #
+#   Byte2: A0 + unit_id    — unit identity (A0=main, A1..nodes)                #
 #   Byte3: 4D              — product tag ('M' for MerVLAN)                     #
 #   Byte4: (vid >> 8)      — VLAN high byte                                    #
 #   Byte5: (vid & 0xFF)    — VLAN low byte                                     #
@@ -68,14 +68,21 @@ fi
 
 # stp_get_unit_id — Determine the numeric unit identity for this device
 # Args: none (reads NODE_ID from caller's environment or settings)
-# Returns: stdout 0 (main router) or 1-5 (node)
+# Returns: stdout 0 (main router) or 1-MERV_MAX_NODES (node)
 stp_get_unit_id() {
   # NODE_ID is set by mervlan_manager.sh or execute_nodes.sh before we are called.
   # Accept both the script-global NODE_ID and the MERV_NODE_ID variant.
   _stp_nid="${NODE_ID:-${MERV_NODE_ID:-none}}"
+  _stp_max="${MERV_MAX_NODES:-10}"
   case "$_stp_nid" in
-    1|2|3|4|5) printf '%s' "$_stp_nid" ;;
-    *)         printf '0' ;;
+    ''|*[!0-9]*) printf '0' ;;
+    *)
+      if [ "$_stp_nid" -ge 1 ] 2>/dev/null && [ "$_stp_nid" -le "$_stp_max" ] 2>/dev/null; then
+        printf '%s' "$_stp_nid"
+      else
+        printf '0'
+      fi
+      ;;
   esac
 }
 
@@ -95,7 +102,7 @@ stp_mac_for_vlan_bridge() {
   # Byte 1: 02 (locally-administered unicast)
   _stp_b1="02"
 
-  # Byte 2: A0 + unit_id (0xA0 = 160; range 160..165)
+  # Byte 2: A0 + unit_id (0xA0 = 160; range 160..170)
   _stp_b2_dec=$((160 + _stp_uid))
   _stp_b2=$(printf '%02x' "$_stp_b2_dec")
 
