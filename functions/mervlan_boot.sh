@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.57"                     #
+#                - File: mervlan_boot.sh || version="0.58"                     #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -362,14 +362,11 @@ remove_inject() {
 # NODE ORCHESTRATION HELPERS — SSH connectivity, node discovery, status polling  #
 # ============================================================================== #
 
-# get_node_ips — Extract NODE1-NODE5 IPs from settings.json (same as sync_nodes.sh)
+# get_node_ips — Extract NODE1-NODE10 IPs from settings.json (same as sync_nodes.sh)
 # Args: none (reads $SETTINGS_FILE global)
 # Returns: stdout list of "node_id ip" pairs (one per line), or empty string if none
 get_node_ips() {
-    # Extract NODE1-NODE5 entries via grep + sed patterns, filter out "none" and non-IPs
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
+    merv_node_list
 }
 
 # test_ssh_connection — Validate SSH connectivity to a specific node
