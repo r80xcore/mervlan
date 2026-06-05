@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: hw_probe.sh || version="0.52"                      #
+#                   - File: hw_probe.sh || version="0.53"                      #
 # ============================================================================ #
 # - Purpose:  Probe system hardware and record hardware keys in the central    #
 #             settings store (settings.json). Writes non-destructively via     #
@@ -121,10 +121,11 @@ _OVR_NODE_ID=$(json_get_section_value "General" "NODE_ID" "$SETTINGS_FILE" 2>/de
 
 # Determine override target key
 if [ "$_OVR_IS_NODE" = "1" ]; then
-  case "$_OVR_NODE_ID" in
-    1|2|3|4|5) _OVR_TARGET="NODE${_OVR_NODE_ID}" ;;
-    *) _OVR_TARGET="MAIN" ;;
-  esac
+  if merv_is_valid_node_id "$_OVR_NODE_ID" 2>/dev/null; then
+    _OVR_TARGET="NODE${_OVR_NODE_ID}"
+  else
+    _OVR_TARGET="MAIN"
+  fi
 else
   _OVR_TARGET="MAIN"
 fi
@@ -350,7 +351,7 @@ json_set_array "LAN_PORT_LABELS" "$LAN_PORT_LABELS" "$HW_TARGET" || warn "Failed
 # ============================================================================ #
 if [ "$_OVR_IS_NODE" != "1" ]; then
   _node_i=1
-  while [ "$_node_i" -le 5 ]; do
+  while [ "$_node_i" -le "${MERV_MAX_NODES:-10}" ]; do
     _nod_map=$(json_get_section2_value "Hardware_Override" "NODE${_node_i}" "MAP_OVERRIDE" "$HW_TARGET" 2>/dev/null)
     if [ "$_nod_map" = "1" ]; then
       _nod_max=$(json_get_section2_value "Hardware_Override" "NODE${_node_i}" "OVERRIDE_MAX_ETH_PORTS" "$HW_TARGET" 2>/dev/null)
