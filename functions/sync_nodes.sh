@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.59"                      #
+#               - File: sync_nodes.sh || version="0.60"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -271,11 +271,9 @@ info -c cli,vlan "✓ SSH key verification passed"
 # NODE DISCOVERY — Extract and validate node IP addresses from settings      #
 # ========================================================================== #
 
-# get_node_ips — Pull NODE1..NODE5 entries, filter placeholders/invalid IPs
+# get_node_ips — Pull NODE1..NODE10 entries, filter placeholders/invalid IPs
 get_node_ips() {
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
+    merv_node_list
 }
 
 NODE_IPS=$(get_node_ips)
