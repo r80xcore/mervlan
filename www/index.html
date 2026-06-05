@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.10" -->
+  <!-- index.html version="0.53.11" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_index_style.css" />
@@ -149,11 +149,6 @@
                 <span>Ethernet Port</span>
                 <div class="lan-node-toggle" role="group" aria-label="LAN port target">
                   <button type="button" class="lan-node-btn is-active" data-lan-target="main" title="Edit main router LAN VLANs">Main</button>
-                  <button type="button" class="lan-node-btn" data-lan-target="NODE1" title="Edit Node 1 LAN VLANs">1</button>
-                  <button type="button" class="lan-node-btn" data-lan-target="NODE2" title="Edit Node 2 LAN VLANs">2</button>
-                  <button type="button" class="lan-node-btn" data-lan-target="NODE3" title="Edit Node 3 LAN VLANs">3</button>
-                  <button type="button" class="lan-node-btn" data-lan-target="NODE4" title="Edit Node 4 LAN VLANs">4</button>
-                  <button type="button" class="lan-node-btn" data-lan-target="NODE5" title="Edit Node 5 LAN VLANs">5</button>
                 </div>
               </div>
             </th>
@@ -179,41 +174,11 @@
       </button>
     </div>
     <div id="nodeAdditional" class="node-additional" hidden>
-      <div class="node-row">
-        <label for="node2Field"><span class="node-label" data-node-index="2" title="Double-click to rename this node">Node 2</span></label>
-        <div class="node-input-wrap">
-          <input id="node2Field" class="input_15_table vlan-input" name="NODE2" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE2')" title="Enter node IP (format: 192.168.x.x)">
-          <span id="statusNODE2" class="status node-status" title="❌ Missing/invalid value">❌</span>
-        </div>
-      </div>
-      <div class="node-row">
-        <label for="node3Field"><span class="node-label" data-node-index="3" title="Double-click to rename this node">Node 3</span></label>
-        <div class="node-input-wrap">
-          <input id="node3Field" class="input_15_table vlan-input" name="NODE3" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE3')" title="Enter node IP (format: 192.168.x.x)">
-          <span id="statusNODE3" class="status node-status" title="❌ Missing/invalid value">❌</span>
-        </div>
-      </div>
-      <div class="node-row">
-        <label for="node4Field"><span class="node-label" data-node-index="4" title="Double-click to rename this node">Node 4</span></label>
-        <div class="node-input-wrap">
-          <input id="node4Field" class="input_15_table vlan-input" name="NODE4" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE4')" title="Enter node IP (format: 192.168.x.x)">
-          <span id="statusNODE4" class="status node-status" title="❌ Missing/invalid value">❌</span>
-        </div>
-      </div>
-      <div class="node-row">
-        <label for="node5Field"><span class="node-label" data-node-index="5" title="Double-click to rename this node">Node 5</span></label>
-        <div class="node-input-wrap">
-          <input id="node5Field" class="input_15_table vlan-input" name="NODE5" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE5')" title="Enter node IP (format: 192.168.x.x)">
-          <span id="statusNODE5" class="status node-status" title="❌ Missing/invalid value">❌</span>
-        </div>
-      </div>
     </div>
   </div>
+      <div id="nodeAliasContainer">
       <input type="hidden" name="NODE1_ALIAS" id="node1AliasField" value="Node 1">
-      <input type="hidden" name="NODE2_ALIAS" id="node2AliasField" value="Node 2">
-      <input type="hidden" name="NODE3_ALIAS" id="node3AliasField" value="Node 3">
-      <input type="hidden" name="NODE4_ALIAS" id="node4AliasField" value="Node 4">
-      <input type="hidden" name="NODE5_ALIAS" id="node5AliasField" value="Node 5">
+      </div>
       </form>
 
       <!-- General Settings Panel -->
@@ -326,11 +291,17 @@
               <!-- Clients Overview Panel -->
               <div class="clients-panel">
                 <div class="clients-header">
-                  <span>Active VLAN Clients</span>
-                  <button type="button" class="button_gen" title="Clear and rebuild the per-client MAC shield database" onclick="runMacRefresh()">MAC Shield Refresh</button>
-                  <button type="button" id="refreshClientsBtn" class="button_gen" title="Collect and refresh client list" onclick="refreshClients(this)">Refresh</button>
+                  <div class="clients-header-top">
+                    <span>Active VLAN Clients</span>
+                    <button type="button" id="refreshClientsBtn" class="button_gen clients-refresh-btn" title="Refresh the visible client list only. This does not rebuild or change the MAC shield database." onclick="refreshClients(this)">&#x27F3;</button>
+                  </div>
                 </div>
                 <div id="vlanOverview" class="clients-body"></div>
+                <div class="clients-footer">
+                  <button type="button" id="editClientMetaBtn" class="button_gen" title="Edit friendly client names and unlock selected MACs from the MAC shield." onclick="toggleClientMetaEdit()">Edit Metadata</button>
+                  <label class="clients-toggle" title="Show observations that are not the active location for a device — relayed trunk/backhaul copies and relay-only diagnostic rows. Hidden by default."><input type="checkbox" id="clientsShowInactive" onchange="toggleClientsShowInactive(this)"> Show inactive / relayed</label>
+                  <button type="button" class="button_gen" title="Rebuild the MAC shield from currently connected VLAN clients. Use after moving a device from VLAN to br0 to clear its old lock instead of waiting for it to expire." onclick="runMacRefresh()">Rebuild MAC Shield</button>
+                </div>
               </div>
             </div>
             <div class="cli-latch" id="cliLatch" title="Expand CLI panel" role="button" tabindex="0" aria-expanded="false" aria-controls="cliPanel">
@@ -534,11 +505,6 @@
         <label for="advOverrideTargetSelect">Device</label>
         <select id="advOverrideTargetSelect" class="input_option" onchange="switchAdvancedOverrideTarget(this.value)">
           <option value="MAIN">Main Router</option>
-          <option value="NODE1">Node 1</option>
-          <option value="NODE2">Node 2</option>
-          <option value="NODE3">Node 3</option>
-          <option value="NODE4">Node 4</option>
-          <option value="NODE5">Node 5</option>
         </select>
       </div>
       <div class="adv-override-target-indicator" id="advOverrideTargetLabel">Editing: Main Router</div>
@@ -758,6 +724,62 @@
           return match[1].trim();
         }
 
+        const MAX_NODES = 10;
+        function nodeNums() { return Array.from({ length: MAX_NODES }, (_, i) => i + 1); }
+        function nodeTokens(includeMain = false) {
+          const nodes = nodeNums().map(n => `NODE${n}`);
+          return includeMain ? ["MAIN", ...nodes] : nodes;
+        }
+        function defaultSSIDAssign() { return ["MAIN", ...Array(MAX_NODES).fill("none")].join(","); }
+        function normalizeSsidAssignString(raw) {
+          const parts = String(raw ?? "").split(",");
+          while (parts.length < MAX_NODES + 1) parts.push("none");
+          return parts.slice(0, MAX_NODES + 1).join(",");
+        }
+
+        // Render NODE2..NODE_MAX IP rows into #nodeAdditional (NODE1 stays static).
+        function renderAdditionalNodeRows() {
+          const container = document.getElementById("nodeAdditional");
+          if (!container) return;
+          container.innerHTML = nodeNums().filter(n => n >= 2).map(n => `
+            <div class="node-row">
+              <label for="node${n}Field"><span class="node-label" data-node-index="${n}" title="Double-click to rename this node">Node ${n}</span></label>
+              <div class="node-input-wrap">
+                <input id="node${n}Field" class="input_15_table vlan-input" name="NODE${n}" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE${n}')" title="Enter node IP (format: 192.168.x.x)">
+                <span id="statusNODE${n}" class="status node-status" title="❌ Missing/invalid value">❌</span>
+              </div>
+            </div>`).join("");
+        }
+
+        // Render hidden alias inputs for NODE1..NODE_MAX into #nodeAliasContainer.
+        function renderNodeAliasInputs() {
+          const container = document.getElementById("nodeAliasContainer");
+          if (!container) return;
+          container.innerHTML = nodeNums().map(n =>
+            `<input type="hidden" name="NODE${n}_ALIAS" id="node${n}AliasField" value="Node ${n}">`
+          ).join("");
+        }
+
+        // Render LAN target buttons (Main + NODE1..NODE_MAX) into .lan-node-toggle.
+        function renderLanTargetButtons() {
+          const group = document.querySelector(".lan-node-toggle");
+          if (!group) return;
+          group.innerHTML =
+            `<button type="button" class="lan-node-btn is-active" data-lan-target="main" title="Edit main router LAN VLANs">Main</button>` +
+            nodeNums().map(n =>
+              `<button type="button" class="lan-node-btn" data-lan-target="NODE${n}" title="Edit Node ${n} LAN VLANs">${n}</button>`
+            ).join("");
+        }
+
+        // Populate the advanced override device select with MAIN + NODE1..NODE_MAX.
+        function populateAdvOverrideSelect() {
+          const sel = document.getElementById("advOverrideTargetSelect");
+          if (!sel) return;
+          sel.innerHTML =
+            `<option value="MAIN">Main Router</option>` +
+            nodeNums().map(n => `<option value="NODE${n}">Node ${n}</option>`).join("");
+        }
+
         function isStructuredSettingsPayload(data) {
           if (!data || typeof data !== "object") {
             return false;
@@ -782,7 +804,7 @@
           flat.ENABLE_NATIVE_SSID = stringOrDefault(general.ENABLE_NATIVE_SSID, "0");
 
           const nodes = ensurePlainObject(data.Nodes);
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             const key = `NODE${i}`;
             flat[key] = stringOrDefault(nodes[key], "none");
             const aliasKey = `NODE${i}_ALIAS`;
@@ -803,7 +825,7 @@
             flat[`SSID_${idx}`] = stringOrDefault(ssids[`SSID_${idx}`], "unused-placeholder");
             flat[`APISO_${idx}`] = stringOrDefault(apiso[`APISO_${idx}`], "0");
             flat[`VLAN_${idx}`] = stringOrDefault(pool[`VLAN_${idx}`], "none");
-            flat[`SSIDassign_${idx}`] = stringOrDefault(ssidAssign[`SSIDassign_${idx}`], "MAIN,none,none,none,none,none");
+            flat[`SSIDassign_${idx}`] = stringOrDefault(ssidAssign[`SSIDassign_${idx}`], defaultSSIDAssign());
           }
           for (let i = 1; i <= 8; i++) {
             flat[`ETH${i}_VLAN`] = stringOrDefault(ethPorts[`ETH${i}_VLAN`], "none");
@@ -811,7 +833,7 @@
             flat[`TAGGED_TRUNK${i}`] = stringOrDefault(trunks[`TAGGED_TRUNK${i}`], "none");
             flat[`UNTAGGED_TRUNK${i}`] = stringOrDefault(trunks[`UNTAGGED_TRUNK${i}`], "none");
           }
-          for (let n = 1; n <= 5; n++) {
+          for (let n = 1; n <= MAX_NODES; n++) {
             const nodeKey = `NODE${n}`;
             const nodeBlock = ensurePlainObject(nodeOverrides[nodeKey]);
             const nodeEthSectionName = `NODE${n}_Ethernet_ports`;
@@ -823,7 +845,7 @@
           }
 
           const hwOverrideSection = ensurePlainObject(data.Hardware_Override);
-          ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"].forEach(t => {
+          nodeTokens(true).forEach(t => {
             const sub = ensurePlainObject(hwOverrideSection[t]);
             flat[`OVERRIDE_${t}_MAP_OVERRIDE`] = stringOrDefault(sub.MAP_OVERRIDE, "0");
             flat[`OVERRIDE_${t}_WAN`] = stringOrDefault(sub.OVERRIDE_WAN, "eth0");
@@ -832,6 +854,19 @@
               flat[`OVERRIDE_${t}_LAN${i}`] = stringOrDefault(sub[`OVERRIDE_LAN${i}`], "none");
             }
           });
+
+          // ClientMeta: MAC shield overrides + client display names. Fall back to
+          // top-level keys for older installs whose settings.json predates the
+          // nested ClientMeta section (keeps the editor populated regardless).
+          const clientMeta = ensurePlainObject(data.ClientMeta);
+          flat.MAC_SHIELD_OVERRIDES = stringOrDefault(
+            clientMeta.MAC_SHIELD_OVERRIDES,
+            stringOrDefault(data.MAC_SHIELD_OVERRIDES, "")
+          );
+          flat.CLIENT_NAME_OVERRIDES = stringOrDefault(
+            clientMeta.CLIENT_NAME_OVERRIDES,
+            stringOrDefault(data.CLIENT_NAME_OVERRIDES, "")
+          );
 
           return flat;
         }
@@ -871,11 +906,13 @@
           const ssids = {};
           const apiso = {};
           const vlanPool = {};
+          const ssidAssign = {};
           for (let i = 1; i <= 12; i++) {
             const idx = String(i).padStart(2, "0");
             ssids[`SSID_${idx}`] = "unused-placeholder";
             apiso[`APISO_${idx}`] = "0";
             vlanPool[`VLAN_${idx}`] = "none";
+            ssidAssign[`SSIDassign_${idx}`] = defaultSSIDAssign();
           }
 
           const ethPorts = {};
@@ -888,6 +925,45 @@
             trunks[`TAGGED_TRUNK${i}`] = "none";
             trunks[`UNTAGGED_TRUNK${i}`] = "none";
           }
+
+          // Node IPs + aliases
+          const nodesSection = {
+            _description: "Configured node IPs (used for sync and remote execution)"
+          };
+          nodeNums().forEach(n => { nodesSection[`NODE${n}`] = "none"; });
+          nodeNums().forEach(n => { nodesSection[`NODE${n}_ALIAS`] = `Node ${n}`; });
+
+          // Per-node Ethernet port VLAN overrides
+          const nodeOverrides = {
+            _description: "Optional per-node Ethernet port VLAN overrides (NODE1..NODE" + MAX_NODES + ")"
+          };
+          nodeNums().forEach(n => {
+            nodeOverrides[`NODE${n}`] = { [`NODE${n}_Ethernet_ports`]: cloneNodeEthernetPortsTemplate(n, ethPorts) };
+          });
+
+          // Hardware node hint keys
+          const hardware = {
+            _description: "Detected hardware profile (auto-generated by hw_probe.sh; do not edit)",
+            MODEL: "",
+            PRODUCTID: "",
+            MAX_SSIDS: "0",
+            RADIOS: [],
+            GUEST_SLOTS: "0",
+            ETH_PORTS: [],
+            LAN_PORT_LABELS: [],
+            WAN_IF: "",
+            MAX_ETH_PORTS: "0"
+          };
+          nodeNums().forEach(n => { hardware[`PRODUCTID_NODE${n}`] = ""; });
+          nodeNums().forEach(n => { hardware[`MAX_ETH_PORTS_NODE${n}`] = "0"; });
+
+          // Hardware override per device
+          const overrideBlock = () => ({ MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" });
+          const hardwareOverride = {
+            _description: "Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE" + MAX_NODES + ")",
+            MAIN: overrideBlock()
+          };
+          nodeNums().forEach(n => { hardwareOverride[`NODE${n}`] = overrideBlock(); });
 
           return {
             General: {
@@ -906,58 +982,26 @@
               NODE_SSH_PORT: "22",
               SSH_KEYS_INSTALLED: "0"
             },
-            Nodes: {
-              _description: "Configured node IPs (used for sync and remote execution)",
-              NODE1: "none",
-              NODE2: "none",
-              NODE3: "none",
-              NODE4: "none",
-              NODE5: "none",
-              NODE1_ALIAS: "Node 1",
-              NODE2_ALIAS: "Node 2",
-              NODE3_ALIAS: "Node 3",
-              NODE4_ALIAS: "Node 4",
-              NODE5_ALIAS: "Node 5"
-            },
+            Nodes: nodesSection,
             WiFi: {
               _description: "SSID slots and per-SSID AP isolation flags (APISO)",
               SSIDs: ssids,
-              APISO: apiso
+              APISO: apiso,
+              SSIDassign: ssidAssign
             },
             VLAN: {
               _description: "All VLAN-related configuration: pool, per-port mapping, trunks",
               Pool: vlanPool,
               Ethernet_ports: ethPorts,
               Trunks: trunks,
-              Node_overrides: {
-                _description: "Optional per-node Ethernet port VLAN overrides (NODE1..NODE5)",
-                NODE1: { NODE1_Ethernet_ports: cloneNodeEthernetPortsTemplate(1, ethPorts) },
-                NODE2: { NODE2_Ethernet_ports: cloneNodeEthernetPortsTemplate(2, ethPorts) },
-                NODE3: { NODE3_Ethernet_ports: cloneNodeEthernetPortsTemplate(3, ethPorts) },
-                NODE4: { NODE4_Ethernet_ports: cloneNodeEthernetPortsTemplate(4, ethPorts) },
-                NODE5: { NODE5_Ethernet_ports: cloneNodeEthernetPortsTemplate(5, ethPorts) }
-              }
+              Node_overrides: nodeOverrides
             },
-            Hardware: {
-              _description: "Detected hardware profile (auto-generated by hw_probe.sh; do not edit)",
-              MODEL: "",
-              PRODUCTID: "",
-              MAX_SSIDS: "0",
-              RADIOS: [],
-              GUEST_SLOTS: "0",
-              ETH_PORTS: [],
-              LAN_PORT_LABELS: [],
-              WAN_IF: "",
-              MAX_ETH_PORTS: "0"
-            },
-            Hardware_Override: {
-              _description: "Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE5)",
-              MAIN:  { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" },
-              NODE1: { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" },
-              NODE2: { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" },
-              NODE3: { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" },
-              NODE4: { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" },
-              NODE5: { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" }
+            Hardware: hardware,
+            Hardware_Override: hardwareOverride,
+            ClientMeta: {
+              _description: "MAC shield override and client display name configuration",
+              MAC_SHIELD_OVERRIDES: "",
+              CLIENT_NAME_OVERRIDES: ""
             }
           };
         }
@@ -971,7 +1015,7 @@
           general.ENABLE_NATIVE_SSID = stringOrDefault(flat.ENABLE_NATIVE_SSID, general.ENABLE_NATIVE_SSID ?? "0");
 
           const nodes = target.Nodes = ensurePlainObject(target.Nodes);
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             const key = `NODE${i}`;
             nodes[key] = stringOrDefault(flat[key], nodes[key] ?? "none");
             const aliasKey = `NODE${i}_ALIAS`;
@@ -990,7 +1034,7 @@
             ssids[`SSID_${idx}`] = stringOrDefault(flat[`SSID_${idx}`], ssids[`SSID_${idx}`] ?? "unused-placeholder");
             apiso[`APISO_${idx}`] = stringOrDefault(flat[`APISO_${idx}`], apiso[`APISO_${idx}`] ?? "0");
             pool[`VLAN_${idx}`] = stringOrDefault(flat[`VLAN_${idx}`], pool[`VLAN_${idx}`] ?? "none");
-            ssidAssign[`SSIDassign_${idx}`] = stringOrDefault(flat[`SSIDassign_${idx}`], ssidAssign[`SSIDassign_${idx}`] ?? "MAIN,none,none,none,none,none");
+            ssidAssign[`SSIDassign_${idx}`] = stringOrDefault(flat[`SSIDassign_${idx}`], ssidAssign[`SSIDassign_${idx}`] ?? defaultSSIDAssign());
           }
 
           const ethPorts = vlan.Ethernet_ports = ensurePlainObject(vlan.Ethernet_ports);
@@ -1002,18 +1046,19 @@
             trunks[`TAGGED_TRUNK${i}`] = stringOrDefault(flat[`TAGGED_TRUNK${i}`], trunks[`TAGGED_TRUNK${i}`] ?? "none");
             trunks[`UNTAGGED_TRUNK${i}`] = stringOrDefault(flat[`UNTAGGED_TRUNK${i}`], trunks[`UNTAGGED_TRUNK${i}`] ?? "none");
           }
-          for (let n = 1; n <= 5; n++) {
+          for (let n = 1; n <= MAX_NODES; n++) {
             const nodeKey = `NODE${n}`;
             const nodeBlock = nodeOverrides[nodeKey] = ensurePlainObject(nodeOverrides[nodeKey]);
-            const nodeEth = nodeBlock.Ethernet_ports = ensurePlainObject(nodeBlock.Ethernet_ports);
+            const nodeEthSection = `${nodeKey}_Ethernet_ports`;
+            const nodeEth = nodeBlock[nodeEthSection] = ensurePlainObject(nodeBlock[nodeEthSection]);
             for (let i = 1; i <= 8; i++) {
-              const key = `NODE${n}_ETH${i}_VLAN`;
-              nodeEth[`ETH${i}_VLAN`] = stringOrDefault(flat[key], nodeEth[`ETH${i}_VLAN`] ?? "none");
+              const vlanKey = `${nodeKey}_ETH${i}_VLAN`;
+              nodeEth[vlanKey] = stringOrDefault(flat[vlanKey], nodeEth[vlanKey] ?? "none");
             }
           }
 
           const hwOverride = target.Hardware_Override = ensurePlainObject(target.Hardware_Override);
-          const hwOvrTargets = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
+          const hwOvrTargets = nodeTokens(true);
           hwOvrTargets.forEach(t => {
             const sub = hwOverride[t] = ensurePlainObject(hwOverride[t]);
             sub.MAP_OVERRIDE = stringOrDefault(flat[`OVERRIDE_${t}_MAP_OVERRIDE`], sub.MAP_OVERRIDE ?? "0");
@@ -1025,26 +1070,30 @@
             }
           });
 
+          const clientMeta = target.ClientMeta = ensurePlainObject(target.ClientMeta);
+          if (clientMeta._description == null) {
+            clientMeta._description = "MAC shield override and client display name configuration";
+          }
+          clientMeta.MAC_SHIELD_OVERRIDES = stringOrDefault(flat.MAC_SHIELD_OVERRIDES, clientMeta.MAC_SHIELD_OVERRIDES ?? "");
+          clientMeta.CLIENT_NAME_OVERRIDES = stringOrDefault(flat.CLIENT_NAME_OVERRIDES, clientMeta.CLIENT_NAME_OVERRIDES ?? "");
+
           return target;
         }
 
         /* ================== HW SETTINGS + TABLE GENERATION ================== */
-        let HW_SETTINGS = {
-          MAX_SSIDS: 0,
-          MAX_ETH_PORTS: 0,
-          PRODUCTID: "",
-          PRODUCTID_NODE1: "",
-          PRODUCTID_NODE2: "",
-          PRODUCTID_NODE3: "",
-          PRODUCTID_NODE4: "",
-          PRODUCTID_NODE5: "",
-          MAX_ETH_PORTS_NODE1: 0,
-          MAX_ETH_PORTS_NODE2: 0,
-          MAX_ETH_PORTS_NODE3: 0,
-          MAX_ETH_PORTS_NODE4: 0,
-          MAX_ETH_PORTS_NODE5: 0,
-          LOADED: false
-        };
+        let HW_SETTINGS = (function () {
+          const hw = {
+            MAX_SSIDS: 0,
+            MAX_ETH_PORTS: 0,
+            PRODUCTID: "",
+            LOADED: false
+          };
+          for (let i = 1; i <= MAX_NODES; i++) {
+            hw["PRODUCTID_NODE" + i] = "";
+            hw["MAX_ETH_PORTS_NODE" + i] = 0;
+          }
+          return hw;
+        })();
 
         function showUnsupportedModelModal() {
           const modal = document.getElementById("unsupportedModelModal");
@@ -1109,7 +1158,7 @@
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
 
           // Load node hardware values
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             const pidKey = "PRODUCTID_NODE" + i;
             const ethKey = "MAX_ETH_PORTS_NODE" + i;
             const pidVal = hw && typeof hw[pidKey] === "string" ? hw[pidKey].trim().toUpperCase() : "";
@@ -1154,7 +1203,7 @@
           }
 
           // Node overrides
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             const nodeOvr = ovr["NODE" + i];
             if (nodeOvr && String(nodeOvr.MAP_OVERRIDE) === "1") {
               const maxEth = parseInt(nodeOvr.OVERRIDE_MAX_ETH_PORTS, 10);
@@ -1178,7 +1227,7 @@
             MAX_SSIDS: HW_SETTINGS.MAX_SSIDS,
             PRODUCTID: HW_SETTINGS.PRODUCTID
           };
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             oldVals["MAX_ETH_PORTS_NODE" + i] = HW_SETTINGS["MAX_ETH_PORTS_NODE" + i];
             oldVals["PRODUCTID_NODE" + i] = HW_SETTINGS["PRODUCTID_NODE" + i];
           }
@@ -1191,7 +1240,7 @@
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
 
           // Update node values
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             const pidKey = "PRODUCTID_NODE" + i;
             const ethKey = "MAX_ETH_PORTS_NODE" + i;
             const pidVal = typeof hw[pidKey] === "string" ? hw[pidKey].trim().toUpperCase() : "";
@@ -1210,7 +1259,7 @@
               oldVals.PRODUCTID !== HW_SETTINGS.PRODUCTID) {
             changed = true;
           }
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             if (oldVals["MAX_ETH_PORTS_NODE" + i] !== HW_SETTINGS["MAX_ETH_PORTS_NODE" + i] ||
                 oldVals["PRODUCTID_NODE" + i] !== HW_SETTINGS["PRODUCTID_NODE" + i]) {
               changed = true;
@@ -1249,7 +1298,7 @@
         }
 
         /**
-         * Get the max LAN ports for a given target ("main" or "NODE1".."NODE5").
+         * Get the max LAN ports for a given target ("main" or "NODE1".."NODE10").
          */
         function getMaxEthPortsForTarget(target) {
           if (!target || target === "main") {
@@ -1266,7 +1315,7 @@
          */
         function getOverallMaxEthPorts() {
           let max = HW_SETTINGS.MAX_ETH_PORTS || 0;
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= MAX_NODES; i++) {
             const v = HW_SETTINGS["MAX_ETH_PORTS_NODE" + i] || 0;
             if (v > max) max = v;
           }
@@ -1313,11 +1362,7 @@
                 <td class="ssid-col-assign ssid-col-hidden" colspan="3">
                   <div class="ssid-node-assign" data-ssid="${idx}">
                     <label class="ssid-node-cb" title="Assign to Main Router"><input type="checkbox" name="SSIDassign_${idx}_MAIN" value="MAIN" checked onchange="markEdited(${i})"><span>M</span></label>
-                    <label class="ssid-node-cb" title="Assign to Node 1"><input type="checkbox" name="SSIDassign_${idx}_NODE1" value="NODE1" onchange="markEdited(${i})"><span>1</span></label>
-                    <label class="ssid-node-cb" title="Assign to Node 2"><input type="checkbox" name="SSIDassign_${idx}_NODE2" value="NODE2" onchange="markEdited(${i})"><span>2</span></label>
-                    <label class="ssid-node-cb" title="Assign to Node 3"><input type="checkbox" name="SSIDassign_${idx}_NODE3" value="NODE3" onchange="markEdited(${i})"><span>3</span></label>
-                    <label class="ssid-node-cb" title="Assign to Node 4"><input type="checkbox" name="SSIDassign_${idx}_NODE4" value="NODE4" onchange="markEdited(${i})"><span>4</span></label>
-                    <label class="ssid-node-cb" title="Assign to Node 5"><input type="checkbox" name="SSIDassign_${idx}_NODE5" value="NODE5" onchange="markEdited(${i})"><span>5</span></label>
+                    ${nodeNums().map(n => `<label class="ssid-node-cb" title="Assign to Node ${n}"><input type="checkbox" name="SSIDassign_${idx}_NODE${n}" value="NODE${n}" onchange="markEdited(${i})"><span>${n}</span></label>`).join("")}
                   </div>
                 </td>
               </tr>
@@ -1491,6 +1536,7 @@ function showTooltip() {
     };
     const statusTooltips = {"✅":TOOLTIP.STATUS_OK,"❎":TOOLTIP.STATUS_NOT,"🟩":TOOLTIP.STATUS_EDIT,"❌":TOOLTIP.STATUS_ERR,"🟡":TOOLTIP.STATUS_DUP};
     const NODE_DISABLED_TOOLTIP = "Configure node(s) first!";
+    const MERLIN_SAVE_PAYLOAD_LIMIT = 8000;
     function getDefaultNodeAlias(index){
       return "Node " + index;
     }
@@ -1618,7 +1664,7 @@ function showTooltip() {
     }
 
     function updateLanTargetButtons(){
-      document.querySelectorAll(".lan-node-btn").forEach(btn => {
+      document.querySelectorAll(".lan-node-toggle .lan-node-btn").forEach(btn => {
         const target = btn.dataset.lanTarget || "";
         btn.classList.toggle("is-active", target === CURRENT_LAN_TARGET);
       });
@@ -1643,7 +1689,7 @@ function showTooltip() {
     }
 
     /**
-     * Get the PRODUCTID for a given target ("main" or "NODE1".."NODE5").
+     * Get the PRODUCTID for a given target ("main" or "NODE1".."NODE10").
      */
     function getProductIdForTarget(target) {
       if (!target || target === "main") {
@@ -1678,7 +1724,7 @@ function showTooltip() {
     function updateLanNodeButtonStates() {
       if (!HW_SETTINGS.LOADED) return;
       const settings = CURRENT_SETTINGS_CACHE || {};
-      document.querySelectorAll(".lan-node-btn").forEach(btn => {
+      document.querySelectorAll(".lan-node-toggle .lan-node-btn").forEach(btn => {
         const target = btn.dataset.lanTarget || "";
         if (target === "main") {
           btn.disabled = false;
@@ -1734,7 +1780,7 @@ function showTooltip() {
     }
 
     function setupLanTargetButtons(){
-      document.querySelectorAll(".lan-node-btn").forEach(btn => {
+      document.querySelectorAll(".lan-node-toggle .lan-node-btn").forEach(btn => {
         if(btn.dataset.handlerAttached === "1") return;
         btn.addEventListener("click", () => {
           const target = btn.dataset.lanTarget;
@@ -1780,7 +1826,7 @@ function showTooltip() {
 
     /**
      * Update SSID node assignment checkboxes based on configured/loaded nodes.
-     * Nodes with a valid IP in settings (NODE1..NODE5) are enabled.
+     * Nodes with a valid IP in settings (NODE1..NODE10) are enabled.
      * If no nodes configured at all, all checkboxes except MAIN are disabled.
      */
     function updateSSIDAssignCheckboxes() {
@@ -1791,7 +1837,7 @@ function showTooltip() {
       const nodeAvailable = {};
       nodeAvailable["MAIN"] = true; // Main is always available
       
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= MAX_NODES; i++) {
         const nodeKey = "NODE" + i;
         const ip = (settings[nodeKey] || "").trim();
         const hasValidIP = ip && ip.toLowerCase() !== "none" && 
@@ -1808,8 +1854,9 @@ function showTooltip() {
         
         // Extract node from checkbox name: SSIDassign_XX_MAIN or SSIDassign_XX_NODE1
         const name = cb.name || "";
-        const match = name.match(/SSIDassign_(\d+)_(MAIN|NODE[1-5])$/);
+        const match = name.match(/SSIDassign_(\d+)_(MAIN|NODE([0-9]+))$/);
         if (!match) return;
+        if (match[3] && (+match[3] < 1 || +match[3] > MAX_NODES)) return;
         
         const slotIdx = match[1];
         const nodeId = match[2];
@@ -1916,7 +1963,7 @@ function showTooltip() {
     }
     function hasConfiguredNodes(settings){
       if(!settings) return false;
-      for(var i=1;i<=5;i++){
+      for(var i=1;i<=MAX_NODES;i++){
         var key = "NODE"+i;
         var raw = settings[key];
         if(typeof raw !== "string") continue;
@@ -2622,7 +2669,88 @@ function showTooltip() {
       setTimeout(() => {
         try { adjustClientsPanelHeight(); } catch(_){}
         scheduleFormPaneWidthUpdate();
+        scheduleHostIframeResize();
       }, 40);
+    }
+
+    let pendingHostResize = null;
+
+    function getAddonContentHeight(){
+      const cliPanel = document.getElementById('cliPanel');
+      const candidates = [
+        document.querySelector('.form-box--main'),
+        document.querySelector('.container'),
+        cliPanel && cliPanel.classList.contains('expanded') ? cliPanel.querySelector('.cli-shell') : null,
+        document.getElementById('advancedOverrideModal'),
+        document.getElementById('sshKeyModal'),
+        document.getElementById('unsupportedModelModal'),
+        document.getElementById('versionModal')
+      ];
+
+      let bottom = 0;
+
+      candidates.forEach(el => {
+        if(!el) return;
+        const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+        if(style && style.display === 'none') return;
+        const r = el.getBoundingClientRect();
+        if(!r || !isFinite(r.bottom)) return;
+        bottom = Math.max(bottom, r.bottom + window.scrollY);
+      });
+
+      return Math.ceil(bottom);
+    }
+
+    function scheduleHostIframeResize(){
+      if(pendingHostResize !== null) return;
+      pendingHostResize = requestAnimationFrame(() => {
+        pendingHostResize = null;
+        if(window.parent && window.parent !== window &&
+           typeof window.parent.MVM_resizeVlanIframe === 'function'){
+          const h = getAddonContentHeight();
+          if(h > 0) window.parent.MVM_resizeVlanIframe(h);
+        }
+      });
+    }
+
+    function setupHostIframeAutoResize(){
+      scheduleHostIframeResize();
+      if(typeof ResizeObserver === 'function'){
+        const ro = new ResizeObserver(() => scheduleHostIframeResize());
+        [
+          document.querySelector('.form-box--main'),
+          document.querySelector('.container'),
+          document.querySelector('.cli-container')
+        ].forEach(el => { if(el) ro.observe(el); });
+      }
+      window.addEventListener('resize', scheduleHostIframeResize);
+    }
+
+    function canScrollInDirection(el, delta){
+      if(!el) return false;
+      const max = el.scrollHeight - el.clientHeight;
+      if(max <= 0) return false;
+      if(delta < 0) return el.scrollTop > 0;
+      if(delta > 0) return el.scrollTop < max - 1;
+      return false;
+    }
+
+    function setupClientsWheelScroll(){
+      const body = document.querySelector('.clients-body');
+      if(!body || body.dataset.wheelScrollAttached === '1') return;
+      body.dataset.wheelScrollAttached = '1';
+      body.addEventListener('wheel', function(e){
+        const delta = e.deltaY || 0;
+        const nestedScroller = e.target.closest('.cm-rows');
+        if(nestedScroller && nestedScroller !== body && canScrollInDirection(nestedScroller, delta)) {
+          return;
+        }
+        if(!canScrollInDirection(body, delta)) {
+          return;
+        }
+        body.scrollTop += delta;
+        e.preventDefault();
+      }, { passive: false });
     }
 
     function setupNodeCollapse(){
@@ -2639,7 +2767,7 @@ function showTooltip() {
     function syncNodeCollapseWithValues(){
       const panel = document.getElementById("nodeAdditional");
       if(!panel) return;
-      const shouldExpand = Array.from(panel.querySelectorAll('input[name^="NODE"]'))
+      const shouldExpand = Array.from(panel.querySelectorAll('input[name^="NODE"]:not([name$="_ALIAS"])'))
         .some(input => input.value.trim() !== "");
       if(shouldExpand) setNodeCollapse(true);
     }
@@ -2659,7 +2787,7 @@ function showTooltip() {
         const name = cb.name || "";
         cb.checked = name.endsWith("_MAIN"); // Only MAIN checked by default
       });
-      for(let i = 1; i <= 5; i++){
+      for(let i = 1; i <= MAX_NODES; i++){
         setNodeAlias(i, getDefaultNodeAlias(i), { markEdited: false });
       }
       const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
@@ -2695,6 +2823,7 @@ function showTooltip() {
       rebuildTrunkVlanOptionsFromSettings({});
       updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
+      scheduleHostIframeResize();
       CURRENT_SETTINGS_CACHE = null;
       CURRENT_SETTINGS_STRUCTURED = null;
       CURRENT_SETTINGS_SHAPE = "flat";
@@ -2710,6 +2839,10 @@ function showTooltip() {
     `;
 
     window.addEventListener("DOMContentLoaded", async () => {
+      renderAdditionalNodeRows();
+      renderNodeAliasInputs();
+      renderLanTargetButtons();
+      populateAdvOverrideSelect();
       initNodeDependentButtons();
       updateExperimentalVersionBadge();
       const expBadge = document.getElementById("experimentalVersionBadge");
@@ -2734,7 +2867,7 @@ function showTooltip() {
       document.querySelectorAll('input[name^="VLAN_"], .lan-vlan-input').forEach(el =>
         el.addEventListener("input", validateAllVlans)
       );
-      document.querySelectorAll('input[name^="NODE"]').forEach(el =>
+      document.querySelectorAll('input[name^="NODE"]:not([name$="_ALIAS"])').forEach(el =>
         el.addEventListener("input", () => validateNodeField(el))
       );
 
@@ -2755,7 +2888,7 @@ function showTooltip() {
       // run same initial validation as before
       validateAllVlans();
       document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
-      document.querySelectorAll('input[name^="NODE"]').forEach(el => validateNodeField(el));
+      document.querySelectorAll('input[name^="NODE"]:not([name$="_ALIAS"])').forEach(el => validateNodeField(el));
       updateStatusTooltips();
   syncNodeCollapseWithValues();
       startClientsPolling();
@@ -2893,6 +3026,7 @@ function showTooltip() {
         adjustClientsPanelHeight();
         scheduleFormPaneWidthUpdate();
         updateCliOverlayPosition();
+        scheduleHostIframeResize();
       }, 50);
       window.addEventListener('resize', () => {
         updateCliOverlayPosition();
@@ -2900,6 +3034,8 @@ function showTooltip() {
         scheduleFormPaneWidthUpdate();
       });
       setupNodeCollapse();
+      setupClientsWheelScroll();
+      setupHostIframeAutoResize();
 
       // Auto-load settings once the UI has initialized
       setTimeout(() => {
@@ -2980,6 +3116,7 @@ function toggleCliFullsize() {
   }
   // Recalculate heights after toggle
   adjustClientsPanelHeight();
+  scheduleHostIframeResize();
 }
 
     // View state management
@@ -3261,9 +3398,360 @@ async function fetchClientsJSON(){
   }catch(_){ return null; }
 }
 
+/* ===== Client metadata (MAC shield override + display names) ===== */
+let CLIENT_META_EDIT = false;            // editor open/closed
+let LAST_CLIENTS_DATA = null;            // last good annotated client JSON
+let CLIENTS_HIDE_INACTIVE = true;        // hide inactive/relayed/diagnostic rows by default
+const CLIENT_META_SAVE_DELAY_MS = 9000;  // button-disable window while save + apply run
+
+function cmMacKey(m){ return String(m == null ? '' : m).trim().toLowerCase(); }
+function cmIsValidMac(m){ return /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(cmMacKey(m)); }
+
+function cmEscapeHtml(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// Display names may not contain ';' (record separator). '=' inside a name is
+// fine because parsing splits on the first '='. Tabs/newlines are collapsed.
+function cmSanitizeName(name){
+  return String(name == null ? '' : name)
+    .replace(/[;\t\r\n]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim()
+    .slice(0, 48);
+}
+
+function cmParseOverrides(str){
+  const set = new Set();
+  String(str == null ? '' : str).split(',').forEach(tok=>{
+    const m = cmMacKey(tok);
+    if (cmIsValidMac(m)) set.add(m);
+  });
+  return set;
+}
+function cmSerializeOverrides(set){
+  return Array.from(set).filter(cmIsValidMac).sort().join(',');
+}
+function cmParseNames(str){
+  const map = new Map();
+  String(str == null ? '' : str).split(';').forEach(pair=>{
+    if (!pair) return;
+    const eq = pair.indexOf('=');
+    if (eq < 0) return;
+    const m = cmMacKey(pair.slice(0, eq));
+    const nm = cmSanitizeName(pair.slice(eq + 1));
+    if (cmIsValidMac(m) && nm) map.set(m, nm);
+  });
+  return map;
+}
+function cmSerializeNames(map){
+  const parts = [];
+  Array.from(map.keys()).sort().forEach(m=>{
+    const nm = cmSanitizeName(map.get(m));
+    if (cmIsValidMac(m) && nm) parts.push(m + '=' + nm);
+  });
+  return parts.join(';');
+}
+
+function cmCurrentMeta(){
+  const c = (typeof CURRENT_SETTINGS_CACHE === 'object' && CURRENT_SETTINGS_CACHE) ? CURRENT_SETTINGS_CACHE : {};
+  return {
+    overrides: cmParseOverrides(c.MAC_SHIELD_OVERRIDES),
+    names: cmParseNames(c.CLIENT_NAME_OVERRIDES)
+  };
+}
+
+// Gather every known MAC from annotated client data (active clients + stale)
+// so the editor can list them with their current name/lock/override status.
+function cmCollectKnownMacs(data){
+  const map = new Map(); // mac -> full status object (active/locked/override/location_status/...)
+  const visit = (c) => {
+    if (!c) return;
+    const mac = cmMacKey(c.mac);
+    if (!cmIsValidMac(mac)) return;
+    const prev = map.get(mac);
+    if (!prev){
+      map.set(mac, Object.assign({}, c, { mac }));
+      return;
+    }
+    // Prefer the active observation as the base so its location_status and
+    // owner attribution survive; OR the positive status flags across all
+    // observations so badges never get downgraded by an inactive duplicate.
+    let base = prev, extra = c;
+    if (c.active === true && prev.active !== true){ base = c; extra = prev; }
+    const merged = Object.assign({}, extra, base, { mac });
+    merged.name = c.name || prev.name || '';
+    merged.active = !!(prev.active || c.active);
+    merged.locked = !!(prev.locked || c.locked);
+    merged.override = !!(prev.override || c.override);
+    if (prev.unshielded || c.unshielded) merged.unshielded = !!(prev.unshielded || c.unshielded);
+    map.set(mac, merged);
+  };
+  if (data && Array.isArray(data.nodes)){
+    data.nodes.forEach(n=>{
+      (Array.isArray(n.vlans) ? n.vlans : []).forEach(v=>{
+        (Array.isArray(v.clients) ? v.clients : []).forEach(visit);
+      });
+    });
+  }
+  if (data && Array.isArray(data.stale_clients)){
+    data.stale_clients.forEach(visit);
+  }
+  return map;
+}
+
+function renderClientMetaBadges(c){
+  const badges = [];
+  if (!c) return '';
+  // Activity / location state (mutually informative, not all mutually exclusive)
+  if (c.active) badges.push('<span class="cm-badge cm-active" title="Currently connected to this device">A</span>');
+  else if (c.stale) badges.push('<span class="cm-badge cm-stale" title="Previously seen, not currently connected">S</span>');
+  else badges.push('<span class="cm-badge cm-inactive" title="Observed here but not the active location (duplicate observation)">I</span>');
+
+  // Location confidence from the backend merge resolver.
+  if (c.location_status === 'relay_only' || c.diagnostic)
+    badges.push('<span class="cm-badge cm-relay-only" title="Learned only through trunk/backhaul; hidden from active clients by default.">Relay-only</span>');
+  else if (c.location_status === 'relayed')
+    badges.push('<span class="cm-badge cm-relayed" title="Learned through a trunk/backhaul — not directly attached here">R</span>');
+  else if (c.location_status === 'ambiguous' || c.location_conflict)
+    badges.push('<span class="cm-badge cm-ambiguous" title="Conflicting direct observations — active location could not be resolved">?</span>');
+  else if (c.location_status === 'unknown')
+    badges.push('<span class="cm-badge cm-ambiguous" title="Location could not be determined (legacy/old node output)">!</span>');
+
+  // Shield state: Locked vs Unlocked (override) vs Unshielded.
+  if (c.locked) badges.push('<span class="cm-badge cm-locked" title="MAC shield lock enforced (DROP rule active)">&#128274</span>');
+  else if (c.override) badges.push('<span class="cm-badge cm-unlock" title="MAC shield override active — DROP rule suppressed, device can connect freely">&#128275</span>');
+  else if (c.unshielded || (!c.locked && !c.override))
+    badges.push('<span class="cm-badge cm-unshielded" title="Not enrolled in the MAC shield database — no DROP rule exists for this device">U</span>');
+
+  return badges.length ? '<span class="cm-badges">' + badges.join('') + '</span>' : '';
+}
+
+// Build a single editor row. `forceOverride` pre-checks the override box (used
+// when an admin manually adds a MAC that is not yet in collected/saved data).
+function cmBuildEditorRow(mac, curName, isOverride, statusFlags){
+  const sf = statusFlags || {};
+  // Preserve the full resolved status so the editor shows the same badges as
+  // the overview (active/inactive, relay/relay-only, locked/unlock/unshielded).
+  // `override` reflects the live checkbox state, not just the saved DB.
+  const badgeState = Object.assign({}, sf, { mac: mac, name: curName, override: !!isOverride });
+  return `<div class="cm-erow" data-mac="${cmEscapeHtml(mac)}">`+
+         `<span class="cm-mac muted">${cmEscapeHtml(mac)}</span>`+
+         `<input type="text" class="cm-name-input" maxlength="48" placeholder="(no name)" value="${cmEscapeHtml(curName||'')}" data-cm-name="${cmEscapeHtml(mac)}">`+
+         `<label class="cm-ovr-label" title="Unlock: when ticked, the MAC shield DROP rule for this device is suppressed cluster-wide. The device connects freely even if enrolled in the MAC shield database. Untick to re-enable the DROP rule on the next shield reload."><input type="checkbox" class="cm-ovr-input" data-cm-ovr="${cmEscapeHtml(mac)}"${isOverride?' checked':''}> Unlock</label>`+
+         `<span class="cm-erow-badges">${renderClientMetaBadges(badgeState)}</span>`+
+         `</div>`;
+}
+
+// Add (or focus) an override MAC typed into the editor's add field. Lets an
+// admin pre-register a device for override before it ever appears in collected
+// or stale client data — one of the core UX requirements.
+function cmAddOverrideMac(){
+  const input = document.getElementById('cmAddMacInput');
+  if (!input) return;
+  const mac = cmMacKey(input.value);
+  if (!cmIsValidMac(mac)){
+    appendCliText('Add MAC: "' + input.value + '" is not a valid MAC address (expected aa:bb:cc:dd:ee:ff).\n', {scroll:'force'});
+    return;
+  }
+  const rows = document.querySelector('.cm-rows');
+  if (!rows) return;
+  const existing = rows.querySelector('.cm-erow[data-mac="' + mac + '"]');
+  if (existing){
+    // Already listed: just enable its override box and highlight it.
+    const chk = existing.querySelector('.cm-ovr-input');
+    if (chk) chk.checked = true;
+    existing.scrollIntoView({ block:'nearest' });
+    existing.classList.add('cm-erow-flash');
+    setTimeout(()=>existing.classList.remove('cm-erow-flash'), 1200);
+  } else {
+    const emptyHint = rows.querySelector('.cm-rows-empty');
+    if (emptyHint) emptyHint.remove();
+    rows.insertAdjacentHTML('afterbegin', cmBuildEditorRow(mac, '', true, {active:false,locked:false}));
+  }
+  input.value = '';
+  input.focus();
+}
+
+function renderClientMetaEditor(data){
+  const el = document.getElementById('vlanOverview');
+  if (!el) return;
+  const meta = cmCurrentMeta();
+  const known = cmCollectKnownMacs(data);
+  // Include MACs that only exist in saved settings (overrides/names) so the user
+  // can still see and clear them even when the device is currently offline.
+  meta.overrides.forEach(m=>{ if(!known.has(m)) known.set(m,{mac:m,name:'',active:false,locked:false,override:true}); });
+  meta.names.forEach((nm,m)=>{ if(!known.has(m)) known.set(m,{mac:m,name:nm,active:false,locked:false,override:false}); });
+
+  const rows = Array.from(known.values()).sort((a,b)=>{
+    if (a.active !== b.active) return a.active ? -1 : 1;
+    const an = (meta.names.get(a.mac) || a.name || '').toLowerCase();
+    const bn = (meta.names.get(b.mac) || b.name || '').toLowerCase();
+    if (an !== bn) return an < bn ? -1 : 1;
+    return a.mac < b.mac ? -1 : 1;
+  });
+
+  let html = '<div class="cm-editor">';
+  html += '<div class="cm-editor-head">Set display names and tick <strong>Unlock</strong> to suppress a device&#39;s MAC shield lock (DROP rule). Names cannot contain ";".</div>';
+  html += '<div class="cm-add-row">'+
+          '<input type="text" id="cmAddMacInput" class="cm-add-input" maxlength="17" placeholder="Add MAC (aa:bb:cc:dd:ee:ff)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();cmAddOverrideMac();}">'+
+          '<button type="button" class="button_gen" onclick="cmAddOverrideMac()">Add</button>'+
+          '</div>';
+  html += '<div class="cm-rows">';
+  if (!rows.length){
+    html += '<div class="muted cm-rows-empty">No known clients yet. Add a MAC above or use Refresh to collect clients first.</div>';
+  } else {
+    rows.forEach(c=>{
+      const mac = c.mac;
+      const curName = meta.names.has(mac) ? meta.names.get(mac) : (c.name || '');
+      const isOverride = meta.overrides.has(mac);
+      html += cmBuildEditorRow(mac, curName, isOverride, c);
+    });
+  }
+  html += '</div>';
+  html += '<div class="cm-editor-actions">'+
+          '<button type="button" class="button_gen" onclick="saveClientMeta(this)">Save Client Metadata</button>'+
+          '<button type="button" class="button_gen" onclick="toggleClientMetaEdit(false)">Cancel</button>'+
+          '</div>';
+  html += '</div>';
+  el.innerHTML = html;
+  try { adjustClientsPanelHeight(); } catch(_){}
+}
+
+function toggleClientMetaEdit(forceState){
+  CLIENT_META_EDIT = (typeof forceState === 'boolean') ? forceState : !CLIENT_META_EDIT;
+  const btn = document.getElementById('editClientMetaBtn');
+  if (btn) btn.textContent = CLIENT_META_EDIT ? 'Close Editor' : 'Edit Metadata';
+  if (CLIENT_META_EDIT){
+    renderClientMetaEditor(LAST_CLIENTS_DATA);
+  } else {
+    renderClientsOverview(LAST_CLIENTS_DATA);
+  }
+}
+
+// Toggle visibility of non-active (relayed / duplicate / relay-only diagnostic)
+// observations in the overview. Hidden by default so the panel only lists
+// devices that are actually attached at their resolved active location.
+function toggleClientsShowInactive(el){
+  CLIENTS_HIDE_INACTIVE = !(el && el.checked);
+  if (!CLIENT_META_EDIT) renderClientsOverview(LAST_CLIENTS_DATA);
+}
+
+function pollForFreshClientData(sinceMs, opts){
+  opts = opts || {};
+  let ticks = 0;
+  // macclientmeta_vlanmgr can push the override DB to nodes and then run
+  // collect_clients.sh, whose own wait ceiling can be well over 20s. Give the
+  // freshness poll a generous ceiling so it does not time out while the backend
+  // is still legitimately working.
+  const maxTicks = opts.maxTicks || 75; // ~75s ceiling
+  const timer = setInterval(async () => {
+    ticks++;
+    const data = await fetchClientsJSON();
+    if (data){
+      renderClientsOverview(data);
+      const gen = data.generated ? Date.parse(String(data.generated).replace(' ','T')) : NaN;
+      if (!isNaN(gen) && gen >= sinceMs - 2000){
+        clearInterval(timer);
+        appendCliText((opts.doneMsg || 'Client data refreshed.') + '\n', {scroll:'force'});
+        return;
+      }
+    }
+    if (ticks >= maxTicks){
+      clearInterval(timer);
+      appendCliText((opts.timeoutMsg || 'Client data refresh timed out; showing latest available.') + '\n', {scroll:'force'});
+    }
+  }, 1000);
+}
+
+async function saveClientMeta(btn){
+  // Collect editor inputs into an override set + name map.
+  const overrides = new Set();
+  const names = new Map();
+  document.querySelectorAll('.cm-ovr-input').forEach(chk=>{
+    const m = cmMacKey(chk.getAttribute('data-cm-ovr'));
+    if (chk.checked && cmIsValidMac(m)) overrides.add(m);
+  });
+  document.querySelectorAll('.cm-name-input').forEach(inp=>{
+    const m = cmMacKey(inp.getAttribute('data-cm-name'));
+    const nm = cmSanitizeName(inp.value);
+    if (cmIsValidMac(m) && nm) names.set(m, nm);
+  });
+
+  const overridesStr = cmSerializeOverrides(overrides);
+  const namesStr = cmSerializeNames(names);
+
+  if (!(window.parent && typeof window.parent.MVM_save === 'function')){
+    appendCliText('Save error: parent page handler not available.\n', {scroll:'force'});
+    return;
+  }
+
+  // Update the cache so subsequent (unrelated) VLAN saves preserve these values.
+  if (typeof CURRENT_SETTINGS_CACHE === 'object' && CURRENT_SETTINGS_CACHE){
+    CURRENT_SETTINGS_CACHE.MAC_SHIELD_OVERRIDES = overridesStr;
+    CURRENT_SETTINGS_CACHE.CLIENT_NAME_OVERRIDES = namesStr;
+  }
+
+  disableBtnTemporarily(btn, CLIENT_META_SAVE_DELAY_MS + 4000);
+  appendCliText('Saving client metadata...\n', {scroll:'force'});
+
+  const merlinPayload = buildClientMetaPayloadForMerlin(overridesStr, namesStr);
+  const _cmPayloadStr = JSON.stringify(merlinPayload);
+  if (_cmPayloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
+    appendCliText(`Error: Client metadata payload too large (${_cmPayloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, {scroll:'force'});
+    return;
+  }
+  appendCliText(`Saving client metadata (${_cmPayloadStr.length} bytes)...\n`, {scroll:'force'});
+  window.parent.MVM_save(merlinPayload);
+
+  // Close the editor back to the normal overview.
+  toggleClientMetaEdit(false);
+
+  // Verify settings.json actually persisted before applying. mac_client_meta.sh
+  // reads settings.json, so triggering it before the save lands would make it
+  // act on stale metadata and falsely report success. We only care that the two
+  // ClientMeta keys landed — comparing the entire managed form state would fail
+  // whenever any unrelated VLAN/SSID field differs from disk, so verify the two
+  // keys as a SUBSET of the persisted settings instead.
+  const expectedManaged = {
+    MAC_SHIELD_OVERRIDES: overridesStr,
+    CLIENT_NAME_OVERRIDES: namesStr
+  };
+
+  appendCliText('Waiting for settings to persist...\n', {scroll:'force'});
+  const persisted = await waitForSettingsToMatch(expectedManaged, {
+    timeoutMs: 25000,
+    intervalMs: 700,
+    scope: "clientmeta",
+    subset: true
+  });
+  if (!persisted){
+    appendCliText('Client metadata: settings did not persist in time — skipping apply to avoid acting on stale state. Try Save again.\n', {scroll:'force'});
+    return;
+  }
+
+  // Settings are on disk; now materialize the DBs, reload the shield, recollect.
+  appendCliText('Applying client metadata...\n', {scroll:'force'});
+  const metaStartTime = Date.now();
+  if (window.parent && typeof window.parent.MVM_macClientMeta === 'function'){
+    window.parent.MVM_macClientMeta();
+  } else {
+    queueServiceAction('macclientmeta_vlanmgr', { description:'Apply client metadata', cooldownMs:3000 });
+  }
+  pollForFreshClientData(metaStartTime, {
+    doneMsg: 'Client metadata applied.',
+    timeoutMsg: 'Client metadata apply is taking longer than expected; showing latest available.'
+  });
+}
+
 function renderClientsOverview(data){
   const el = document.getElementById('vlanOverview');
   if(!el) return;
+  if (data) LAST_CLIENTS_DATA = data;
+  // Never clobber the open editor with a background poll refresh.
+  if (CLIENT_META_EDIT) return;
   if(!data || !Array.isArray(data.nodes) || data.nodes.length===0){
     el.innerHTML = `<div class="muted">No client data available yet. Configure the VLAN Manager to generate this data.</div>`;
     return;
@@ -3276,7 +3764,7 @@ function renderClientsOverview(data){
     
     // Check if this router IP matches any configured node
     const settings = typeof CURRENT_SETTINGS_CACHE === 'object' ? CURRENT_SETTINGS_CACHE : {};
-    for(let i = 1; i <= 5; i++) {
+    for(let i = 1; i <= MAX_NODES; i++) {
       const nodeIp = settings['NODE' + i] || '';
       if(nodeIp && nodeIp !== 'none' && nodeIp === routerValue) {
         const alias = settings['NODE' + i + '_ALIAS'] || ('Node ' + i);
@@ -3329,9 +3817,21 @@ function renderClientsOverview(data){
     } else {
       html += `<div class=\"vlan-grid\">`;
       vlans.forEach(v=>{
-        const clients = Array.isArray(v.clients) ? v.clients : [];
+        const rawClients = Array.isArray(v.clients) ? v.clients : [];
         const interfaces = Array.isArray(v.interfaces) ? v.interfaces : [];
-        
+
+        // Only devices resolved to their active location here count as "active".
+        // Relayed/duplicate/relay-only diagnostic observations are hidden by
+        // default but remain available behind the "Show inactive / relayed" toggle.
+        const activeN = rawClients.filter(c => c && c.active === true).length;
+        const observedN = rawClients.length;
+        const visibleClients = CLIENTS_HIDE_INACTIVE
+          ? rawClients.filter(c => c && c.active === true)
+          : rawClients;
+        const chipText = (activeN === observedN)
+          ? `${observedN} client${observedN === 1 ? '' : 's'}`
+          : `${activeN} active / ${observedN} observed`;
+
         // Build interfaces display
         let ifaceHtml = '';
         if (interfaces.length > 0) {
@@ -3339,12 +3839,17 @@ function renderClientsOverview(data){
         }
         
         html += `<div class=\"vlan-card\">`+
-                `  <div class=\"vlan-title\"><span>VLAN ${v.id ?? '?'}</span><span class=\"chip\">${clients.length} clients</span></div>`+
+                `  <div class=\"vlan-title\"><span>VLAN ${v.id ?? '?'}</span><span class=\"chip\">${chipText}</span></div>`+
                 ifaceHtml +
                 `  <div class=\"client-list\">`;
-        clients.forEach(c=>{
+        if (!visibleClients.length && observedN > 0){
+          html += `<div class=\"muted client-hidden-hint\">${observedN - activeN} relayed/inactive hidden</div>`;
+        }
+        visibleClients.forEach(c=>{
           const mac = c.mac || '';
-          html += `<div class=\"client-row\"><span class=\"muted\">${mac}</span></div>`;
+          const nameHtml = c.name ? `<span class=\"cm-name\">${cmEscapeHtml(c.name)}</span>` : '';
+          const macHtml = c.name ? '' : `<span class=\"muted cm-mac\">${cmEscapeHtml(mac)}</span>`;
+          html += `<div class=\"client-row\">${nameHtml}${macHtml}${renderClientMetaBadges(c)}</div>`;
         });
         html += `  </div>`+
                 `</div>`;
@@ -3353,23 +3858,106 @@ function renderClientsOverview(data){
     }
     html += `</div>`;
   });
+
+  // Stale / previously-known clients (offline but still tracked via shield,
+  // override, or name databases).
+  if (Array.isArray(data.stale_clients) && data.stale_clients.length){
+    html += `<div class=\"client-node stale-node\">`+
+            `  <h3><span>Stale / Known Clients</span><span class=\"node-meta\">${data.stale_clients.length}</span></h3>`+
+            `  <div class=\"client-list\">`;
+    data.stale_clients.forEach(c=>{
+      const mac = c.mac || '';
+      const nameHtml = c.name ? `<span class=\"cm-name\">${cmEscapeHtml(c.name)}</span>` : '';
+      const macHtml = c.name ? '' : `<span class=\"muted cm-mac\">${cmEscapeHtml(mac)}</span>`;
+      const badge = renderClientMetaBadges(Object.assign({ stale:true }, c));
+      html += `<div class=\"client-row\">${nameHtml}${macHtml}${badge}</div>`;
+    });
+    html += `  </div>`+
+            `</div>`;
+  }
+
   el.innerHTML = html;
   // Recompute clients panel height after content changes
   try { adjustClientsPanelHeight(); } catch(_){}
+  try { scheduleHostIframeResize(); } catch(_){}
 }
 
-// Lightweight periodic clients refresh (separate from action burst refresh)
+// ===== Page-load client refresh =====
+
 let clientsAutoTimer = null;
-function startClientsPolling(){
-  if (clientsAutoTimer) return;
-  const tick = async () => {
-    const data = await fetchClientsJSON();
-    renderClientsOverview(data);
-  };
-  // Initial fetch immediately, then on interval
-  tick();
-  clientsAutoTimer = setInterval(tick, 7000);
+
+// Returns true when at least one SSID/VLAN pair has been configured
+// (ignoring the default placeholder values written by normalizeToFlatSettings).
+function hasConfiguredVlans(){
+  const s = CURRENT_SETTINGS_CACHE || {};
+  for (let i = 1; i <= 12; i++){
+    const n = String(i).padStart(2, '0');
+    const ssid = String(s['SSID_' + n] || '').trim();
+    const vlan = String(s['VLAN_' + n] || '').trim().toLowerCase();
+    if (
+      ssid && ssid !== 'unused-placeholder' &&
+      vlan && vlan !== '0' && vlan !== 'none'
+    ) return true;
+  }
+  return false;
 }
+
+// Per-tab 5-minute cooldown so the auto-refresh runs at most once per session
+// window. Using sessionStorage means each tab is independent and the cooldown
+// resets naturally when the tab closes.
+const CLIENTS_AUTO_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+const CLIENTS_AUTO_REFRESH_KEY = 'mervlan_clients_auto_refresh_last';
+
+function canAutoRefreshClients(){
+  try {
+    const last = Number(sessionStorage.getItem(CLIENTS_AUTO_REFRESH_KEY) || 0);
+    return !last || Date.now() - last > CLIENTS_AUTO_REFRESH_COOLDOWN_MS;
+  } catch(_){ return false; }
+}
+
+function markAutoRefreshClients(){
+  try { sessionStorage.setItem(CLIENTS_AUTO_REFRESH_KEY, String(Date.now())); } catch(_){}
+}
+
+// Main page-load entry point:
+//   1. Show any cached JSON immediately.
+//   2. If the addon is configured and the cooldown has expired, run one quiet
+//      backend refresh and poll only for that result.
+//   3. Never becomes a hidden polling loop.
+async function startClientsOnPageLoad(){
+  // Step 1: render cached data right away so the panel is not blank.
+  const cached = await fetchClientsJSON();
+  if (cached) renderClientsOverview(cached);
+
+  // Step 2: gate — nothing meaningful to collect yet.
+  if (!hasConfiguredVlans()){
+    if (!cached) renderClientsOverview(null);
+    return;
+  }
+
+  // Step 3: cooldown — another tab or a recent page reload already triggered one.
+  if (!canAutoRefreshClients()) return;
+
+  // Step 4: mark *before* queueing so rapid reloads don't stack multiple jobs.
+  markAutoRefreshClients();
+
+  // Step 5: queue one quiet background refresh and poll only for its result.
+  const started = Date.now();
+  queueServiceAction('collectclients_vlanmgr', {
+    description: 'Auto-refresh VLAN clients',
+    cooldownMs: 8000,
+    quiet: true,
+    afterSubmit: () => {
+      pollForFreshClientData(started, {
+        doneMsg: 'Client list auto-refreshed.',
+        timeoutMsg: 'Client auto-refresh is taking longer than expected; showing latest available.'
+      });
+    }
+  });
+}
+
+// Backward-compat alias used by the DOMContentLoaded bootstrap.
+function startClientsPolling(){ startClientsOnPageLoad(); }
 
 function stopClientsPolling(){
   if (clientsAutoTimer){
@@ -3378,31 +3966,19 @@ function stopClientsPolling(){
   }
 }
 
-let clientsRefreshInterval = null;
 async function refreshClients(btn){
   return queueServiceAction('collectclients_vlanmgr', {
     button: btn,
     description: 'Collect VLAN clients',
     cooldownMs: 8000,
     afterSubmit: () => {
-      if (clientsRefreshInterval) {
-        clearInterval(clientsRefreshInterval);
-        clientsRefreshInterval = null;
-      }
-
-      let ticks = 0;
-      const pollOnce = async () => {
-        const data = await fetchClientsJSON();
-        renderClientsOverview(data);
-        ticks++;
-        if (ticks >= 10) {
-          clearInterval(clientsRefreshInterval);
-          clientsRefreshInterval = null;
-        }
-      };
-
-      setTimeout(pollOnce, 800);
-      clientsRefreshInterval = setInterval(pollOnce, 1000);
+      // Poll until collect_clients.sh emits a JSON newer than this trigger,
+      // rather than a fixed tick count, so node collection that runs long still
+      // resolves correctly.
+      pollForFreshClientData(Date.now(), {
+        doneMsg: 'Client list refreshed.',
+        timeoutMsg: 'Client refresh is taking longer than expected; showing latest available.'
+      });
     }
   });
 }
@@ -3441,7 +4017,8 @@ function queueServiceAction(actionScriptName, opts = {}) {
         description = actionScriptName,
         cooldownMs = 8000,
         afterSubmit,
-        parentOpts
+        parentOpts,
+        quiet = false
     } = opts;
 
     const handler = async () => {
@@ -3449,7 +4026,9 @@ function queueServiceAction(actionScriptName, opts = {}) {
         disableBtnTemporarily(button, cooldownMs);
 
         const timestamp = new Date().toLocaleString();
-        appendCliText(`\n[${timestamp}] Queued action: ${description}\n`, { scroll: 'force' });
+        if (!quiet) {
+            appendCliText(`\n[${timestamp}] Queued action: ${description}\n`, { scroll: 'force' });
+        }
         lastLogText = "";
 
         const parentWin = window.parent;
@@ -3458,6 +4037,7 @@ function queueServiceAction(actionScriptName, opts = {}) {
         } else if (parentWin && typeof parentWin.MVM_exec === "function") {
             parentWin.MVM_exec(actionScriptName, null, parentOpts);
         } else {
+            // Always log failures, even in quiet mode.
             appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
             return;
         }
@@ -3501,10 +4081,18 @@ async function checkForConfiguredNodes() {
     }
 
     const settings = await response.json();
-    CURRENT_SETTINGS_CACHE = settings;
-    updateNodeButtonsFromSettings(settings);
+    const flat = isStructuredSettingsPayload(settings) ? normalizeToFlatSettings(settings) : settings;
+    CURRENT_SETTINGS_CACHE = flat;
+    if (isStructuredSettingsPayload(settings)) {
+      CURRENT_SETTINGS_STRUCTURED = settings;
+      CURRENT_SETTINGS_SHAPE = "sectioned";
+    } else {
+      CURRENT_SETTINGS_STRUCTURED = null;
+      CURRENT_SETTINGS_SHAPE = "flat";
+    }
+    updateNodeButtonsFromSettings(flat);
 
-    return hasConfiguredNodes(settings);
+    return hasConfiguredNodes(flat);
   } catch (error) {
     console.error("Error checking for configured nodes:", error);
     setNodeButtonsEnabled(false);
@@ -3543,7 +4131,15 @@ async function runMacRefresh() {
   document.getElementById('vlanManagerModal').style.display = 'none';
   return queueServiceAction('macrefresh_vlanmgr', {
     description: 'MAC Shield Refresh',
-    cooldownMs: 3000
+    cooldownMs: 3000,
+    afterSubmit: () => {
+      // mac_refresh.sh rebuilds the shield DB and kicks off a fresh client
+      // collection; poll until the new JSON lands so badges/locks update.
+      pollForFreshClientData(Date.now(), {
+        doneMsg: 'MAC shield refreshed.',
+        timeoutMsg: 'MAC shield refresh is taking longer than expected; showing latest available.'
+      });
+    }
   });
 }
 
@@ -3577,7 +4173,7 @@ async function runMacRefresh() {
       if (dryRunStatus) dryRunStatus.textContent = "✅";
       if (ensStatus) ensStatus.textContent = "✅";
 
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= MAX_NODES; i++) {
         const k = "NODE" + i;
         const raw = flat[k] ?? "";
         const v = (String(raw).toLowerCase() === "none") ? "" : String(raw);
@@ -3589,7 +4185,7 @@ async function runMacRefresh() {
         setNodeAlias(i, aliasRaw, { markEdited: false });
       }
 
-      // Update input names to match the current LAN target (main or node 1-5)
+      // Update input names to match the current LAN target (main or configured node)
       // This ensures that when we load while on a specific node tab, the form inputs
       // have the correct names to reflect that tab's data
       updateLanInputNames(CURRENT_LAN_TARGET);
@@ -3645,11 +4241,10 @@ async function runMacRefresh() {
         if (f[`VLAN_${idx}`]) f[`VLAN_${idx}`].value = vlan;
         if (f[`APISO_${idx}`]) f[`APISO_${idx}`].value = apiso;
 
-        // Populate SSIDassign checkboxes (format: "MAIN,NODE1,none,none,none,none")
-        const assignRaw = flat[`SSIDassign_${idx}`] ?? "MAIN,none,none,none,none,none";
-        const assignList = String(assignRaw).split(",").map(s => s.trim().toUpperCase());
-        const nodeTokens = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
-        nodeTokens.forEach(token => {
+        // Populate SSIDassign checkboxes (format: "MAIN,NODE1,none,...")
+        const assignRaw = flat[`SSIDassign_${idx}`] ?? defaultSSIDAssign();
+        const assignList = normalizeSsidAssignString(assignRaw).split(",").map(s => s.trim().toUpperCase());
+        nodeTokens(true).forEach(token => {
           const cb = f[`SSIDassign_${idx}_${token}`];
           if (cb) cb.checked = assignList.includes(token);
         });
@@ -3659,7 +4254,7 @@ async function runMacRefresh() {
       }
 
       validateAllVlans();
-      document.querySelectorAll('input[name^="NODE"]').forEach(el => validateNodeField(el));
+      document.querySelectorAll('input[name^="NODE"]:not([name$="_ALIAS"])').forEach(el => validateNodeField(el));
       document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
       updateStatusTooltips();
       syncNodeCollapseWithValues();
@@ -3691,13 +4286,13 @@ async function runMacRefresh() {
       return true;
     }
 
-    function buildSettingsObjectForMerlin() {
+    function buildNormalSettingsPayloadForMerlin() {
       const f = document.getElementById("settingsForm");
-      const out = {};
+      const out = { vlanmgr_SAVE_SCOPE: "normal" };
 
       syncLanFieldsToCache(CURRENT_LAN_TARGET);
 
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= MAX_NODES; i++) {
         const raw = f["NODE" + i] ? f["NODE" + i].value.trim() : "";
         out["vlanmgr_NODE" + i] = raw === "" ? "none" : raw;
         const aliasInput = document.getElementById(`node${i}AliasField`);
@@ -3723,7 +4318,7 @@ async function runMacRefresh() {
         out["vlanmgr_UNTAGGED_TRUNK" + i] = trunkState.untagValue;
       }
 
-      for (let n = 1; n <= 5; n++) {
+      for (let n = 1; n <= MAX_NODES; n++) {
         for (let i = 1; i <= HW_SETTINGS.MAX_ETH_PORTS; i++) {
           const nodeKey = `NODE${n}_ETH${i}_VLAN`;
           const cached = CURRENT_SETTINGS_CACHE ? CURRENT_SETTINGS_CACHE[nodeKey] : null;
@@ -3744,8 +4339,7 @@ async function runMacRefresh() {
         out["vlanmgr_APISO_" + idx] = apisoRaw;
 
         // Serialize SSIDassign checkboxes as comma-separated fixed-width list
-        const nodeTokens = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
-        const assignParts = nodeTokens.map(token => {
+        const assignParts = nodeTokens(true).map(token => {
           const cb = f[`SSIDassign_${idx}_${token}`];
           return (cb && cb.checked) ? token : "none";
         });
@@ -3758,9 +4352,17 @@ async function runMacRefresh() {
       out["vlanmgr_EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
       out["vlanmgr_ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
 
-      // Hardware_Override keys from settings cache
+      // Hardware_Override and ClientMeta keys are sent via their own scoped
+      // payloads (buildOverridePayloadForMerlin / buildClientMetaPayloadForMerlin)
+      // and must NOT be included here to keep this payload under the Merlin limit.
+
+      return out;
+    }
+
+    function buildOverridePayloadForMerlin() {
+      const out = { vlanmgr_SAVE_SCOPE: "override" };
       if (CURRENT_SETTINGS_CACHE) {
-        ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"].forEach(t => {
+        nodeTokens(true).forEach(t => {
           out[`vlanmgr_OVERRIDE_${t}_MAP_OVERRIDE`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_MAP_OVERRIDE`] || "0";
           out[`vlanmgr_OVERRIDE_${t}_WAN`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_WAN`] || "eth0";
           out[`vlanmgr_OVERRIDE_${t}_MAX_ETH_PORTS`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_MAX_ETH_PORTS`] || "0";
@@ -3769,8 +4371,15 @@ async function runMacRefresh() {
           }
         });
       }
-
       return out;
+    }
+
+    function buildClientMetaPayloadForMerlin(overridesStr, namesStr) {
+      return {
+        vlanmgr_SAVE_SCOPE: "clientmeta",
+        vlanmgr_MAC_SHIELD_OVERRIDES: overridesStr,
+        vlanmgr_CLIENT_NAME_OVERRIDES: namesStr
+      };
     }
 
     async function loadSettings(opts = {}){
@@ -3855,7 +4464,7 @@ async function runMacRefresh() {
       const f = document.getElementById("settingsForm");
       const flat = {};
       syncLanFieldsToCache(CURRENT_LAN_TARGET);
-      for(let i=1;i<=5;i++){
+      for(let i=1;i<=MAX_NODES;i++){
         flat["NODE"+i] = toNone(f["NODE"+i]?.value||"");
         const aliasInput = document.getElementById(`node${i}AliasField`);
         const aliasLabel = document.querySelector(`.node-label[data-node-index="${i}"]`);
@@ -3877,7 +4486,7 @@ async function runMacRefresh() {
         flat[`TAGGED_TRUNK${i}`] = trunkState.taggedValue;
         flat[`UNTAGGED_TRUNK${i}`] = trunkState.untagValue;
       }
-      for(let n=1;n<=5;n++){
+      for(let n=1;n<=MAX_NODES;n++){
         for(let i=1;i<=HW_SETTINGS.MAX_ETH_PORTS;i++){
           const key = `NODE${n}_ETH${i}_VLAN`;
           const raw = CURRENT_SETTINGS_CACHE ? CURRENT_SETTINGS_CACHE[key] : "none";
@@ -3890,8 +4499,7 @@ async function runMacRefresh() {
         flat[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
         flat[`APISO_${idx}`] = (f[`APISO_${idx}`]?.value||"0");
         // Serialize SSIDassign checkboxes as comma-separated fixed-width list
-        const nodeTokens = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
-        const assignParts = nodeTokens.map(token => {
+        const assignParts = nodeTokens(true).map(token => {
           const cb = f[`SSIDassign_${idx}_${token}`];
           return (cb && cb.checked) ? token : "none";
         });
@@ -3905,7 +4513,7 @@ async function runMacRefresh() {
 
       // Pull Hardware_Override flat keys from settings cache into flat object
       if (CURRENT_SETTINGS_CACHE) {
-        ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"].forEach(t => {
+        nodeTokens(true).forEach(t => {
           flat[`OVERRIDE_${t}_MAP_OVERRIDE`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_MAP_OVERRIDE`] || "0";
           flat[`OVERRIDE_${t}_WAN`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_WAN`] || "eth0";
           flat[`OVERRIDE_${t}_MAX_ETH_PORTS`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_MAX_ETH_PORTS`] || "0";
@@ -4215,8 +4823,8 @@ function closeVersionModal() {
 
 let advancedOverrideState = {};
 let advancedOverrideCurrentTarget = "MAIN";
-const ADV_OVERRIDE_TARGETS = ["MAIN", "NODE1", "NODE2", "NODE3", "NODE4", "NODE5"];
-const ADV_OVERRIDE_TARGET_LABELS = { MAIN: "Main Router", NODE1: "Node 1", NODE2: "Node 2", NODE3: "Node 3", NODE4: "Node 4", NODE5: "Node 5" };
+const ADV_OVERRIDE_TARGETS = nodeTokens(true);
+const ADV_OVERRIDE_TARGET_LABELS = Object.fromEntries([["MAIN", "Main Router"], ...nodeNums().map(n => ["NODE" + n, "Node " + n])]);
 
 function advOverrideDefaultTarget() {
   return { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0",
@@ -4528,6 +5136,7 @@ function showAdvancedOverrideModal() {
   advancedOverrideCurrentTarget = "MAIN";
   const sel = document.getElementById("advOverrideTargetSelect");
   if (sel) {
+    populateAdvOverrideSelect();
     sel.value = "MAIN";
     updateAdvOverrideTargetOptions(sel);
   }
@@ -4537,6 +5146,7 @@ function showAdvancedOverrideModal() {
 
   modal.style.display = "block";
   anchorModalToForm(modal);
+  scheduleHostIframeResize();
 
   if (overlay) {
     overlay.classList.add("is-active");
@@ -4576,6 +5186,7 @@ function hideAdvancedOverrideModal() {
     cliLatch.style.display = previous !== undefined ? previous : '';
     if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
   }
+  scheduleHostIframeResize();
 }
 
 function toggleOverrideBtnText() {
@@ -4617,9 +5228,9 @@ function applyAdvancedOverride() {
     hideAdvancedOverrideModal();
     applyOverrideWithHwProbe();
   } else {
-    // Normal: save settings, keep user on page (modal already closed by save)
+    // Override-only: persist Hardware_Override keys, no full form save needed
     hideAdvancedOverrideModal();
-    uploadSettingsAndSave();
+    applyOverrideSaveOnly();
   }
 }
 
@@ -4627,23 +5238,14 @@ async function applyOverrideWithHwProbe() {
   return withActionLock("override-save-hwprobe", async () => {
     stopPolling();
     try {
-      const newJsonStr = formToSettingsJSON();
-      let newObj;
-      try {
-        newObj = JSON.parse(newJsonStr);
-      } catch (e) {
-        appendCliText("Save error: form produced invalid JSON\n", { scroll: "force" });
-        return;
-      }
-
-      const merlinPayload = buildSettingsObjectForMerlin();
+      const merlinPayload = buildOverridePayloadForMerlin();
       const payloadStr = JSON.stringify(merlinPayload);
-      if (payloadStr.length > 8000) {
-        appendCliText("Error: Payload too large to save.\n", { scroll: "force" });
+      if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
+        appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
         return;
       }
 
-      appendCliText("Saving settings + refreshing HW profile...\n", { scroll: "force" });
+      appendCliText(`Saving hardware overrides + refreshing HW profile (${payloadStr.length} bytes)...\n`, { scroll: "force" });
 
       if (!(window.parent && typeof window.parent.MVM_save === "function" &&
             typeof window.parent.MVM_hwprobe === "function")) {
@@ -4676,6 +5278,55 @@ async function applyOverrideWithHwProbe() {
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
     }
   }, 18000);
+}
+
+async function applyOverrideSaveOnly() {
+  return withActionLock("override-save", async () => {
+    stopPolling();
+    try {
+      const merlinPayload = buildOverridePayloadForMerlin();
+      const payloadStr = JSON.stringify(merlinPayload);
+      if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
+        appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
+        return;
+      }
+
+      appendCliText(`Saving hardware overrides (${payloadStr.length} bytes)...\n`, { scroll: "force" });
+
+      if (!(window.parent && typeof window.parent.MVM_save === "function")) {
+        appendCliText("Error: parent page handler not available.\n", { scroll: "force" });
+        return;
+      }
+
+      window.parent.MVM_save(merlinPayload);
+
+      setTimeout(() => {
+        appendCliText("Clearing form fields...\n", { scroll: "force" });
+        clearFields();
+      }, 500);
+
+      setTimeout(async () => {
+        appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
+        const flat = CURRENT_SETTINGS_CACHE ? { ...CURRENT_SETTINGS_CACHE } : {};
+        const expectedManaged = extractManagedKeysForScope(flat, "override");
+        const ok = await waitForSettingsToMatch(expectedManaged, {
+          timeoutMs: 25000,
+          intervalMs: 700,
+          scope: "override"
+        });
+        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+        await loadSettings();
+        appendCliText(
+          ok ? "Override save complete.\n"
+             : "Override save: settings did not persist in time. Loaded latest available.\n",
+          { scroll: "force" }
+        );
+      }, 3000);
+
+    } catch (err) {
+      appendCliText("Save error: " + err + "\n", { scroll: "force" });
+    }
+  }, 8000);
 }
 
 async function refreshHwProfile() {
@@ -4802,11 +5453,59 @@ function normalizeToFlatSettings(obj) {
 }
 
 // Only compare keys MerVLAN actually manages (ignore Hardware, timestamps, etc)
+function isManagedNodeKey(k) {
+  let m;
+  if ((m = k.match(/^NODE([0-9]+)(?:_ALIAS)?$/))) {
+    const n = +m[1]; return n >= 1 && n <= MAX_NODES;
+  }
+  if ((m = k.match(/^NODE([0-9]+)_ETH\d+_VLAN$/))) {
+    const n = +m[1]; return n >= 1 && n <= MAX_NODES;
+  }
+  if ((m = k.match(/^OVERRIDE_(MAIN|NODE([0-9]+))_(MAP_OVERRIDE|WAN|MAX_ETH_PORTS|LAN[1-8])$/))) {
+    if (m[1] === "MAIN") return true;
+    const n = +m[2]; return n >= 1 && n <= MAX_NODES;
+  }
+  return false;
+}
+
 function extractManagedKeys(flat) {
   const out = {};
-  const re = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|NODE[1-5](_ALIAS)?|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|NODE[1-5]_ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|OVERRIDE_(MAIN|NODE[1-5])_(MAP_OVERRIDE|WAN|MAX_ETH_PORTS|LAN[1-8]))$/;
+  const staticRe = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
   Object.keys(flat || {}).forEach(k => {
-    if (re.test(k)) out[k] = String(flat[k] ?? "");
+    if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
+  });
+  return out;
+}
+
+function extractManagedKeysForScope(flat, scope) {
+  const all = flat || {};
+  const out = {};
+
+  if (scope === "override") {
+    Object.keys(all).forEach(k => {
+      const m = k.match(/^OVERRIDE_(MAIN|NODE([0-9]+))_(MAP_OVERRIDE|WAN|MAX_ETH_PORTS|LAN[1-8])$/);
+      if (!m) return;
+      if (m[1] === "MAIN" || (+m[2] >= 1 && +m[2] <= MAX_NODES)) out[k] = String(all[k] ?? "");
+    });
+    return out;
+  }
+
+  if (scope === "clientmeta") {
+    if ("MAC_SHIELD_OVERRIDES" in all) out.MAC_SHIELD_OVERRIDES = String(all.MAC_SHIELD_OVERRIDES ?? "");
+    if ("CLIENT_NAME_OVERRIDES" in all) out.CLIENT_NAME_OVERRIDES = String(all.CLIENT_NAME_OVERRIDES ?? "");
+    return out;
+  }
+
+  // "normal": all managed keys except OVERRIDE_* and ClientMeta
+  const normalStaticRe = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  Object.keys(all).forEach(k => {
+    if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
+    let m;
+    if ((m = k.match(/^NODE([0-9]+)(?:_ALIAS)?$/))) {
+      const n = +m[1]; if (n >= 1 && n <= MAX_NODES) out[k] = String(all[k] ?? "");
+    } else if ((m = k.match(/^NODE([0-9]+)_ETH\d+_VLAN$/))) {
+      const n = +m[1]; if (n >= 1 && n <= MAX_NODES) out[k] = String(all[k] ?? "");
+    }
   });
   return out;
 }
@@ -4820,6 +5519,20 @@ function shallowEqual(a, b) {
     if (a[k] !== b[k]) return false;
   }
   return true;
+}
+
+// Subset equality: every key in `expected` must equal the same key in `actual`.
+// Extra keys in `actual` are ignored. Used to verify that a small set of keys
+// (e.g. the two ClientMeta keys) landed in settings.json without requiring the
+// entire managed form state to match. Returns the first mismatching key name,
+// or "" when every expected key matches.
+function subsetMismatchKey(expected, actual) {
+  const keys = Object.keys(expected || {});
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (String(actual[k] ?? "") !== String(expected[k] ?? "")) return k;
+  }
+  return "";
 }
 
 async function fetchSettingsObjNoStore() {
@@ -4839,17 +5552,23 @@ async function fetchSettingsObjNoStore() {
 async function waitForSettingsToMatch(expectedManaged, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 20000;
   const intervalMs = opts.intervalMs ?? 700;
+  const subset = opts.subset === true;
+  const scope = opts.scope || "";
 
   const start = Date.now();
   let lastErr = null;
+  let lastManaged = null;
 
   while ((Date.now() - start) < timeoutMs) {
     try {
       const obj = await fetchSettingsObjNoStore();
       const flat = normalizeToFlatSettings(obj);
-      const managed = extractManagedKeys(flat);
+      const managed = scope ? extractManagedKeysForScope(flat, scope) : extractManagedKeys(flat);
+      lastManaged = managed;
 
-      if (shallowEqual(managed, expectedManaged)) {
+      if (subset) {
+        if (subsetMismatchKey(expectedManaged, managed) === "") return true;
+      } else if (shallowEqual(managed, expectedManaged)) {
         return true;
       }
     } catch (e) {
@@ -4860,6 +5579,27 @@ async function waitForSettingsToMatch(expectedManaged, opts = {}) {
 
   if (lastErr) {
     appendCliText("Save verify: last fetch error: " + lastErr + "\n", { scroll: "force" });
+  }
+  // Surface the first mismatching key (lengths only, to avoid dumping secrets
+  // or huge values) so a persist timeout is diagnosable from the CLI log.
+  if (lastManaged) {
+    const k = subset
+      ? subsetMismatchKey(expectedManaged, lastManaged)
+      : (Object.keys(expectedManaged).find(kk => String(lastManaged[kk] ?? "") !== String(expectedManaged[kk] ?? "")) || "");
+    if (k) {
+      const expLen = String(expectedManaged[k] ?? "").length;
+      const actLen = String(lastManaged[k] ?? "").length;
+      appendCliText(
+        "Settings persist timeout: key=" + k + " expected_len=" + expLen + " actual_len=" + actLen + "\n",
+        { scroll: "force" }
+      );
+    } else {
+      // Values all match but key counts differ — scope mismatch or stale keys
+      appendCliText(
+        `Settings persist timeout: expected_keys=${Object.keys(expectedManaged).length} actual_keys=${Object.keys(lastManaged).length}${scope ? " scope=" + scope : ""}\n`,
+        { scroll: "force" }
+      );
+    }
   }
   return false;
 }
@@ -4900,18 +5640,18 @@ async function uploadSettingsAndSave(btn) {
         return;
       }
 
-      const merlinPayload = buildSettingsObjectForMerlin();
+      const merlinPayload = buildNormalSettingsPayloadForMerlin();
       const payloadStr = JSON.stringify(merlinPayload);
-      if (payloadStr.length > 8000) {
-        appendCliText("Error: Payload too large to save.\n", {scroll: 'force'});
+      if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
+        appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, {scroll: 'force'});
         return;
       }
 
-      appendCliText("Saving settings via Merlin...\n", {scroll: 'force'});
+      appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, {scroll: 'force'});
 
       // Compute expected managed keys for verification polling
       const expectedFlat = normalizeToFlatSettings(newObj);
-      const expectedManaged = extractManagedKeys(expectedFlat);
+      const expectedManaged = extractManagedKeysForScope(expectedFlat, "normal");
 
       if (window.parent && typeof window.parent.MVM_save === "function") {
         window.parent.MVM_save(merlinPayload);
@@ -4922,14 +5662,15 @@ async function uploadSettingsAndSave(btn) {
           clearFields();
         }, 500);
 
-        // Start polling at 9s - wait until settings.json actually matches
+        // Start polling at 3s - wait until settings.json actually matches
         setTimeout(async () => {
           appendCliText("Waiting for settings to persist...\n", { scroll: "force" });
 
           // Wait until the router actually wrote the new settings.json
           const ok = await waitForSettingsToMatch(expectedManaged, {
             timeoutMs: 25000,
-            intervalMs: 700
+            intervalMs: 700,
+            scope: "normal"
           });
 
           appendCliText("Reloading settings from disk...\n", { scroll: "force" });
@@ -4940,7 +5681,7 @@ async function uploadSettingsAndSave(btn) {
                : "Save verification: settings.json did not match yet (may still be writing). Loaded latest available.\n",
             { scroll: "force" }
           );
-        }, 9000);
+        }, 3000);
 
       } else {
         appendCliText("Save error: parent page handler not available.\n", {scroll: 'force'});
@@ -4983,8 +5724,12 @@ function adjustClientsPanelHeight(){
   const shellRect = cliShell.getBoundingClientRect();
   if(!shellRect || !isFinite(shellRect.top) || !anchorRect || !isFinite(anchorRect.bottom)) return;
 
-  // Total available height = from shell top to bottom of form area
-  let totalAvailable = anchorRect.bottom - shellRect.top;
+  // Total available height = from shell top to bottom of form area,
+  // capped to viewport bottom so the clients-footer is never pushed below the fold
+  // (the cli-container is position:absolute and doesn't contribute to page scroll).
+  const viewportBottom = window.innerHeight;
+  const effectiveAnchorBottom = Math.min(anchorRect.bottom, viewportBottom - 8);
+  let totalAvailable = effectiveAnchorBottom - shellRect.top;
   if(!isFinite(totalAvailable) || totalAvailable < 400) totalAvailable = 800;
 
   // Set the shell height to fill the form area
