@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_local_clients.sh || version="0.48"            #
+#                - File: collect_local_clients.sh || version="0.49"            #
 # ============================================================================ #
 # - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local    #
 #               node so it can be collected by collect_clients.sh.             #
@@ -51,7 +51,7 @@ NODE_NAME="${2:-$(hostname)}"
 RESOLVE_HOSTNAMES="${RESOLVE_HOSTNAMES:-0}"
 
 # Number of retries when reading bridge FDB (retry if incomplete read)
-FDB_RETRIES="${FDB_RETRIES:-3}"
+FDB_RETRIES="${FDB_RETRIES:-2}"
 # Sleep duration (seconds) between FDB read retry attempts
 FDB_RETRY_SLEEP="${FDB_RETRY_SLEEP:-1}"
 
@@ -61,6 +61,7 @@ cleanup_local_collect() {
   rm -f "$COLLECTDIR"/mac_br*.lst "$COLLECTDIR"/mac_exclude.lst 2>/dev/null
   rm -f "$COLLECTDIR"/mac_br*.lst.tmp "$COLLECTDIR"/mac_counts.tmp 2>/dev/null
   rm -f "$COLLECTDIR"/portmap_br*.lst 2>/dev/null
+  rm -f "$COLLECTDIR"/mac_own_ifaces.lst "$COLLECTDIR"/mac_own_ifaces.lst.tmp 2>/dev/null
 }
 trap 'cleanup_local_collect' EXIT INT TERM
 
@@ -306,6 +307,95 @@ build_port_map() {
 }
 
 # ============================================================================ #
+# append_own_mac_candidate                                                     #
+# Add a MAC and its U/L-bit paired variant to an exclusion file.               #
+# The U/L bit is bit 1 of the first octet (0x02). Router VAP interfaces        #
+# sometimes appear in the FDB with that bit toggled, creating false clients.   #
+# ============================================================================ #
+append_own_mac_candidate() {
+  local mac out pair
+  mac=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+  out="$2"
+
+  case "$mac" in
+    [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+    *) return 0 ;;
+  esac
+
+  printf '%s\n' "$mac" >> "$out"
+
+  pair=$(printf '%s\n' "$mac" | awk -F: '
+    BEGIN { OFS=":"; h="0123456789abcdef" }
+    function hv(c){ return index(h,c)-1 }
+    function hd(n){ return substr(h,n+1,1) }
+    {
+      v=hv(substr($1,1,1))*16 + hv(substr($1,2,1))
+      if (int(v/2)%2) v-=2; else v+=2
+      $1=hd(int(v/16)) hd(v%16)
+      print
+    }')
+  [ -n "$pair" ] && printf '%s\n' "$pair" >> "$out"
+}
+
+# ============================================================================ #
+# build_own_mac_exclude                                                        #
+# Build a sorted unique list of all router/VAP interface MACs (plus their      #
+# U/L-bit pairs) into $1. Called once before PASS 3 so every client row can   #
+# be checked in O(1) by mac_is_own_interface.                                  #
+# ============================================================================ #
+build_own_mac_exclude() {
+  local out="$1"
+  local tmp="${out}.tmp"
+  local p iface mac br
+
+  : > "$tmp" || return 0
+
+  # All kernel network interfaces
+  for p in /sys/class/net/*/address; do
+    [ -f "$p" ] || continue
+    mac=$(cat "$p" 2>/dev/null)
+    append_own_mac_candidate "$mac" "$tmp"
+  done
+
+  # Bridge-local (is_local=yes) FDB entries
+  for br in $(get_bridges) br0; do
+    brctl showmacs "$br" 2>/dev/null | awk '$3=="yes"{print $2}' | while read -r mac; do
+      append_own_mac_candidate "$mac" "$tmp"
+    done
+  done
+
+  # Wireless VAP addresses (cur_etheraddr / perm_etheraddr / bssid may differ)
+  for iface in $(ls /sys/class/net 2>/dev/null | grep -E '^wl[0-9]+(\.[0-9]+)?$'); do
+    cat "/sys/class/net/$iface/address" 2>/dev/null
+    wl -i "$iface" cur_etheraddr 2>/dev/null
+    wl -i "$iface" perm_etheraddr 2>/dev/null
+    wl -i "$iface" bssid 2>/dev/null
+  done | awk '{
+    for (i=1;i<=NF;i++) {
+      m=tolower($i)
+      if (m ~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/) print m
+    }
+  }' | while read -r mac; do
+    append_own_mac_candidate "$mac" "$tmp"
+  done
+
+  sort -u "$tmp" > "$out" 2>/dev/null || cp "$tmp" "$out" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+}
+
+# ============================================================================ #
+# mac_is_own_interface                                                         #
+# Return 0 (true) if MAC is in the own-interface exclusion file, 1 otherwise.  #
+# ============================================================================ #
+mac_is_own_interface() {
+  local mac="$1"
+  local file="$2"
+  [ -f "$file" ] || return 1
+  mac=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
+  awk -v m="$mac" 'tolower($0)==m{found=1; exit} END{exit found?0:1}' "$file"
+}
+
+# ============================================================================ #
 #                         INITIALIZE JSON OUTPUT                               #
 # Create output JSON file with header structure, timestamps, and router name.  #
 # Begin the vlans array which will be populated in main loop.                  #
@@ -340,6 +430,11 @@ rm -f "$COLLECTDIR"/mac_br*.lst "$COLLECTDIR"/mac_exclude.lst 2>/dev/null
 
 # Get list of all VLAN bridges on this system
 BR_LIST="$(get_bridges)"
+
+# Build own-interface MAC exclusion list once (includes U/L-bit paired variants)
+OWN_MACS_FILE="$COLLECTDIR/mac_own_ifaces.lst"
+OWN_FILTERED=0
+build_own_mac_exclude "$OWN_MACS_FILE"
 
 # ============================================================================ #
 # PASS 1: Gather MACs per bridge                                               #
@@ -442,6 +537,12 @@ for BR in $BR_LIST; do
   # Iterate observations collected for this bridge: "mac port_no age"
   while read -r MAC PORTNO AGE; do
     [ -n "$MAC" ] || continue
+    # Skip router/VAP interface MACs (and their U/L-bit variants) to prevent
+    # false-positive clients from being reported.
+    if mac_is_own_interface "$MAC" "$OWN_MACS_FILE"; then
+      OWN_FILTERED=$((OWN_FILTERED + 1))
+      continue
+    fi
     # Resolve the learning interface from the port number, then classify it.
     SRC_IFACE=$(awk -v p="$PORTNO" '$1==p{print $2; exit}' "$PORTMAP" 2>/dev/null)
     if [ -n "$SRC_IFACE" ]; then
@@ -480,6 +581,9 @@ for BR in $BR_LIST; do
   # Log client count for this VLAN
   info -c vlan "VLAN $VLAN_ID: $VLAN_CLIENTS clients"
 done
+
+[ "${OWN_FILTERED:-0}" -gt 0 ] && \
+  info -c vlan "Filtered ${OWN_FILTERED} local interface/VAP MAC observation(s) on $NODE_NAME"
 
 # ============================================================================ #
 #                           FINALIZE JSON & CLEANUP                            #
