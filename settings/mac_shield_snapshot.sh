@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.31"                #
+#               - File: mac_shield_snapshot.sh || version="0.32"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -147,10 +147,17 @@ merv_mac_boot_init() {
 merv_mac_build_expected_iface_vid() {
   local max_ssids i ssid vlan nvram_ssids key rawval val base iface
 
-  max_ssids="${MAX_SSIDS:-12}"
+  # Use merv_cap_ssids to get a safe, cap-bounded slot count.
+  # Falls back to 12 if MAX_SSIDS is 0/unset, and never exceeds Limits.MAX_SSID_CAP.
+  if type merv_cap_ssids >/dev/null 2>&1; then
+    max_ssids=$(merv_cap_ssids "${MAX_SSIDS:-0}" "${SETTINGS_FILE:-}")
+  else
+    max_ssids="${MAX_SSIDS:-12}"
+    [ "$max_ssids" -gt 16 ] 2>/dev/null && max_ssids=16
+  fi
 
   # Single cached NVRAM read across all slot iterations
-  nvram_ssids=$(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ssid=')
+  nvram_ssids=$(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.([0-9]+))?_ssid=')
 
   i=1
   while [ "$i" -le "$max_ssids" ]; do
@@ -174,21 +181,30 @@ merv_mac_build_expected_iface_vid() {
 
       base="${key%_ssid}"
 
-      # Only process wl subinterface NVRAM keys (wl0.1_ssid etc.) — skip base radios
-      case "$base" in
-        wl[0-9].[0-9]*) ;;
-        *) continue ;;
-      esac
+      # Only process wl subinterface NVRAM keys (wl0.1_ssid, wl10.1_ssid etc.) — skip base radios.
+      # Use merv_is_wl_vap_iface for strict validation (rejects trailing garbage like wl0.1abc).
+      if type merv_is_wl_vap_iface >/dev/null 2>&1; then
+        merv_is_wl_vap_iface "$base" || continue
+      else
+        case "$base" in
+          wl[0-9].[0-9]*|wl[0-9][0-9].[0-9]*) ;;
+          *) continue ;;
+        esac
+      fi
 
       # Resolve ifname from NVRAM; fall back to base key name if empty
       iface=$(nvram get "${base}_ifname" 2>/dev/null \
         | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       [ -n "$iface" ] || iface="$base"
 
-      # Emit only wl subinterfaces
-      case "$iface" in
-        wl[0-9].*) printf '%s %s\n' "$iface" "$vlan" ;;
-      esac
+      # Emit only wl subinterfaces (strict check)
+      if type merv_is_wl_vap_iface >/dev/null 2>&1; then
+        merv_is_wl_vap_iface "$iface" && printf '%s %s\n' "$iface" "$vlan"
+      else
+        case "$iface" in
+          wl[0-9].*|wl[0-9][0-9].*) printf '%s %s\n' "$iface" "$vlan" ;;
+        esac
+      fi
 
     done <<_NVRAM_
 $nvram_ssids
