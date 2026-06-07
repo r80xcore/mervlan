@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                 - File: mac_refresh.sh || version="0.21"                      #
+#                 - File: mac_refresh.sh || version="0.22"                      #
 # ============================================================================ #
 # Purpose: Clear the MERV_MAC client db and rebuild from a fresh wl assoclist
 #   snapshot. Called from the UI "MAC Shield Refresh" button.
@@ -34,11 +34,18 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ]              || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_SSH_LOADED:-}" ]                 || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || true
+[ -n "${LIB_RADIO_LOADED:-}" ]               || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
 
 # --------------------------------------------------------- Bootstrap config --
 : "${HW_SETTINGS_FILE:=$SETTINGS_FILE}"
 if [ -z "${MAX_SSIDS:-}" ]; then
-  MAX_SSIDS=$(json_get_int MAX_SSIDS 12 "$HW_SETTINGS_FILE")
+  MAX_SSIDS=$(json_get_int MAX_SSIDS 0 "$HW_SETTINGS_FILE")
+fi
+if type merv_cap_ssids >/dev/null 2>&1; then
+  MAX_SSIDS=$(merv_cap_ssids "$MAX_SSIDS" "$HW_SETTINGS_FILE")
+else
+  [ -z "$MAX_SSIDS" ] && MAX_SSIDS=12
+  [ "$MAX_SSIDS" -gt 16 ] 2>/dev/null && MAX_SSIDS=16
 fi
 
 # merv_mac_snapshot checks DRY_RUN internally; force to "no" for this script
