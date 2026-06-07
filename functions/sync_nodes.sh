@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.60"                      #
+#               - File: sync_nodes.sh || version="0.61"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -146,6 +146,7 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_radio.sh
 settings/mac_shield_snapshot.sh
 settings/lib_br0_guard.sh
 functions/mervlan_boot.sh
@@ -182,6 +183,7 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_radio.sh
 settings/mac_shield_snapshot.sh
 settings/lib_br0_guard.sh
 templates/mervlan_templates.sh
@@ -541,10 +543,18 @@ copy_file_to_node() {
 
         # Zero all trunks first (clean slate), then inject node trunk config
         if [ "$_cfn_main_has_trunk" = "yes" ] && json_reset_trunks_section "$_cfn_tmp"; then
-            # Collect all VLAN IDs from the SSID pool
+            # Collect all VLAN IDs from the SSID pool.
+            # Scan up to Hardware.MAX_SSIDS slots; if zero/absent use Limits.MAX_SSID_CAP; default 16.
+            _cfn_vlan_scan_max=$(json_get_section_value "Hardware" "MAX_SSIDS" "$_cfn_tmp" 2>/dev/null)
+            case "$_cfn_vlan_scan_max" in
+              ''|0|*[!0-9]*)
+                _cfn_vlan_scan_max=$(json_get_section_value "Limits" "MAX_SSID_CAP" "$_cfn_tmp" 2>/dev/null)
+                case "$_cfn_vlan_scan_max" in ''|0|*[!0-9]*) _cfn_vlan_scan_max=16 ;; esac
+                ;;
+            esac
             _cfn_vlan_list=""
             _cfn_vi=1
-            while [ "$_cfn_vi" -le 12 ]; do
+            while [ "$_cfn_vi" -le "$_cfn_vlan_scan_max" ]; do
                 _cfn_vid="$(json_get_flag "VLAN_$(printf '%02d' "$_cfn_vi")" "" "$_cfn_tmp")"
                 case "$_cfn_vid" in
                     ""|none|*[!0-9]*) ;;
