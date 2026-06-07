@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_clients.sh || version="0.50"                  #
+#                - File: collect_clients.sh || version="0.51"                  #
 # ============================================================================ #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -54,7 +54,7 @@ TIMEOUT=10
 # Retry controls for transient node boot/SSH delays
 RETRY_MAX="${COLLECT_RETRY_MAX:-2}"
 RETRY_DELAY="${COLLECT_RETRY_DELAY:-3}"
-# Maximum time (seconds) to wait for all node collections to complete
+# Maximum time (seconds) to wait for all collection jobs to complete
 WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-90}"
 
 # Cleanup handler for temp files on exit/interrupt
@@ -101,11 +101,11 @@ info -c cli,vlan "=== VLAN Client Collection Started ==="
 # Create temporary collection directory and results directory
 mkdir -p "$COLLECTDIR" "$RESULTDIR"
 
-# Remove any stale results file from previous collection attempts
-if [ -f "$OUT_FINAL" ]; then
-  rm -f "$OUT_FINAL"
-  info -c vlan "Cleared previous results at $OUT_FINAL"
-fi
+# Do NOT remove the old OUT_FINAL here. It stays visible to the frontend until
+# the new fully-annotated file is atomically published at the end of this script.
+# Writing to a work file and renaming at the end prevents the browser from
+# seeing a missing, partial, or unannotated file during collection.
+OUT_WORK="${OUT_FINAL}.new.$$"
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -121,18 +121,6 @@ fi
 # ============================================================================ #
 get_node_ips() {
   merv_node_list
-}
-
-# ============================================================================ #
-# test_ssh_connection                                                          #
-# Verify SSH connectivity to a node using the SSH wrapper. Attempts echo       #
-# command with timeout. Returns 0 if successful, 1 if connection fails.        #
-# ============================================================================ #
-test_ssh_connection() {
-  node_id="$1"
-  node_ip="$2"
-  # Use wrapper-based SSH test with precheck and timeout
-  merv_ssh_test "$node_id" "$node_ip"
 }
 
 # ============================================================================ #
@@ -155,27 +143,22 @@ collect_from_node() {
     return 1
   fi
 
-  # Test SSH connectivity using wrapper
-  if ! test_ssh_connection "$node_id" "$node_ip"; then
-    merv_ssh_skip_log "$node_id" "$node_ip" "collect"
-    printf '{"router":"%s","error":"ssh-failed","vlans":[]}' "$node_ip" > "$output_file"
-    return 1
-  fi
-
   # Run remote collector and fetch JSON via SSH wrapper
   # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
   remote_cmd="$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json"
   
   result=$(merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" 2>/dev/null)
   rc=$?
-  
+
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
     printf '%s' "$result" > "$output_file"
     info -c cli,vlan "✓ Successfully collected from $node_ip"
     return 0
   else
-    warn -c cli,vlan "Failed to fetch results from $node_ip (rc=$rc)"
-    printf '{"router":"%s","error":"fetch-failed","vlans":[]}' "$node_ip" > "$output_file"
+    _reason="${MERV_SSH_LAST_REASON:-fetch-failed}"
+    [ "$rc" -eq 0 ] && [ -z "$result" ] && _reason="empty-output"
+    warn -c cli,vlan "Failed to fetch results from $node_ip (rc=$rc, reason=$_reason)"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
     return 1
   fi
 }
@@ -189,18 +172,22 @@ collect_from_node() {
 info -c cli,vlan "Collecting VLAN clients"
 MAIN_JSON="$COLLECTDIR/main.json"
 
-# Call local collector; redirect output to CLI log channel
-if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" >>"$LOG_chan_cli" 2>&1; then
-  info -c cli,vlan "✓ Main router collection completed"
-else
-  # Collector returned error; log failure code and write error JSON if file is empty
-  rc=$?
-  error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
-  if [ ! -s "$MAIN_JSON" ]; then
-    # Write error JSON so result merging doesn't fail on missing file
-    printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+collect_from_main() {
+  if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" >>"$LOG_chan_cli" 2>&1; then
+    info -c cli,vlan "✓ Main router collection completed"
+  else
+    rc=$?
+    error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
+    if [ ! -s "$MAIN_JSON" ]; then
+      printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+    fi
   fi
-fi
+}
+
+# Start main collection in background so it runs while we check node config
+( trap - EXIT INT TERM; collect_from_main ) &
+MAIN_PID="$!"
+BG_PIDS="$BG_PIDS $MAIN_PID"
 
 # ============================================================================ #
 #                          NODE DISCOVERY & VALIDATION                         #
@@ -250,17 +237,17 @@ if [ "$NODES_ENABLED" = "true" ]; then
   # Read from file (not pipe) so background PIDs stay in this shell
   while read -r node_id node_ip; do
     [ -n "$node_id" ] || continue
-    collect_from_node "$node_id" "$node_ip" "$COLLECTDIR/node_${node_ip}.json" &
+    ( trap - EXIT INT TERM; collect_from_node "$node_id" "$node_ip" "$COLLECTDIR/node_${node_ip}.json" ) &
     # Track PID for cleanup handler
     BG_PIDS="$BG_PIDS $!"
   done < "$_node_tmp"
   rm -f "$_node_tmp"
-  
-  # Wait for all background jobs with timeout using PID-based tracking
-  # 'jobs -p' may not work reliably in BusyBox non-interactive sh
+fi
+
+# Wait for all background jobs (main + nodes) with timeout
+if [ -n "$BG_PIDS" ]; then
   waited=0
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
-    # Check if any tracked PIDs are still running via /proc
     _still_running=0
     for _pid in $BG_PIDS; do
       if [ -d "/proc/$_pid" ]; then
@@ -268,26 +255,26 @@ if [ "$NODES_ENABLED" = "true" ]; then
         break
       fi
     done
-    
-    if [ "$_still_running" -eq 0 ]; then
-      break
-    fi
-    
+
+    [ "$_still_running" -eq 0 ] && break
+
     sleep 1
     waited=$((waited + 1))
   done
-  
-  # Collect exit codes from background jobs (wait for each)
+
+  if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
+    warn -c cli,vlan "Client collection timeout after ${WAIT_TIMEOUT}s; some results may be incomplete"
+    for _pid in $BG_PIDS; do
+      [ -d "/proc/$_pid" ] && kill "$_pid" 2>/dev/null
+    done
+  else
+    info -c vlan "All collection jobs finished in ${waited}s"
+  fi
+
   for _pid in $BG_PIDS; do
     wait "$_pid" 2>/dev/null
   done
-  
-  # If timeout reached, log warning (jobs will be killed by trap on exit)
-  if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
-    warn -c cli,vlan "Node collection timeout after ${WAIT_TIMEOUT}s; some nodes may be incomplete"
-  else
-    info -c vlan "All node collections finished in ${waited}s"
-  fi
+  BG_PIDS=""
 fi
 
 # ============================================================================ #
@@ -299,11 +286,16 @@ fi
 info -c vlan "Merging JSON results..."
 # Capture current timestamp in ISO 8601 format
 DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
+# Unique run identifier: epoch seconds + PID. The frontend watches for this
+# value to change so it does not have to compare browser time to router time.
+RUN_ID="$(date +%s)-$$"
 
-# Build final JSON structure with timestamp and array of node results
+# Build final JSON structure with timestamp and array of node results.
+# Write to a work file; atomic mv to OUT_FINAL happens after annotation.
 {
   echo "{"
   echo "  \"generated\": \"$DATE_NOW\","
+  echo "  \"run_id\": \"$RUN_ID\","
   echo "  \"nodes\": ["
 
   # Track first entry to avoid trailing comma after last entry
@@ -320,7 +312,7 @@ DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
 
   echo "  ]"
   echo "}"
-} > "$OUT_FINAL"
+} > "$OUT_WORK"
 
 # ============================================================================ #
 #                  CLIENT METADATA ANNOTATION + LOCATION RESOLVER             #
@@ -611,8 +603,8 @@ if awk \
       close(statsf)
     }
   }
-' "$OUT_FINAL" > "$_ann_tmp" 2>/dev/null && [ -s "$_ann_tmp" ]; then
-  mv "$_ann_tmp" "$OUT_FINAL" 2>/dev/null || rm -f "$_ann_tmp" 2>/dev/null
+' "$OUT_WORK" > "$_ann_tmp" 2>/dev/null && [ -s "$_ann_tmp" ]; then
+  mv "$_ann_tmp" "$OUT_WORK" 2>/dev/null || rm -f "$_ann_tmp" 2>/dev/null
   if [ -f "$_ann_stats" ]; then
     info -c vlan "Client annotation: $(cat "$_ann_stats" 2>/dev/null)"
     rm -f "$_ann_stats" 2>/dev/null
@@ -622,6 +614,12 @@ else
   rm -f "$_ann_tmp" "$_ann_stats" 2>/dev/null
   warn -c cli,vlan "Client metadata annotation skipped (kept raw collection)"
 fi
+
+# Atomically publish the finished file. The old OUT_FINAL stays readable until
+# this rename completes, so the frontend never sees a missing file.
+mv "$OUT_WORK" "$OUT_FINAL" 2>/dev/null || {
+  warn -c cli,vlan "Failed to publish $OUT_FINAL; leaving work file at $OUT_WORK"
+}
 
 # ============================================================================ #
 #                            CLEANUP & COMPLETION                              #
