@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.51"                      #
+#                  - File: lib_mervqt.sh || version="0.52"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -40,6 +40,12 @@ if [ -n "${LIB_MERVQT_LOADED:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
+# lib_radio.sh provides merv_is_wl_vap_iface and merv_is_wl_base_radio.
+# Source it here so lib_mervqt.sh validators are self-consistent even when
+# lib_mervqt.sh is loaded without a full manager environment (e.g. heal_event).
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+[ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
+
 # ============================================================================
 # Shared validators
 # ============================================================================
@@ -67,11 +73,22 @@ mervqt_valid_mac() {
 }
 
 # mervqt_valid_wl_subif — true if $1 is a wireless subinterface (not a base radio)
-# Accepts: wl*.*, ra*.*, ath*.*
-# Rejects: wl0, wl1, eth*, and anything without a dot-index
+# For Broadcom (wl*.*) delegates to merv_is_wl_vap_iface for strict numeric
+# validation of both the radio index and slot number (rejects trailing garbage
+# like wl0.1abc).  ra*.* and ath*.* are accepted via glob for forward
+# compatibility with non-Broadcom drivers.
 mervqt_valid_wl_subif() {
   case "$1" in
-    wl[0-9].[0-9]*|ra[0-9].[0-9]*|ath[0-9].[0-9]*) return 0 ;;
+    wl*.*)
+      if type merv_is_wl_vap_iface >/dev/null 2>&1; then
+        merv_is_wl_vap_iface "$1"
+      else
+        # lib_radio.sh not available; fall back to conservative glob
+        case "$1" in wl[0-9].[0-9]*|wl[0-9][0-9].[0-9]*) return 0 ;; esac
+        return 1
+      fi
+      ;;
+    ra[0-9].[0-9]*|ath[0-9].[0-9]*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -773,12 +790,23 @@ merv_lock_release() {
 # the watchdog timeout elapses.
 # ============================================================================
 merv_boot_shield_lan_configured() {
-  local _file="${1:-$SETTINGS_FILE}" _i _slot _val
+  local _file="${1:-$SETTINGS_FILE}" _i _slot _val _max
   [ -s "$_file" ] || return 1
   type json_get_flag >/dev/null 2>&1 || return 1
 
+  # Determine how many VLAN slots to scan dynamically.
+  # Prefer Hardware.MAX_SSIDS (post-probe actual count); if zero or absent fall
+  # back to Limits.MAX_SSID_CAP; finally default to 16 (new cap).
+  _max=$(json_get_section_value "Hardware" "MAX_SSIDS" "$_file" 2>/dev/null)
+  case "$_max" in
+    ''|0|*[!0-9]*)
+      _max=$(json_get_section_value "Limits" "MAX_SSID_CAP" "$_file" 2>/dev/null)
+      case "$_max" in ''|0|*[!0-9]*) _max=16 ;; esac
+      ;;
+  esac
+
   _i=1
-  while [ "$_i" -le 12 ]; do
+  while [ "$_i" -le "$_max" ]; do
     if [ "$_i" -lt 10 ]; then
       _slot="VLAN_0$_i"
     else
