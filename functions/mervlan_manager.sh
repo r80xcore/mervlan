@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.70.2"                   #
+#               - File: mervlan_manager.sh || version="0.70.3"                   #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -33,6 +33,7 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
+[ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
 # Optional CLI overrides:
 #   boot                 → boot mode (enables SSID readiness gate)
 #   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
@@ -282,7 +283,7 @@ esac
 
 # Apply defaults for unconfigured values
 [ -z "$MAX_SSIDS" ] && MAX_SSIDS=12
-[ "$MAX_SSIDS" -gt 12 ] && MAX_SSIDS=12
+MAX_SSIDS=$(merv_cap_ssids "$MAX_SSIDS" "$SETTINGS_FILE")
 [ -z "$PERSISTENT" ] && PERSISTENT="no"
 [ -z "$DRY_RUN" ] && DRY_RUN="yes"
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
@@ -526,12 +527,16 @@ is_internal_vap() {
 
   case "$ifn" in
     eth*) return 1 ;;
-    wl[0-9]) return 1 ;;
-    wl[0-9].[0-9]*)
-      ssid_configured_for_iface "$ifn" && return 1
-      return 0
-      ;;
   esac
+
+  # Base radios (wl0, wl1, ..., wl99) are never internal VAPs
+  merv_is_wl_base_radio "$ifn" && return 1
+
+  # Strict VAP check: slot portion must be a pure unsigned integer
+  if merv_is_wl_vap_iface "$ifn"; then
+    ssid_configured_for_iface "$ifn" && return 1
+    return 0
+  fi
 
   # Unknown interface types: treat as non-internal by default
   return 1
@@ -550,13 +555,10 @@ is_wl_iface() {
 
 # is_native_radio — Check if interface is a primary/native radio
 # Args: $1=interface_name
-# Returns: 0 if native (wl0, wl1, wl2...), 1 if guest (wl0.1) or ethernet
+# Returns: 0 if native (wl0, wl1, ..., wl99), 1 if guest (wl0.1) or ethernet
 # Note: Moving native radios to VLAN bridges can break Broadcom firmware routing.
 is_native_radio() {
-  case "$1" in
-    wl[0-9]) return 0 ;;
-    *) return 1 ;;
-  esac
+  merv_is_wl_base_radio "$1"
 }
 
 # validate_vlan_id — Check if VLAN ID is valid (1-4094 reserved range)
@@ -1017,7 +1019,7 @@ find_if_by_ssid_any() {
         ;;
     esac
   done <<EOF
-$(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ssid=')
+$(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.[0-9]+)?_ssid=')
 EOF
 
   # Return all exact matches (one per line) if any were found
@@ -1196,7 +1198,7 @@ nvram_base_for_ifname() {
     echo "$base"
     return 0
   done <<EOF
-$(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ifname=')
+$(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.[0-9]+)?_ifname=')
 EOF
 
   return 1
@@ -1317,7 +1319,7 @@ _SSID_EOF_
   done
 
   BOUND_SET=" $BOUND_IFACES "
-  for iface in $(nvram show 2>/dev/null | grep -E '^wl[0-9](\.[0-9]+)?_ifname=' | awk -F= '{print $2}' | sort -u); do
+  for iface in $(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.[0-9]+)?_ifname=' | awk -F= '{print $2}' | sort -u); do
         iface=$(normalize_iface "$iface")
         [ -n "$iface" ] || continue
         iface_exists "$iface" || continue
@@ -1654,11 +1656,17 @@ rc_proc_busy() {
 # manager, heal_event.sh and the MERV_MAC snapshot share one implementation.
 
 merv_native_auth_snapshot() {
-  local _auth_file _radio _key _nv
+  local _auth_file _ridx _radio _key _nv _indexes
   _auth_file="$LOCKDIR/native_auth.snapshot.$$"
   : > "$_auth_file"
 
-  for _radio in wl0 wl1 wl2; do
+  # Use live radio index enumeration so quad-band (wl3) and future radios
+  # are included.  Fall back to the classic trio if nvram probe finds nothing.
+  _indexes=$(merv_list_wl_radio_indexes)
+  : "${_indexes:=0 1 2}"
+
+  for _ridx in ${_indexes}; do
+    _radio="wl${_ridx}"
     for _key in ssid auth_mode_x crypto wpa_psk akm; do
       _nv="${_radio}_${_key}"
       printf '%s=%s\n' "$_nv" "$(nvram get "$_nv" 2>/dev/null)" >> "$_auth_file"
