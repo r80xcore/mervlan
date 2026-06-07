@@ -189,6 +189,7 @@ Special thanks to everyone who contributed mappings.
 | RT‑BE92U**    | brzd                    | SNB     | v0.52.92         |
 | TUF‑AX3000_V2 | piratak                 | Github  | v0.52.96         |
 | GT‑AX11000_PRO| bigadron                | Github  | v0.53.10         |
+| XT12          | MathNerd28              | Github  | v0.53.12         |
 ```
 **RT‑AX88U:** LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging.
 **RT‑BE92U:** LAN1–LAN4 share one VLAN bridge — no per-port isolation.
@@ -277,6 +278,14 @@ SSH into the AP and run this command. The addon will be placed under **LAN → M
 ```sh
 mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full
 ```
+
+### Development install
+
+Use this only if you want to test the latest development build. It may contain unfinished changes and can be less stable than the main branch. But might support
+more devices, better security and newer implementations.
+
+```sh
+mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/dev/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full dev
 
 This will:
 
