@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: hw_probe.sh || version="0.53"                      #
+#                   - File: hw_probe.sh || version="0.54"                      #
 # ============================================================================ #
 # - Purpose:  Probe system hardware and record hardware keys in the central    #
 #             settings store (settings.json). Writes non-destructively via     #
@@ -29,6 +29,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -61,15 +62,20 @@ PRODUCTID=$(nvram get productid)
 
 # Initialize radio tracking variables
 RADIOS=""
+RADIO_INDEXES=""
 GUEST_SLOTS=0
 MAX_SSIDS=0
 
 # AiMesh nodes remap wl interfaces to ethX; bypass /sys/class/net check for them
 is_node=$(nvram get re_mode 2>/dev/null)
 
-# Iterate through radio indices 0, 1, 2 (potential radio slots on Merlin)
-for radio in 0 1 2; do
-    # Retrieve interface name from nvram (e.g., wl0_ifname, wl1_ifname, wl2_ifname)
+# Determine guest slot limit from Limits section (default 3)
+GUEST_SLOTS_LIMIT=$(merv_guest_slots_per_radio "$SETTINGS_FILE")
+
+# Iterate through radio indices 0..15 to support tri-band and quad-band hardware
+radio=0
+while [ "$radio" -le 15 ]; do
+    # Retrieve interface name from nvram (e.g., wl0_ifname, wl1_ifname, ...)
     ifname=$(nvram get "wl${radio}_ifname" 2>/dev/null)
     # Verify interface exists in kernel (or bypass check for AiMesh nodes)
     if [ -n "$ifname" ] && { [ "$is_node" = "1" ] || [ -d "/sys/class/net/$ifname" ]; }; then
@@ -78,33 +84,45 @@ for radio in 0 1 2; do
             0) band="2.4" ;;      # 2.4 GHz band
             1) band="5g-1" ;;     # 5 GHz primary
             2) band="5g-2" ;;     # 5 GHz secondary (tri-band)
+            3) band="5g-3" ;;     # 5 GHz tertiary / quad-band
+            *) band="radio${radio}" ;; # generic label for higher indices
         esac
         RADIOS="$RADIOS $band"
+        RADIO_INDEXES="$RADIO_INDEXES $radio"
 
-        # Count guest SSID slots on this radio (slots 1–3 are guests; slot 0 is primary)
+        # Capacity is 1 primary + GUEST_SLOTS_LIMIT per radio regardless of
+        # whether guest SSID names are currently populated.  Counting only
+        # non-empty nvram values would under-report capacity on routers where
+        # guest SSIDs are configured but left with default empty names.
+        MAX_SSIDS=$((MAX_SSIDS + 1 + GUEST_SLOTS_LIMIT))
+
+        # Separately count populated guest slots for the GUEST_SLOTS diagnostic
+        # value (informational; used to describe the current NVRAM state).
         radio_guests=0
-        for slot in 1 2 3; do
-            ssid=$(nvram get "wl${radio}.${slot}_ssid" 2>/dev/null)
+        _slot=1
+        while [ "$_slot" -le "$GUEST_SLOTS_LIMIT" ]; do
+            ssid=$(nvram get "wl${radio}.${_slot}_ssid" 2>/dev/null)
             [ -n "$ssid" ] && radio_guests=$((radio_guests + 1))
+            _slot=$((_slot + 1))
         done
-        # Track maximum guest slots across all radios
+        # Track maximum populated guest slots across all radios
         [ $radio_guests -gt $GUEST_SLOTS ] && GUEST_SLOTS=$radio_guests
-
-        # Total SSIDs = 1 primary + all guest slots per radio
-        MAX_SSIDS=$((MAX_SSIDS + 1 + radio_guests))
     fi
+    radio=$((radio + 1))
 done
 
-# Clean leading space from RADIOS list
+# Clean leading spaces from lists
 RADIOS=$(echo $RADIOS | sed 's/^ //')
+RADIO_INDEXES=$(echo $RADIO_INDEXES | sed 's/^ //')
 # Default to typical tri-band if no radios detected
 [ -z "$RADIOS" ] && RADIOS="2.4 5g-1 5g-2"
+[ -z "$RADIO_INDEXES" ] && RADIO_INDEXES="0 1 2"
 # Default to 3 guest slots if none detected
 [ $GUEST_SLOTS -eq 0 ] && GUEST_SLOTS=3
 # Default to 12 SSIDs if none calculated
 [ $MAX_SSIDS -eq 0 ] && MAX_SSIDS=12
-# Cap at 12 SSIDs maximum (firmware limit)
-[ $MAX_SSIDS -gt 12 ] && MAX_SSIDS=12
+# Cap at Limits.MAX_SSID_CAP (default 16) — replaces the old hardcoded 12 ceiling
+MAX_SSIDS=$(merv_cap_ssids "$MAX_SSIDS" "$SETTINGS_FILE")
 
 # ============================================================================ #
 #                     HARDWARE OVERRIDE – IDENTITY & VALIDATION                #
@@ -255,6 +273,7 @@ RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PO
 RT-AX88U) MODEL="RT-AX88U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; MAX_ETH_PORTS=1; WAN_IF="eth0" ;;
 GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 
 # === Models that needs port layout testing/verification ===
 #RT-AX68U) MODEL="RT-AX68U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
@@ -294,8 +313,9 @@ GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LA
         ETH_PORTS="eth1 eth2 eth3"
         LAN_PORT_LABELS="LAN1 LAN2 LAN3"
         MAX_ETH_PORTS=3
-        # Default SSID cap for unknown models
-        MAX_SSIDS=3
+        # Do NOT overwrite MAX_SSIDS here — the wireless detection above already
+        # computed the correct value from live nvram.  Clobbering it with 3
+        # would discard the actual hardware capacity for unrecognized models.
         WAN_IF="eth0"
         ;;
 esac
@@ -339,6 +359,7 @@ json_set_flag "WAN_IF" "$WAN_IF" "$HW_TARGET" || warn "Failed to write WAN_IF"
 json_set_flag "MAX_ETH_PORTS" "${MAX_ETH_PORTS}" "$HW_TARGET" || warn "Failed to write MAX_ETH_PORTS"
 
 # Lists: store as space-separated strings for later parsing
+json_set_array "RADIO_INDEXES" "$RADIO_INDEXES" "$HW_TARGET" || warn "Failed to write RADIO_INDEXES"
 json_set_array "RADIOS" "$RADIOS" "$HW_TARGET" || warn "Failed to write RADIOS"
 json_set_array "ETH_PORTS" "$ETH_PORTS" "$HW_TARGET" || warn "Failed to write ETH_PORTS"
 json_set_array "LAN_PORT_LABELS" "$LAN_PORT_LABELS" "$HW_TARGET" || warn "Failed to write LAN_PORT_LABELS"
@@ -381,6 +402,7 @@ fi
 info "Hardware detection complete:"
 echo "  Model: $MODEL ($PRODUCTID)"
 echo "  Radios: $RADIOS"
+echo "  Radio indexes: $RADIO_INDEXES"
 echo "  Guest slots per radio: $GUEST_SLOTS"
 echo "  Max SSIDs: $MAX_SSIDS"
 echo "  Ethernet ports: $ETH_PORTS"
