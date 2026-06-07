@@ -1,3 +1,49 @@
+mervlan v0.53.12
+
+Improved SSID capacity detection:
+- Added support for detecting up to 16 SSID slots on supported hardware, making
+  the addon ready for newer multi-band routers while keeping existing models
+  working as before.
+
+Improved hardware profile handling:
+- Centralized SSID slot limits so future hardware support can be expanded more
+  safely and consistently across apply, sync, MAC shield, and the UI.
+
+Fixed MAC shield DB preservation during updates:
+- update_mervlan.sh now preserves and restores the MAC shield database during
+  addon updates, then pushes the restored DB to configured nodes when present.
+  This prevents the shared MAC shield DB from being cleared by the update
+  teardown flow introduced around the v0.53.11 shared-db changes.
+
+Improved VLAN client collection speed:
+- collect_clients.sh now collects the main router and configured nodes in
+  parallel, reducing wait time when node sync is enabled.
+- Removed an extra SSH connection check before node collection, avoiding one
+  unnecessary SSH round-trip per node.
+- Reduced the default FDB retry count for local client collection while keeping
+  a retry in place for transient bridge/FDB reads.
+
+Fixed false clients in Active VLAN Clients:
+- collect_local_clients.sh now filters router and VAP interface MAC addresses,
+  including their U/L-bit paired variants, before writing the client list.
+  This prevents Asus interface/BSSID MACs from appearing as active unshielded
+  VLAN clients.
+
+Fixed/tweaked small UI designs, issues and bugs:
+- Opening "Assign" now properly resizes the addon width when entering and existing
+  the "Assign" mode.
+- Removed vertical lines in the forms and lowered opacity on the vertical lines.
+- Fixed "INFO" view from resizing height when zooming in.
+
+New Files:
+- lib_radios.sh, a centralized library for better radio support, consistency and
+  easier future optimizations.
+  
+Added support for following models:
+- XT12
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.11
 
 Multi-node support expanded:
