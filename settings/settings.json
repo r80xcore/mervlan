@@ -60,7 +60,11 @@
       "SSID_09": "unused-placeholder",
       "SSID_10": "unused-placeholder",
       "SSID_11": "unused-placeholder",
-      "SSID_12": "unused-placeholder"
+      "SSID_12": "unused-placeholder",
+      "SSID_13": "unused-placeholder",
+      "SSID_14": "unused-placeholder",
+      "SSID_15": "unused-placeholder",
+      "SSID_16": "unused-placeholder"
     },
     "APISO": {
       "APISO_01": "0",
@@ -74,7 +78,11 @@
       "APISO_09": "0",
       "APISO_10": "0",
       "APISO_11": "0",
-      "APISO_12": "0"
+      "APISO_12": "0",
+      "APISO_13": "0",
+      "APISO_14": "0",
+      "APISO_15": "0",
+      "APISO_16": "0"
     },
     "SSIDassign": {
       "_description": "Node assignment per SSID slot (comma-separated: MAIN,NODE1..NODE10 or none)",
@@ -89,7 +97,11 @@
       "SSIDassign_09": "MAIN,none,none,none,none,none,none,none,none,none,none",
       "SSIDassign_10": "MAIN,none,none,none,none,none,none,none,none,none,none",
       "SSIDassign_11": "MAIN,none,none,none,none,none,none,none,none,none,none",
-      "SSIDassign_12": "MAIN,none,none,none,none,none,none,none,none,none,none"
+      "SSIDassign_12": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_13": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_14": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_15": "MAIN,none,none,none,none,none,none,none,none,none,none",
+      "SSIDassign_16": "MAIN,none,none,none,none,none,none,none,none,none,none"
     }
   },
 
@@ -109,7 +121,11 @@
       "VLAN_09": "none",
       "VLAN_10": "none",
       "VLAN_11": "none",
-      "VLAN_12": "none"
+      "VLAN_12": "none",
+      "VLAN_13": "none",
+      "VLAN_14": "none",
+      "VLAN_15": "none",
+      "VLAN_16": "none"
     },
 
     "Ethernet_ports": {
@@ -294,6 +310,7 @@
     "PRODUCTID_NODE9": "",
     "PRODUCTID_NODE10": "",
     "MAX_SSIDS": "0",
+    "RADIO_INDEXES": [],
     "RADIOS": [],
     "GUEST_SLOTS": "0",
     "ETH_PORTS": [],
@@ -457,6 +474,12 @@
       "OVERRIDE_LAN7": "none",
       "OVERRIDE_LAN8": "none"
     }
+  },
+
+  "Limits": {
+    "_description": "Addon-wide slot limits (read by scripts; do not edit unless you know what you are doing)",
+    "MAX_SSID_CAP": "16",
+    "GUEST_SLOTS_PER_RADIO": "3"
   },
 
   "ClientMeta": {
