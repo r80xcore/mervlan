@@ -29,16 +29,16 @@ Fixed false clients in Active VLAN Clients:
   This prevents Asus interface/BSSID MACs from appearing as active unshielded
   VLAN clients.
 
-Fixed/tweaked small UI designs, issues and bugs:
-- Opening "Assign" now properly resizes the addon width when entering and existing
-  the "Assign" mode.
-- Removed vertical lines in the forms and lowered opacity on the vertical lines.
-- Fixed "INFO" view from resizing height when zooming in.
+Improved UI polish:
+- Opening Assign now properly resizes the addon width when entering and exiting
+  Assign mode.
+- Removed vertical form lines and softened the horizontal row separators.
+- Fixed INFO view height behavior when zooming in.
 
-New Files:
-- lib_radios.sh, a centralized library for better radio support, consistency and
-  easier future optimizations.
-  
+New files:
+- Added lib_radio.sh, a centralized library for better radio support,
+  consistency, and easier future expansion.
+
 Added support for following models:
 - XT12
 
