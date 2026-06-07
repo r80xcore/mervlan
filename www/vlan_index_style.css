@@ -582,6 +582,7 @@ body {
         border-collapse:collapse;
         background-color:#2F3A3E;
         border:1px solid #222;
+        --vlan-table-row-line-opacity:0.40;
 }
 
 .vlan-table th,
@@ -589,6 +590,35 @@ body {
         text-align:center;
         vertical-align:middle;
         white-space:nowrap;
+}
+
+.vlan-table th {
+        border:1px solid #222;
+}
+
+#ssidTable td,
+#lanTable td {
+        position:relative;
+        border:0 !important;
+}
+
+#ssidTable td::after,
+#lanTable td::after {
+        content:"";
+        position:absolute;
+        left:0;
+        right:0;
+        bottom:0;
+        height:1px;
+        background:#222;
+        opacity:var(--vlan-table-row-line-opacity);
+        pointer-events:none;
+        z-index:2;
+}
+
+#ssidTable > tbody:last-child > tr:last-child td::after,
+#lanTable > tbody:last-child > tr:last-child td::after {
+        content:none;
 }
 
 
