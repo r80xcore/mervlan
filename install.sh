@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.52"                      #
+#                    - File: install.sh || version="0.53"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1032,6 +1032,7 @@ download_mervlan() {
                 log_settings.sh|var_settings.sh|\
                 lib_debug.sh|lib_json.sh|lib_ssh.sh|\
                 lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|\
+                lib_radio.sh|\
                 mervlan_templates.sh|mac_shield_snapshot.sh|\
                 lib_br0_guard.sh)
                     chmod 644 "$f" 2>/dev/null || :
