@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.11" -->
+  <!-- index.html version="0.53.12" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
-  <link rel="stylesheet" href="vlan_index_style.css" />
   <link rel="stylesheet" href="vlan_form_style.css" />
+  <link rel="stylesheet" href="vlan_index_style.css" />
   <style>
     .button_gen:disabled {
       opacity: 0.45;
@@ -820,7 +820,7 @@
           const ethPorts = ensurePlainObject(vlan.Ethernet_ports);
           const trunks = ensurePlainObject(vlan.Trunks);
           const nodeOverrides = ensurePlainObject(vlan.Node_overrides);
-          for (let i = 1; i <= 12; i++) {
+          for (let i = 1; i <= effectiveMaxSsidCap(); i++) {
             const idx = String(i).padStart(2, "0");
             flat[`SSID_${idx}`] = stringOrDefault(ssids[`SSID_${idx}`], "unused-placeholder");
             flat[`APISO_${idx}`] = stringOrDefault(apiso[`APISO_${idx}`], "0");
@@ -907,7 +907,7 @@
           const apiso = {};
           const vlanPool = {};
           const ssidAssign = {};
-          for (let i = 1; i <= 12; i++) {
+          for (let i = 1; i <= effectiveMaxSsidCap(); i++) {
             const idx = String(i).padStart(2, "0");
             ssids[`SSID_${idx}`] = "unused-placeholder";
             apiso[`APISO_${idx}`] = "0";
@@ -998,6 +998,11 @@
             },
             Hardware: hardware,
             Hardware_Override: hardwareOverride,
+            Limits: {
+              _description: "Addon-wide slot limits (read by scripts; do not edit unless you know what you are doing)",
+              MAX_SSID_CAP: "16",
+              GUEST_SLOTS_PER_RADIO: "3"
+            },
             ClientMeta: {
               _description: "MAC shield override and client display name configuration",
               MAC_SHIELD_OVERRIDES: "",
@@ -1029,7 +1034,7 @@
           const vlan = target.VLAN = ensurePlainObject(target.VLAN);
           const pool = vlan.Pool = ensurePlainObject(vlan.Pool);
 
-          for (let i = 1; i <= 12; i++) {
+          for (let i = 1; i <= effectiveMaxSsidCap(); i++) {
             const idx = String(i).padStart(2, "0");
             ssids[`SSID_${idx}`] = stringOrDefault(flat[`SSID_${idx}`], ssids[`SSID_${idx}`] ?? "unused-placeholder");
             apiso[`APISO_${idx}`] = stringOrDefault(flat[`APISO_${idx}`], apiso[`APISO_${idx}`] ?? "0");
@@ -1084,6 +1089,7 @@
         let HW_SETTINGS = (function () {
           const hw = {
             MAX_SSIDS: 0,
+            MAX_SSID_CAP: 16,
             MAX_ETH_PORTS: 0,
             PRODUCTID: "",
             LOADED: false
@@ -1094,6 +1100,22 @@
           }
           return hw;
         })();
+
+        // effectiveMaxSsidCap — absolute ceiling from Limits.MAX_SSID_CAP (default 16).
+        // Used in struct<->flat conversion loops that must cover all possible slots.
+        function effectiveMaxSsidCap() {
+          const cap = HW_SETTINGS.MAX_SSID_CAP;
+          return (typeof cap === "number" && cap > 0) ? cap : 16;
+        }
+
+        // effectiveMaxSsids — the actual SSID count on this hardware, clamped to the cap.
+        // Falls back to the cap when hw_probe has not run yet (MAX_SSIDS = 0).
+        function effectiveMaxSsids() {
+          const cap = effectiveMaxSsidCap();
+          const hw = HW_SETTINGS.MAX_SSIDS;
+          const raw = (typeof hw === "number" && hw > 0) ? hw : cap;
+          return Math.min(raw, cap);
+        }
 
         function showUnsupportedModelModal() {
           const modal = document.getElementById("unsupportedModelModal");
@@ -1156,6 +1178,11 @@
           HW_SETTINGS.PRODUCTID = productId;
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+
+          // Load Limits section for SSID slot cap
+          const limits = (json && typeof json === "object") ? json.Limits : null;
+          const maxSsidCap = parseInt(limits?.MAX_SSID_CAP, 10);
+          HW_SETTINGS.MAX_SSID_CAP = Number.isInteger(maxSsidCap) && maxSsidCap > 0 ? maxSsidCap : 16;
 
           // Load node hardware values
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1225,6 +1252,7 @@
           const oldVals = {
             MAX_ETH_PORTS: HW_SETTINGS.MAX_ETH_PORTS,
             MAX_SSIDS: HW_SETTINGS.MAX_SSIDS,
+            MAX_SSID_CAP: HW_SETTINGS.MAX_SSID_CAP,
             PRODUCTID: HW_SETTINGS.PRODUCTID
           };
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1238,6 +1266,14 @@
           HW_SETTINGS.PRODUCTID = typeof hw.PRODUCTID === "string" ? hw.PRODUCTID.trim().toUpperCase() : "";
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+
+          // Refresh Limits.MAX_SSID_CAP so effectiveMaxSsids() stays in sync after a
+          // settings save/load without a full page reload.
+          const limits = CURRENT_SETTINGS_STRUCTURED?.Limits ?? null;
+          const maxCap = parseInt(limits?.MAX_SSID_CAP, 10);
+          if (Number.isInteger(maxCap) && maxCap > 0) {
+            HW_SETTINGS.MAX_SSID_CAP = maxCap;
+          }
 
           // Update node values
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1256,7 +1292,8 @@
           let changed = false;
           if (oldVals.MAX_ETH_PORTS !== HW_SETTINGS.MAX_ETH_PORTS ||
               oldVals.MAX_SSIDS !== HW_SETTINGS.MAX_SSIDS ||
-              oldVals.PRODUCTID !== HW_SETTINGS.PRODUCTID) {
+              oldVals.PRODUCTID !== HW_SETTINGS.PRODUCTID ||
+              oldVals.MAX_SSID_CAP !== HW_SETTINGS.MAX_SSID_CAP) {
             changed = true;
           }
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1348,7 +1385,7 @@
           lanTable.querySelectorAll("tbody:empty").forEach(tb => tb.remove());
 
           // build SSID rows
-          for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
+          for (let i = 1; i <= effectiveMaxSsids(); i++) {
             const idx = String(i).padStart(2, "0");
             ssidTable.insertAdjacentHTML("beforeend", `
               <tr>
@@ -1812,6 +1849,11 @@ function showTooltip() {
       document.querySelectorAll(".ssid-view-btn").forEach(btn => {
         btn.classList.toggle("is-active", btn.dataset.ssidView === view);
       });
+
+      // Config and Assign have different natural widths. Allow this explicit
+      // view switch to shrink again so Assign does not permanently stretch Config.
+      scheduleFormPaneWidthUpdate({ allowShrink: true });
+      scheduleHostIframeResize();
     }
 
     function setupSSIDViewToggle() {
@@ -2178,7 +2220,7 @@ function showTooltip() {
 
     function updateAPIsolationAvailability(){
       // Enable AP Isolation select only when both SSID and VLAN are valid
-      for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
+      for (let i = 1; i <= effectiveMaxSsids(); i++) {
         const idx = String(i).padStart(2, "0");
         const ssidInput = document.querySelector(`input[name="SSID_${idx}"]`);
         const vlanInput = document.querySelector(`input[name="VLAN_${idx}"]`);
@@ -2452,7 +2494,7 @@ function showTooltip() {
     function extractVlansFromFlatSettings(flat){
       if(!flat) return [];
       const collected = new Set();
-      const maxSsids = HW_SETTINGS.MAX_SSIDS;
+      const maxSsids = effectiveMaxSsids();
       for(let i = 1; i <= maxSsids; i++){
         const idx = String(i).padStart(2, "0");
         const value = flat[`VLAN_${idx}`];
@@ -2589,7 +2631,8 @@ function showTooltip() {
     const FORM_PANE_MAX_WIDTH = 720;
     const FORM_PANE_PADDING_ALLOWANCE = 32;
     let pendingFormWidthUpdate = null;
-  let lastFormPaneWidth = FORM_PANE_MIN_WIDTH;
+    let pendingFormWidthAllowShrink = false;
+    let lastFormPaneWidth = FORM_PANE_MIN_WIDTH;
 
     function updateCliOverlayPosition(){
       const cliPanel = document.getElementById("cliPanel");
@@ -2600,7 +2643,10 @@ function showTooltip() {
       adjustClientsPanelHeight();
     }
 
-    function updateFormPaneWidth(){
+    function updateFormPaneWidth(opts){
+      opts = opts || {};
+      const allowShrink = !!opts.allowShrink;
+
       const ssidTable = document.getElementById("ssidTable");
       if(!ssidTable) return;
 
@@ -2641,17 +2687,24 @@ function showTooltip() {
         FORM_PANE_MAX_WIDTH,
         Math.max(FORM_PANE_MIN_WIDTH, Math.ceil(requiredWidth))
       );
-      const finalWidth = Math.min(FORM_PANE_MAX_WIDTH, Math.max(previousWidth, clamped));
+      const finalWidth = allowShrink
+        ? clamped
+        : Math.min(FORM_PANE_MAX_WIDTH, Math.max(previousWidth, clamped));
       lastFormPaneWidth = finalWidth;
       root.style.setProperty("--form-pane-width", `${finalWidth}px`);
       updateCliOverlayPosition();
     }
 
-    function scheduleFormPaneWidthUpdate(){
+    function scheduleFormPaneWidthUpdate(opts){
+      opts = opts || {};
+      pendingFormWidthAllowShrink = pendingFormWidthAllowShrink || !!opts.allowShrink;
+
       if(pendingFormWidthUpdate !== null) return;
       pendingFormWidthUpdate = requestAnimationFrame(() => {
+        const allowShrink = pendingFormWidthAllowShrink;
         pendingFormWidthUpdate = null;
-        updateFormPaneWidth();
+        pendingFormWidthAllowShrink = false;
+        updateFormPaneWidth({ allowShrink });
       });
     }
 
@@ -3639,28 +3692,69 @@ function toggleClientsShowInactive(el){
   if (!CLIENT_META_EDIT) renderClientsOverview(LAST_CLIENTS_DATA);
 }
 
+// Parse the generated timestamp from a client JSON object to milliseconds.
+// Returns NaN if absent or unparseable.
+function clientGeneratedMs(data){
+  if (!data || !data.generated) return NaN;
+  return Date.parse(String(data.generated).replace(' ','T'));
+}
+
+// Single active poll handle. Starting a new poll cancels any previous one so
+// rapid clicks or overlapping auto/manual refreshes cannot fight over rendering.
+let CLIENTS_REFRESH_TIMER = null;
+let CLIENTS_REFRESH_SEQ   = 0;
+
 function pollForFreshClientData(sinceMs, opts){
   opts = opts || {};
   let ticks = 0;
+  let latestData = null;
+
+  // Cancel any previous poll before starting this one.
+  if (CLIENTS_REFRESH_TIMER) { clearInterval(CLIENTS_REFRESH_TIMER); CLIENTS_REFRESH_TIMER = null; }
+  const seq = ++CLIENTS_REFRESH_SEQ;
+
   // macclientmeta_vlanmgr can push the override DB to nodes and then run
-  // collect_clients.sh, whose own wait ceiling can be well over 20s. Give the
-  // freshness poll a generous ceiling so it does not time out while the backend
-  // is still legitimately working.
+  // collect_clients.sh, whose own wait ceiling can be well over 20s.
   const maxTicks = opts.maxTicks || 75; // ~75s ceiling
-  const timer = setInterval(async () => {
+  const prevRunId       = opts.previousRunId || null;
+  const prevGenMs       = opts.previousGenerated
+    ? Date.parse(String(opts.previousGenerated).replace(' ','T'))
+    : NaN;
+
+  CLIENTS_REFRESH_TIMER = setInterval(async () => {
+    // Ignore ticks from a superseded poll.
+    if (seq !== CLIENTS_REFRESH_SEQ) { clearInterval(CLIENTS_REFRESH_TIMER); return; }
+
     ticks++;
     const data = await fetchClientsJSON();
-    if (data){
-      renderClientsOverview(data);
-      const gen = data.generated ? Date.parse(String(data.generated).replace(' ','T')) : NaN;
-      if (!isNaN(gen) && gen >= sinceMs - 2000){
-        clearInterval(timer);
+    if (data) {
+      // Primary freshness signal: run_id changed (backend wrote a new file).
+      const runIdChanged = prevRunId
+        ? (data.run_id && data.run_id !== prevRunId)
+        : !!data.run_id;  // no previous run_id → any run_id is new
+
+      // Fallback: generated timestamp strictly newer than previous.
+      const gen = clientGeneratedMs(data);
+      const genNewer = !isNaN(prevGenMs)
+        ? (!isNaN(gen) && gen > prevGenMs)
+        : (!isNaN(gen) && gen >= sinceMs - 1000);
+
+      const isFresh = runIdChanged || (!prevRunId && !data.run_id && genNewer);
+
+      if (isFresh) {
+        clearInterval(CLIENTS_REFRESH_TIMER);
+        CLIENTS_REFRESH_TIMER = null;
+        renderClientsOverview(data);
         appendCliText((opts.doneMsg || 'Client data refreshed.') + '\n', {scroll:'force'});
         return;
       }
+      // Keep the most recent fetch so we can render it on timeout.
+      latestData = data;
     }
-    if (ticks >= maxTicks){
-      clearInterval(timer);
+    if (ticks >= maxTicks) {
+      clearInterval(CLIENTS_REFRESH_TIMER);
+      CLIENTS_REFRESH_TIMER = null;
+      if (latestData) renderClientsOverview(latestData);
       appendCliText((opts.timeoutMsg || 'Client data refresh timed out; showing latest available.') + '\n', {scroll:'force'});
     }
   }, 1000);
@@ -3735,12 +3829,16 @@ async function saveClientMeta(btn){
   // Settings are on disk; now materialize the DBs, reload the shield, recollect.
   appendCliText('Applying client metadata...\n', {scroll:'force'});
   const metaStartTime = Date.now();
+  const prevRunIdForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
+  const prevGenForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
   if (window.parent && typeof window.parent.MVM_macClientMeta === 'function'){
     window.parent.MVM_macClientMeta();
   } else {
     queueServiceAction('macclientmeta_vlanmgr', { description:'Apply client metadata', cooldownMs:3000 });
   }
   pollForFreshClientData(metaStartTime, {
+    previousRunId: prevRunIdForMeta,
+    previousGenerated: prevGenForMeta,
     doneMsg: 'Client metadata applied.',
     timeoutMsg: 'Client metadata apply is taking longer than expected; showing latest available.'
   });
@@ -3890,7 +3988,7 @@ let clientsAutoTimer = null;
 // (ignoring the default placeholder values written by normalizeToFlatSettings).
 function hasConfiguredVlans(){
   const s = CURRENT_SETTINGS_CACHE || {};
-  for (let i = 1; i <= 12; i++){
+  for (let i = 1; i <= effectiveMaxSsids(); i++){
     const n = String(i).padStart(2, '0');
     const ssid = String(s['SSID_' + n] || '').trim();
     const vlan = String(s['VLAN_' + n] || '').trim().toLowerCase();
@@ -3949,6 +4047,8 @@ async function startClientsOnPageLoad(){
     quiet: true,
     afterSubmit: () => {
       pollForFreshClientData(started, {
+        previousRunId: cached && cached.run_id,
+        previousGenerated: cached && cached.generated,
         doneMsg: 'Client list auto-refreshed.',
         timeoutMsg: 'Client auto-refresh is taking longer than expected; showing latest available.'
       });
@@ -3967,6 +4067,9 @@ function stopClientsPolling(){
 }
 
 async function refreshClients(btn){
+  const started = Date.now();
+  const previousRunId = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
+  const previousGenerated = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
   return queueServiceAction('collectclients_vlanmgr', {
     button: btn,
     description: 'Collect VLAN clients',
@@ -3975,7 +4078,9 @@ async function refreshClients(btn){
       // Poll until collect_clients.sh emits a JSON newer than this trigger,
       // rather than a fixed tick count, so node collection that runs long still
       // resolves correctly.
-      pollForFreshClientData(Date.now(), {
+      pollForFreshClientData(started, {
+        previousRunId,
+        previousGenerated,
         doneMsg: 'Client list refreshed.',
         timeoutMsg: 'Client refresh is taking longer than expected; showing latest available.'
       });
@@ -4228,7 +4333,7 @@ async function runMacRefresh() {
         }
       }
 
-      for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
+      for (let i = 1; i <= effectiveMaxSsids(); i++) {
         const idx = String(i).padStart(2, "0");
         const ssidRaw = flat[`SSID_${idx}`] ?? "";
         const vlanRaw = flat[`VLAN_${idx}`] ?? "";
@@ -4327,7 +4432,7 @@ async function runMacRefresh() {
         }
       }
 
-      for (let i = 1; i <= HW_SETTINGS.MAX_SSIDS; i++) {
+      for (let i = 1; i <= effectiveMaxSsids(); i++) {
         const idx = String(i).padStart(2, "0");
 
         const ssidRaw = f["SSID_" + idx] ? f["SSID_" + idx].value.trim() : "";
@@ -4493,7 +4598,7 @@ async function runMacRefresh() {
           flat[key] = toNone(raw);
         }
       }
-      for(let i=1;i<=HW_SETTINGS.MAX_SSIDS;i++){
+      for(let i=1;i<=effectiveMaxSsids();i++){
         const idx = String(i).padStart(2,"0");
         flat[`SSID_${idx}`] = toSSIDPlaceholder(f[`SSID_${idx}`]?.value||"");
         flat[`VLAN_${idx}`] = toNone(f[`VLAN_${idx}`]?.value||"");
@@ -5724,12 +5829,10 @@ function adjustClientsPanelHeight(){
   const shellRect = cliShell.getBoundingClientRect();
   if(!shellRect || !isFinite(shellRect.top) || !anchorRect || !isFinite(anchorRect.bottom)) return;
 
-  // Total available height = from shell top to bottom of form area,
-  // capped to viewport bottom so the clients-footer is never pushed below the fold
-  // (the cli-container is position:absolute and doesn't contribute to page scroll).
-  const viewportBottom = window.innerHeight;
-  const effectiveAnchorBottom = Math.min(anchorRect.bottom, viewportBottom - 8);
-  let totalAvailable = effectiveAnchorBottom - shellRect.top;
+  // Total available height = from shell top to bottom of form area.
+  // Do not cap to window.innerHeight; browser zoom changes that value and
+  // would shrink the INFO/client panel even though the addon content is taller.
+  let totalAvailable = anchorRect.bottom - shellRect.top;
   if(!isFinite(totalAvailable) || totalAvailable < 400) totalAvailable = 800;
 
   // Set the shell height to fill the form area
