@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.57"                   #
+#                - File: update_mervlan.sh || version="0.58"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -49,6 +49,9 @@ BACKUP_READY="0"
 # Set to 1 once we start performing destructive operations on $MERV_BASE
 DESTRUCTIVE_TOUCHED="0"
 
+# Set to 1 when the main MAC DB was successfully preserved before teardown
+MAC_DB_BACKUP_PRESENT="0"
+
 # ========================================================================== #
 # CENTRAL FAILURE / ROLLBACK HANDLER                                         #
 # ========================================================================== #
@@ -56,9 +59,6 @@ fail_update() {
 	block="$1"
 	shift
 	detail="$*"
-
-	# Ensure temporary user-data backup is cleared on failure paths
-	[ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] && rm -rf "$BACKUP_DIR" 2>/dev/null || :
 
 	restored_tree="0"
 	restore_attempted="0"
@@ -75,6 +75,12 @@ fail_update() {
 		fi
 	fi
 
+	# Restore the main MAC DB if it was preserved before teardown.
+	# Do this before re-applying hooks so the DB exists when nodeenable runs.
+	if [ "${MAC_DB_BACKUP_PRESENT:-0}" = "1" ] && type restore_main_mac_db_after_update >/dev/null 2>&1; then
+		restore_main_mac_db_after_update
+	fi
+
 	if [ "$TEARDOWN_DONE" = "1" ] && [ -n "${BOOT_SCRIPT:-}" ] && [ -x "$BOOT_SCRIPT" ]; then
 		info -c cli,vlan "Re-applying MerVLAN hooks to original state"
 		sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1 || :
@@ -85,6 +91,9 @@ fail_update() {
 			fi
 		fi
 	fi
+
+	# Now safe to remove the temporary user-data backup
+	[ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] && rm -rf "$BACKUP_DIR" 2>/dev/null || :
 
 	if [ "$restored_tree" = "1" ]; then
 		error -c cli,vlan "Update failed in stage: $block (backup restored)"
@@ -170,6 +179,7 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_radio.sh
 settings/mac_shield_snapshot.sh
 functions/mac_refresh.sh
 functions/mac_client_meta.sh
@@ -831,6 +841,75 @@ EOF
 }
 
 # ========================================================================== #
+# MAIN MAC DB PRESERVE / RESTORE (PRE- AND POST-UPDATE)                     #
+# ========================================================================== #
+
+# backup_main_mac_db_for_update
+# Save the main router's MAC shield DB to RAM before teardown.
+# Uses -f (not -s) so an empty DB (no clients locked) is still preserved.
+backup_main_mac_db_for_update() {
+    MAC_DB_BACKUP_PRESENT=0
+    mkdir -p "$BACKUP_DIR/tmp" 2>/dev/null || return 0
+
+    _msrc=""
+    [ -f "$MERV_MAC_DB_ACTIVE" ] && _msrc="$MERV_MAC_DB_ACTIVE"
+    [ -z "$_msrc" ] && [ -f "$MERV_MAC_DB_JFFS" ] && _msrc="$MERV_MAC_DB_JFFS"
+
+    if [ -z "$_msrc" ]; then
+        info -c cli,vlan "MERV_MAC: no existing MAC shield db found; restore will be skipped"
+        return 0
+    fi
+
+    if cp -p "$_msrc" "$BACKUP_DIR/tmp/mac_shield.db" 2>/dev/null; then
+        MAC_DB_BACKUP_PRESENT=1
+        _mcount=$(awk 'NF==4' "$BACKUP_DIR/tmp/mac_shield.db" 2>/dev/null | wc -l | tr -d ' ')
+        info -c cli,vlan "MERV_MAC: preserved pre-update db (${_mcount:-0} entries)"
+    else
+        warn -c cli,vlan "MERV_MAC: failed to preserve pre-update db"
+    fi
+}
+
+# restore_main_mac_db_after_update
+# Copy the preserved MAC shield DB back into the active and JFFS locations.
+# Returns 0 if the active DB was restored successfully (caller may push to nodes),
+# 1 if it was not (JFFS may still have succeeded, but push should not run).
+restore_main_mac_db_after_update() {
+    _msrc="$BACKUP_DIR/tmp/mac_shield.db"
+    if [ ! -f "$_msrc" ]; then
+        [ "${MAC_DB_BACKUP_PRESENT:-0}" = "1" ] && \
+            warn -c cli,vlan "MERV_MAC: preserved db missing during restore"
+        return 1
+    fi
+
+    _mcount=$(awk 'NF==4' "$_msrc" 2>/dev/null | wc -l | tr -d ' ')
+    _mactive_ok=0
+    _mjffs_ok=0
+
+    mkdir -p "$(dirname "$MERV_MAC_DB_ACTIVE")" 2>/dev/null || :
+    if cp -p "$_msrc" "$MERV_MAC_DB_ACTIVE" 2>/dev/null; then
+        _mactive_ok=1
+    else
+        warn -c cli,vlan "MERV_MAC: active db restore failed"
+    fi
+
+    mkdir -p "$(dirname "$MERV_MAC_DB_JFFS")" 2>/dev/null || :
+    if cp -p "$_msrc" "$MERV_MAC_DB_JFFS" 2>/dev/null; then
+        _mjffs_ok=1
+    else
+        warn -c cli,vlan "MERV_MAC: JFFS checkpoint restore failed"
+    fi
+
+    if [ "$_mactive_ok" = "1" ] || [ "$_mjffs_ok" = "1" ]; then
+        info -c cli,vlan "MERV_MAC: restored pre-update db (${_mcount:-0} entries, active=${_mactive_ok} jffs=${_mjffs_ok})"
+    else
+        warn -c cli,vlan "MERV_MAC: db restore failed for both active and JFFS locations"
+        return 1
+    fi
+
+    [ "$_mactive_ok" = "1" ] && return 0 || return 1
+}
+
+# ========================================================================== #
 # BACKUP ORIGINAL FILES                                                      #
 # ========================================================================== #
 
@@ -906,6 +985,9 @@ if [ "$missing" -ne 0 ]; then
 	fail_update validating "Validation failed; downloaded archive does not look like a valid MerVLAN package"
 fi
 info -c cli,vlan "Staged content validated successfully"
+
+# Preserve main MAC DB before teardown destroys it (setupdisable removes the DB)
+backup_main_mac_db_for_update
 
 # Temporarily tear down boot/service-event hooks so refreshed templates can be applied cleanly
 if [ -x "$BOOT_SCRIPT" ]; then
@@ -995,6 +1077,7 @@ for rel_path in \
 	"settings/lib_ssid_filter.sh" \
 	"settings/lib_stp.sh" \
 	"settings/lib_mervqt.sh" \
+	"settings/lib_radio.sh" \
 	"settings/mac_shield_snapshot.sh" \
 	"settings/lib_br0_guard.sh"
 do
@@ -1090,7 +1173,6 @@ fi
 
 # Refresh node files when SSH keys and nodes are configured
 if ssh_keys_effectively_installed && has_configured_nodes; then
-	backup_remote_node_dbs
 	clean_remote_addon_dirs
 	if [ -x "$SYNC_SCRIPT" ]; then
 		info -c cli,vlan "Syncing nodes via sync_nodes.sh"
@@ -1100,13 +1182,20 @@ if ssh_keys_effectively_installed && has_configured_nodes; then
 	else
 		warn -c cli,vlan "sync_nodes.sh not executable; skipping node sync"
 	fi
-	restore_remote_node_dbs
 else
 	info -c cli,vlan "Node sync skipped (no nodes configured or SSH keys absent)"
 fi
 
 # Ensure the public install view reflects the refreshed files before re-adding hooks
 refresh_public_install
+
+# Restore the main MAC DB: refresh_public_install runs uninstall.sh which can
+# remove the DB. Restore it now so enable/nodeenable see the correct state.
+# Capture return value: 0 = active DB restored (safe to push), 1 = active failed.
+MAC_DB_RESTORE_OK=0
+if [ "$MAC_DB_BACKUP_PRESENT" = "1" ]; then
+    restore_main_mac_db_after_update && MAC_DB_RESTORE_OK=1 || MAC_DB_RESTORE_OK=0
+fi
 
 # Reapply boot/service-event hooks from the refreshed installation
 if [ -x "$BOOT_SCRIPT" ]; then
@@ -1140,6 +1229,34 @@ if [ -x "$BOOT_SCRIPT" ]; then
 	fi
 else
 	warn -c cli,vlan "mervlan_boot.sh not executable; skipping post-update hook setup"
+fi
+
+# Push the restored main MAC DB to all configured nodes so the cluster's
+# shield state is consistent after the update.
+# Only push when active DB restore succeeded: merv_mac_push_db_to_nodes reads
+# MERV_MAC_DB_ACTIVE, so a failed active restore would push the wrong content.
+if [ "$MAC_DB_BACKUP_PRESENT" = "1" ] && [ "$MAC_DB_RESTORE_OK" = "1" ] && \
+   ssh_keys_effectively_installed && has_configured_nodes; then
+
+	[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || \
+		warn -c cli,vlan "MERV_MAC: failed to load lib_mervqt.sh; restored db not pushed to nodes"
+
+	[ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || \
+		warn -c cli,vlan "MERV_MAC: failed to load mac_shield_snapshot.sh; restored db not pushed to nodes"
+
+	_push_nodes="$(list_configured_nodes 2>/dev/null)"
+
+	if [ -z "$_push_nodes" ]; then
+		warn -c cli,vlan "MERV_MAC: restored db not pushed; no configured nodes returned by list_configured_nodes"
+	elif ! type merv_mac_push_db_to_nodes >/dev/null 2>&1; then
+		warn -c cli,vlan "MERV_MAC: restored db not pushed; merv_mac_push_db_to_nodes unavailable"
+	else
+		MERV_MAC_LAST_PUSH_TOTAL=0
+		MERV_MAC_LAST_PUSH_OK=0
+		MERV_MAC_LAST_PUSH_FAILED=0
+		merv_mac_push_db_to_nodes "$_push_nodes"
+		info -c cli,vlan "MERV_MAC: restored db pushed to nodes ${MERV_MAC_LAST_PUSH_OK:-0}/${MERV_MAC_LAST_PUSH_TOTAL:-0}"
+	fi
 fi
 
 # ========================================================================== #
