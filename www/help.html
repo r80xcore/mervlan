@@ -88,6 +88,24 @@
       height: auto;
     }
 
+    .diagram-loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 72px;
+      margin: 12px 0;
+      padding: 12px;
+      color: #9ca3af;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+    }
+
+    .diagram-loading.is-error {
+      color: #ff7b72;
+      border-color: #f85149;
+    }
+
     .markdown-body a {
       color: #58a6ff;
     }
@@ -295,14 +313,113 @@
           });
         }
 
-        helpEl.innerHTML = html;
+        insertRenderedHtml(html);
         enhanceRenderedHelp();
+      }
+
+      function insertRenderedHtml(html) {
+        var template = document.createElement("template");
+        template.innerHTML = html;
+        var diagrams = prepareDiagramImages(template.content);
+        helpEl.innerHTML = "";
+        helpEl.appendChild(template.content);
+        loadDiagramImages(diagrams);
       }
 
       function enhanceRenderedHelp() {
         styleGitHubAlerts();
         prepareLinks();
         contentEl.scrollTop = 0;
+      }
+
+      function prepareDiagramImages(root) {
+        var diagrams = [];
+        var images = root.querySelectorAll("img[src]");
+        Array.prototype.forEach.call(images, function (image) {
+          var src = image.getAttribute("src") || "";
+          if (!/^diagrams\/.+\.png$/i.test(src)) {
+            image.setAttribute("loading", "lazy");
+            image.setAttribute("decoding", "async");
+            return;
+          }
+
+          var placeholder = document.createElement("div");
+          placeholder.className = "diagram-loading";
+          placeholder.textContent = "Loading diagram...";
+
+          image.setAttribute("data-src", src);
+          image.removeAttribute("src");
+          image.setAttribute("decoding", "async");
+          image.style.display = "none";
+
+          image.parentNode.insertBefore(placeholder, image);
+          diagrams.push({
+            image: image,
+            placeholder: placeholder,
+            src: src
+          });
+        });
+        return diagrams;
+      }
+
+      function loadDiagramImages(diagrams) {
+        var queue = [];
+        var loading = false;
+
+        function enqueue(diagram) {
+          queue.push(diagram);
+          if (!loading) {
+            loadNext();
+          }
+        }
+
+        function loadNext() {
+          var diagram = queue.shift();
+          if (!diagram) {
+            loading = false;
+            return;
+          }
+
+          loading = true;
+          var preload = new Image();
+          preload.onload = function () {
+            diagram.image.setAttribute("src", diagram.src);
+            diagram.image.style.display = "";
+            if (diagram.placeholder.parentNode) {
+              diagram.placeholder.parentNode.removeChild(diagram.placeholder);
+            }
+            window.setTimeout(loadNext, 150);
+          };
+          preload.onerror = function () {
+            diagram.placeholder.className = "diagram-loading is-error";
+            diagram.placeholder.textContent = "Could not load diagram.";
+            window.setTimeout(loadNext, 150);
+          };
+          preload.src = diagram.src;
+        }
+
+        if ("IntersectionObserver" in window) {
+          var observer = new IntersectionObserver(function (entries) {
+            Array.prototype.forEach.call(entries, function (entry) {
+              if (!entry.isIntersecting) {
+                return;
+              }
+              observer.unobserve(entry.target);
+              enqueue(entry.target._diagram);
+            });
+          }, {
+            root: contentEl,
+            rootMargin: "160px 0px"
+          });
+
+          diagrams.forEach(function (diagram) {
+            diagram.placeholder._diagram = diagram;
+            observer.observe(diagram.placeholder);
+          });
+          return;
+        }
+
+        diagrams.forEach(enqueue);
       }
 
       function styleGitHubAlerts() {
