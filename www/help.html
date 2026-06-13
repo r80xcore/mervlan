@@ -243,7 +243,7 @@
 <body>
   <div class="header">
     <h1>MerVLAN Help &amp; Usage Guide</h1>
-    <div class="subtitle">Loaded from docs/HELP.md</div>
+    <div class="subtitle">Loaded from docs/HELP.json</div>
   </div>
 
   <div class="content" id="content">
@@ -260,7 +260,7 @@
   <script src="vendor/purify.min.js"></script>
   <script>
     (function () {
-      var HELP_DOC = "docs/HELP.md";
+      var HELP_DOC = "docs/HELP.json";
       var contentEl = document.getElementById("content");
       var helpEl = document.getElementById("helpContent");
       var alertTitles = {
@@ -467,7 +467,7 @@
 
       function loadHelp() {
         setMessage("Loading help...", false);
-        fetch(HELP_DOC + "?_=" + Date.now(), { cache: "no-store" })
+        fetch(HELP_DOC)
           .then(function (response) {
             if (!response.ok) {
               throw new Error("HTTP " + response.status);
