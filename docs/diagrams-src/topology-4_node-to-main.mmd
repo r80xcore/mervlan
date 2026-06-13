@@ -1,0 +1,50 @@
+flowchart LR
+    Switch{"Managed Switch<br/>(802.1Q aware)"}
+
+    Switch ==>|WAN port<br/>upstream trunk| Main["Main AP<br/>(MerVLAN addon)"]
+
+    Main ==>|LAN port -> WAN port | AP1["AP / Node 1"]
+    Main ==>|LAN port -> WAN port | AP2["AP / Node 2"]
+
+    Main -.->|starts apply| Apply[["MerVLAN Apply Task<br/>(runs from main AP)"]]
+    Apply -.->|SSH config| AP1
+    Apply -.->|SSH config| AP2
+
+    LanSetup[/"Required:<br/>Configure LAN ports as<br/>trunks in MerVLAN LAN Setup"/] -.->|required| Main
+
+    KeyMode[/"SSH key depends on node type<br/>AiMesh: auto after reboot<br/>Standalone AP: manual"/] -.->|SSH prerequisite| Apply
+
+    Warn[/"Experimental topology<br/>APs must connect to main AP<br/>No AP-to-AP trunking"/] -.->|warning| Main
+
+    subgraph BridgeLayer["VLAN bridge layer"]
+        direction TB
+        BMain[["VLAN: 20 / 30 / 40"]]
+        BAP1[["VLAN: 20 / 30 / 40"]]
+        BAP2[["VLAN: 20 / 30 / 40"]]
+    end
+
+    Main -.->|builds| BMain
+    AP1 -.->|builds| BAP1
+    AP2 -.->|builds| BAP2
+
+    BMain ==> Clients(["Clients<br/>"])
+    BAP1 ==> Clients
+    BAP2 ==> Clients
+
+    classDef switch fill:#064e3b,stroke:#34d399,color:#ecfdf5;
+    classDef main fill:#1e3a5f,stroke:#60a5fa,color:#eff6ff;
+    classDef node fill:#374151,stroke:#d1d5db,color:#f9fafb;
+    classDef task fill:#0f172a,stroke:#38bdf8,color:#e0f2fe;
+    classDef bridge fill:#14532d,stroke:#22c55e,color:#f0fdf4;
+    classDef client fill:#312e81,stroke:#818cf8,color:#eef2ff;
+    classDef note fill:#78350f,stroke:#f59e0b,color:#fffbeb;
+    classDef warning fill:#7f1d1d,stroke:#ef4444,color:#fef2f2;
+
+    class Switch switch;
+    class Main main;
+    class AP1,AP2 node;
+    class Apply task;
+    class BMain,BAP1,BAP2 bridge;
+    class Clients client;
+    class LanSetup,KeyMode note;
+    class Warn warning;

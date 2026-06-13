@@ -1098,6 +1098,9 @@ create_dirs() {
         "$TMP_DIR"/results/client_collection \
         "$PUBLIC_DIR" \
         "$PUBLIC_DIR/settings" \
+        "$PUBLIC_DIR/docs" \
+        "$PUBLIC_DIR/diagrams" \
+        "$PUBLIC_DIR/vendor" \
         "$PUBLIC_DIR/.ssh" \
         "$PUBLIC_DIR/tmp/results" \
         "$PUBLIC_DIR/tmp/logs"
@@ -1234,8 +1237,6 @@ case "$MODE" in
             www/index.html \
             www/vlan_index_style.css \
             www/vlan_form_style.css \
-            www/help.html \
-            www/view_logs.html \
             settings/settings.json
         do
             [ -f "$MERV_BASE/$_req" ] || {
@@ -1244,6 +1245,23 @@ case "$MODE" in
                 echo "[install] For a first install, run: sh install.sh full" >&2
                 exit 1
             }
+        done
+
+        for _optional in \
+            www/help.html \
+            www/view_logs.html \
+            www/vendor/marked.umd.js \
+            www/vendor/purify.min.js \
+            www/vendor/github-markdown-dark.css \
+            www/vendor/THIRD_PARTY_LICENSES.md \
+            docs/HELP.md \
+            docs/diagrams/topology-1_local.png \
+            docs/diagrams/topology-2_aimesh.png \
+            docs/diagrams/topology-3_standalone-ap.png \
+            docs/diagrams/topology-4_node-to-main.png
+        do
+            [ -f "$MERV_BASE/$_optional" ] || \
+                echo "[install] WARNING: Optional file missing: $MERV_BASE/$_optional" >&2
         done
         ;;
 esac
@@ -1309,6 +1327,15 @@ cp -p "$ADDON_DIR/$ADDON/www/vlan_index_style.css"  "$PUBLIC_DIR/vlan_index_styl
 cp -p "$ADDON_DIR/$ADDON/www/vlan_form_style.css"   "$PUBLIC_DIR/vlan_form_style.css" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/help.html"             "$PUBLIC_DIR/help.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/view_logs.html"        "$PUBLIC_DIR/view_logs.html" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/marked.umd.js"  "$PUBLIC_DIR/vendor/marked.umd.js" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/purify.min.js"  "$PUBLIC_DIR/vendor/purify.min.js" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/github-markdown-dark.css" "$PUBLIC_DIR/vendor/github-markdown-dark.css" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/THIRD_PARTY_LICENSES.md" "$PUBLIC_DIR/vendor/THIRD_PARTY_LICENSES.md" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/HELP.md"              "$PUBLIC_DIR/docs/HELP.md" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-1_local.png" "$PUBLIC_DIR/diagrams/topology-1_local.png" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-2_aimesh.png" "$PUBLIC_DIR/diagrams/topology-2_aimesh.png" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-3_standalone-ap.png" "$PUBLIC_DIR/diagrams/topology-3_standalone-ap.png" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-4_node-to-main.png" "$PUBLIC_DIR/diagrams/topology-4_node-to-main.png" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/settings/settings.json"    "$PUBLIC_DIR/settings/settings.json" 2>/dev/null
 # Note: hw_settings.json has been consolidated into settings/settings.json.
 # The SPA now reads the Hardware block from settings/settings.json directly;
