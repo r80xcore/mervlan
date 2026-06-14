@@ -13,6 +13,8 @@ The addon installs under the normal Merlin web interface (LAN section) and handl
 
 > **MerVLAN is not a router or managed switch.** It tags and bridges traffic at the AP; you still need a VLAN‑aware upstream switch/firewall for routing, DHCP, and policy.
 
+> New here or looking for setup details? Read the full [MerVLAN Help Guide](docs/HELP.md) for topology examples, requirements, supported devices, troubleshooting, and mapper instructions.
+
 ---
 
 ## Status / Beta Notes
@@ -126,145 +128,25 @@ SSH key behavior:
 
 ---
 
-## Help wanted: LAN/ETH port mapping (device support)
-
-To add official support for more routers, we need accurate LAN port mapping (LAN1 → LANX → ethX). The helper script below walks you through mapping and creates everything needed for upstream support.
-
-### What the mapper does
-
-- Detects the WAN/uplink interface.
-- Guides you through mapping each physical LAN port.
-- Generates a ready‑to‑use `hw_probe.sh` case snippet.
-- Writes a full report to `/tmp/mervlan_tmp/results`.
-- Provides a pre‑filled GitHub issue link for submission.
-- Optionally patches a local MerVLAN install for temporary support.
-
-### Run the mapper (one‑liner)
-
-```sh
-mkdir -p /tmp/mervlan_tmp && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/functions/device_support_mapper.sh" -o "/tmp/mervlan_tmp/device_support_mapper.sh" && chmod 0755 /tmp/mervlan_tmp/device_support_mapper.sh && sh /tmp/mervlan_tmp/device_support_mapper.sh
-```
-
-### How to use it
-
-1. **Start with only the WAN cable connected.**
-2. **Unplug all LAN cables** before running the script.
-3. **WAN detection (Step 1/2):** the script detects the WAN/uplink interface.
-4. **LAN mapping (Step 2/2):**
-   - Enter the number of physical LAN ports (excluding WAN).
-   - For each LAN port (LAN1 → LANX):
-     - Unplug the cable when prompted.
-     - Plug into the requested LAN port.
-     - Press Enter and confirm the detected interface.
-   - You can retry, skip, or quit at any step.
-5. **Report generation:** submit the pre‑filled GitHub issue link (add extra notes if needed).
-
-### Important notes
-
-- MerVLAN does **not** need to be installed to run the mapper.
-- `/tmp` is cleared on reboot—save the report or submit the issue.
-- Local patching is a stopgap; please submit the report for official support.
-- Primary testing target is AP mode, but router‑mode validation is helpful too.
-
-### Community‑added model support
-
-Special thanks to everyone who contributed mappings.
-```
-| Model        | Contributor        | From    | Added in version |
-| ------------ | ------------------ | ------- | ---------------- |
-| RT‑AC86U     | mistermoonlight1   | SNB     | v0.52.3          |
-| RT‑AX86U     | mistermoonlight1   | SNB     | v0.52.4          |
-| GT‑AX6000    | kstamand           | SNB     | v0.52.4          |
-| RT‑AX86S     | bieniu             | Github  | v0.52.3          |
-| RT‑AX58U     | commodoro          | SNB     | v0.52.4          |
-| RT‑AX88U**   | amplatfus          | SNB     | v0.52.4          |
-| RT‑AX88U_PRO | jksmurf            | SNB     | v0.52.4          |
-```
-**RT‑AX88U:** LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging.
-
-### Manual template (if you already know the mapping)
-
-Use the template below (text in brackets is informational):
-
-```sh
-RT-AX86U) MODEL="RT-AX86U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
-[nvramname]     [ model  ]            [        interface       ]                  [        LAN ports       ] [ Max LAN ports ]    [wan port]
-```
-
-Example with a different nvram name than the commonly used name:
-
-```sh
-RT-AX95Q) MODEL="XT8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
-```
-
-Example where WAN is not `eth0`:
-
-```sh
-RT-AX58U) MODEL="RT-AX58U"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
-```
-
-Find your nvramname with:
-
-```sh
-nvram get productid
-```
-
-MODEL= can either be the same name as the nvramname or another if the unit is commonly knows something else, as the XT8 shows.
-
-### Models requiring testing
-
-WiFi 7 / BE Series:
-
-- RT‑BE58 Go
-- RT‑BE86U
-- RT‑BE88U
-- RT‑BE92U
-- RT‑BE96U
-- GT‑BE98 Pro
-- GT‑BE19000AI
-
-ROG & high‑performance series:
-
-- GT‑AX11000
-- GT‑AX11000 Pro
-- GT‑AXE11000
-- GT‑AXE16000
-- RT‑AX86U Pro
-
-TUF Gaming series:
-
-- TUF‑AX3000 v1
-- TUF‑AX3000 v2
-- TUF‑AX5400 v1
-
-Standard RT‑AX series:
-
-- RT‑AX5400
-- RT‑AX58U v2
-- RT‑AX68U
-- RT‑AX82U v1
-- RT‑AX82U v2
-- RT‑AX92U
-- DSL‑AX82U
-- DSL‑AX5400
-
-ZenWiFi (mesh) series:
-
-- ZenWiFi ET8
-- ZenWiFi Pro XT12
-
-Models added to the support table are excluded from this list. Any help testing is appreciated.
-
----
-
 ## Install
 
 Only install if you are comfortable with **beta software** and have a way to recover (including factory reset) if something goes wrong.
 
 SSH into the AP and run this command. The addon will be placed under **LAN → MerVLAN** in the GUI:
 
+Before installing, skim the [MerVLAN Help Guide](docs/HELP.md), especially the topology and requirements sections.
+
 ```sh
 mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full
+```
+
+### Development install
+
+Use this only if you want to test the latest development build. It may contain unfinished changes and can be less stable than the main branch. But might support
+more devices, better security and newer implementations.
+
+```sh
+mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/dev/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full dev
 ```
 
 This will:
@@ -371,6 +253,137 @@ For structured beta testing and discussion, see the SNBForums thread and Discord
 ## Changelog
 
 See `changelog.txt` in this repository for detailed version history and notes.
+
+---
+
+## Help wanted: LAN/ETH port mapping (device support)
+
+To add official support for more routers, we need accurate LAN port mapping (LAN1 → LANX → ethX). The helper script below walks you through mapping and creates everything needed for upstream support.
+
+For the current supported-device list, see [Device Support in HELP.md](docs/HELP.md#8-device-support).
+
+### What the mapper does
+
+- Detects the WAN/uplink interface.
+- Guides you through mapping each physical LAN port.
+- Generates a ready‑to‑use `hw_probe.sh` case snippet.
+- Writes a full report to `/tmp/mervlan_tmp/results`.
+- Provides a pre‑filled GitHub issue link for submission.
+- Optionally patches a local MerVLAN install for temporary support.
+
+### Run the mapper (one‑liner)
+
+```sh
+mkdir -p /tmp/mervlan_tmp && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/functions/device_support_mapper.sh" -o "/tmp/mervlan_tmp/device_support_mapper.sh" && chmod 0755 /tmp/mervlan_tmp/device_support_mapper.sh && sh /tmp/mervlan_tmp/device_support_mapper.sh
+```
+
+### How to use it
+
+1. **Start with only the WAN cable connected.**
+2. **Unplug all LAN cables** before running the script.
+3. **WAN detection (Step 1/2):** the script detects the WAN/uplink interface.
+4. **LAN mapping (Step 2/2):**
+   - Enter the number of physical LAN ports (excluding WAN).
+   - For each LAN port (LAN1 → LANX):
+     - Unplug the cable when prompted.
+     - Plug into the requested LAN port.
+     - Press Enter and confirm the detected interface.
+   - You can retry, skip, or quit at any step.
+5. **Report generation:** submit the pre‑filled GitHub issue link (add extra notes if needed).
+
+### Important notes
+
+- MerVLAN does **not** need to be installed to run the mapper.
+- `/tmp` is cleared on reboot—save the report or submit the issue.
+- Local patching is a stopgap; please submit the report for official support.
+- Primary testing target is AP mode, but router‑mode validation is helpful too.
+
+### Community‑added model support
+
+Special thanks to everyone who contributed mappings.
+
+| Model         | Contributor             | From    | Added in version |
+| ------------- | ----------------------- | ------- | ---------------- |
+| RT‑AC86U      | mistermoonlight1        | SNB     | v0.52.3          |
+| RT‑AX86U      | mistermoonlight1        | SNB     | v0.52.4          |
+| GT‑AX6000     | kstamand                | SNB     | v0.52.4          |
+| RT‑AX86S      | bieniu                  | Github  | v0.52.3          |
+| RT‑AX58U      | commodoro               | SNB     | v0.52.4          |
+| RT‑AX82U      | pxdl                    | Github  | v0.52.93         |
+| RT‑AX86U_PRO  | davittoncat             | Github  | v0.52.94         |
+| RT‑AX88U**    | amplatfus               | SNB     | v0.52.4          |
+| RT‑AX88U_PRO  | jksmurf                 | SNB     | v0.52.4          |
+| RT‑AX92U      | RikshaDriver            | Github  | v0.52.94         |
+| RT‑AX92U      | Mudcrab353              | Github  | v0.52.96         |
+| RT‑AX92U      | franzatkiermeyereu      | Github  | v0.52.96         |
+| RT‑AX95Q      | mdraco11                | Github  | v0.52.93         |
+| RT‑AX5400     | tooty-1135              | Github  | v0.52.96         |
+| RT‑BE92U**    | brzd                    | SNB     | v0.52.92         |
+| TUF‑AX3000_V2 | piratak                 | Github  | v0.52.96         |
+| GT‑AX11000_PRO| bigadron                | Github  | v0.53.10         |
+| XT12          | MathNerd28              | Github  | v0.53.12         |
+
+**RT‑AX88U:** LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging.
+**RT‑BE92U:** LAN1–LAN4 share one VLAN bridge — no per-port isolation.
+
+### Manual template (if you already know the mapping)
+
+Use the template below (text in brackets is informational):
+
+```sh
+RT-AX86U) MODEL="RT-AX86U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
+[nvramname]     [ model  ]            [        interface       ]                  [        LAN ports       ] [ Max LAN ports ]    [wan port]
+```
+
+Example with a different nvram name than the commonly used name:
+
+```sh
+RT-AX95Q) MODEL="XT8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
+```
+
+Example where WAN is not `eth0`:
+
+```sh
+RT-AX58U) MODEL="RT-AX58U"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
+```
+
+Find your nvramname with:
+
+```sh
+nvram get productid
+```
+
+MODEL= can either be the same name as the nvramname or another if the unit is commonly knows something else, as the XT8 shows.
+
+### Models requiring testing
+
+WiFi 7 / BE Series:
+
+- RT‑BE58 Go
+- RT‑BE86U
+- RT‑BE88U
+- RT‑BE96U
+- GT‑BE98 Pro
+- GT‑BE19000AI
+
+ROG & high‑performance series:
+
+- GT‑AX11000
+- GT‑AXE11000
+- GT‑AXE16000
+
+TUF Gaming series:
+
+- TUF‑AX3000 v1
+- TUF‑AX5400 v1
+
+Standard RT‑AX series:
+
+- RT‑AX68U
+- DSL‑AX82U
+- DSL‑AX5400
+
+Models added to the support table are excluded from this list. Any help testing is appreciated.
 
 ---
 

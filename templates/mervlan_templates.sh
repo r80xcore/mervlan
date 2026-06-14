@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#         - File: templates/mervlan_templates.sh || version="0.52"             #
+#         - File: templates/mervlan_templates.sh || version="0.53"             #
 # ============================================================================ #
 # - Purpose:    Provide unified template lookup utilities for MerVLAN.         #
 #               Each template is stored inline and can be materialized via     #
@@ -33,6 +33,9 @@ MERV_BASE_PLACEHOLDER/functions/service-event-handler.sh "$@"
 
 %%TEMPLATE services-start 1
 # MerVLAN auto-enable VLAN on boot
+# Arm the L2 boot shield FIRST (synchronous; ~50ms) so the DHCP escape
+# window is closed before rc settles and the manager runs.
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1
 sleep 10
 MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
 sleep 10
@@ -41,6 +44,9 @@ MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 
 
 %%TEMPLATE services-start 2
 # MerVLAN auto-enable VLAN on boot
+# Arm the L2 boot shield FIRST (synchronous; ~50ms) so the DHCP escape
+# window is closed before rc settles and the manager runs.
+MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1
 sleep 10
 MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
 sleep 10

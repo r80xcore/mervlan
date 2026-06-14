@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.54.1"                      #
+#               - File: sync_nodes.sh || version="0.61"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -27,6 +27,7 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 
 # Default no-op debug helpers; overridden if lib_debug.sh is loaded
@@ -87,6 +88,48 @@ dbg_var DRY_RUN DRY_RUN_FORCED DEBUG DEBUG_FORCED DEBUG_JSON
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 dbg_var SSH_NODE_USER SSH_NODE_PORT
+
+# Remove any per-node sync metadata breadcrumbs left by copy_file_to_node.
+# Fires on every exit path (normal, error, signal) so no stale files survive
+# across runs even if verification was skipped or the script was interrupted.
+_cleanup_sync_tmp() {
+    rm -f "$TMPDIR"/merv_sync_expected_* 2>/dev/null || :
+    [ "${SYNC_LOCK_ACQUIRED:-0}" -eq 1 ] && merv_lock_release "$SYNC_LOCK" 2>/dev/null
+}
+trap '_cleanup_sync_tmp' EXIT INT TERM
+
+# ========================================================================== #
+# CONCURRENCY GUARD — One sync at a time; never overlap a manager apply       #
+# ========================================================================== #
+# A sync pushes settings.json (and every runtime script) to nodes. If the
+# manager is mid-apply locally, its in-flight settings could be captured
+# half-written, and two concurrent syncs could race the same remote files.
+# Guard with the shared lock primitive:
+#   1. Observe the manager lock (stale-safe) and skip if an apply is in flight.
+#   2. Take a dedicated, NON-BLOCKING sync lock so a second sync skips rather
+#      than queueing. Skip-on-contention can only make a redundant sync bail —
+#      it can never deadlock, and a crashed sync is reclaimed after the stale
+#      window. DRY_RUN takes no lock (read-only, safe to overlap).
+SYNC_LOCK="$LOCKDIR/sync_nodes.lock"
+SYNC_LOCK_ACQUIRED=0
+if [ "$DRY_RUN" != "yes" ] && type merv_lock_acquire >/dev/null 2>&1; then
+    mkdir -p "$LOCKDIR" 2>/dev/null || :
+    if type merv_lock_state >/dev/null 2>&1; then
+        case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
+            active|unknown_recent)
+                warn -c cli,vlan "Sync: mervlan_manager is applying config — skipping this run"
+                exit 0
+                ;;
+        esac
+    fi
+    if merv_lock_acquire "$SYNC_LOCK" "${MERV_SYNC_LOCK_STALE_SEC:-600}" 0 "sync_nodes"; then
+        SYNC_LOCK_ACQUIRED=1
+    else
+        warn -c cli,vlan "Sync: another sync_nodes run is in progress — skipping"
+        exit 0
+    fi
+fi
+
 # ========================================================================== #
 # FILE SYNC SETUP — Source/destination lists and synchronization parameters  #
 # ========================================================================== #
@@ -102,6 +145,10 @@ settings/lib_debug.sh
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
+settings/lib_mervqt.sh
+settings/lib_radio.sh
+settings/mac_shield_snapshot.sh
+settings/lib_br0_guard.sh
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
@@ -109,6 +156,8 @@ functions/collect_local_clients.sh
 functions/heal_event.sh  
 functions/service-event-handler.sh
 functions/hw_probe.sh
+functions/mervlan_trunk.sh
+functions/mac_refresh.sh
 templates/mervlan_templates.sh
 "
 
@@ -121,6 +170,8 @@ functions/collect_local_clients.sh
 functions/heal_event.sh
 functions/service-event-handler.sh
 functions/hw_probe.sh
+functions/mervlan_trunk.sh
+functions/mac_refresh.sh
 "
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
 FILES_TO_COPY_CHMOD_644="
@@ -131,6 +182,10 @@ settings/lib_debug.sh
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
 settings/lib_stp.sh
+settings/lib_mervqt.sh
+settings/lib_radio.sh
+settings/mac_shield_snapshot.sh
+settings/lib_br0_guard.sh
 templates/mervlan_templates.sh
 "
 dbg_log "File synchronization manifest loaded"
@@ -140,9 +195,11 @@ dbg_var FILES_TO_COPY FILES_TO_COPY_CHMOD FILES_TO_COPY_CHMOD_644
 # SYNCHRONIZATION PARAMETERS — Debug toggles and SSH retry behaviour         #
 # ========================================================================== #
 
-# SYNC_DEBUG_PRE/POST toggle verbose remote listings (before/after copy)
+# SYNC_DEBUG_PRE/POST toggle verbose remote listings (before/after copy).
+# Both default off: the post-copy `ls -laR` was an extra SSH round-trip per node
+# that nobody reads outside active debugging. Set to 1 to re-enable.
 SYNC_DEBUG_PRE="${SYNC_DEBUG_PRE:-0}"
-SYNC_DEBUG_POST="${SYNC_DEBUG_POST:-1}"
+SYNC_DEBUG_POST="${SYNC_DEBUG_POST:-0}"
 # Ping/SSH retry windows allow nodes time to boot and expose services
 PING_MAX_ATTEMPTS="${PING_MAX_ATTEMPTS:-60}"
 PING_RETRY_INTERVAL="${PING_RETRY_INTERVAL:-5}"
@@ -216,11 +273,9 @@ info -c cli,vlan "✓ SSH key verification passed"
 # NODE DISCOVERY — Extract and validate node IP addresses from settings      #
 # ========================================================================== #
 
-# get_node_ips — Pull NODE1..NODE5 entries, filter placeholders/invalid IPs
+# get_node_ips — Pull NODE1..NODE10 entries, filter placeholders/invalid IPs
 get_node_ips() {
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
+    merv_node_list
 }
 
 NODE_IPS=$(get_node_ips)
@@ -461,17 +516,61 @@ copy_file_to_node() {
         return 0
     fi
 
-    # Special handling for settings.json: reset Trunks section to prevent trunk configs on nodes
+    # Special handling for settings.json: inject node-aware trunk config
+    # Nodes need TRUNK1 enabled so the backhaul port carries tagged VLAN traffic.
     if [ "$file" = "settings/settings.json" ]; then
         _cfn_tmp="$TMPDIR/settings_trunk_reset_sync_node${node_id}.$$"
         cp "$MERV_BASE/$file" "$_cfn_tmp" 2>/dev/null || {
-            error -c cli,vlan "✗ Failed to create temp file for trunk reset"
+            error -c cli,vlan "✗ Failed to create temp file for trunk config"
             rm -f "$_cfn_tmp" 2>/dev/null
             return 1
         }
 
-        # Reset Trunks section to defaults (nodes should never trunk)
-        if ! json_reset_trunks_section "$_cfn_tmp"; then
+        # Check if main has any active trunk ports (user intent gate).
+        # If all trunks are "0", the user explicitly wants no trunks — respect
+        # that and send the settings as-is. Only auto-inject when the main has
+        # at least one trunk enabled, which signals an active managed-switch
+        # topology where the node's backhaul port also needs trunk config.
+        _cfn_main_has_trunk="no"
+        _cfn_ti=1
+        while [ "$_cfn_ti" -le 8 ]; do
+            if [ "$(json_get_flag "TRUNK${_cfn_ti}" "0" "$MERV_BASE/$file")" = "1" ]; then
+                _cfn_main_has_trunk="yes"
+                break
+            fi
+            _cfn_ti=$((_cfn_ti + 1))
+        done
+
+        # Zero all trunks first (clean slate), then inject node trunk config
+        if [ "$_cfn_main_has_trunk" = "yes" ] && json_reset_trunks_section "$_cfn_tmp"; then
+            # Collect all VLAN IDs from the SSID pool.
+            # Scan up to Hardware.MAX_SSIDS slots; if zero/absent use Limits.MAX_SSID_CAP; default 16.
+            _cfn_vlan_scan_max=$(json_get_section_value "Hardware" "MAX_SSIDS" "$_cfn_tmp" 2>/dev/null)
+            case "$_cfn_vlan_scan_max" in
+              ''|0|*[!0-9]*)
+                _cfn_vlan_scan_max=$(json_get_section_value "Limits" "MAX_SSID_CAP" "$_cfn_tmp" 2>/dev/null)
+                case "$_cfn_vlan_scan_max" in ''|0|*[!0-9]*) _cfn_vlan_scan_max=16 ;; esac
+                ;;
+            esac
+            _cfn_vlan_list=""
+            _cfn_vi=1
+            while [ "$_cfn_vi" -le "$_cfn_vlan_scan_max" ]; do
+                _cfn_vid="$(json_get_flag "VLAN_$(printf '%02d' "$_cfn_vi")" "" "$_cfn_tmp")"
+                case "$_cfn_vid" in
+                    ""|none|*[!0-9]*) ;;
+                    *) _cfn_vlan_list="${_cfn_vlan_list}${_cfn_vlan_list:+,}${_cfn_vid}" ;;
+                esac
+                _cfn_vi=$((_cfn_vi + 1))
+            done
+            # Enable TRUNK1 for node backhaul with collected VLANs
+            if [ -n "$_cfn_vlan_list" ]; then
+                json_set_flag "TRUNK1" "1" "$_cfn_tmp"
+                json_set_flag "TAGGED_TRUNK1" "$_cfn_vlan_list" "$_cfn_tmp"
+                info -c cli,vlan "Node trunk config: TRUNK1=1, TAGGED=$_cfn_vlan_list"
+            fi
+        elif [ "$_cfn_main_has_trunk" = "no" ]; then
+            info -c cli,vlan "Node trunk config: all trunks disabled on main — sending as-is (no auto-inject)"
+        else
             warn -c cli,vlan "⚠️ Failed to reset trunks section, copying original file"
             rm -f "$_cfn_tmp" 2>/dev/null
             # Fallback to original file
@@ -486,6 +585,19 @@ copy_file_to_node() {
 
         # Use cat piped with timeout wrapper for atomic file transfer
         if cat "$_cfn_tmp" | _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
+            # Persist expected size+md5 of the sent (content-modified) file
+            # before discarding the temp copy. verify_file_on_node reads this
+            # breadcrumb so it validates against what actually landed on the
+            # node rather than the unmodified local original.
+            _cfn_exp_size=$(wc -c < "$_cfn_tmp" 2>/dev/null | tr -cd '0-9')
+            _cfn_exp_md5=""
+            if merv_has md5sum; then
+                _cfn_exp_md5=$(md5sum "$_cfn_tmp" 2>/dev/null | awk '{print $1}')
+            elif merv_has md5; then
+                _cfn_exp_md5=$(md5 -r "$_cfn_tmp" 2>/dev/null | awk '{print $1}')
+            fi
+            printf '%s\n%s\n' "$_cfn_exp_size" "$_cfn_exp_md5" \
+                > "$TMPDIR/merv_sync_expected_${node_id}" 2>/dev/null || true
             info -c cli,vlan "✓ Copied $file (trunk-safe) to NODE${node_id} ($node_ip):$remote_path"
             rm -f "$_cfn_tmp" 2>/dev/null
             return 0
@@ -510,6 +622,129 @@ copy_file_to_node() {
     fi
 }
 
+# copy_batch_to_node — Transfer many files in ONE tar stream over a single SSH
+# connection instead of one connection per file. The bottleneck in node sync is
+# the Dropbear handshake (~150-300ms each), not data volume, so collapsing ~21
+# per-file copies into one tar pipe removes ~20 connections of overhead.
+# Args: $1=node_ip, $2=node_id, $3=space-separated file list (relative to MERV_BASE)
+# Returns: 0 on success, 1 on failure (tar exit code covers truncation / remote
+#          write errors; settings.json is handled separately and never here).
+copy_batch_to_node() {
+    node_ip="$1"
+    node_id="$2"
+    batch_files="$3"
+
+    if [ -z "$batch_files" ]; then
+        warn -c cli,vlan "Batch copy: empty file list for NODE${node_id} ($node_ip)"
+        return 1
+    fi
+
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would batch-copy $(echo "$batch_files" | wc -w | tr -d ' ') files to NODE${node_id} ($node_ip) via tar"
+        return 0
+    fi
+
+    info -c cli,vlan "Batch-copying files to NODE${node_id} ($node_ip)..."
+    # Local tar streams the listed paths (relative to MERV_BASE); remote tar
+    # extracts under the same base. Subdirectories are pre-created in the main
+    # loop's mkdir so extraction never fails on a missing path.
+    if (cd "$MERV_BASE" && tar -cf - $batch_files 2>/dev/null) | \
+        _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cd '$MERV_BASE' && tar -xf - 2>/dev/null"; then
+        info -c cli,vlan "✓ Batch copy successful to NODE${node_id} ($node_ip)"
+        return 0
+    else
+        error -c cli,vlan "✗ Batch copy failed to NODE${node_id} ($node_ip)"
+        return 1
+    fi
+}
+
+# verify_batch_on_node — Confirm all batched files landed intact using ONE SSH.
+# Primary check: combined md5 fingerprint (md5sum of each file, sorted by name
+# so tar's extraction order is irrelevant, then hashed into a single value).
+# Fallback (no md5sum on either side): total byte count across all files.
+# This replaces the previous per-file verify loop (~2 SSH calls per file) while
+# providing a stronger guarantee than the old per-file size+md5 check.
+# Args: $1=node_ip, $2=node_id, $3=space-separated file list (relative to MERV_BASE)
+# Returns: 0 on success, 1 on mismatch.
+verify_batch_on_node() {
+    node_ip="$1"
+    node_id="$2"
+    batch_files="$3"
+    _vbn_local_fp=""
+    _vbn_remote_fp=""
+    _vbn_local_total=""
+    _vbn_remote_total=""
+
+    [ -n "$batch_files" ] || return 1
+
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would verify batch on NODE${node_id} ($node_ip)"
+        return 0
+    fi
+
+    # Primary: combined md5 fingerprint (order-independent via sort -k2).
+    if merv_has md5sum; then
+        _vbn_local_fp=$(cd "$MERV_BASE" && md5sum $batch_files 2>/dev/null | sort -k2 | md5sum 2>/dev/null | awk '{print $1}')
+    elif merv_has md5; then
+        _vbn_local_fp=$(cd "$MERV_BASE" && md5 -r $batch_files 2>/dev/null | sort -k2 | md5sum 2>/dev/null | awk '{print $1}')
+    fi
+
+    if [ -n "$_vbn_local_fp" ]; then
+        _vbn_remote_fp=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE' && if type md5sum >/dev/null 2>&1; then md5sum $batch_files 2>/dev/null; elif type md5 >/dev/null 2>&1; then md5 -r $batch_files 2>/dev/null; fi | sort -k2 | md5sum 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -cd 'a-fA-F0-9')
+        if [ -n "$_vbn_remote_fp" ] && [ "$_vbn_local_fp" = "$_vbn_remote_fp" ]; then
+            info -c cli,vlan "✓ Batch verified on NODE${node_id} ($node_ip) (md5 fingerprint ok)"
+            return 0
+        else
+            error -c cli,vlan "✗ Batch md5 mismatch on NODE${node_id} ($node_ip) (local: $_vbn_local_fp, remote: $_vbn_remote_fp)"
+            return 1
+        fi
+    fi
+
+    # Fallback: total byte count (wc -c prints a 'total' line for multiple files).
+    _vbn_local_total=$(cd "$MERV_BASE" && wc -c $batch_files 2>/dev/null | tail -1 | tr -cd '0-9')
+    _vbn_remote_total=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE' && wc -c $batch_files 2>/dev/null | tail -1 | awk '{print \$1}'" 2>/dev/null | tr -cd '0-9')
+    if [ -n "$_vbn_local_total" ] && [ "$_vbn_local_total" = "$_vbn_remote_total" ] && [ "$_vbn_local_total" -gt 0 ] 2>/dev/null; then
+        info -c cli,vlan "✓ Batch verified on NODE${node_id} ($node_ip) (total size ok: ${_vbn_local_total} bytes)"
+        return 0
+    else
+        error -c cli,vlan "✗ Batch size mismatch on NODE${node_id} ($node_ip) (local: $_vbn_local_total, remote: $_vbn_remote_total)"
+        return 1
+    fi
+}
+
+# batch_set_remote_permissions — Apply all 755 and 644 permissions in ONE SSH
+# call instead of one connection per file. Reads the existing manifest lists
+# (FILES_TO_COPY_CHMOD / FILES_TO_COPY_CHMOD_644) so the permission policy is
+# unchanged — only the transport is batched. Non-fatal, matching old behaviour.
+# Args: $1=node_ip, $2=node_id
+# Returns: 0 always (permission failures are warnings, never block sync).
+batch_set_remote_permissions() {
+    node_ip="$1"
+    node_id="$2"
+    _bsp_c755=""
+    _bsp_c644=""
+    _bsp_f=""
+
+    if [ "$DRY_RUN" = "yes" ]; then
+        info -c cli,vlan "[DRY-RUN] Would set 755/644 permissions on NODE${node_id} ($node_ip)"
+        return 0
+    fi
+
+    for _bsp_f in $FILES_TO_COPY_CHMOD; do
+        _bsp_c755="$_bsp_c755 '$MERV_BASE/$_bsp_f'"
+    done
+    for _bsp_f in $FILES_TO_COPY_CHMOD_644; do
+        _bsp_c644="$_bsp_c644 '$MERV_BASE/$_bsp_f'"
+    done
+
+    if merv_ssh_exec "$node_id" "$node_ip" "chmod 755 $_bsp_c755 2>/dev/null; chmod 644 $_bsp_c644 2>/dev/null; echo 'chmod_done'" 2>/dev/null | grep -q "chmod_done"; then
+        info -c cli,vlan "✓ Permissions set (755/644) on NODE${node_id} ($node_ip)"
+    else
+        warn -c cli,vlan "⚠️  chmod may not have completed on NODE${node_id} ($node_ip)"
+    fi
+    return 0
+}
+
 # verify_file_on_node — Confirm remote file exists, matches size/optional hash
 verify_file_on_node() {
     node_ip="$1"
@@ -527,7 +762,23 @@ verify_file_on_node() {
         # Remove any extra characters from size
         remote_size=$(echo "$remote_size" | tr -cd '0-9')
         local_size=$(echo "$local_size" | tr -cd '0-9')
-        
+
+        # If copy_file_to_node left a breadcrumb for this node+file, use its
+        # size and md5 as the reference values. The sent file was content-modified
+        # (e.g. settings.json had trunk config rewritten for the node), so
+        # comparing against the unmodified local original would always mismatch.
+        _vfn_exp_md5=""
+        if [ "$file" = "settings/settings.json" ]; then
+            _vfn_breadcrumb="$TMPDIR/merv_sync_expected_${node_id}"
+            if [ -f "$_vfn_breadcrumb" ]; then
+                _vfn_exp_size=$(sed -n '1p' "$_vfn_breadcrumb" | tr -cd '0-9')
+                _vfn_exp_md5=$(sed -n '2p' "$_vfn_breadcrumb" | tr -cd 'a-fA-F0-9')
+                rm -f "$_vfn_breadcrumb" 2>/dev/null || :
+                [ -n "$_vfn_exp_size" ] && [ "$_vfn_exp_size" -gt 0 ] && \
+                    local_size="$_vfn_exp_size"
+            fi
+        fi
+
         if [ "$remote_size" -eq "$local_size" ] && [ "$remote_size" -gt 0 ]; then
             local local_md5=""
             local remote_md5=""
@@ -537,6 +788,8 @@ verify_file_on_node() {
             elif merv_has md5; then
                 local_md5=$(md5 -r "$MERV_BASE/$file" 2>/dev/null | awk '{print $1}')
             fi
+            # Use breadcrumb md5 when available (content-modified file)
+            [ -n "$_vfn_exp_md5" ] && local_md5="$_vfn_exp_md5"
 
             if [ -n "$local_md5" ]; then
                 remote_md5=$(merv_ssh_exec "$node_id" "$node_ip" "if type md5sum >/dev/null 2>&1; then md5sum '$remote_file' 2>/dev/null | awk '{print \$1}'; elif type md5 >/dev/null 2>&1; then md5 -r '$remote_file' 2>/dev/null | awk '{print \$1}'; else echo NA; fi" 2>/dev/null)
@@ -692,30 +945,34 @@ debug_remote_files() {
 pull_node_hardware() {
     _pnh_ip="$1"
     _pnh_id="$2"
+    _pnh_output=""
+    _pnh_productid=""
+    _pnh_maxeth=""
 
     if [ "$DRY_RUN" = "yes" ]; then
         info -c cli,vlan "[DRY-RUN] Would run hw_probe and pull hardware values from NODE${_pnh_id} ($_pnh_ip)"
         return 0
     fi
 
-    # Run hw_probe.sh on the node to detect and write hardware to its settings.json
+    # Run hw_probe.sh on the node, then read both Hardware values back — all in
+    # ONE SSH session instead of three. hw_probe writes the node's settings.json;
+    # we source lib_json once and print the two values with stable key prefixes
+    # so the caller can parse them without ambiguity.
     info -c cli,vlan "Running hw_probe on NODE${_pnh_id} ($_pnh_ip)..."
-    if ! merv_ssh_exec "$_pnh_id" "$_pnh_ip" "cd '$MERV_BASE/functions' && ./hw_probe.sh" >/dev/null 2>&1; then
+    _pnh_output=$(merv_ssh_exec "$_pnh_id" "$_pnh_ip" "
+        cd '$MERV_BASE/functions' && ./hw_probe.sh >/dev/null 2>&1 || echo 'HWPROBE_FAILED'
+        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
+        printf 'PRODUCTID=%s\n' \"\$(json_get_section_value Hardware PRODUCTID '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
+        printf 'MAX_ETH_PORTS=%s\n' \"\$(json_get_section_value Hardware MAX_ETH_PORTS '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
+    " 2>/dev/null)
+
+    if printf '%s' "$_pnh_output" | grep -q 'HWPROBE_FAILED'; then
         warn -c cli,vlan "⚠️ hw_probe failed on NODE${_pnh_id} ($_pnh_ip)"
         return 1
     fi
 
-    # Extract PRODUCTID from node's settings.json
-    _pnh_productid=$(merv_ssh_exec "$_pnh_id" "$_pnh_ip" "
-        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
-        json_get_section_value Hardware PRODUCTID '$MERV_BASE/settings/settings.json'
-    " 2>/dev/null | tr -d '\r\n')
-
-    # Extract MAX_ETH_PORTS from node's settings.json
-    _pnh_maxeth=$(merv_ssh_exec "$_pnh_id" "$_pnh_ip" "
-        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
-        json_get_section_value Hardware MAX_ETH_PORTS '$MERV_BASE/settings/settings.json'
-    " 2>/dev/null | tr -d '\r\n')
+    _pnh_productid=$(printf '%s' "$_pnh_output" | sed -n 's/^PRODUCTID=//p' | tr -d '\r\n')
+    _pnh_maxeth=$(printf '%s' "$_pnh_output" | sed -n 's/^MAX_ETH_PORTS=//p' | tr -d '\r\n')
 
     # Validate we got something
     if [ -z "$_pnh_productid" ] && [ -z "$_pnh_maxeth" ]; then
@@ -778,8 +1035,10 @@ while read -r node_id node_ip; do
         continue
     fi
     
-    # Create base remote directories (addon path + runtime folders)
-    remote_mkdir_cmd="mkdir -p '$MERV_BASE' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
+    # Create base remote directories (addon path + runtime folders + the addon
+    # subdirs that tar will extract into — pre-creating them means batch extract
+    # never fails on a missing path, and we drop the per-file dir-creation SSH).
+    remote_mkdir_cmd="mkdir -p '$MERV_BASE' '$MERV_BASE/settings' '$MERV_BASE/functions' '$MERV_BASE/templates' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
     dbg_log "Ensuring base directories on node"
     dbg_var node_ip remote_mkdir_cmd
     if [ "$DRY_RUN" = "yes" ]; then
@@ -798,21 +1057,41 @@ while read -r node_id node_ip; do
         debug_remote_files "$node_ip" "before" "$node_id"
     fi
     
-    # Copy each file
+    # Copy files. Everything except settings/settings.json goes in ONE tar
+    # stream (single SSH); settings.json keeps its own atomic path because it
+    # gets a trunk-rewrite + md5 breadcrumb before transfer. Pre-flight every
+    # batch entry so a missing local file is reported up front and BusyBox tar
+    # (which can exit 0 on absent inputs) never silently skips it.
     file_success=true
+    _batch_files=""
     for file in $FILES_TO_COPY; do
-        local_file="$MERV_BASE/$file"
-        
-        if [ ! -f "$local_file" ]; then
-            error -c cli,vlan "✗ Local file not found: $local_file"
+        [ "$file" = "settings/settings.json" ] && continue
+        if [ ! -f "$MERV_BASE/$file" ]; then
+            error -c cli,vlan "✗ Local file not found: $MERV_BASE/$file"
             file_success=false
             continue
         fi
-        
-        if ! copy_file_to_node "$node_ip" "$file" "$node_id"; then
+        _batch_files="$_batch_files $file"
+    done
+
+    if [ "$file_success" = "true" ] && [ -n "$_batch_files" ]; then
+        if ! copy_batch_to_node "$node_ip" "$node_id" "$_batch_files"; then
             file_success=false
         fi
-    done
+    fi
+
+    # settings/settings.json: keep the dedicated atomic copy path (trunk rewrite
+    # + breadcrumb md5) — only copy if it is part of the manifest.
+    if echo "$FILES_TO_COPY" | grep -q "settings/settings.json"; then
+        if [ -f "$MERV_BASE/settings/settings.json" ]; then
+            if ! copy_file_to_node "$node_ip" "settings/settings.json" "$node_id"; then
+                file_success=false
+            fi
+        else
+            error -c cli,vlan "✗ Local file not found: $MERV_BASE/settings/settings.json"
+            file_success=false
+        fi
+    fi
     
     # Debug: show remote directory after copying (default on)
     if [ "$SYNC_DEBUG_POST" = "1" ]; then
@@ -830,34 +1109,24 @@ while read -r node_id node_ip; do
     # Verify files were copied
     if [ "$file_success" = "true" ]; then
         verification_success=true
-        for file in $FILES_TO_COPY; do
-            if ! verify_file_on_node "$node_ip" "$file" "$node_id"; then
+        # Batched files: one combined md5 fingerprint check (single SSH).
+        if [ -n "$_batch_files" ]; then
+            if ! verify_batch_on_node "$node_ip" "$node_id" "$_batch_files"; then
                 verification_success=false
             fi
-        done
-        
+        fi
+        # settings/settings.json: dedicated per-file verify (uses breadcrumb md5).
+        if echo "$FILES_TO_COPY" | grep -q "settings/settings.json"; then
+            if ! verify_file_on_node "$node_ip" "settings/settings.json" "$node_id"; then
+                verification_success=false
+            fi
+        fi
+
         if [ "$verification_success" = "true" ]; then
             info -c cli,vlan "✓ All files verified on NODE${node_id} ($node_ip)"
-            
-            # Set 755 permissions for files that need to be executable
-            for file in $FILES_TO_COPY_CHMOD; do
-                # Check if this file is in our copy list
-                if echo "$FILES_TO_COPY" | grep -q "$file"; then
-                    if set_remote_permissions "$node_ip" "$file" "$node_id"; then
-                        info -c cli,vlan "chmod 755 on NODE${node_id}:$file"
-                    fi
-                fi
-            done
 
-            # Set 644 permissions for files that should not be executable
-            for file in $FILES_TO_COPY_CHMOD_644; do
-                # Check if this file is in our copy list
-                if echo "$FILES_TO_COPY" | grep -q "$file"; then
-                    if set_remote_permissions_644 "$node_ip" "$file" "$node_id"; then
-                        info -c cli,vlan "chmod 644 on NODE${node_id}:$file"
-                    fi
-                fi
-            done
+            # Apply all 755 + 644 permissions in a single SSH call.
+            batch_set_remote_permissions "$node_ip" "$node_id"
 
             # Mark remote device as MerVLAN node via IS_NODE flag
             if ! set_node_flag_remote "$node_ip" "$node_id"; then

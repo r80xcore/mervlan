@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: execute_nodes.sh || version="0.50"                    #
+#                - File: execute_nodes.sh || version="0.54"                    #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -22,15 +22,35 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+
+# ----------------------------------------------------------- Concurrency lock --
+# execute_nodes orchestrates a local manager apply plus remote node runs. The
+# local manager self-locks, but two overlapping execute_nodes invocations (e.g.
+# UI double-submit) would still fire redundant remote work. Take a NON-BLOCKING
+# self-lock so the second invocation skips cleanly. Lower urgency than sync/
+# mac_refresh (no local config files are overwritten here), hence best-effort.
+EXEC_NODES_LOCK="$LOCKDIR/execute_nodes.lock"
+EXEC_NODES_LOCK_ACQUIRED=0
+if type merv_lock_acquire >/dev/null 2>&1; then
+  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  if merv_lock_acquire "$EXEC_NODES_LOCK" "${MERV_SYNC_LOCK_STALE_SEC:-600}" 0 "execute_nodes"; then
+    EXEC_NODES_LOCK_ACQUIRED=1
+    trap '[ "$EXEC_NODES_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null' EXIT INT TERM
+  else
+    warn -c cli,vlan "Execute: another execute_nodes run is in progress — skipping"
+    exit 0
+  fi
+fi
 # ============================================================================ #
 #                          INITIALIZATION & LOGGING                            #
 # Display welcome message and prepare for node execution. Log script           #
@@ -107,14 +127,11 @@ info -c cli,vlan "✓ SSH key verification passed"
 
 # ============================================================================ #
 # get_node_ips                                                                 #
-# Extract NODE1-NODE5 IP addresses from settings.json. Parse JSON format       #
+# Extract NODE1-NODE10 IP addresses from settings.json. Parse JSON format       #
 # and filter out "none" entries and invalid IP addresses.                      #
 # ============================================================================ #
 get_node_ips() {
-    # Extract NODE entries matching JSON "NODE[1-5]": "IP" format
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" | \
-    sed -n 's/"NODE\([1-5]\)"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1 \2/p' | \
-    awk '$2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
+    merv_node_list
 }
 
 NODE_IPS=$(get_node_ips)
@@ -664,8 +681,7 @@ if [ -z "$READY_NODES" ]; then
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
             # No nodes, so run with collect_clients included
-            sh "$local_script" >>"$CLI_LOG" 2>&1
-            local_success=$?
+            sh "$local_script" >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
         fi
     fi
 else
@@ -688,7 +704,8 @@ EOF2
         info -c cli,vlan "Launching execution on main router..."
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
-            sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 &
+            _main_rc_file="$TMPDIR/main_exec_rc.$$"
+            ( sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; echo $? > "$_main_rc_file" ) &
             main_pid=$!
         fi
     fi
@@ -700,12 +717,22 @@ EOF2
     
     # Check if main router succeeded (if we ran it)
     if [ "$MODE" != "nodesonly" ]; then
-        # wait already completed, check if script ran
-        if [ -f "$local_script" ]; then
-            info -c cli,vlan "✓ Main router execution completed"
-            local_success=true
-        else
+        if [ -n "${_main_rc_file:-}" ] && [ -f "$_main_rc_file" ]; then
+            _main_rc=$(cat "$_main_rc_file" 2>/dev/null)
+            rm -f "$_main_rc_file" 2>/dev/null
+            if [ "${_main_rc:-1}" = "0" ]; then
+                info -c cli,vlan "✓ Main router execution completed"
+                local_success=true
+            else
+                error -c cli,vlan "✗ Main router execution failed (rc=${_main_rc:-?})"
+                local_success=false
+            fi
+        elif [ -n "${local_script:-}" ] && [ ! -f "$local_script" ]; then
             error -c cli,vlan "✗ Local VLAN manager script missing"
+            local_success=false
+        else
+            # rc file missing (script may not have been launched)
+            warn -c cli,vlan "⚠ Main router exit status unavailable"
             local_success=false
         fi
     fi

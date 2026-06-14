@@ -1,4 +1,1452 @@
-mervlan v0.52.91
+mervlan v0.53.13
+
+Release note
+- This version is intended to be merged into main after dev testing.
+
+help.html
+- Reworked the help page to render Markdown using "marked 18.0.5" and "github-markdown-dark".
+- Uses docs/HELP.md as the single source file. During install/update it is copied to the public web path as docs/HELP.json to avoid Asus httpd issues with .md files.
+- License information for vendored help assets is available in www/vendor/THIRD_PARTY_LICENSES.md.
+
+HELP.md (NEW FILE)
+- Added the main help source under /docs.
+- Updated topology documentation for better understanding and more detail.
+- Uses .svg files for rendering the topology diagrams.
+- Updated the supported-device table to match the active hw_probe.sh hardware profiles.
+
+README.md
+- Added links to HELP.md in the README.
+- Moved "Help wanted: LAN/ETH port mapping (device support)" further down the README for better structure.
+
+Diagrams
+- Rendered and source diagrams are available in docs/diagrams and docs/diagrams-src.
+
+update_mervlan.sh
+- Relaxed file validation so missing core files still fail hard, while non-essential files only warn.
+  This makes branch changes safer by avoiding hard failures from overly strict validation.
+
+
+install.sh
+- Correctly copies the new help, diagram, and vendor files to the public (www) directory.
+
+Added support for the following models:
+- RT-AX56U
+- RT-AX88U_PRO (restored after being lost during a previous update)
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.12
+
+Improved SSID capacity detection:
+- Added support for detecting up to 16 SSID slots on supported hardware, making
+  the addon ready for newer multi-band routers while keeping existing models
+  working as before.
+
+Improved hardware profile handling:
+- Centralized SSID slot limits so future hardware support can be expanded more
+  safely and consistently across apply, sync, MAC shield, and the UI.
+
+Fixed MAC shield DB preservation during updates:
+- update_mervlan.sh now preserves and restores the MAC shield database during
+  addon updates, then pushes the restored DB to configured nodes when present.
+  This prevents the shared MAC shield DB from being cleared by the update
+  teardown flow introduced around the v0.53.11 shared-db changes.
+
+Improved VLAN client collection speed:
+- collect_clients.sh now collects the main router and configured nodes in
+  parallel, reducing wait time when node sync is enabled.
+- Removed an extra SSH connection check before node collection, avoiding one
+  unnecessary SSH round-trip per node.
+- Reduced the default FDB retry count for local client collection while keeping
+  a retry in place for transient bridge/FDB reads.
+
+Fixed false clients in Active VLAN Clients:
+- collect_local_clients.sh now filters router and VAP interface MAC addresses,
+  including their U/L-bit paired variants, before writing the client list.
+  This prevents Asus interface/BSSID MACs from appearing as active unshielded
+  VLAN clients.
+
+Improved UI polish:
+- Opening Assign now properly resizes the addon width when entering and exiting
+  Assign mode.
+- Removed vertical form lines and softened the horizontal row separators.
+- Fixed INFO view height behavior when zooming in.
+
+New files:
+- Added lib_radio.sh, a centralized library for better radio support,
+  consistency, and easier future expansion.
+
+Added support for following models:
+- XT12
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.11
+
+Multi-node support expanded:
+- MerVLAN now supports up to 10 configured nodes instead of 5.
+- The UI now generates node fields, node LAN tabs, SSID assignment buttons,
+  hardware override targets, and node aliases from the shared node limit.
+- Settings load/save, sync, apply, execute, hardware detection, and client
+  collection paths were updated to handle NODE1..NODE10 consistently.
+- SSID assignment values are normalized to the full node range so older
+  settings files continue to load cleanly.
+
+Settings save reliability:
+- Save payloads are now split by purpose to avoid hitting the Merlin payload
+  size limit on larger multi-node setups.
+- Normal Save only sends normal VLAN/node settings, hardware override save
+  only sends hardware override fields, and client metadata save only sends
+  client name/MAC shield metadata.
+- Save verification now checks only the keys that were actually saved, which
+  prevents false mismatch warnings after scoped saves.
+
+Client metadata and MAC Shield overrides:
+- Added client metadata support for friendly client names and MAC Shield
+  overrides.
+- Friendly names can replace raw MAC addresses in the Active VLAN Clients view.
+- MAC Shield overrides allow selected devices to move between VLANs and br0
+  without being blocked by the MAC shield.
+- Client metadata is saved persistently and applied through the normal addon
+  service flow.
+
+Active VLAN Clients badge system:
+- The Active VLAN Clients view now shows clearer device state badges.
+- Devices can show active, stale, inactive/duplicate, relayed, relay-only,
+  ambiguous, locked, unlocked, or unshielded states.
+- This makes it easier to see which clients are currently protected by the
+  MAC Shield and which observations are only diagnostic.
+- Inactive and relayed observations are hidden by default and can be shown
+  with a dedicated toggle.
+
+Client refresh behavior:
+- The addon now auto-collects VLAN client data on first page load when VLANs
+  are configured.
+- Auto-refresh is rate-limited with a 5 minute cooldown so the page stays fresh
+  without repeatedly running client collection while the user is working.
+- Manual Refresh still forces a visible client list update when needed.
+
+INFO panel UI improvements:
+- The INFO panel client area was reorganized for a cleaner layout.
+- Client refresh was moved to a compact icon button, while metadata editing,
+  inactive-client visibility, and MAC Shield rebuild actions now sit in the
+  client panel footer.
+- Button tooltips were clarified, especially the MAC Shield rebuild action,
+  so users know when to use it after moving devices back to br0.
+
+INFO panel scrolling improvements:
+- Active VLAN Clients now uses the same styled scrollbar as the CLI window.
+- Mouse wheel scrolling now works inside the Active VLAN Clients panel.
+- Nested client lists were simplified so the main client panel owns scrolling.
+- When the client panel reaches the top or bottom, scrolling can continue on
+  the main page like a normal web page.
+
+Addon height and page scrolling:
+- The addon iframe now auto-resizes to the rendered UI height instead of using
+  one fixed height for every layout.
+- Expanding Nodes, opening INFO, changing client views, and opening modals no
+  longer hide the bottom of the addon behind the container.
+- A tall fallback height remains for extreme no-JS/error cases, but normal use
+  now follows the actual rendered content height.
+
+MAC Shield — Mesh-wide client blocking:
+- The MAC Shield is now mesh-wide. When a refresh or cron snapshot runs, the
+  main router collects client MACs from every node, merges them into a single
+  database, and pushes it back to all nodes. A device known to any unit is
+  blocked across the whole mesh within one snapshot cycle.
+- Sleeping and idle devices (Wi-Fi power-save, screen off) are now reliably
+  captured via the bridge forwarding table, not just the active association
+  list. They stay in the database and keep their block rule even if they are
+  not actively transmitting when the snapshot runs.
+- Push to nodes only fires when the MAC set actually changes, so a stable
+  network generates no extra SSH traffic.
+- Can be turned off per-unit with MERV_MAC_NODE_SYNC=0. Degrades cleanly to
+  local-only if SSH keys are not set up.
+
+MAC Refresh — redesigned as a clean rebuild:
+- The Refresh button now fully delegates to the snapshot engine instead of
+  doing its own database manipulation. This removes a class of bugs where the
+  old approach could leave the shield in a half-rebuilt state.
+- Reset only clears the old database after every node has been successfully
+  heard from. If any node is unreachable, the refresh falls back to a safe
+  merge so no known clients are dropped by accident.
+- After a successful rebuild, the merged database is pushed to all nodes and
+  their shields are reloaded in the same operation — no extra step needed.
+- The refresh now reports a clear outcome: changed (MAC set updated),
+  reloaded (same clients, shield reapplied), or unchanged (nothing to do).
+  Node collection and push counts are shown in the log.
+- Verbose per-step logging is on during a manual refresh and silent during
+  the background cron tick, keeping logs readable in both cases.
+
+MAC Shield — SSH toolchain fix:
+- The snapshot engine previously relied on callers to load the SSH library,
+  which meant cron and manager invocations were running without it, producing
+  a spurious "SSH toolchain unavailable" warning every 5 minutes even on a
+  fully working setup.
+- Push to nodes was also silently skipping on some firmware builds due to a
+  binary lookup incompatibility. Both issues are fixed; push now works
+  reliably on all supported hardware.
+
+MAC Shield — snapshot concurrency lock:
+- A single lock now prevents the cron tick, the post-apply snapshot, and a
+  manual refresh from running at the same time. If a snapshot is already
+  running when the Refresh button is pressed, the user gets a clear message
+  to retry in a few seconds instead of the two operations racing each other.
+
+Lock reliability improvements:
+- Lock stale detection now accounts for PID reuse on the router's small PID
+  namespace, so a crashed process can no longer leave a lock stuck forever.
+- A dead snapshot lock now clears in 2 minutes instead of 15.
+- The cron-triggered snapshot runs in the background so it does not hold the
+  heal lock during its SSH work.
+
+Event handler reliability:
+- Service event locks now record a creation timestamp alongside the PID.
+  Previously, if a handler crashed before writing its timestamp, every
+  future event of the same type would be silently skipped forever. This is
+  now detected and the lock is reclaimed automatically.
+
+Install guard for non-full install
+- Added a guard in install.sh that prevents the addon the get badly installed
+  if the base files are not present. This prevents accidental bad installations
+  should a user forget to add "full" to the install.sh on an empty system.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.10
+
+Security / Leak Protection:
+
+Boot-time DHCP shield (mervlan_boot_wrap.sh, templates/mervlan_templates.sh):
+- Added a new "shield" mode to mervlan_boot_wrap.sh that runs synchronously
+  at services-start before the manager. It arms MERV_DHCP_HOLD on br0 and
+  replays the persistent MERV_MAC db, closing the reboot gap where clients
+  could get a br0 lease before the first full apply completes.
+- A detached watchdog re-arms both chains every second up to MERV_BOOT_SHIELD_MAX_SEC
+  (120s). The shield is removed automatically once the manager apply returns.
+
+Emergency DHCP gate covers both FORWARD and INPUT (service-event-handler.sh):
+- The inline DHCP gate inserted during ebtables re-link events previously only
+  covered the FORWARD chain. Now drops on INPUT as well, closing a path where
+  a client could send DHCP directly to the router's br0 interface.
+
+L2 guard tick during wait_for_interface (mervlan_manager.sh):
+- While waiting for a slow wl subinterface to appear after wireless restart,
+  the manager now calls merv_guard_tick on each backoff iteration so shields
+  are kept alive even during long interface-appearance waits.
+
+Stability / Self-Recovery:
+
+Manager lock hardened with stale-lock recovery and deadlock protection (mervlan_manager.sh, lib_mervqt.sh):
+- acquire_script_lock now writes a PID and creation timestamp into the lock
+  directory. On acquisition failure it checks liveness (kill -0) and age
+  before deciding to wait or reclaim. Bounded to 30 retries × 2s — will
+  never spin forever. Stale reclaim threshold is MERV_MANAGER_LOCK_STALE_SEC
+  (default 420s).
+- merv_lock_state() added to lib_mervqt.sh (was merv_manager_lock_state, alias
+  kept): generic observer for any lock dir; returns active / stale /
+  unknown_recent / absent. Used by heal, snapshot, and manager.
+
+heal_event.sh all stale-blind checks replaced (heal_event.sh):
+- All three raw [ -d "$MANAGER_LOCK" ] guards (entry, mid-body, deferred
+  recheck subshell) replaced with merv_lock_state case-statements. Stale
+  locks no longer block healing indefinitely.
+
+Manager courtesy-yield to in-flight heal (mervlan_manager.sh):
+- At apply start, if the heal lock is active, manager sleeps 3s then always
+  proceeds. Never aborts — escape surface unchanged.
+
+Non-blocking self-locks for sync_nodes, mac_refresh, execute_nodes:
+- All three scripts now take a non-blocking lock on entry; a second concurrent
+  run skips cleanly. sync_nodes also skips if the manager lock is active.
+  All locks release on EXIT/INT/TERM.
+
+mac_shield_snapshot.sh stale-lock awareness (mac_shield_snapshot.sh):
+- Snapshot precondition check now uses merv_manager_lock_state instead of
+  a bare lock-dir test, so a crashed manager can't permanently suppress
+  snapshot ticks.
+
+New variables (var_settings.sh):
+- MERV_MANAGER_LOCK_STALE_SEC (420s), MERV_HEAL_LOCK_STALE_SEC (180s),
+  MERV_SYNC_LOCK_STALE_SEC (60s), MERV_MAC_REFRESH_LOCK_STALE_SEC (60s),
+  MERV_BOOT_SHIELD_MAX_SEC (120s).
+
+Performance:
+
+Scoped iface→VID result cache during apply (mac_shield_snapshot.sh, lib_mervqt.sh, lib_br0_guard.sh, mervlan_manager.sh):
+- merv_mac_build_expected_iface_vid was called 5+ times back-to-back during
+  a single apply run, each call taking ~5s on the AX95Q. A new merv_iface_vid_list()
+  wrapper caches the result in-memory for the hot path.
+- Cache is invalidated after restart_services (NVRAM may change) and disabled
+  before post_rc_watchdog so the security check always reads fresh state.
+- Saves ~15s per apply.
+
+SSID slot pre-scan in bind_configured_ssids (mervlan_manager.sh):
+- Pre-scan builds the populated+allowed slot list once; the bind loop iterates
+  only those slots, skipping ~9 wasted sed scans per pass (called twice per apply).
+- Saves ~10s across both passes.
+
+Total apply time reduced from ~170s to ~120s on RT-AX95Q (3 VLANs, 1 node).
+
+sync_nodes.sh tar-batch SSH optimization (~7× speedup):
+- All files are bundled into one tar stream per node over a single SSH
+  connection instead of one scp call per file. Checksums and permissions
+  set in a second SSH pass. Full multi-node sync now completes in ~10s (was ~60-70s).
+
+
+CHANGED FILES:
+
+settings/var_settings.sh
+- Added MERV_MANAGER_LOCK_STALE_SEC, MERV_HEAL_LOCK_STALE_SEC, MERV_SYNC_LOCK_STALE_SEC,
+  MERV_MAC_REFRESH_LOCK_STALE_SEC, MERV_BOOT_SHIELD_MAX_SEC.
+
+settings/lib_mervqt.sh
+- Added merv_lock_state() (was merv_manager_lock_state, alias kept), merv_boot_shield_lan_configured().
+- merv_qt_ensure_expected_rules() and restore_merv_qt_shield() use cached wrapper.
+
+settings/mac_shield_snapshot.sh
+- Stale-aware manager-lock check via merv_lock_state().
+- Added merv_iface_vid_list(), merv_iface_vid_cache_enable/invalidate/disable().
+
+settings/lib_br0_guard.sh
+- merv_managed_wl_ifaces() uses cached wrapper when available.
+
+functions/mervlan_manager.sh
+- acquire_script_lock/release_script_lock: PID+timestamp, liveness check, stale reclaim.
+- acquire_script_lock: courtesy-yield (sleep 3) when heal lock is active.
+- merv_guard_tick called per backoff tick in wait_for_interface.
+- ebt_quarantine_ensure_expected_rules() uses cached wrapper.
+- apply_vlan: cache lifecycle (enable → invalidate post-restart → disable pre-watchdog).
+- bind_configured_ssids: pre-scan replaces full 12-slot iteration loop.
+
+functions/heal_event.sh
+- All stale-blind manager-lock checks replaced with merv_lock_state case-statements.
+
+functions/sync_nodes.sh
+- Tar-batch SSH: all files bundled per node into one tar stream, single SSH connection.
+- Non-blocking self-lock; skips if manager lock is active.
+
+functions/mac_refresh.sh
+- Non-blocking self-lock (MERV_MAC_REFRESH_LOCK_STALE_SEC=60s).
+
+functions/execute_nodes.sh
+- Sourced lib_mervqt.sh; non-blocking self-lock.
+
+functions/service-event-handler.sh
+- Emergency DHCP gate now inserts paired DROP rules in both FORWARD and INPUT.
+
+functions/mervlan_boot_wrap.sh
+- New _mode_shield(): boot DHCP hold + MERV_MAC replay + detached watchdog.
+- _mode_manager: removes shield marker after manager returns.
+- Added shield to dispatch case.
+
+templates/mervlan_templates.sh
+- services-start now runs mervlan_boot_wrap.sh shield synchronously before
+  the backgrounded manager/cron.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.09
+
+Stability / Self-Recovery:
+
+Heal mutex hardened with stale-lock recovery (heal_event.sh):
+- The vlan_event.lock previously had no age check. A heal process that was
+  SIGKILL'd or crashed mid-tick would leave the lock dir orphaned, silently
+  blocking every subsequent event indefinitely. Now logs explicitly when
+  refusing entry (instead of silent exit 0) and automatically reclaims the
+  lock if its mtime exceeds HEAL_LOCK_STALE_SEC (default 600s).
+
+Broader service-event coverage for MAC blacklist commits (service-event-handler.sh):
+- Intentionally NOT added. ACL / wl_filter events fire on every MAC blacklist
+  change (e.g. adding a new device); routing them through heal would cascade
+  to restart_wireless and drop the native SSID password state on Broadcom
+  hardware. MAC-shield rebuild is driven by the snapshot tick instead.
+
+DHCP hold re-armed immediately after rc restart (mervlan_manager.sh):
+- restart_services() now re-arms merv_dhcp_hold_arm before returning. Closes
+  the ~4s ebtables FORWARD-flush window between safe_service_restart and
+  wait_for_rc_quiet's per-tick restore, during which an IoT client racing
+  reassociation could grab a br0 lease and wedge across the wrong bridge.
+
+Detached VAP detection in placement check (heal_event.sh):
+- check_wl_iface_placements now treats "expected br<vid> but in neither bridge"
+  as a hard mismatch (previously dbg-only). After wait_for_rc_quiet, an
+  interface in no bridge is structurally broken — heal re-applies bridge
+  membership instead of leaving clients stranded until a reboot.
+
+MAC precondition triggers gated heal (settings/mac_shield_snapshot.sh):
+- When merv_mac_snapshot's preconditions fail (a managed VAP is missing,
+  misplaced, or detached), the snapshot tick now queues a heal instead of
+  only logging a warning. Strictly gated: skipped while mervlan_manager is
+  applying, skipped while another heal holds vlan_event.lock, and
+  per-LOCKDIR debounced by MERV_MAC_HEAL_TRIGGER_DEBOUNCE (default 60s).
+  Disable with MERV_MAC_HEAL_TRIGGER=0.
+
+
+mervlan v0.53.08
+
+Security / Leak Protection:
+
+DHCP safety hold during heal and manager runs (heal_event.sh, mervlan_manager.sh):
+- DHCP on br0 is blocked for the full duration of a heal or apply cycle so a
+  VLAN client cannot grab a native LAN lease during the repair window. The hold
+  is armed at event detection and released only after the watchdog confirms all
+  staged VAPs are in the correct bridges.
+
+Active eviction of firmware-leaked wireless interfaces (heal_event.sh):
+- After restart_wireless, Broadcom temporarily puts managed VLAN VAPs back into
+  br0. MerVLAN now detects and evicts these before rebuilding VLANs.
+
+Improved MERV_QT chain recovery (heal_event.sh):
+- Handles the common "orphaned chain" case (FORWARD/INPUT jumps flushed, chain
+  rules intact) without bridge surgery. The wiped-chain rebuild delegates to the
+  same VID-filtered ensure function, so native br0 interfaces like wl2.5 can
+  never receive a DROP rule during a full rebuild.
+
+Stricter VID-based quarantine filtering (heal_event.sh, mervlan_manager.sh):
+- All MERV_QT DROP rule paths now require VID >= 2 and purely numeric. VIDs of
+  none, trunk, 0, 1, or any non-numeric value are skipped, preventing accidental
+  quarantine of br0-resident native interfaces.
+
+Watchdog hold release is now fail-closed (mervlan_manager.sh):
+- The watchdog runs synchronously; the DHCP hold cannot be released by a racing
+  subshell before VAP placement is confirmed.
+
+Stability / Native Wi-Fi Fixes:
+
+Removed unsafe bare eapd restart (mervlan_manager.sh):
+- Manager no longer restarts eapd without firmware arguments. On Broadcom this
+  wiped native SSID credentials. restart_wireless handles eapd correctly.
+
+Runtime NVRAM scrubbing disabled by default (mervlan_manager.sh):
+- Off by default to avoid disturbing live wireless state. Re-enable with
+  MERV_BR0_GUARD_SCRUB=1 for testing.
+
+Performance / Timing:
+
+Removed expensive resolver calls from per-tick loops (heal_event.sh, mervlan_manager.sh):
+- merv_mac_build_expected_iface_vid was called on every 100ms tick, taking
+  several seconds per call and turning a 3-second settle window into minutes.
+  Now called once before each loop; per-tick work is cheap restore ops only.
+
+Recovery / Verification:
+
+Post-restart watchdog for VLAN interface placement (mervlan_manager.sh):
+- After services restart, watchdog checks each staged VAP and hard-moves any
+  that firmware returned to br0. Runs synchronously so the DHCP hold stays
+  active until placement is verified.
+
+Manager-active guard (heal_event.sh):
+- heal_event.sh skips destructive actions while mervlan_manager is running,
+  preventing the two from racing over bridge membership.
+
+Consistent VLAN-bound vs native quarantine policy (heal_event.sh, mervlan_manager.sh):
+- MERV_QT DROP rules are only installed for VLAN-bound interfaces. All rebuild
+  and ensure paths apply the same VID policy, so a deferred heal recheck cannot
+  re-add a DROP rule for an interface the manager placed in br0.
+
+
+CHANGED FILES:
+
+functions/heal_event.sh
+- restore_merv_qt_shield(): wiped-chain rebuild delegates to
+  merv_qt_ensure_expected_rules(); VID-filtered fallback and sysfs last-resort
+  retained with "unsafe for production" note.
+- merv_qt_ensure_expected_rules(): VID filter adds *[!0-9]* and -ge 2 guard;
+  moved out of per-tick loops, called once per loop entry.
+- merv_dhcp_hold_arm(): quiet mode added; idempotent (grep-before-insert).
+- wait_for_rc_quiet(), settle loop, pre-entry wait: per-tick body is cheap
+  restore ops only.
+
+functions/mervlan_manager.sh
+- ebt_quarantine_ensure_expected_rules(): VID filter tightened to match heal.
+- ebt_quarantine_add(): idempotent; skips if rule already present.
+- post_rc_watchdog(): synchronous; WATCHDOG_HOLD_OWNED coordinates hold release.
+- wait_for_rc_quiet(): ensure call moved before loop; per-tick body trimmed.
+- merv_dhcp_hold_arm(): quiet/idempotent pattern matching heal version.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.07
+
+Bug Fixes:
+
+Native SSID passwords destroyed after every VLAN apply or heal (mervlan_manager.sh):
+- After a VLAN apply completed, the native SSIDs (wl0/wl1) lost their Wi-Fi
+  passwords and clients could no longer connect. VLAN SSIDs were unaffected.
+  Resetting the password in the router UI restored connectivity until the next
+  apply or heal triggered the issue again.
+- Root cause 1: The manager was restarting the eapd authentication daemon bare
+  (without firmware arguments) after restart_wireless had already started it
+  correctly. On Broadcom platforms this reinitialises native radio authentication
+  with an empty state, wiping the PSK that restart_wireless had just set up.
+  Fix: eapd restart removed from the manager. restart_wireless handles it
+  correctly on its own.
+- Root cause 2: The unconfigured-interface sweep at the end of each apply briefly
+  detached native radios (wl0, wl1) from br0 and immediately re-added them, even
+  when they were already correctly placed. On Broadcom hardware this brief detach
+  is enough to reset the authentication state for that radio.
+  Fix: Native radios already in br0 are now left in place — the sweep skips the
+  remove+reattach cycle when the interface is already where it belongs.
+
+Shield gap on wireless events reduced (heal_event.sh, service-event-handler.sh):
+- Wireless events had a fixed 3-second delay before heal_event.sh was launched.
+  During that window the ebtables chains could be orphaned and clients left
+  unguarded while the heal hadn't started yet.
+- Fix: The 3-second delay is removed for wireless events — heal_event.sh now
+  starts immediately. A DHCP gate rule (blocking UDP port 67) is installed in
+  the inline re-link pass in service-event-handler.sh so no client can grab a
+  br0 lease during the brief window before the heal takes over.
+- To avoid acting on a stale healthy snapshot, heal_event.sh now polls for
+  real evidence that the restart has begun (ebtables chains flushed or rc
+  showing wireless activity) before running the main VLAN check. Shield restore
+  runs on every poll tick. A 5-second ceiling prevents stalling if the restart
+  is undetectable.
+
+
+CHANGED FILES:
+
+functions/mervlan_manager.sh
+- restart_services(): removed bare eapd restart. Added comment explaining why
+  eapd is intentionally absent and why restart_wireless handles it correctly.
+- attach_to_bridge(): added idempotency guard for interfaces already in br0 with
+  VID=none. Skips the bridge detach+reattach and goes straight to quarantine
+  release, preventing the Broadcom auth reset on native radios.
+
+functions/heal_event.sh
+- Wireless event branch: replaced fixed sleep with an active pre-entry poll loop
+  (max 5s, 100ms ticks). Each tick runs the shield restore for both MERV_QT and
+  MERV_MAC. Breaks early on first confirmed sign of restart activity.
+
+functions/service-event-handler.sh
+- Wireless events now use a delay of 0 instead of MERV_HEAL_DELAY before firing
+  heal_event.sh.
+- Inline re-link pass: installs a DHCP gate (UDP dport 67 DROP rule on br0)
+  around the chain re-link so no client can obtain a br0 lease during the
+  ~50ms window before heal_event.sh takes over.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.06
+
+Shield gap during service-event debounce delay (service-event-handler.sh):
+- Between rc flushing ebtables and heal_event.sh's first protective tick there
+  was a ~3-8s unprotected window: 3s MERV_HEAL_DELAY sleep + script startup.
+  During this window both MERV_QT and MERV_MAC jump rules were orphaned and
+  any associated client could reach br0 unguarded.
+- Fix: service-event-handler.sh now runs an inline re-link pass synchronously
+  for system events (restart_wireless and similar), after the debounce check
+  passes but before the fire-and-forget subshell is launched. Only re-links
+  existing chains' FORWARD/INPUT jump rules (~50ms); chain creation and DROP
+  rule rebuild remain heal_event.sh's responsibility. This reduces the
+  unprotected window from ~3-8s to ~50ms.
+
+Trunk configuration delays placement detection by ~27s (heal_event.sh):
+- On routers with a trunk port (e.g. RT-AX86U with eth5 trunk), VLAN bridge
+  subinterfaces (eth5.X) keep br2/br3/br4/br5 structurally alive even after
+  restart_wireless moves all wl interfaces back to br0. check_vlan_config's
+  bridge-presence loop therefore passes 10/10, and the placement check that
+  detects wl misplacement only ran at the tail — after the full 27s monitoring
+  window. Total exposure: ~47s from event to heal trigger.
+- Fix: check_vlan_config now runs check_wl_iface_placements once at entry,
+  before the monitoring loop. If wl subinterfaces are already misplaced when
+  called (after wait_for_rc_quiet confirms rc is done), it returns 1
+  immediately without running the 27s window. For trunk-configured routers
+  this reduces heal latency from ~47s to ~13s (dominated by wait_for_rc_quiet).
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.05
+
+Hotfix:
+
+BusyBox grep compatibility — orphaned-jump detection silently broken on older firmware:
+- grep patterns starting with '-j' were misinterpreted as option flags by BusyBox
+  v1.25.1 (RT-AX86U and similar). The count returned garbage instead of a number,
+  '[: bad number' errors appeared on stderr, and the orphaned-chain re-link path
+  never fired. Fixed by dropping the leading dash: 'j MERV_QT' matches the same
+  jump rules without triggering option parsing.
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.04
+
+Bug Fixes:
+
+IoT/VLAN clients escaping to br0 during manager-triggered wireless restart:
+- During a full VLAN apply, the manager restarts wireless services and then
+  waits for the system to settle before rebinding interfaces. This wait loop
+  had no shield enforcement, leaving a window where client traffic could reach
+  br0 unguarded. The loop now re-arms the L2 shields on every tick so the
+  window is closed within ~1 second of the restart completing.
+- The explicit re-arm pass that fires once rc goes quiet was also moved earlier
+  so it runs before the settle delay rather than after.
+
+False "orphaned chain - re-linked" log spam on every cron tick:
+- A pattern mismatch in the orphan detection check caused it to always report
+  the MERV_QT and MERV_MAC chains as orphaned, even when the shields were
+  healthy. The re-link path was idempotent so no actual damage was done, but
+  every cron run produced noisy warning logs. Pattern corrected.
+
+Shield blind spot during VLAN health monitoring window:
+- Between each of the 10 monitoring passes in check_vlan_config there is a
+  3-second pause. During that pause the shields were not being policed, so a
+  second rc event arriving mid-window could flush the chains and leak traffic
+  for the full 3 seconds undetected. The pause is now an active tick loop that
+  restores both shields every 100ms, matching the same protection already in
+  place during the rc-quiet wait.
+
+Shield blind spot while waiting for a slow interface to appear:
+- When a wireless subinterface takes a long time to appear after a wireless
+  restart, the manager waits with exponential backoff (up to 63 seconds). No
+  shield enforcement ran during this wait, so a late rc wakeup could flush the
+  chains while the manager was simply sleeping. Each backoff sleep is now
+  preceded by a full shield restore check.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.03
+
+heal_event.sh — MAC Escape Window Fixes:
+- Fix A: cron handler now performs a one-shot ebtables read and calls
+  restore_merv_qt_shield / restore_merv_mac_shield at entry, before the fast
+  VLAN check. Re-links orphaned FORWARD/INPUT jump rules on every cron tick
+  (max 60s exposure) even when no service-event has fired.
+- Fix B: cron handler now calls check_wl_iface_placements when check_vlan_config_fast
+  passes. Detects the restart_wireless race where VLAN bridges remain alive via
+  trunk subinterfaces but wl subinterfaces have leaked to br0 — a condition the
+  fast check is blind to. Triggers evict + manager if placement is wrong.
+- Fix C: non-wireless events (dnsmasq, firewall, lan, wan, deferred, etc.) now
+  perform a one-shot shield restore before check_vlan_config. If rc is
+  concurrently busy with restart_wireless (e.g. MAC binding change triggered
+  both a dnsmasq and a wireless restart), the full wait_for_rc_quiet 6 30 loop
+  runs instead to keep re-linking chains throughout the wireless restart sequence.
+
+update_mervlan.sh
+- now preserves the merv_mac database when updated.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.02
+
+Bug Fixes:
+
+sync_nodes.sh — Node Receives Auto-Injected TRUNK1 Even When All Trunks Are Zero:
+- sync_nodes.sh unconditionally rewrote the Trunks section of settings.json
+  before syncing to nodes, zeroing all trunks then forcing TRUNK1=1 with all
+  pool VLANs tagged whenever the VLAN pool was non-empty. This ignored the
+  user's explicit trunk configuration and produced a settings.json on the node
+  that contradicted what was set in the UI.
+- Fix: the auto-trunk injection is now gated on whether the main router itself
+  has at least one active trunk (TRUNK1-8 = "1"). If all trunks are "0" on
+  the main, the node receives the settings.json as-is with no rewrite. If any
+  trunk is active on the main, the existing backhaul-trunk injection runs
+  unchanged for backward compatibility.
+
+MERV_MAC — Structural Fingerprint for JFFS and ebtables-Churn Decisions:
+- merv_mac_merge_db used raw md5sum of the active db to decide whether to write
+  the JFFS checkpoint. merv_mac_snapshot used raw md5sum to decide whether to
+  rebuild ebtables rules. Because merv_mac_merge_db always refreshes timestamps
+  for seen clients (latest-timestamp-wins), the raw content changed on every
+  5-minute cron tick even when the same clients were on the same VLANs — causing
+  JFFS writes and ebtables flush+apply on every tick on a stable network.
+- Fix: both comparisons now use a structural fingerprint derived from the
+  mac+iface+vid fields only (awk '{print $2,$3,$4}' | sort | md5sum). Timestamps
+  are excluded. Result: a stable network produces zero JFFS writes and zero
+  ebtables churn per cron tick. Writes and rebuilds occur only when the MAC set
+  or their VLAN assignments actually change.
+
+New Features:
+
+MERV_MAC — Per-Client L2 Secondary Shield (Issue #22 mitigation):
+- Added a second ebtables chain (MERV_MAC) that enforces client MAC → VLAN
+  assignments independently of interface bridge placement. Specifically targets
+  the post-watchdog restart_wireless race where firmware can complete a second
+  wireless restart after heal_event.sh's monitoring window has closed, silently
+  moving wl SSID subinterfaces back to br0 while VLAN bridges remain alive
+  (trunk interfaces keep them up). In that window, previously-associated
+  clients can obtain br0/native DHCP leases.
+- MERV_MAC rule shape: -s <mac> --logical-in br0 -j DROP
+  Rules self-dormant when the client's wl interface is in its correct VLAN
+  bridge (--logical-in br0 only fires when enslaved to br0). Zero cleanup
+  required after correct bridge placement.
+- Persistent db: space-separated records (<epoch_ts> <mac> <iface> <vid>),
+  active at /tmp/mervlan_tmp/mac_shield.db, checkpointed to JFFS at
+  $MERV_BASE/tmp/mac_shield.db. Latest-per-MAC semantics; 48h max age prune.
+  Boot restores from JFFS before the first apply (closes the reboot gap).
+- wl assoclist snapshot: captured from each VLAN bridge after the post_rc_watchdog
+  correction window closes (~WATCHDOG_DELAY_SEC + 5s). Precondition check
+  confirms all expected wl interfaces are on their correct bridges before
+  snapshotting to avoid polluting the db with mid-restart state.
+
+check_wl_iface_placements() — Per-Interface Placement Detector:
+- Replaces wl_leaked_to_br0 as the secondary leak detector in check_vlan_config.
+  wl_leaked_to_br0 had a blind spot: its dual condition (wl in br0 AND none in
+  VLAN bridge) goes false when a native guest SSID legitimately lives in br0 and
+  at least one managed SSID is correctly placed. Partial leaks were invisible.
+- New function uses merv_mac_build_expected_iface_vid (settings + NVRAM derived)
+  to check each expected wl subinterface individually. Fires on ANY misplaced
+  managed interface, regardless of guest SSID state. Falls back to wl_leaked_to_br0
+  if lib_mervqt.sh is not loaded (graceful degradation on partial install).
+
+MAC Shield Refresh Button (UI):
+- Button in the clients panel header (left of the existing Refresh button).
+  Calls mac_refresh.sh via macrefresh_vlanmgr action. Clears both active and
+  JFFS db files, flushes the MERV_MAC chain, then runs a fresh wl assoclist
+  snapshot and rebuilds rules. Use when the db is suspected stale
+  (decommissioned devices, long outages, or snapshot missed because all clients
+  were disconnected when it ran).
+
+MERV_MAC — Periodic Snapshot via Existing mervlan_health Cron (every 5 min):
+- Piggybacked merv_mac_snapshot onto the existing mervlan_health cru job
+  (heal_event.sh cron, */5). Added at the end of the cron block, after VLAN
+  health checks, before exit 0. The precondition check inside merv_mac_snapshot
+  self-gates against mid-heal snapshots. With the structural fingerprint fix,
+  stable networks produce no I/O on these ticks.
+
+MERV_MAC — Enable/Disable Service Arms/Tears Down MAC Shield:
+- mervlan_boot.sh enable) now arms the MERV_MAC chain from the best available
+  db (JFFS checkpoint if /tmp is cold) after enable_cron_now.
+- mervlan_boot.sh disable) now tears down the MERV_MAC chain after
+  disable_cron_now. db files are retained so re-enable restores prior state.
+
+Service Status — MAC Shield State Visible in Status and Report:
+- Added check_mac_shield_state() helper in mervlan_boot.sh that queries
+  ebtables -L MERV_MAC and sets $mac_shield_state to "on(N)" or "off".
+- status) action: displays mac_shield=on(N)/off for main unit and each node.
+- report) action: appends mac_shield= to REPORT line (used by collect_node_status
+  for remote aggregation).
+
+MAC Shield Refresh — Propagates to Configured Nodes:
+- mac_refresh.sh now propagates the refresh to all configured nodes via SSH
+  after completing the local refresh. Uses MERV_NODE_CONTEXT=1 to prevent
+  recursive propagation. Skipped when running as a node or when lib_ssh is
+  unavailable.
+
+lib_mervqt.sh — Located in settings/:
+- Shared L2 shield enforcement library placed in settings/ alongside lib_json.sh,
+  lib_ssh.sh, and other lib_*.sh files. All sourcing paths reference settings/.
+
+
+Performance:
+
+heal_event.sh — Active Shield: Bootstrap Tick Probe (usleep/sleep Selection):
+- At startup, heal_event.sh probes for usleep availability. When present, sets
+  TICK_CMD="usleep 100000" and TICKS_PER_SEC=10 (100ms ticks per loop iteration).
+  Falls back to TICK_CMD="sleep 1" / TICKS_PER_SEC=1 on firmware without usleep.
+- wait_for_rc_quiet now runs at up to 10 ticks/sec on typical hardware: jump rules
+  are re-linked within 100ms of each rc flush instead of up to 1s. Both TICK_CMD
+  and TICKS_PER_SEC are exported so callers inherit the probed rate.
+
+heal_event.sh — Active Shield: Single Shared ebtables Dump per Tick:
+- Previously, restore_merv_qt_shield and restore_merv_mac_shield each issued
+  their own ebtables -t filter -L call on every tick (4-6 netlink round-trips/tick).
+- Fix: wait_for_rc_quiet fetches one shared dump per tick and passes it to both
+  restore functions as $1. Each function falls back to its own fetch when called
+  standalone. Reduces steady-state to 1 netlink call/tick.
+- Also eliminates date +%s forks from the wait loop; timing is now a pure-tick
+  counter (quiet_ticks and max_ticks derived from TICKS_PER_SEC arithmetic).
+
+heal_event.sh / lib_mervqt.sh — Active Shield: Repair Log Deduplication:
+- Both restore functions previously logged a repair message on every tick where
+  damage was detected. At 10 ticks/sec over a ~90s restart_wireless event: ~900
+  repair lines per shield per event (~1800 total). Individual events were invisible
+  in the noise.
+- Fix: Script-level _MERV_QT_SHIELD_STATE and _MERV_MAC_SHIELD_STATE track the
+  current repair state per process invocation. Repair messages fire only on state
+  transitions (first detection logs the damage type). A single recovery line fires
+  when each shield transitions back to stable. Repair ticks in between are silent.
+- Typical restart_wireless log: 1 "orphaned" line per shield on first detection,
+  silence throughout the sustained damage window, optionally 1 "stable" line per
+  shield when rc stops flushing. States: "" (initial) / "orphaned" / "wiped" / "ok".
+
+lib_mervqt.sh — restore_merv_mac_shield: Split Repair Path (mirrors MERV_QT):
+- Previously any damage (orphaned or wiped) triggered full flush → init → apply
+  from db: 11+ ebtables ops plus a db file read on every affected repair tick.
+- Fix: repair path now mirrors the two-case design already in restore_merv_qt_shield:
+  (a) Orphaned (chain intact, FORWARD/INPUT jumps flushed): call ebt_mac_shield_init
+      only. Chain and per-MAC DROP rules are untouched; only the 2 jump rules are
+      re-linked. ~3 ebtables ops, no db read. This is the common rc flush pattern.
+  (b) Wiped (chain gone): full flush → init → apply from db. Unchanged behavior.
+- Reduces per-tick repair cost for the common orphaned case from 11+ ops to 3.
+  ebt_mac_shield_init is idempotent: creates chain if missing, inserts jumps only
+  when absent (grep guard), safe to call without a prior flush.
+
+
+Cleanup:
+
+Partial-State Guard Consistency (all function scripts):
+- Each script has a guard that resets library load flags when the environment
+  is in a partially-initialized state. Several scripts had incomplete lists that
+  didn't cover all the libraries they actually source.
+- Updated all affected scripts to include their full set of library flags.
+  No functional change under normal operation — the guard only fires in
+  edge-case environments where initialization was interrupted.
+
+
+CHANGED FILES:
+
+settings/lib_mervqt.sh v0.2 (NEW)
+- Shared L2 shield enforcement library. Provides validators (mervqt_valid_mac,
+  mervqt_valid_wl_subif, mervqt_valid_vid), db path selection (merv_mac_best_db),
+  MERV_MAC ebtables chain lifecycle (init/flush/teardown/apply/init_and_apply),
+  and restore_merv_mac_shield() for use in heal_event.sh wait loop.
+- restore_merv_mac_shield(): now accepts shared ebtables dump as $1 (falls back
+  to its own fetch when called standalone). Jump count check uses grep -cF >= 2
+  (was grep -qF) to require both FORWARD and INPUT jumps before fast-pathing.
+- restore_merv_mac_shield(): split repair path — orphaned case (chain intact,
+  jumps flushed) calls ebt_mac_shield_init only; wiped case (chain gone) retains
+  full flush → init → apply. Mirrors restore_merv_qt_shield's two-case design.
+- _MERV_MAC_SHIELD_STATE: script-level state var (initialized at source time).
+  restore_merv_mac_shield reads/writes it to gate log output on state transitions.
+
+settings/mac_shield_snapshot.sh v0.1 (NEW)
+- MERV_MAC persistent db management. merv_mac_boot_init, merv_mac_build_expected_iface_vid,
+  merv_mac_snapshot_preconditions_ok, merv_mac_build_snapshot (wl assoclist),
+  merv_mac_merge_db (latest-MAC-wins, age prune, JFFS checkpoint), merv_mac_snapshot.
+- merv_mac_merge_db: JFFS checkpoint uses structural fingerprint (mac+iface+vid)
+  instead of raw md5sum. Eliminates write-every-5-min on stable networks.
+- merv_mac_snapshot: ebtables flush+apply uses structural fingerprint; skips
+  rebuild when MAC set and VLAN assignments are unchanged.
+
+functions/mac_refresh.sh v0.1 (NEW)
+- Maintenance script for MAC Shield Refresh UI button. Clears both db files,
+  flushes MERV_MAC chain, runs fresh merv_mac_snapshot. Propagates refresh to
+  all configured nodes via SSH (MERV_NODE_CONTEXT=1 prevents recursion).
+
+settings/var_settings.sh
+- Added MERV_MAC constants: MERV_MAC_CHAIN, MERV_MAC_DB_ACTIVE, MERV_MAC_DB_JFFS,
+  MERV_MAC_MAX_AGE_SEC.
+
+functions/mervlan_manager.sh
+- Sources lib_mervqt.sh and mac_shield_snapshot.sh.
+- Boot mode: calls merv_mac_boot_init after boot_wait_for_configured_ssids.
+- cleanup_existing_config: calls ebt_mac_shield_init_and_apply after MERV_QT arm.
+- main: launches async snapshot subshell (WATCHDOG_DELAY_SEC + 5s) after post_rc_watchdog.
+
+functions/heal_event.sh v0.56
+- Sources lib_mervqt.sh and mac_shield_snapshot.sh with graceful-degradation guards.
+- wait_for_rc_quiet loop: calls restore_merv_mac_shield every tick alongside
+  restore_merv_qt_shield.
+- Added check_wl_iface_placements() after wl_leaked_to_br0.
+- check_vlan_config: secondary section now uses check_wl_iface_placements when
+  lib_mervqt.sh is loaded, falls back to wl_leaked_to_br0 otherwise.
+- cron block: calls merv_mac_snapshot before exit 0 (gated by type check).
+- Bootstrap tick probe: usleep availability test at startup sets TICK_CMD and
+  TICKS_PER_SEC (10 ticks/sec with usleep, 1 tick/sec fallback).
+- wait_for_rc_quiet(): quiet_ticks/max_ticks derived from TICKS_PER_SEC; loop
+  sleep uses $TICK_CMD; date +%s forks eliminated; shared ebtables dump fetched
+  once per tick and passed to both restore functions.
+- restore_merv_qt_shield(): accepts shared dump as $1 with independent-fetch
+  fallback. Jump check upgraded to grep -cF count >= 2.
+- _MERV_QT_SHIELD_STATE: script-level state var gates repair log on transitions.
+
+functions/mervlan_boot.sh
+- Sources lib_mervqt.sh with graceful-degradation guard.
+- Added check_mac_shield_state() helper.
+- enable): arms MERV_MAC shield from best available db after enable_cron_now.
+- disable(): tears down MERV_MAC shield after disable_cron_now (db files retained).
+- setupdisable and nodedisable: calls ebt_mac_shield_teardown and removes both
+  MERV_MAC db files.
+- status(): calls check_mac_shield_state, displays mac_shield= for main and nodes.
+- report(): appends mac_shield=$mac_shield_state to REPORT line.
+
+functions/service-event-handler.sh
+- Added macrefresh_vlanmgr to APP_EVENT case and dispatch table
+  (maps to mac_refresh.sh).
+
+functions/sync_nodes.sh
+- Added lib_mervqt.sh, mac_shield_snapshot.sh to FILES_TO_COPY_CHMOD_644.
+- Added mac_refresh.sh to FILES_TO_COPY_CHMOD.
+- copy_file_to_node(): trunk auto-injection now gated on whether main has any
+  active trunk. Skips reset+inject when all trunks are "0", sends as-is.
+
+mervlan.asp
+- Added macrefresh_vlanmgr to MVM_NO_REFRESH and MVM_ALLOWED_ACTIONS.
+- Added MVM_macRefresh() wrapper function.
+
+www/index.html
+- Added MAC Shield Refresh button to clients panel header (left of Refresh).
+- Added runMacRefresh() async function.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.01
+
+Bug Fixes:
+
+heal_event.sh — Active Shield Blind Spot: Orphaned MERV_QT Chain Not Detected:
+- restore_merv_qt_shield() checked only whether the MERV_QT chain existed
+  (ebtables -t filter -L MERV_QT). This missed a second firmware flush pattern
+  where Asuswrt rc runs ebtables -t filter -F FORWARD, deleting the jump rules
+  from FORWARD and INPUT without touching the MERV_QT chain itself.
+  Result: chain intact, per-interface DROP rules intact, but FORWARD and INPUT
+  no longer jump to MERV_QT — traffic bypasses quarantine entirely.
+  Confirmed by ebtables interceptor log showing "Jumps:1 Rules:12" during the
+  wait window and DHCP leaks on restart_wireless events.
+- Fix: restore_merv_qt_shield() now checks chain existence AND jump rule
+  presence in FORWARD/INPUT separately. Two distinct recovery paths:
+  (a) jumps flushed but chain intact — re-insert jump rules only, per-interface
+  DROP rules are untouched (they survived in the orphaned chain);
+  (b) chain wiped entirely — full rebuild: chain + jumps + per-interface rules.
+  Fast path exits only when both chain and jumps are confirmed present.
+
+
+CHANGED FILES:
+
+heal_event.sh v0.55
+- restore_merv_qt_shield(): rewritten to detect two distinct firmware flush
+  patterns: (a) FORWARD/INPUT chains flushed leaving MERV_QT orphaned —
+  re-inserts jump rules without touching per-interface DROP rules; (b) full
+  chain wipe — rebuilds chain + jumps + per-interface rules. Fast path now
+  requires both chain and jumps to be confirmed present.
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53
+
+Bug Fixes:
+
+heal_event.sh — Active Shield Regression: Radios Permanently Down After MAC Blacklist Change:
+- v0.52.99 introduced evict_wl_from_br0() inside the wait_for_rc_quiet() loop
+  as part of the Active Shield. This caused a regression where WiFi went down
+  and did not recover without a manual apply.
+- Root cause: evict_wl_from_br0() calls `wl -i IF down` + `brctl delif br0 IF`
+  every second. During firmware's restart_wireless sequence, rc repeatedly adds
+  wl subinterfaces back to br0 as part of its normal rebuild. The shield
+  immediately evicted them again, creating a fight that lasted the full wait
+  window (up to 165s across both wait_for_rc_quiet calls). After this, radios
+  were left in a permanently down state. VLAN checks still passed 10/10 because
+  they inspect bridge structure, not radio state — so the heal completed without
+  detecting the dead radios.
+- Fix: removed evict_wl_from_br0() from the wait loop. Only restore_merv_qt_shield()
+  remains in the loop. It is passive (ebtables DROP rules only, no wl or brctl
+  calls) and does not interfere with firmware's restart sequence. The single
+  evict_wl_from_br0() call after wait_for_rc_quiet() returns (once rc is
+  confirmed quiet) is unaffected — that remains the correct clean sweep.
+
+
+CHANGED FILES:
+
+heal_event.sh v0.54
+- wait_for_rc_quiet(): removed evict_wl_from_br0 from the active shield loop.
+  restore_merv_qt_shield remains as the sole loop action. Added comment
+  explaining why evict is intentionally absent from the loop.
+
+index.html v0.53
+- Added clarification "Stand-alone AP units need steps 2-5 on each unit individually"
+  so the user better understands the different SSH installation needed when using
+  full AP-nodes with MerVLAN instead of AiMesh nodes. 
+- Added more information about SSH keys.
+- Cleaned up some CSS.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.99
+
+Bug Fixes:
+
+sync_nodes.sh — False Size Mismatch Warning on settings.json:
+- verify_file_on_node() compared the remote file size against the unmodified
+  local settings.json, but the file sent to nodes is always content-modified
+  (trunk config zeroed, TRUNK1 injected for backhaul). The size and md5 would
+  never match, producing a spurious warning on every sync.
+- Fix: copy_file_to_node() now saves the expected size and md5 of the actual
+  sent content to a per-node breadcrumb file before discarding the temp copy.
+  verify_file_on_node() reads the breadcrumb when verifying settings.json and
+  uses those values as the reference instead of the local original. The
+  breadcrumb is consumed immediately after reading. A trap on EXIT removes any
+  leftover breadcrumb files so they cannot persist across runs.
+
+
+Security:
+
+heal_event.sh — Active Shield for MERV_QT During RC Wait Window:
+- During wait_for_rc_quiet(), Asuswrt's rc daemon flushes ebtables as part of
+  its wireless rebuild sequence, silently wiping the MERV_QT chain for the
+  entire wait window — up to 120s for restart_wireless events. This left the
+  router with zero L2 quarantine protection while rc was active.
+- Fix: New restore_merv_qt_shield() function detects chain loss via
+  ebtables -t filter -L MERV_QT and immediately rebuilds the chain, re-inserts
+  FORWARD/INPUT jump rules (idempotent via grep guard), and re-adds DROP rules
+  for all guest wireless subinterfaces found in sysfs (wl*.*, ra*.*, ath*.*).
+  The function is called every second at the top of the wait_for_rc_quiet()
+  loop alongside evict_wl_from_br0(), converting the passive wait into an
+  Active Shield that reduces worst-case MERV_QT exposure from 120s to ~1s.
+  Fast path (chain intact) returns in sub-millisecond with no ebtables writes.
+
+Help:
+
+help.index
+- Added topology information and clarification.
+- Added wiki tab for answers to terminology and general question. Will be updated more.
+
+UPDATED FILES:
+
+sync_nodes.sh v0.56
+- copy_file_to_node: saves expected size+md5 of the trunk-modified temp file
+  to $TMPDIR/merv_sync_expected_${node_id} before deletion (success path only).
+- verify_file_on_node: reads and consumes the breadcrumb when verifying
+  settings/settings.json; overrides local_size and local_md5 with breadcrumb
+  values so the comparison reflects what was actually sent.
+- Added _cleanup_sync_tmp() + trap EXIT to remove all merv_sync_expected_*
+  files on script exit.
+
+heal_event.sh v0.54
+- Added restore_merv_qt_shield(): detects firmware ebtables flush via chain
+  lookup, rebuilds MERV_QT chain + FORWARD/INPUT jumps (idempotent) + DROP
+  rules for all sysfs guest wireless interfaces. Uses ebtables availability
+  guard (type ebtables) and jump idempotency check (grep -qF) matching the
+  manager's ebt_quarantine_init pattern.
+- wait_for_rc_quiet(): added evict_wl_from_br0 + restore_merv_qt_shield calls
+  at the top of the wait loop. Both callers (pre-check 120s window and
+  pre-manager 45s window) are covered by this single change.
+
+help.html version v0.49
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.98
+
+Adds MERV_QT — a dedicated ebtables filter chain that provides true L2 quarantine
+for managed wl subinterfaces while they are members of br0. Completes the DHCP
+isolation work started in v0.52.97: where that release reduced the leakage window
+to near-zero via the DHCP gate and pre-eviction, MERV_QT closes it at the bridge
+layer. Any managed VAP temporarily in br0 (e.g. during a firmware restart_wireless)
+is immediately dark at L2 — DHCP discovery, ARP, and static-IP forwarding are all
+dropped. The --logical-in br0 constraint makes each rule automatically dormant once
+the interface is correctly placed in its VLAN bridge, requiring no per-interface
+cleanup for VLAN-bound ports.
+
+New Features:
+
+MERV_QT — L2 Quarantine Chain (mervlan_manager.sh):
+- ebt_quarantine_init(): creates the MERV_QT chain in the ebtables filter table
+  and inserts jump rules into FORWARD and INPUT. Idempotent: uses grep on -L
+  output to detect existing jumps before inserting, safe to call multiple times.
+- ebt_quarantine_flush(): flushes all per-interface rules from MERV_QT at the
+  start of each apply cycle without touching the chain or jumps. Discards stale
+  rules from the previous cycle before fresh ones are built from current NVRAM state.
+- ebt_quarantine_add(): adds a -i IF --logical-in br0 -j DROP rule for a given
+  wl subinterface. One rule covers both FORWARD and INPUT paths because both base
+  chains jump to MERV_QT. Native base radios (wl0, wl1, …) are excluded. If
+  --logical-in is unsupported by the firmware's ebtables binary, the add fails
+  silently and the system degrades gracefully to evict-only behaviour (the
+  heal_event.sh path already covers that case).
+- ebt_quarantine_release(): removes the DROP rule for a specific interface.
+  Called only in the none) case of attach_to_bridge after a successful brctl addif
+  br0, lifting quarantine for interfaces intentionally placed in br0 (unmanaged
+  SSIDs, native fallbacks). VLAN-bound interfaces never need this call — their
+  rules go dormant automatically via the --logical-in br0 constraint.
+- ebt_quarantine_teardown(): full chain removal in strict ebtables order: flush
+  rules → delete FORWARD/INPUT jump refs → delete chain. Used directly by
+  mervlan_boot.sh (inlined) and available for future callers in the manager.
+
+cleanup_existing_config() Integration (mervlan_manager.sh):
+- MERV_QT is armed as the very first action of every apply cycle, before any
+  bridge teardown or trunk rule cleanup. Enumerates all wl*.* registered in NVRAM
+  via grep on `nvram show` output, skipping native base radios. Any managed VAP
+  that lands in br0 mid-cycle due to a firmware restart_wireless event is dropped
+  at L2 immediately, closing the detection/confirmation gap that v0.52.97 narrowed
+  but could not fully close.
+
+setupdisable / nodedisable Teardown (mervlan_boot.sh):
+- Both disable paths now run an inline MERV_QT teardown sequence (F → D FORWARD
+  → D INPUT → X) before template removals. Chain is torn down silently with no
+  restart_wireless required. Inlined rather than sourced because mervlan_boot.sh
+  does not source mervlan_manager.sh.
+
+
+UPDATED FILES:
+
+mervlan_manager.sh v0.63
+- Added MERV_QT_CHAIN constant and five quarantine functions: ebt_quarantine_init,
+  ebt_quarantine_flush, ebt_quarantine_add, ebt_quarantine_release,
+  ebt_quarantine_teardown. Placed between ebt_cleanup_all_trunk_rules and
+  cleanup_existing_config.
+- cleanup_existing_config: quarantine flush/init/enumerate block added as the
+  first action, before ebt_cleanup_all_trunk_rules.
+- attach_to_bridge none): ebt_quarantine_release called after successful brctl
+  addif br0, lifting quarantine for interfaces correctly placed in br0.
+
+mervlan_boot.sh v0.56
+- setupdisable: inline MERV_QT teardown (F/D/D/X) added before
+  handle_nodes_via_ssh propagation.
+- nodedisable local path: same inline teardown sequence added before exit 0.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.97
+
+This update hopefully closes a DHCP isolation gap where clients reconnecting during a
+restart_wireless event could obtain br0 leases and gain unintended LAN access.
+wl subinterfaces are now brought down before any bridge move in the manager,
+and the heal path pre-evicts leaked interfaces from br0 before invoking the
+manager — shrinking the exposure window from ~60s to near-zero. Also fixes
+heal reliability issues caused by missing rc-quiet helpers on node hardware,
+a stale lock reclaim bug that triggered double manager runs, and a spurious
+library reload caused by an incorrect initialization guard.
+
+Bug Fixes:
+
+heal_event.sh RC Helpers Implemented Inline:
+- heal_event.sh relied on an Asuswrt firmware utility for rc-activity monitoring
+  that behaves inconsistently across firmware versions and is absent on node
+  hardware, causing heals to proceed without waiting on nodes.
+- Fix: wait_for_rc_quiet(), rc_queue_has(), and rc_proc_busy() are now
+  implemented inline, mirroring the pattern already used in mervlan_manager.sh.
+
+execute_nodes.sh Parallel Exit-Code Capture:
+- In Phase 2 parallel execution, the main router's exit code was silently lost
+  because `wait` only reliably captures the last reaped background job, leading
+  to failed local applies being reported as success.
+- Fix: Main router is launched in a subshell that writes its exit code to a
+  temp file, read back and cleared after `wait`.
+
+execute_nodes.sh No-Nodes Path Success Flag:
+- In the no-nodes path, local_success could be set incorrectly on some BusyBox
+  sh versions when the script exited non-zero for non-error reasons.
+- Fix: Replaced with the explicit `&& local_success=true || local_success=false`
+  pattern for correct boolean evaluation.
+
+mervlan_manager.sh Spurious unset LIB_JSON_LOADED:
+- The initialization guard block erroneously included LIB_JSON_LOADED in its
+  unset call, clearing lib_json.sh's load flag on every invocation. In inherited
+  shell environments (e.g. called from execute_nodes.sh), this caused the library
+  to be re-sourced with function redefinition warnings and double-init side-effects.
+- Fix: Removed LIB_JSON_LOADED from the unset; block now only clears the
+  intended VAR/LOG guard pair.
+
+mervlan_manager.sh wait_for_rc_quiet Timeout:
+- wait_for_rc_quiet() had a hard-coded max-wait that callers could not override.
+  On slower hardware, this caused the manager to read bridge state mid-restart
+  and apply configuration against a partially-reconstructed topology.
+- Fix: Parameterized with need=$1 (default 6s) and max_wait=$2 (default 30s).
+  heal_event.sh now calls it with 120s for restart_wireless class events.
+
+Service-Event Stale-Lock Fix (service-event-handler.sh):
+- DEBOUNCE_SECONDS=3 was used as both the rapid-fire debounce threshold and the
+  stale-lock reclaim threshold. A second service-event call arriving >3s after
+  the first would force-remove the outer lock, queue behind the inner manager
+  lock, and run a full second manager pass — causing the double-run pattern.
+- Fix: Introduced STALE_LOCK_SECONDS=300 separate from DEBOUNCE_SECONDS=3.
+  Lock-failure branch now has three distinct cases: rapid re-fire (<3s, skip),
+  script still running (3s–300s, skip), orphaned lock (≥300s, reclaim).
+
+Lock Acquire/Release Audit Logging (service-event-handler.sh):
+- No visibility into lock lifecycles made field debugging difficult.
+- Fix: dispatch_if_executable now emits syslog entries on lock acquired
+  ("launching <script>") and lock released (normal or trap path).
+  `logread | grep VLANMgr` shows the full lifecycle for any action.
+
+Missing Settings File Exit (mervlan_manager.sh):
+- The HW_SETTINGS_FILE and SETTINGS_FILE pre-flight checks logged an error but
+  allowed execution to continue into an undefined state with empty variables.
+- Fix: Both checks now call `exit 1` immediately after logging the error.
+
+show_configuration_summary Read Safety (mervlan_manager.sh):
+- `while read line` in the brctl show pipeline stripped leading whitespace and
+  mis-handled backslashes in bridge output.
+- Fix: Changed to `while IFS= read -r line` for verbatim line reading.
+
+
+UPDATED FILES:
+
+execute_nodes.sh v0.51
+- Parallel exit-code capture via temp file for main router background job.
+- No-nodes local_success boolean fixed with explicit && / || pattern.
+
+mervlan_manager.sh v0.62
+- attach_to_bridge: DHCP-isolation gate for wl subinterfaces. Before the bridge
+  detach, wl subinterfaces (wl0.1, wl1.1, …) bound for a VLAN bridge are brought
+  down with `wl -i IF down` so clients cannot obtain a br0 DHCP lease during the
+  bridge-less gap. The VAP is restored with `wl -i IF up` only after brctl addif
+  succeeds. Base radios (wl0, wl1) and eth ports are excluded. Both error return
+  paths (ensure_vlan_bridge and brctl addif failures) restore the VAP before
+  returning so interfaces are never left permanently down.
+- Removed erroneous LIB_JSON_LOADED from initialization guard unset.
+- wait_for_rc_quiet parameterized: need=$1 (6s), max_wait=$2 (30s).
+- Missing-file guards now exit 1 after logging (were silently continuing).
+- show_configuration_summary: `while read line` → `while IFS= read -r line`.
+
+heal_event.sh v0.53
+- Added evict_wl_from_br0(): pre-eviction guard that immediately removes wl
+  subinterfaces from br0 before invoking the VLAN manager. Iterates
+  /sys/class/net/br0/brif/wl*.* — base radios and eth ports are not touched —
+  and calls `wl -i IF down` then `brctl delif br0 IF` for each match. This
+  closes the ~35-60s detection/confirmation window where firmware-dumped wl
+  interfaces sit in br0 and can hand out wrong DHCP leases to reconnecting
+  clients. Called at all three heal invocation sites: service event path, cron
+  escalation path, and manual --test path. Is a no-op when nothing is in br0.
+- Inline wait_for_rc_quiet(), rc_queue_has(), rc_proc_busy(); removed external
+  Asuswrt helper.sh dependency for rc monitoring.
+- Added evict_wl_from_br0() pre-eviction guard; called at all heal sites.
+
+service-event-handler.sh v0.52
+- STALE_LOCK_SECONDS=300 added; separated from DEBOUNCE_SECONDS=3.
+- Lock-failure branch split into three cases (debounce / running / stale).
+- `local elapsed` declaration added to prevent variable scope leak.
+- Syslog entries added on lock acquired and lock released (normal + trap).
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.96
+
+NOTABLE FEATURES:
+
+restart_wireless Race Condition Fix (Security):
+- Fixed a silent VLAN isolation failure where Asuswrt's restart_wireless event
+  (triggered by MAC filter changes, channel changes, etc.) could leave guest
+  and work VLAN wireless interfaces in br0, granting isolated clients full
+  access to the internal LAN until a manual apply was forced.
+- Root cause was two interacting flaws: trunk subinterfaces kept VLAN bridges
+  structurally alive, causing the bridge-presence validator to report a false-
+  positive healthy state even after all wl interfaces had been evicted; and
+  wait_for_rc_quiet was only ever called after a mismatch was detected, so the
+  firmware's delayed wireless reconstruction was never caught.
+- Three layered fixes were applied (see heal_event.sh below).
+
+Leak Detector — wl_leaked_to_br0():
+- New dual-condition function that detects the specific failure mode where
+  trunk subinterfaces keep VLAN bridges alive but wireless SSID subinterfaces
+  (wl*.*, ra*.*, ath*.*) have been evicted back to br0.
+- Only flags a leak when wl subinterfaces are present in br0 AND none are
+  found in any non-br0 VLAN bridge. The dual condition self-filters unmanaged
+  native Asuswrt guest networks (e.g. an unmanaged wl0.2 legitimately in br0
+  won't trigger an alert as long as MerVLAN's own managed interfaces are
+  correctly placed). Post-heal, once managed interfaces are restored, the
+  check clears automatically — no settings cross-reference required and no
+  infinite heal loop possible.
+- Called as a secondary test at the tail of check_vlan_config, after all
+  bridge-presence passes succeed.
+
+Wireless Event Wait Ordering (Fix 2):
+- wait_for_rc_quiet is now called before check_vlan_config for
+  restart_wireless class events (max_wait raised to 120s to cover slow
+  Broadcom DFS restarts on older hardware). Reading kernel bridge state
+  mid-restart was producing false-positive healthy results because the
+  firmware had not yet finished migrating wl interfaces.
+- Non-wireless events (firewall, WAN, NAT, etc.) are unaffected.
+
+Deferred Safety-Net Recheck (Fix 3):
+- After any wireless event completes its primary monitoring window, a
+  background subshell schedules a one-shot follow-up heal_event.sh call
+  90 seconds later. This catches the edge case where firmware rc yields
+  mid-restart (satisfying wait_for_rc_quiet) and then resumes and re-
+  migrates wl interfaces after the monitoring window has already closed.
+- The deferred event is routed through the full check_vlan_config and
+  wl_leaked_to_br0 pipeline. The existing cooldown prevents a double-apply
+  if the primary window already healed. Deferred events do not schedule
+  further deferred events (no daisy-chaining).
+
+Contributions:
+- agnithin: Stripped Windows carriage returns (\r) from update_mervlan.sh.
+- agnithin: Fixed pollUpdateLogOnce in index.html to use
+  lines.slice(-Math.min(5, lines.length)) for update completion detection.
+- agnithin: Fixed heal_event.sh early lock-guard trace log to correctly
+  resolve [${1:-initial}] instead of printing the literal shell variable.
+
+
+UPDATED FILES:
+
+heal_event.sh v0.50
+- Added wl_leaked_to_br0() function: dual-condition leak detector using
+  /sys/class/net glob expansion (no subshell). Detects the restart_wireless
+  race condition where trunk subinterfaces mask evicted wl interfaces.
+- check_vlan_config: added wl_leaked_to_br0 call after all monitoring passes
+  succeed. Returns 1 with a distinct log message on leak detection.
+- Main event dispatch: hoisted wait_for_rc_quiet 6 120 before check_vlan_config
+  for restart_wireless* and wl* event patterns.
+- should_heal_event: added deferred_* pattern to watchlist.
+- Main event dispatch: wireless events now spawn a background subshell that
+  fires heal_event.sh deferred_<event> after a 90s sleep. Skips if
+  MANAGER_LOCK is held. Does not recurse (deferred events don't match the
+  wireless-only case that spawns the subshell).
+- Early lock-guard trace log fixed to resolve [${1:-initial}] (agnithin).
+
+update_mervlan.sh
+- Stripped all invisible Windows carriage return (\r) characters throughout
+  the file (agnithin).
+
+index.html v0.52.96
+- pollUpdateLogOnce: changed completion detection to evaluate
+  lines.slice(-Math.min(5, lines.length)) so the check always examines the
+  last up-to-5 lines regardless of total log length (agnithin).
+
+hw_probe.sh
+- Added RT-AX5400 as supported: ETH_PORTS="eth3 eth2 eth1 eth0", WAN_IF=eth4.
+- Added TUF-AX3000_V2 as supported: ETH_PORTS="eth1 eth2 eth3 eth4", WAN_IF=eth0.
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.95
+
+NOTABLE FEATURES:
+
+Multi-SSID Dual-Band Fix:
+- Rewrote interface resolution in find_if_by_ssid to use nvram-first lookup,
+  removing iface_exists guards that blocked resolution when interfaces had not
+  yet appeared after boot.
+- Fixed boot_wait_for_configured_ssids to correctly handle multi-line output
+  from find_if_by_ssid_any; dual-band identical SSIDs previously always timed
+  out because no single interface is named "wl0\nwl1".
+- Fixed br0 sweep race condition in bind_configured_ssids: note_bound_iface is
+  now called before wait_for_interface so both bands of a dual-band SSID are
+  reserved before the unconfigured-interface sweep can claim them.
+- Removed is_wl_iface gate from find_if_by_ssid_any; the gate silently dropped
+  eth-named WiFi radios (e.g. eth4, eth5) not yet up during boot.
+
+Enable Native SSID (ENS) Safeguard:
+- New is_native_radio helper identifies base radio interfaces (wl0, wl1) whose
+  placement on VLAN bridges can break Broadcom firmware routing.
+- New ENABLE_NATIVE_SSID flag (default: off) controls whether native radios may
+  be tagged. When off, bind_configured_ssids skips any interface matched by
+  is_native_radio and logs a warning. Toggle via the new ENS setting in the UI.
+- Settable via the new ENS toggle in the General Settings panel.
+
+
+UPDATED FILES:
+
+mervlan_manager.sh v0.60
+- Nvram-first resolution in find_if_by_ssid: removed iface_exists checks from
+  both the base radio check and the virtual interface slot loop.
+- Added is_native_radio() helper function.
+- Removed is_wl_iface gate from find_if_by_ssid_any.
+- Fixed boot_wait_for_configured_ssids: inner while+heredoc loop now iterates
+  each line of multi-line find_if_by_ssid_any output individually.
+- bind_configured_ssids: note_bound_iface called before wait_for_interface to
+  prevent br0 sweep race. Native radio safeguard block added after wait.
+- resolve_and_attach: native radio safeguard added (defensive).
+- ENABLE_NATIVE_SSID extracted and normalized from settings.json on init.
+
+settings.json
+- Added ENABLE_NATIVE_SSID: "0" to General block (default: safeguard active).
+
+index.html v0.52.95
+- Added ENS (Enable Native SSID) dropdown to General Settings panel.
+- Fixed status icon layout: each dropdown now has its status icon immediately
+  to its right. Previously STP status was left-anchored and DRY_RUN status was
+  right-anchored, with both status icons floating on opposite sides of the row.
+- ENABLE_NATIVE_SSID added to all settings load/save/verify paths:
+  flattenStructuredSettingsPayload, expandFlatSettingsToStructured,
+  structuredSettingsDefaultsTemplate, fillFormFromSettings,
+  formToSettingsJSON, CGI param collector, extractManagedKeys regex.
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.94
+
+NOTABLE FEATURES:
+
+Advanced Port Mapping Override (APMO):
+- New manual WAN/LAN port mapping override system.
+- Lets users define custom ethernet port assignments per device when
+  auto-detection gets the layout wrong or the model is not yet supported.
+- Configurable for the main router and each AiMesh node independently.
+- Each device slot (MAIN, NODE1-5) can override: WAN interface, number
+  of LAN ports (0-8), and individual LAN interface names.
+- Built-in validation prevents invalid or duplicate port assignments.
+- Node overrides require a Sync Nodes run afterwards so the updated
+  configuration is pushed and applied on each node.
+
+Override UI:
+- New modal accessible from the Experimental badge area.
+- Tab-based navigation to switch between MAIN and NODE1-5 targets.
+- Enable/disable toggle per target with field greying when disabled.
+- Preset dropdowns with optional custom freeform input for any field.
+- "Save" writes settings to disk. Tick "Auto-refresh HW Profile" to
+  also chain a hardware probe automatically (button becomes "Save & Apply").
+- Standalone "Refresh HW Profile" button for manual re-detection.
+
+
+UPDATED FILES:
+
+hw_probe.sh v0.50
+- Override identity resolution — each node reads IS_NODE/NODE_ID and
+  applies its own override from the shared settings.json.
+- Node override propagation on the main router updates node LAN port
+  counts without needing SSH, so the UI refreshes immediately.
+- Added support for the following models:
+  GT-AX6000, RT-AX86U_PRO, RT-AX92U
+
+settings.json
+- New "Hardware_Override" section with per-device override sub-objects.
+
+save_settings.sh v0.50
+- Override keys are separated and written into the nested
+  Hardware_Override section via two-level JSON helpers.
+
+service-event-handler.sh v0.51
+- New hwprobe_vlanmgr action for on-demand hardware profile refresh.
+
+mervlan.asp v0.50
+- hwprobe_vlanmgr added to policy sets. New MVM_hwprobe() wrapper.
+
+index.html v0.52.94
+- Updated version header.
+- Full APMO modal with tab navigation, validation, and state management.
+- Save pipeline extended for override keys with verification polling.
+- UI-side override enforcement on every settings load.
+- Fixed table rebuild issues when hardware values change.
+- Two save flows: normal "Save" and chained "Save & Apply".
+
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.93
+
+hw_probe.sh - v0.48
+- Merge pull request #12 from agnithin/xt8-fix
+  Fix dual-band SSID resolution and AiMesh node VLAN support
+- Added the following model support:
+  RT-AXE95Q, RT-AX82U
+
+mervlan_manager.sh - v0.59
+- Merge pull request #12 from agnithin/xt8-fix
+  Fix dual-band SSID resolution and AiMesh node VLAN support
+
+sync_nodes.sh - v0.55
+- Merge pull request #12 from agnithin/xt8-fix
+  Fix dual-band SSID resolution and AiMesh node VLAN support
+
+device_support_mapper.sh - v0.50.3
+- Fixed a bug where wireless radio interfaces (e.g. eth4, eth5, eth6) could be
+  misidentified as WAN or LAN candidates on routers where radios share the eth[N]
+  naming scheme with physical ports (e.g. ZenWiFi ET8, and similar tri-band models).
+- Added nvram wl_ifnames reading in read_device_info(). The returned interface
+  names are stored in WL_IFNAMES and used as an exclusion list throughout the script.
+- Updated list_eth_ifaces() to skip any interface present in WL_IFNAMES, preventing
+  wireless radios from appearing as LAN candidates or in the carrier snapshot.
+- Added nvram wan0_ifname as the primary WAN detection method. On all Asuswrt-Merlin
+  routers this key authoritatively stores the configured WAN interface, making
+  detection instant, stateless, and immune to routing/bridge topology edge cases.
+- The existing ip route fallback and br0 tx-delta last-resort remain in place.
+  The br0 delta candidate list is also now filtered through WL_IFNAMES so wireless
+  radios can no longer win the delta race even if reached as a last resort.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.52.92
+
+hw_probe.sh
+- added RT-BE92U support. Because of the internal handling of the LAN ports, as of now, i can
+  only provide a bridge VLAN option for LAN on this model. This means that LAN 1-4 will 
+  share the same VLAN-ID if configured. Hopefully this can be fixed further down the road.
+
+index.html
+- Fixed node assignment buttons showing as enabled on all SSID rows even when
+  the SSID or VLAN wasn't configured. Now they only become clickable when you've
+  entered both a valid SSID name and VLAN ID for that row.
+
+################ END OF CURRENT CHANGELOG
+
+Previous mervlan v0.52.91 changes
 
 mervlan_boot.sh — Hotfix
 - Fixed a bug where the boot template injection could silently remove other

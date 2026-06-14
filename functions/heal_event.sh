@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.50"                     #
+#                  - File: heal_event.sh || version="0.67"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -23,12 +23,18 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
+# Graceful-degradation: load MERV_MAC enforcement libs if present.
+# heal_event.sh degrades safely if the files are missing (partial install).
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
+[ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
+[ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
 
@@ -36,7 +42,13 @@ fi
 : "${HW_SETTINGS_FILE:=$SETTINGS_FILE}"
 
 if [ -z "${MAX_SSIDS:-}" ]; then
-  MAX_SSIDS=$(json_get_int MAX_SSIDS 12 "$HW_SETTINGS_FILE")
+  MAX_SSIDS=$(json_get_int MAX_SSIDS 0 "$HW_SETTINGS_FILE")
+fi
+if type merv_cap_ssids >/dev/null 2>&1; then
+  MAX_SSIDS=$(merv_cap_ssids "$MAX_SSIDS" "$HW_SETTINGS_FILE")
+else
+  [ -z "$MAX_SSIDS" ] && MAX_SSIDS=12
+  [ "$MAX_SSIDS" -gt 16 ] 2>/dev/null && MAX_SSIDS=16
 fi
 
 if [ -z "${ETH_PORTS:-}" ]; then
@@ -47,6 +59,20 @@ fi
 # Initialize SSID filter based on node identity (affects which VLAN slots we consider)
 MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 ssid_filter_init "$MERV_NODE_ID"
+# ====================================================== Bootstrap Tick Probe
+# Determine sub-second or fallback tick command dynamically.
+# 100,000 microseconds = 100ms (0.1s). Fallback is 1 second.
+if usleep 1 2>/dev/null; then
+  export TICK_CMD="usleep 100000"
+  export TICKS_PER_SEC=10
+  TICK_LABEL="usleep (100ms)"
+else
+  export TICK_CMD="sleep 1"
+  export TICKS_PER_SEC=1
+  TICK_LABEL="sleep (1s)"
+fi
+# ================================================= End of Bootstrap Tick Probe
+
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -149,22 +175,64 @@ if ! any_vlan_configured; then
   exit 0
 fi
 
-# Skip if vlan manager already busy (avoid holding our lock needlessly)
+# Skip if vlan manager already busy (avoid holding our lock needlessly).
+# Uses the shared lock-state helper so a CRASHED manager (lock dir left behind
+# with a dead/absent PID) cannot block every future heal forever — that was the
+# old failure mode that required a manual cleanup or reboot.
 MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
-if [ -d "$MANAGER_LOCK" ]; then
-  info -c vlan "Heal: skipping [initial] because mervlan_manager is active"
-  exit 0
+if type merv_lock_state >/dev/null 2>&1; then
+  _mgr_state=$(merv_lock_state "$MANAGER_LOCK")
+else
+  # lib_mervqt failed to load — fall back to the legacy blunt check.
+  _mgr_state="legacy"
 fi
+case "$_mgr_state" in
+  active|unknown_recent)
+    info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active (${_mgr_state})"
+    exit 0
+    ;;
+  stale)
+    warn -c vlan "Heal: mervlan_manager.lock is stale — reclaiming and continuing"
+    rm -rf "$MANAGER_LOCK" 2>/dev/null || :
+    ;;
+  legacy)
+    if [ -d "$MANAGER_LOCK" ]; then
+      info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active"
+      exit 0
+    fi
+    ;;
+  absent)
+    :
+    ;;
+esac
 
 # Ensure locks directory exists for all lock/cooldown files
 mkdir -p "$LOCKDIR" 2>/dev/null
 
-# Simple lock using mkdir (atomic operation) to avoid concurrent runs
+# Hard mutex via the shared lock primitive (lib_mervqt.sh). This is the same
+# implementation the manager uses: mkdir + pid + a `created` epoch stamp, with
+# age derived from that stamp via merv_lock_age — NOT `stat -c %Y`, which is
+# unreliable on BusyBox and previously produced bogus ages (~1.7e9s) that broke
+# stale detection. Non-blocking (max_wait_iters=0): heal skips on contention
+# rather than queueing. A crashed heal is reclaimed once HEAL_LOCK_STALE_SEC
+# elapses instead of wedging every future event.
 LOCK="$LOCKDIR/vlan_event.lock"
-if mkdir "$LOCK" 2>/dev/null; then
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-${MERV_HEAL_LOCK_STALE_SEC:-180}}"
+if type merv_lock_acquire >/dev/null 2>&1; then
+  if merv_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
+    trap 'merv_lock_release "$LOCK" 2>/dev/null' EXIT INT TERM
+  else
+    info -c vlan "Heal: skipping [${1:-initial}] — vlan_event.lock held by another instance"
+    exit 0
+  fi
 else
-  exit 0
+  # lib_mervqt unavailable — degrade to a plain non-stale mutex. No buggy
+  # stat-based age math here; better to occasionally skip than to wedge.
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    info -c vlan "Heal: skipping [${1:-initial}] — vlan_event.lock present (lib unavailable)"
+    exit 0
+  fi
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 fi
 
 # ============================================================================ #
@@ -296,36 +364,212 @@ actual_vlans_from_kernel() {
   done | sort -n
 }
 
+# ============================================================================ #
+# wl_leaked_to_br0                                                             #
+# Detect the restart_wireless race condition where firmware dumps wireless     #
+# SSID subinterfaces back into br0 while trunk subinterfaces keep VLAN bridges #
+# alive, causing bridge_has_members / actual_vlans_from_kernel to report a     #
+# false-positive healthy state.                                                #
+#                                                                              #
+# Logic: only flag a leak when BOTH conditions hold simultaneously:            #
+#   1. At least one wl*.* (or ra*.*|ath*.*) subinterface is present in br0    #
+#   2. No such subinterface exists in ANY non-br0 VLAN bridge                 #
+#                                                                              #
+# This dual condition self-filters unmanaged guest networks: if wl0.2 is a    #
+# native Asuswrt guest legitimately in br0, but MerVLAN's wl0.1 is correctly  #
+# in br5, condition 2 is false and no alert fires. Post-heal, once the managed #
+# interfaces are restored to their VLAN bridges, condition 2 flips false again #
+# and the check clears — no infinite loop.                                     #
+#                                                                              #
+# Returns 0 (true) if a leak is detected, 1 (false) otherwise.                #
+# ============================================================================ #
+wl_leaked_to_br0() {
+  local iface_path iface has_wl_in_br0 has_wl_in_vlan br_path
+
+  has_wl_in_br0=0
+  has_wl_in_vlan=0
+
+  # Condition 1: any wl*.* subinterface in br0?
+  for iface_path in /sys/class/net/br0/brif/*; do
+    [ -e "$iface_path" ] || continue
+    iface="${iface_path##*/}"
+    case "$iface" in
+      wl*.*|ra*.*|ath*.*)
+        has_wl_in_br0=1
+        break
+        ;;
+    esac
+  done
+
+  [ "$has_wl_in_br0" -eq 1 ] || return 1
+
+  # Condition 2: no wl*.* subinterface in any VLAN bridge (br1..br9*)?
+  for br_path in /sys/class/net/br[1-9]*/brif; do
+    [ -d "$br_path" ] || continue
+    for iface_path in "$br_path"/*; do
+      [ -e "$iface_path" ] || continue
+      iface="${iface_path##*/}"
+      case "$iface" in
+        wl*.*|ra*.*|ath*.*)
+          has_wl_in_vlan=1
+          break 2
+          ;;
+      esac
+    done
+  done
+
+  [ "$has_wl_in_vlan" -eq 0 ]
+}
+
+# ============================================================================ #
+# check_wl_iface_placements                                                    #
+# Per-interface leak detector using settings-derived expected placements.      #
+# Checks each config-expected wl subinterface individually:                    #
+#   - If in br0: report a per-interface leak                                   #
+#   - If in correct VLAN bridge: report as correct                             #
+#   - If in neither: log at debug level (may be restarting; not a hard fail)  #
+#                                                                              #
+# Returns 0 if ALL expected interfaces are in their correct VLAN bridge.       #
+# Returns 1 on any mismatch (at least one interface is in br0).                #
+#                                                                              #
+# Unlike wl_leaked_to_br0, this fires even when only SOME interfaces leaked    #
+# (e.g. native guest SSID keeps condition 2 of wl_leaked_to_br0 false).       #
+# ============================================================================ #
+check_wl_iface_placements() {
+  local pairs iface vid ok
+
+  ok=1
+  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null) || return 0
+  [ -n "$pairs" ] || return 0
+
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+
+    if [ -e "/sys/class/net/br${vid}/brif/$iface" ]; then
+      # Correctly placed in its VLAN bridge
+      continue
+    elif [ -e "/sys/class/net/br0/brif/$iface" ]; then
+      warn -c vlan "Placement: $iface expected br${vid} but is in br0 — restart_wireless race suspected"
+      ok=0
+    else
+      # Called after wait_for_rc_quiet — rc is settled, so "no bridge" means
+      # the VAP detached (firmware brought it down or a flush left it orphan).
+      # Treat as a hard mismatch so heal re-applies bridge membership instead
+      # of leaving the client population stranded until the next reboot.
+      warn -c vlan "Placement: $iface expected br${vid} but found in neither bridge — VAP detached"
+      ok=0
+    fi
+  done <<_PAIRS_
+$pairs
+_PAIRS_
+
+  [ "$ok" -eq 1 ]
+}
+
+# ============================================================================ #
+# evict_wl_from_br0                                                            #
+# Pre-eviction guard: immediately removes wl subinterfaces from br0 before    #
+# invoking the VLAN manager, closing the DHCP leak window that exists while   #
+# the manager is detecting and repairing bridges. Brings each subinterface    #
+# down first so clients cannot grab a br0 lease in the gap between the delif  #
+# and the manager's brctl addif into the correct VLAN bridge.                 #
+# Scoped to MERVLAN-managed interfaces only — firmware-owned interfaces (e.g. #
+# AiMesh management SSIDs like wl0.1 on nodes) that legitimately belong in    #
+# br0 are never touched.                                                       #
+# ============================================================================ #
+evict_wl_from_br0() {
+  local iface iface_path evicted managed_ifaces
+  evicted=0
+
+  # Resolve MERVLAN-managed wl interfaces from settings + NVRAM.
+  # Only these can leak to br0; firmware-owned AiMesh SSIDs must be left alone.
+  managed_ifaces=""
+  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    managed_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+  fi
+  # Nothing to evict if no MERVLAN-managed wl interfaces are configured.
+  [ -n "$managed_ifaces" ] || return 0
+
+  for iface_path in /sys/class/net/br0/brif/wl*.*; do
+    [ -e "$iface_path" ] || continue
+    iface="${iface_path##*/}"
+    # Skip firmware-owned interfaces (not in MERVLAN-managed set)
+    printf '%s\n' "$managed_ifaces" | grep -qxF "$iface" || continue
+    wl -i "$iface" down 2>/dev/null
+    brctl delif br0 "$iface" 2>/dev/null
+    info -c vlan "Heal: pre-evicted $iface from br0 (DHCP gate)"
+    evicted=$((evicted + 1))
+  done
+  [ "$evicted" -gt 0 ] && info -c vlan "Heal: evicted ${evicted} wl subinterface(s) from br0"
+  return 0
+}
+
+# Script-level state for repair-log deduplication — reset once per process invocation.
+# restore_merv_qt_shield, merv_qt_ensure_expected_rules and the merv_dhcp_hold_*
+# helpers now live in settings/lib_mervqt.sh (sourced above) so heal_event.sh,
+# mervlan_manager.sh and the MERV_MAC snapshot all share one implementation and
+# can never drift apart. The shared functions read MERV_DHCP_HOLD_CHAIN from
+# var_settings.sh.
+
+rc_queue_has() {
+  [ -f /tmp/rc_service ] && grep -E "$1" /tmp/rc_service 2>/dev/null | grep -qv '^$'
+}
+
+rc_proc_busy() {
+  ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$1" >/dev/null 2>&1
+}
+
 wait_for_rc_quiet() {
-  local need max_wait quiet start now
+  local need_sec max_wait_sec quiet_ticks max_ticks quiet current_tick _rules
 
-  need="${1:-6}"
-  max_wait="${2:-45}"
+  need_sec="${1:-6}"
+  max_wait_sec="${2:-45}"
+  quiet_ticks=$(( need_sec * TICKS_PER_SEC ))
+  max_ticks=$(( max_wait_sec * TICKS_PER_SEC ))
   quiet=0
-  start=$(date +%s)
+  current_tick=0
 
-  info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
+  info -c vlan "wait_for_rc_quiet: watching rc (need=${need_sec}s quiet, method=${TICK_LABEL})"
 
+  # Enforce expected MERV_QT rules once before entering the tick loop.
+  # merv_qt_ensure_expected_rules calls merv_mac_build_expected_iface_vid which
+  # is expensive (~2-5s). Calling it per-tick at 100ms cadence multiplies each
+  # tick into seconds. restore_merv_qt_shield handles per-tick chain/jump repair.
+  merv_qt_ensure_expected_rules
   while :; do
+    # Fetch ebtables filter table once per tick; pass to both restore functions
+    # to avoid redundant netlink reads at tick rate. Gate on ebtables presence
+    # to avoid spawning a missing binary on every tick.
+    # During rc/wlconf we only restore L2 shields.
+    # Do NOT run brctl delif or wl down here.
+    # Bridge surgery inside this loop makes restart_wireless take far longer because
+    # rc/wlconf and MerVLAN fight over bridge membership.
+    _rules=""
+    type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
+    restore_merv_qt_shield "$_rules"
+    type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
+    merv_dhcp_hold_restore_if_active
+
     # If either queue or process is busy, reset quiet counter
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
       quiet=0
     else
       quiet=$((quiet + 1))
-      if [ "$quiet" -ge "$need" ]; then
-        info -c vlan "wait_for_rc_quiet: rc quiet for ${quiet}s; proceeding"
+      if [ "$quiet" -ge "$quiet_ticks" ]; then
+        info -c vlan "wait_for_rc_quiet: rc quiet threshold satisfied; proceeding"
         return 0
       fi
     fi
 
-    now=$(date +%s)
-    if [ $((now - start)) -ge "$max_wait" ]; then
-      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s; continuing"
+    current_tick=$((current_tick + 1))
+    if [ "$current_tick" -ge "$max_ticks" ]; then
+      warn -c vlan "wait_for_rc_quiet: timeout reached; continuing"
       return 0
     fi
 
-    sleep 1
+    # Unquoted: intentional POSIX word-split for two-token command
+    $TICK_CMD
   done
 }
 
@@ -459,6 +703,19 @@ check_vlan_config() {
   fi
   exp_str=$(printf '%s\n' "$exp" | xargs 2>/dev/null)
 
+  # Fast-path placement check: if wl subinterfaces are already misplaced at
+  # check entry (called after wait_for_rc_quiet confirms rc is done), skip
+  # the 27s monitoring window and heal immediately. Without this, trunk
+  # configurations keep VLAN bridges alive via subinterfaces regardless of
+  # wl placement, so the bridge-presence loop passes 10/10 and placement is
+  # only detected at the tail — adding ~27s of unnecessary delay.
+  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    if ! check_wl_iface_placements; then
+      warn -c vlan "wl subinterfaces already misplaced at check entry — skipping monitoring window"
+      return 1
+    fi
+  fi
+
   # Multi-check validation with full monitoring window
   # - Always performs all max_checks to ensure VLANs remain stable
   # - Heals if heal_threshold consecutive mismatches detected
@@ -508,13 +765,45 @@ check_vlan_config() {
 
     # Continue to next check (unless this was the last one)
     if [ "$check" -lt "$max_checks" ]; then
-      sleep "$settle_delay"
+      # Active settle: restore L2 shields on every tick so rc cannot flush
+      # and leak traffic during the inter-check pause. Mirrors the dump+restore
+      # pattern in wait_for_rc_quiet to avoid redundant netlink reads per tick.
+      local s=0
+      local tick_target=$(( settle_delay * TICKS_PER_SEC ))
+      # Enforce expected rules once before the settle tick loop (expensive NVRAM call).
+      merv_qt_ensure_expected_rules
+      while [ "$s" -lt "$tick_target" ]; do
+        _rules=""
+        type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
+        restore_merv_qt_shield "$_rules"
+        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
+        merv_dhcp_hold_restore_if_active
+        $TICK_CMD
+        s=$((s + 1))
+      done
     fi
     check=$((check + 1))
   done
 
   # Completed all checks without hitting heal threshold
   info -c vlan "VLAN monitoring complete: ${pass_count}/${max_checks} checks passed, ${mismatch_count} consecutive mismatches (below ${heal_threshold} threshold)"
+
+  # Secondary leak detector: first try per-interface placement check (settings-derived,
+  # catches partial leaks where only some managed SSIDs moved to br0 while a native
+  # guest SSID keeps wl_leaked_to_br0's condition 2 false). Fall back to wl_leaked_to_br0
+  # for environments where the settings-derived resolver is unavailable.
+  if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    if ! check_wl_iface_placements; then
+      warn -c vlan "VLAN bridges present (trunk alive) but wl subinterfaces misplaced — restart_wireless race suspected"
+      return 1
+    fi
+  else
+    if wl_leaked_to_br0; then
+      warn -c vlan "VLAN bridges present (trunk alive) but wl subinterfaces detected in br0 — restart_wireless race condition suspected"
+      return 1
+    fi
+  fi
+
   return 0
 }
 
@@ -557,6 +846,7 @@ if [ "$1" = "--test" ] || [ "$1" = "test" ]; then
     if heal_allowed; then
       info -c cli,vlan "Manual check detected mismatch — invoking vlan_manager (cooldown ${COOLDOWN_SEC}s)"
       mark_heal
+      evict_wl_from_br0
       "$VLAN_MANAGER" >/dev/null 2>&1 &
     else
       info -c cli,vlan "Manual check mismatch but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
@@ -716,8 +1006,18 @@ EVENT=$(printf '%s' "$RAW_EVENT" | tr 'A-Z' 'a-z' | tr ' ' '_' | tr '-' '_')
 EVENT=$(printf '%s' "$EVENT" | tr -s '_' '_' | sed 's/^_//; s/_$//')
 EVENT_LABEL="$EVENT"
 
-# Skip heal attempts while mervlan_manager is already applying changes
-if [ -d "$MANAGER_LOCK" ]; then
+# Skip heal attempts while mervlan_manager is already applying changes.
+# Use the shared lock-state helper (not a raw [ -d ]) so a CRASHED manager that
+# left mervlan_manager.lock behind with a dead/absent PID cannot block every
+# subsequent heal event here — the same stale-safe guarantee applied at entry.
+if type merv_lock_state >/dev/null 2>&1; then
+  case "$(merv_lock_state "$MANAGER_LOCK")" in
+    active|unknown_recent)
+      info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active"
+      exit 0
+      ;;
+  esac
+elif [ -d "$MANAGER_LOCK" ]; then
   info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active"
   exit 0
 fi
@@ -750,6 +1050,16 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # Fix A: one-shot shield restore at cron entry.
+  # Re-links MERV_QT/MERV_MAC FORWARD/INPUT jump rules if firmware's rc flushed
+  # them during a restart_wireless that our event handler missed or fired late.
+  # Single ebtables read shared by both restore calls — not a loop, not polling.
+  if type ebtables >/dev/null 2>&1; then
+    _cron_rules=$(ebtables -t filter -L 2>/dev/null)
+    restore_merv_qt_shield "$_cron_rules"
+    type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_cron_rules"
+  fi
+
   # Phase 1: Fast sensor check
   if ! check_vlan_config_fast; then
     record_mismatch
@@ -761,6 +1071,7 @@ if [ "$EVENT" = "cron" ]; then
       if heal_allowed; then
         info -c cli,vlan "Cron: VLAN damage confirmed after escalation — healing (cooldown ${COOLDOWN_SEC}s)"
         mark_heal
+        evict_wl_from_br0
         "$VLAN_MANAGER" >/dev/null 2>&1 &
       else
         info -c cli,vlan "Cron: Damage confirmed but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
@@ -770,7 +1081,33 @@ if [ "$EVENT" = "cron" ]; then
     fi
   else
     log_health_ok_if_needed
+    # Fix B: fast check passed (bridges alive via trunk) but wl subinterfaces may
+    # still be in br0 due to a restart_wireless race. The trunk keeps VLAN bridges
+    # alive so check_vlan_config_fast cannot detect this; check placement directly.
+    # Single synchronous call — no loop, no polling overhead.
+    if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+      if ! check_wl_iface_placements; then
+        warn -c vlan "Cron: wl placement mismatch despite healthy bridges — restart_wireless race"
+        record_mismatch
+        if heal_allowed; then
+          info -c cli,vlan "Cron: wl subinterface(s) misplaced — healing (cooldown ${COOLDOWN_SEC}s)"
+          mark_heal
+          evict_wl_from_br0
+          "$VLAN_MANAGER" >/dev/null 2>&1 &
+        else
+          info -c cli,vlan "Cron: wl placement mismatch but heal suppressed (within ${COOLDOWN_SEC}s cooldown)"
+        fi
+      fi
+    fi
   fi
+
+  # Periodic MAC snapshot — runs in a background subshell so that
+  # vlan_event.lock is released BEFORE any SSH work begins. With cluster sync
+  # enabled, merv_mac_snapshot performs SSH collect+push for every node; doing
+  # that inline while holding the lock would block every subsequent 5-minute
+  # cron tick for the full SSH retry window (~96s worst case per node).
+  # The snapshot has its own mac_snapshot.lock to prevent concurrent runs.
+  type merv_mac_snapshot >/dev/null 2>&1 && ( merv_mac_snapshot ) &
 
   exit 0
 fi
@@ -839,6 +1176,11 @@ should_heal_event() {
     reload|reload_*|restart_all|services_restart|service_restart|restart_services|service_reload)
       return 0
       ;;
+    # Deferred safety-net rechecks scheduled by Fix 3 (fires ~90s after a
+    # wireless event to catch firmware that settles after the main heal window)
+    deferred_*)
+      return 0
+      ;;
     # dnsmasq refresh
     dnsmasq|dnsmasq_*|restart_dnsmasq*|dnsmasq_restart*|dnsmasq_start*|dnsmasq_stop*)
       return 0
@@ -862,23 +1204,166 @@ should_heal_event() {
 # ============================================================================ #
 
 if should_heal_event "$EVENT"; then
+  _MANAGER_STARTED=0
+  _HOLD_RELEASED=0
   info -c vlan "Heal: event [$EVENT_LABEL] matched watchlist"
+
+  # Security-first: block native br0 DHCP during the whole heal decision window.
+  # This runs before rc wait and before reading bridge state.
+  merv_dhcp_hold_arm
+
+  # For wireless restart events, wait for rc to settle BEFORE reading kernel
+  # state. Firmware's restart_wireless can take several minutes on some
+  # hardware; checking mid-restart produces a false-positive healthy result
+  # (trunk subinterfaces keep VLAN bridges alive while wl interfaces are
+  # still being torn down and rebuilt by the wireless driver). Use a generous
+  # 120s max_wait to cover slow Broadcom DFS restarts.
+  # Fix C: for all other matched events (dnsmasq from MAC-binding changes,
+  # firewall, lan, wan, deferred, etc.) perform a one-shot shield restore
+  # before the VLAN check — these events skip wait_for_rc_quiet so orphaned
+  # chains would otherwise stay unrepaired for the full 27s check window.
+  # Single ebtables read; no loop, no CPU concern.
+  case "$EVENT" in
+    restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|\
+    wl*_restart|wl*_start|wl*_down|wl*_up)
+      # Pre-entry wait: actively poll for evidence the wireless restart has
+      # begun rather than relying on a blind sleep in service-event-handler.
+      # service-event-handler uses delay=0 for wireless events, so heal
+      # starts immediately (~50ms) but holds here until either:
+      #   1. ebtables is flushed (_MERV_QT_SHIELD_STATE transitions from ok)
+      #   2. rc shows restart_wireless / wlconf as active
+      # restore_merv_qt_shield + restore_merv_mac_shield run every tick so
+      # any orphaned chains are repaired continuously while waiting.
+      # 5s max fallback covers the case where nothing is detectable (same
+      # worst-case latency as the old 3s sleep + heal init time).
+      info -c vlan "Heal: wireless event [$EVENT_LABEL] — pre-entry wait (max 5s)"
+      _pw_ticks=0
+      _pw_max=$((5 * TICKS_PER_SEC))
+      # Enforce expected rules once before the pre-entry tick loop (expensive NVRAM call).
+      merv_qt_ensure_expected_rules
+      while [ "$_pw_ticks" -lt "$_pw_max" ]; do
+        _pw_rules=""
+        type ebtables >/dev/null 2>&1 && _pw_rules=$(ebtables -t filter -L 2>/dev/null)
+        restore_merv_qt_shield "$_pw_rules"
+        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_pw_rules"
+        merv_dhcp_hold_restore_if_active
+        # ebtables was flushed this tick — firmware restart has begun
+        case "$_MERV_QT_SHIELD_STATE" in
+          orphaned|wiped)
+            info -c vlan "Heal: ebtables flush detected (${_MERV_QT_SHIELD_STATE}) after ${_pw_ticks} ticks"
+            break
+            ;;
+        esac
+        # rc visibly processing wireless restart
+        if rc_queue_has 'restart_wireless|start_lan|stop_lan' || \
+           rc_proc_busy  'restart_wireless|wlconf'; then
+          info -c vlan "Heal: rc restart activity detected after ${_pw_ticks} ticks"
+          break
+        fi
+        $TICK_CMD
+        _pw_ticks=$((_pw_ticks + 1))
+      done
+      [ "$_pw_ticks" -ge "$_pw_max" ] && \
+        info -c vlan "Heal: pre-entry timeout (5s) — proceeding to rc wait"
+      info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
+      wait_for_rc_quiet 6 120
+
+      # rc/wlconf is now quiet enough to stop fighting firmware.
+      # Bridge surgery is allowed after wait_for_rc_quiet returns.
+      type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+        merv_soft_evict_wl_from_br0 "heal-post-rc"
+      ;;
+    *)
+      # If restart_wireless is concurrently running (e.g. MAC binding change
+      # triggered both dnsmasq and wireless restarts and we caught the dnsmasq
+      # event first), use the full restore loop so we keep re-linking chains as
+      # firmware flushes them throughout the wireless restart sequence.
+      # If rc is already quiet, a single read is sufficient — no polling overhead.
+      if rc_queue_has 'restart_wireless' || rc_proc_busy 'restart_wireless|wlconf'; then
+        info -c vlan "Heal: non-wireless event but wireless rc active — waiting for rc quiet (max 30s)"
+        wait_for_rc_quiet 6 30
+      elif type ebtables >/dev/null 2>&1; then
+        _evt_rules=$(ebtables -t filter -L 2>/dev/null)
+        restore_merv_qt_shield "$_evt_rules"
+        merv_qt_ensure_expected_rules
+        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_evt_rules"
+      fi
+      ;;
+  esac
+
   if ! check_vlan_config; then
     record_mismatch
-    # VLAN config mismatch detected after event
+    # VLAN config mismatch detected after event.
+    # A mismatch here means at least one managed VAP is confirmed in br0.
+    # Do NOT wait again before evicting: the second wait_for_rc_quiet was the
+    # direct cause of the 9-10s confirmed exposure window seen in field logs.
     if heal_allowed; then
-      info -c cli,vlan "VLAN config missing after [$EVENT_LABEL] — waiting for rc quiet, then healing (cooldown ${COOLDOWN_SEC}s)"
-      # Allow rc to finish wireless/LAN/httpd work so interfaces exist
-      wait_for_rc_quiet
-      # Mark heal time first (prevents rapid re-triggers)
+      info -c cli,vlan "VLAN config missing after [$EVENT_LABEL] — hard-evicting br0 leaks immediately, then healing (cooldown ${COOLDOWN_SEC}s)"
+
+      # Mark first to prevent rapid re-triggers while we close the leak.
       mark_heal
-      # Invoke VLAN manager in background to restore config
+
+      # Hard evict once: wl down + brctl delif. Only runs on confirmed mismatch.
+      if type merv_hard_evict_wl_from_br0 >/dev/null 2>&1; then
+        merv_hard_evict_wl_from_br0 "heal-confirmed"
+      else
+        evict_wl_from_br0
+      fi
+
+      # No second rc wait here. Mismatch is already confirmed.
+      type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+        merv_soft_evict_wl_from_br0 "heal-pre-manager"
+
+      # Invoke VLAN manager in background to restore full VLAN/bridge config.
       "$VLAN_MANAGER" >/dev/null 2>&1 &
+      _MANAGER_STARTED=1
     else
-      # Cooldown is active
+      # Cooldown is active — do not run manager again.
+      # Still hard-evict so confirmed br0 leaks are not left sitting.
+      if type merv_hard_evict_wl_from_br0 >/dev/null 2>&1; then
+        merv_hard_evict_wl_from_br0 "heal-cooldown"
+      else
+        evict_wl_from_br0
+      fi
+      merv_dhcp_hold_release
+      _HOLD_RELEASED=1
       info -c cli,vlan "Heal suppressed after [$EVENT_LABEL] (within ${COOLDOWN_SEC}s cooldown)"
     fi
   fi
+
+  if [ "$_MANAGER_STARTED" -eq 0 ] && [ "$_HOLD_RELEASED" -eq 0 ]; then
+    type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
+      merv_soft_evict_wl_from_br0 "heal-final-no-manager"
+    merv_dhcp_hold_release
+  fi
+
+  # Fix 3 — Deferred safety-net recheck for wireless events.
+  # Firmware rc can yield mid-restart, satisfying wait_for_rc_quiet, then
+  # resume and dump wl interfaces back into br0 after the monitoring window
+  # closes. Schedule a one-shot follow-up check ~90s later so MerVLAN always
+  # gets the final word regardless of firmware behaviour.
+  # The cooldown in heal_allowed prevents a double-apply if healing already
+  # ran during the primary window.
+  case "$EVENT" in
+    restart_wireless*|wireless*|restart_wl*|wl_restart|wl_start|\
+    wl*_restart|wl*_start|wl*_down|wl*_up)
+      info -c vlan "Heal: scheduling deferred recheck in 90s for [$EVENT_LABEL]"
+      (
+        sleep 90
+        # Skip if manager is genuinely running (concurrent apply in progress).
+        # Use the stale-safe helper so a crashed manager's leftover lock does
+        # not suppress the deferred recheck; the child heal re-checks anyway.
+        if type merv_lock_state >/dev/null 2>&1; then
+          case "$(merv_lock_state "$MANAGER_LOCK")" in
+            active|unknown_recent) exit 0 ;;
+          esac
+        elif [ -d "$MANAGER_LOCK" ]; then
+          exit 0
+        fi
+        "$MERV_BASE/functions/heal_event.sh" "deferred_${EVENT}"
+      ) >/dev/null 2>&1 &
+      ;;
+  esac
   # Service monitoring currently disabled (uncommitted check_services call)
   #check_services
 fi

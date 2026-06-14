@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: device_support_mapper.sh || version="0.50.2"          #
+#                - File: device_support_mapper.sh || version="0.50.3"          #
 # ============================================================================ #
 # - Purpose:  Creates a map template by detecting physical LAN/WAN port order  #
 #             to enable MerVLAN support with correct device mapping.           #
@@ -131,9 +131,14 @@ yesno() {
   done
 }
 
-# Only real eth devices (no eth0.187)
+# Only real eth devices (no eth0.187, no wireless radios from wl_ifnames)
 list_eth_ifaces() {
-  ls /sys/class/net 2>/dev/null | grep -E '^eth[0-9]+$' | sort
+  for _iface in $(ls /sys/class/net 2>/dev/null | grep -E '^eth[0-9]+$' | sort); do
+    case " $WL_IFNAMES " in
+      *" $_iface "*) continue ;;
+    esac
+    printf '%s\n' "$_iface"
+  done
 }
 
 carrier() { cat "/sys/class/net/$1/carrier" 2>/dev/null; }
@@ -166,6 +171,7 @@ nvget() {
 read_device_info() {
   PRODUCTID="unknown"
   FIRMWARE="unknown"
+  WL_IFNAMES=""
   NVRAM_CMD="$(find_nvram 2>/dev/null)" || NVRAM_CMD=""
 
   if [ -n "$NVRAM_CMD" ]; then
@@ -178,16 +184,30 @@ read_device_info() {
       FIRMWARE="$fv"
       [ -n "$bn" ] && FIRMWARE="$FIRMWARE.$bn"
     fi
+
+    wl="$(nvget wl_ifnames)"
+    [ -n "$wl" ] && WL_IFNAMES="$wl"
   fi
 }
 
 # -----------------------------
-# WAN detection (route dev, else br0 delta)
+# WAN detection (nvram wan0_ifname, then route dev, else br0 delta)
 # -----------------------------
 detect_wan() {
   WAN_DETECTED=""
   WAN_METHOD=""
 
+  # Primary: nvram wan0_ifname (authoritative on Asuswrt-Merlin)
+  if [ -n "${NVRAM_CMD:-}" ]; then
+    _wan_nv="$(nvget wan0_ifname)"
+    if printf '%s\n' "$_wan_nv" | grep -qE '^eth[0-9]+$'; then
+      WAN_DETECTED="$_wan_nv"
+      WAN_METHOD="nvram wan0_ifname"
+      return 0
+    fi
+  fi
+
+  # Fallback: ip route
   dev="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
   if [ -z "$dev" ]; then
     WAN_METHOD="could not determine"
@@ -200,8 +220,16 @@ detect_wan() {
     return 0
   fi
 
+  # Last resort: br0 tx delta (wireless interfaces excluded via WL_IFNAMES)
   gw="$(ip route show default 2>/dev/null | awk 'NR==1{print $3; exit}')"
-  members="$(ls /sys/class/net/br0/brif 2>/dev/null | grep -E '^eth[0-9]+$')"
+  members=""
+  for _m in $(ls /sys/class/net/br0/brif 2>/dev/null | grep -E '^eth[0-9]+$'); do
+    case " $WL_IFNAMES " in
+      *" $_m "*) continue ;;
+    esac
+    members="$members $_m"
+  done
+  members="$(printf '%s\n' "$members" | sed 's/^ *//; s/ *$//; s/  */ /g')"
   [ -n "$gw" ] && [ -n "$members" ] || {
     WAN_METHOD="bridge mode, no eth members or no gateway"
     return 1

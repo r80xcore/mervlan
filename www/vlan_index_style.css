@@ -263,9 +263,10 @@ body {
 }
 
 .lan-node-toggle {
-        display:inline-flex;
+        display:grid;
+        grid-template-columns: 34px repeat(5, 20px);
+        gap:2px;
         align-items:center;
-        gap:4px;
 }
 
 .lan-node-btn {
@@ -280,6 +281,20 @@ body {
         min-width:26px;
         text-align:center;
         transition:background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+/* Compact overrides scoped to the LAN target toggle only */
+.lan-node-toggle .lan-node-btn {
+        min-width:0;
+        width:100%;
+        padding:2px 0;
+        font-size:10px;
+        border-radius:3px;
+}
+
+/* Push "6" to column 2 so the second row aligns under nodes 1-5, not Main */
+.lan-node-toggle .lan-node-btn:nth-child(7) {
+        grid-column-start:2;
 }
 
 .lan-node-btn:hover,
@@ -567,6 +582,7 @@ body {
         border-collapse:collapse;
         background-color:#2F3A3E;
         border:1px solid #222;
+        --vlan-table-row-line-opacity:0.40;
 }
 
 .vlan-table th,
@@ -574,6 +590,35 @@ body {
         text-align:center;
         vertical-align:middle;
         white-space:nowrap;
+}
+
+.vlan-table th {
+        border:1px solid #222;
+}
+
+#ssidTable td,
+#lanTable td {
+        position:relative;
+        border:0 !important;
+}
+
+#ssidTable td::after,
+#lanTable td::after {
+        content:"";
+        position:absolute;
+        left:0;
+        right:0;
+        bottom:0;
+        height:1px;
+        background:#222;
+        opacity:var(--vlan-table-row-line-opacity);
+        pointer-events:none;
+        z-index:2;
+}
+
+#ssidTable > tbody:last-child > tr:last-child td::after,
+#lanTable > tbody:last-child > tr:last-child td::after {
+        content:none;
 }
 
 
@@ -839,28 +884,24 @@ body {
 }
 
 .cli-box::-webkit-scrollbar,
-.client-list::-webkit-scrollbar,
-.clients-panel::-webkit-scrollbar {
+.clients-body::-webkit-scrollbar {
         width:10px;
 }
 
 .cli-box::-webkit-scrollbar-track,
-.clients-panel::-webkit-scrollbar-track,
-.client-list::-webkit-scrollbar-track {
+.clients-body::-webkit-scrollbar-track {
         background:#1F2D35;
 }
 
 .cli-box::-webkit-scrollbar-thumb,
-.clients-panel::-webkit-scrollbar-thumb,
-.client-list::-webkit-scrollbar-thumb {
+.clients-body::-webkit-scrollbar-thumb {
         background:#569AC7;
         border-radius:8px;
         border:2px solid #1F2D35;
 }
 
 .cli-box::-webkit-scrollbar-thumb:hover,
-.clients-panel::-webkit-scrollbar-thumb:hover,
-.client-list::-webkit-scrollbar-thumb:hover {
+.clients-body::-webkit-scrollbar-thumb:hover {
         background:#77A5C6;
 }
 
@@ -934,16 +975,17 @@ body {
         border-radius:0 0 6px 6px;
         flex:1 1 auto;
         min-height:0;
-        overflow:auto;
+        overflow:hidden;
+        display:flex;
+        flex-direction:column;
         color:#FFFFFF;
         box-shadow:0 1px 4px rgba(0,0,0,0.35);
 }
 
 .clients-header {
         display:flex;
-        align-items:center;
-        justify-content:space-between;
-        padding:10px 12px;
+        flex-direction:column;
+        padding:8px 12px;
         font-weight:600;
         color:#569AC7;
         border-bottom:1px solid #4D595D;
@@ -951,11 +993,69 @@ body {
         top:0;
         background-color:#2F3A3E;
         z-index:2;
+        gap:5px;
+}
+
+.clients-header-top {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+}
+
+.clients-toggle {
+        display:inline-flex;
+        align-items:center;
+        gap:4px;
+        font-size:11px;
+        font-weight:normal;
+        color:#AAB8BD;
+        cursor:pointer;
+        white-space:nowrap;
+}
+
+.clients-toggle input {
+        margin:0;
+        cursor:pointer;
+}
+
+.client-hidden-hint {
+        font-size:10px;
+        font-style:italic;
+        opacity:0.75;
+        padding:2px 0;
 }
 
 .clients-body {
         padding:12px;
         color:#FFFFFF;
+        flex:1 1 auto;
+        overflow:auto;
+        min-height:0;
+        scrollbar-width:thin;
+        scrollbar-color:#569AC7 #1F2D35;
+}
+
+/* Compact square icon button for the ⟳ refresh action. */
+.clients-refresh-btn {
+        width:28px !important;
+        min-width:0 !important;
+        padding:0 !important;
+        font-size:18px !important;
+        line-height:28px !important;
+        text-align:center;
+        flex-shrink:0;
+}
+
+/* Footer bar pinned to the bottom of the clients panel via flex layout. */
+.clients-footer {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        padding:5px 12px;
+        border-top:1px solid #4D595D;
+        background-color:#2F3A3E;
+        flex-shrink:0;
+        z-index:2;
 }
 
 .client-node {
@@ -1012,8 +1112,6 @@ body {
         font-family:Consolas, "Courier New", monospace;
         font-size:11px;
         line-height:1.4;
-        max-height:160px;
-        overflow:auto;
 }
 
 .chip {
@@ -1083,6 +1181,223 @@ body {
         background-color:#3A3A3A;
         border:1px solid #5A5A5A;
         color:#AAAAAA;
+}
+
+/* ============================================================================
+   Client metadata - display names, status badges, and inline editor
+   ============================================================================ */
+
+.client-row {
+        display:flex;
+        align-items:center;
+        flex-wrap:nowrap;
+        gap:6px;
+        padding:1px 0;
+        min-width:0;
+        overflow:hidden;
+}
+
+/* Name or MAC address — truncates with ellipsis when too long. */
+.cm-name, .cm-mac {
+        flex:1 1 0;
+        min-width:0;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+}
+
+.cm-name {
+        color:#E6EDEF;
+        font-weight:bold;
+}
+
+.cm-mac {
+        font-family:Consolas, "Courier New", monospace;
+}
+
+/* Badge group — always flush to the right, never wraps. */
+.cm-badges {
+        display:inline-flex;
+        align-items:center;
+        gap:3px;
+        flex-shrink:0;
+        margin-left:auto;
+}
+
+.cm-badge {
+        display:inline-flex;
+        align-items:center;
+        gap:3px;
+        padding:1px 6px;
+        border-radius:8px;
+        font-size:9px;
+        line-height:1.5;
+        white-space:nowrap;
+        cursor:default;
+}
+
+.cm-active {
+        background-color:#26402B;
+        border:1px solid #4C8C58;
+        color:#9EE0AC;
+}
+
+.cm-stale {
+        background-color:#3A3A3A;
+        border:1px solid #5A5A5A;
+        color:#AAAAAA;
+}
+
+.cm-locked {
+        background-color:#4A3D35;
+        border:1px solid #7A5D45;
+        color:#E8C88A;
+}
+
+.cm-override {
+        background-color:#3D2D4E;
+        border:1px solid #6A4D8E;
+        color:#C8A8E8;
+}
+
+/* Renamed user-facing state for an active MAC shield override. */
+.cm-unlock {
+        background-color:#243A4E;
+        border:1px solid #3F77A8;
+        color:#9CCBF0;
+}
+
+/* MAC not present in the shield database at all (no DROP rule exists). */
+.cm-unshielded {
+        background-color:#333333;
+        border:1px solid #555555;
+        color:#999999;
+}
+
+/* Observed here but resolved to another device as the active location. */
+.cm-inactive {
+        background-color:#2E2E2E;
+        border:1px solid #4A4A4A;
+        color:#888888;
+}
+
+/* Learned through a trunk/backhaul rather than directly attached. */
+.cm-relayed {
+        background-color:#2C3A2C;
+        border:1px solid #4E6E4E;
+        color:#A8D0A8;
+}
+
+/* Observed only via trunk/backhaul on every router — a diagnostic-only MAC
+   with no direct owner. Hidden from the active list by default. */
+.cm-relay-only {
+        background-color:#26302C;
+        border:1px solid #466052;
+        color:#8FBFA8;
+}
+
+/* Conflicting direct observations — active location unresolved. */
+.cm-ambiguous {
+        background-color:#4E3A24;
+        border:1px solid #A8743F;
+        color:#F0C89C;
+}
+
+.stale-node h3 {
+        opacity:0.85;
+}
+
+.cm-editor {
+        font-family:Tahoma, Arial, sans-serif;
+        font-size:11px;
+}
+
+.cm-editor-head {
+        color:#AAB8BD;
+        margin-bottom:8px;
+        padding-bottom:6px;
+        border-bottom:1px solid #3A4A50;
+}
+
+.cm-add-row {
+        display:flex;
+        gap:6px;
+        margin-bottom:8px;
+}
+
+.cm-add-input {
+        flex:1 1 auto;
+        min-width:160px;
+        background-color:#1E2A2F;
+        border:1px solid #3A4A50;
+        border-radius:4px;
+        color:#E6EDEF;
+        padding:3px 6px;
+        font-family:Consolas, "Courier New", monospace;
+        font-size:11px;
+}
+
+@keyframes cmErowFlash {
+        from { background-color:#3D2D4E; }
+        to   { background-color:#2A363B; }
+}
+
+.cm-erow-flash {
+        animation:cmErowFlash 1.2s ease-out;
+}
+
+.cm-rows {
+        max-height:240px;
+        overflow:auto;
+        display:flex;
+        flex-direction:column;
+        gap:4px;
+}
+
+.cm-erow {
+        display:flex;
+        align-items:center;
+        flex-wrap:wrap;
+        gap:8px;
+        padding:3px 4px;
+        border-radius:4px;
+        background-color:#2A363B;
+}
+
+.cm-erow .cm-mac {
+        min-width:140px;
+}
+
+.cm-name-input {
+        flex:1 1 140px;
+        min-width:120px;
+        background-color:#1E2A2F;
+        border:1px solid #3A4A50;
+        border-radius:4px;
+        color:#E6EDEF;
+        padding:2px 6px;
+        font-size:11px;
+}
+
+.cm-ovr-label {
+        display:inline-flex;
+        align-items:center;
+        gap:4px;
+        white-space:nowrap;
+        color:#C8A8E8;
+}
+
+.cm-erow-badges {
+        display:inline-flex;
+        gap:4px;
+}
+
+.cm-editor-actions {
+        display:flex;
+        gap:8px;
+        margin-top:10px;
+        padding-top:8px;
+        border-top:1px solid #3A4A50;
 }
 
 /* ============================================================================ */

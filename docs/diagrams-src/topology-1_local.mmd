@@ -1,0 +1,21 @@
+flowchart LR
+    Switch{"Managed Switch<br/>(802.1Q aware)"}
+
+    Switch ==>|WAN port<br/>802.1Q trunk| Main["Main AP<br/>(MerVLAN addon)"]
+
+    Main -.->|local apply| BMain[["VLAN: 20 / 30 / 40"]]
+    BMain ==> Clients(["Clients<br/>"])
+
+    LocalOnly[/"Local only<br/>No SSH / no nodes / no sync"/] -.->|note| Main
+
+    classDef switch fill:#064e3b,stroke:#34d399,color:#ecfdf5;
+    classDef main fill:#1e3a5f,stroke:#60a5fa,color:#eff6ff;
+    classDef bridge fill:#14532d,stroke:#22c55e,color:#f0fdf4;
+    classDef client fill:#312e81,stroke:#818cf8,color:#eef2ff;
+    classDef note fill:#78350f,stroke:#f59e0b,color:#fffbeb;
+
+    class Switch switch;
+    class Main main;
+    class BMain bridge;
+    class Clients client;
+    class LocalOnly note;

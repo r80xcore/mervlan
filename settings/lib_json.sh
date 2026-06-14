@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_json.sh || version="0.53"                         #
+#                - File: lib_json.sh || version="0.54"                         #
 # ============================================================================ #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -928,6 +928,30 @@ json_reset_trunks_section() {
 
     mv "$_jrt_tmp" "$_jrt_file" 2>/dev/null || { rm -f "$_jrt_tmp"; return 1; }
     return 0
+}
+
+# merv_node_list : Emit "<n> <ip>" lines for every node with a valid configured
+# IPv4. Self-contained: inline IPv4 validation + local MERV_MAX_NODES default so
+# it works even when var_settings.sh has not been sourced. Reads the structured
+# Nodes section first, then falls back to a flat top-level "NODEn" key for
+# pre-structured installs. Requires SETTINGS_FILE to be set by the caller.
+merv_node_list() {
+    _mnl_max="${MERV_MAX_NODES:-10}"
+    _mnl_i=1
+    while [ "$_mnl_i" -le "$_mnl_max" ]; do
+        _mnl_val=$(json_get_section_value "Nodes" "NODE${_mnl_i}" "$SETTINGS_FILE" 2>/dev/null)
+        [ -n "$_mnl_val" ] || _mnl_val=$(json_get_flag "NODE${_mnl_i}" "" "$SETTINGS_FILE" 2>/dev/null)
+        if [ -n "$_mnl_val" ] && [ "$_mnl_val" != "none" ]; then
+            case "$_mnl_val" in
+                *.*.*.*)
+                    if printf '%s\n' "$_mnl_val" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i<0 || $i>255) exit 1; exit 0 } { exit 1 }'; then
+                        printf '%s %s\n' "$_mnl_i" "$_mnl_val"
+                    fi
+                    ;;
+            esac
+        fi
+        _mnl_i=$((_mnl_i + 1))
+    done
 }
 
 LIB_JSON_LOADED=1

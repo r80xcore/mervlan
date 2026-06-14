@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.49"                     #
+#               - File: save_settings.sh || version="0.52"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -23,7 +23,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
@@ -245,6 +245,62 @@ done < "${CUSTOM_SETTINGS_FILE}"
 # ============================================================================ #
 
 # Sort by first column (key name) to ensure consistent ordering across runs
+sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
+
+# ============================================================================ #
+# STEP 1.5: Extract and remove SAVE_SCOPE                                      #
+# The UI sends vlanmgr_SAVE_SCOPE to indicate which subset of keys are present  #
+# in this payload (normal/override/clientmeta/full). It must not be written    #
+# into settings.json. Remove it here before any further processing.            #
+# ============================================================================ #
+
+SAVE_SCOPE="$(awk -F'\t' '$1=="SAVE_SCOPE"{print $2; exit}' "${TMP_KV}")"
+case "$SAVE_SCOPE" in
+    normal|override|clientmeta|full) :;;
+    *) SAVE_SCOPE="full" ;; # backward-compatible: old UI sends no SAVE_SCOPE
+esac
+info -c vlan "save_settings.sh: SAVE_SCOPE=$SAVE_SCOPE"
+
+# Strip SAVE_SCOPE key from TMP_KV — must never reach settings.json
+_tmp_kv_scoped="${TMP_KV}.scoped.$$"
+grep -v '^SAVE_SCOPE	' "${TMP_KV}" > "${_tmp_kv_scoped}" && mv "${_tmp_kv_scoped}" "${TMP_KV}" || rm -f "${_tmp_kv_scoped}"
+
+# Re-sort after stripping SAVE_SCOPE
+sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
+
+# ============================================================================ #
+# STEP 1.6: Scope filter                                                       #
+# Keep only the keys relevant to this save scope. This prevents stale          #
+# vlanmgr_* lines already present in custom_settings.txt from bleeding into   #
+# the wrong section when a scoped (override/clientmeta) save runs.             #
+# ============================================================================ #
+_tmp_kv_filtered="${TMP_KV}.filtered.$$"
+case "$SAVE_SCOPE" in
+    normal)
+        # Keep VLAN/node/SSID/trunk/general keys; drop OVERRIDE_* and ClientMeta.
+        awk -F'\t' '
+            $1 !~ /^OVERRIDE_/ &&
+            $1 != "MAC_SHIELD_OVERRIDES" &&
+            $1 != "CLIENT_NAME_OVERRIDES" { print }
+        ' "${TMP_KV}" > "${_tmp_kv_filtered}" && mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
+        ;;
+    override)
+        # Keep only OVERRIDE_* keys.
+        awk -F'\t' '$1 ~ /^OVERRIDE_/ { print }' "${TMP_KV}" > "${_tmp_kv_filtered}" && \
+            mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
+        ;;
+    clientmeta)
+        # Keep only ClientMeta keys.
+        awk -F'\t' '$1 == "MAC_SHIELD_OVERRIDES" || $1 == "CLIENT_NAME_OVERRIDES" { print }' \
+            "${TMP_KV}" > "${_tmp_kv_filtered}" && \
+            mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
+        ;;
+    full)
+        : # keep everything already in TMP_KV
+        ;;
+esac
+
+# Re-sort after scope filter
 sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
 
 # ============================================================================ #
@@ -533,7 +589,44 @@ enforce_trunk_eth_exclusivity() {
     rm -f "$TMP_FINAL"
 }
 
-enforce_trunk_eth_exclusivity
+# Only meaningful for normal/full saves; override and clientmeta payloads
+# contain no ETH*/TRUNK* keys so the enforcer would be a no-op and could
+# synthesise unwanted defaults on a metadata-only save.
+case "$SAVE_SCOPE" in
+    normal|full) enforce_trunk_eth_exclusivity ;;
+    *) : ;; # skip for override / clientmeta
+esac
+
+# ============================================================================ #
+# STEP 2.8: Separate Hardware_Override keys from normal flat keys              #
+# Override keys use the flat convention OVERRIDE_<TARGET>_<FIELD> and must be  #
+# written into the nested Hardware_Override section via json_set_section2_value#
+# instead of flat json_set_flag. Split them into a separate file here.         #
+#                                                                             #
+# ClientMeta keys (MAC_SHIELD_OVERRIDES, CLIENT_NAME_OVERRIDES) are likewise  #
+# routed into the nested "ClientMeta" section via json_set_section_value. This #
+# avoids json_set_flag's flat-append path landing the key inside an unrelated #
+# nested object on installs where the section is missing.                      #
+# ============================================================================ #
+
+TMP_OVERRIDE="${RESULTDIR}/vlanmgr_override.$$"
+TMP_CLIENTMETA="${RESULTDIR}/vlanmgr_clientmeta.$$"
+TMP_NORMAL="${RESULTDIR}/vlanmgr_normal.$$"
+> "${TMP_OVERRIDE}"
+> "${TMP_CLIENTMETA}"
+> "${TMP_NORMAL}"
+
+while IFS="$(printf '\t')" read -r key value; do
+    case "$key" in
+        OVERRIDE_*) printf '%s\t%s\n' "$key" "$value" >> "${TMP_OVERRIDE}" ;;
+        MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)
+                    printf '%s\t%s\n' "$key" "$value" >> "${TMP_CLIENTMETA}" ;;
+        *)          printf '%s\t%s\n' "$key" "$value" >> "${TMP_NORMAL}" ;;
+    esac
+done < "${TMP_SORTED}"
+
+# Replace TMP_SORTED with normal-only keys for json_apply_kv_file
+cp "${TMP_NORMAL}" "${TMP_SORTED}"
 
 # ============================================================================ #
 # STEP 3: Merge into persistent settings.json                                   #
@@ -542,9 +635,109 @@ enforce_trunk_eth_exclusivity
 
 if ! json_apply_kv_file "${TMP_SORTED}" "${SETTINGS_FILE}"; then
     error -c vlan "save_settings.sh: failed to update ${SETTINGS_FILE}"
-    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
     exit 1
 fi
+
+# ============================================================================ #
+# STEP 3.5: Apply Hardware_Override keys into nested section                   #
+# Map flat keys like OVERRIDE_MAIN_MAP_OVERRIDE → Hardware_Override.MAIN.MAP_OVERRIDE #
+# ============================================================================ #
+
+if [ -s "${TMP_OVERRIDE}" ]; then
+    _ovr_fail=0
+    while IFS="$(printf '\t')" read -r okey oval; do
+        # Parse: OVERRIDE_<TARGET>_<FIELD>
+        # TARGET is MAIN or NODE<n> (1..MERV_MAX_NODES); FIELD is MAP_OVERRIDE, WAN, MAX_ETH_PORTS, LAN1..LAN8
+        _ovr_rest="${okey#OVERRIDE_}"
+        case "$_ovr_rest" in
+            MAIN_*)
+                _ovr_target="MAIN"; _ovr_field="${_ovr_rest#MAIN_}"
+                ;;
+            NODE[0-9]*_*)
+                # Extract the numeric node id and the remaining field name.
+                _ovr_num="${_ovr_rest#NODE}"
+                _ovr_num="${_ovr_num%%_*}"
+                _ovr_field="${_ovr_rest#NODE${_ovr_num}_}"
+                case "$_ovr_num" in
+                    ''|*[!0-9]*)
+                        warn -c vlan "save_settings.sh: unrecognised override key: $okey"; continue ;;
+                esac
+                if [ "$_ovr_num" -lt 1 ] || [ "$_ovr_num" -gt "${MERV_MAX_NODES:-10}" ]; then
+                    warn -c vlan "save_settings.sh: override node out of range: $okey"; continue
+                fi
+                _ovr_target="NODE${_ovr_num}"
+                ;;
+            *) warn -c vlan "save_settings.sh: unrecognised override key: $okey"; continue ;;
+        esac
+        # Re-prefix FIELD to match JSON key names (OVERRIDE_WAN, OVERRIDE_LAN1, etc.)
+        # MAP_OVERRIDE stays as-is; WAN→OVERRIDE_WAN, MAX_ETH_PORTS→OVERRIDE_MAX_ETH_PORTS, LAN*→OVERRIDE_LAN*
+        case "$_ovr_field" in
+            MAP_OVERRIDE) _ovr_json_key="MAP_OVERRIDE" ;;
+            *)            _ovr_json_key="OVERRIDE_${_ovr_field}" ;;
+        esac
+        if ! json_set_section2_value "Hardware_Override" "$_ovr_target" "$_ovr_json_key" "$oval" "${SETTINGS_FILE}"; then
+            warn -c vlan "save_settings.sh: failed to set Hardware_Override.$_ovr_target.$_ovr_json_key"
+            _ovr_fail=1
+        fi
+    done < "${TMP_OVERRIDE}"
+    if [ "$_ovr_fail" = "0" ]; then
+        info -c vlan "save_settings.sh: Hardware_Override keys applied"
+    fi
+fi
+
+# ============================================================================ #
+# STEP 3.6: Apply ClientMeta keys into nested section                          #
+# MAC_SHIELD_OVERRIDES / CLIENT_NAME_OVERRIDES are upserted into the           #
+# "ClientMeta" section. json_set_section_value safely inserts the key inside   #
+# that object even if the section exists without the key, and creates nothing  #
+# unsafe if the section is missing (it simply no-ops the insert). The default  #
+# settings.json ships the section so normal installs/updates always have it.   #
+# ============================================================================ #
+
+if [ -s "${TMP_CLIENTMETA}" ]; then
+    # Defensive: the default/updated settings.json always ships a "ClientMeta"
+    # section, but json_set_section_value silently no-ops (and still returns 0)
+    # when the section is absent. So if it is somehow missing, seed an empty
+    # section first — and log it — so the keys below actually persist instead of
+    # vanishing without a trace.
+    if ! grep -q '"ClientMeta"[[:space:]]*:' "${SETTINGS_FILE}" 2>/dev/null; then
+        warn -c vlan "save_settings.sh: ClientMeta section missing — seeding it before write"
+        _cm_seed_tmp="${SETTINGS_FILE}.cmseed.$$"
+        if awk '
+                BEGIN { seeded=0 }
+                {
+                    print
+                    if (!seeded && $0 ~ /^[[:space:]]*\{[[:space:]]*$/) {
+                        print "  \"ClientMeta\": {"
+                        print "    \"_description\": \"MAC shield override and client display name configuration\","
+                        print "    \"MAC_SHIELD_OVERRIDES\": \"\","
+                        print "    \"CLIENT_NAME_OVERRIDES\": \"\""
+                        print "  },"
+                        seeded=1
+                    }
+                }
+            ' "${SETTINGS_FILE}" > "${_cm_seed_tmp}" 2>/dev/null && [ -s "${_cm_seed_tmp}" ]; then
+            mv "${_cm_seed_tmp}" "${SETTINGS_FILE}" 2>/dev/null || rm -f "${_cm_seed_tmp}" 2>/dev/null
+        else
+            rm -f "${_cm_seed_tmp}" 2>/dev/null
+            warn -c vlan "save_settings.sh: failed to seed ClientMeta section"
+        fi
+    fi
+    _cm_fail=0
+    while IFS="$(printf '\t')" read -r cmkey cmval; do
+        [ -n "$cmkey" ] || continue
+        if ! json_set_section_value "ClientMeta" "$cmkey" "$cmval" "${SETTINGS_FILE}"; then
+            warn -c vlan "save_settings.sh: failed to set ClientMeta.$cmkey"
+            _cm_fail=1
+        fi
+    done < "${TMP_CLIENTMETA}"
+    if [ "$_cm_fail" = "0" ]; then
+        info -c vlan "save_settings.sh: ClientMeta keys applied"
+    fi
+fi
+
+rm -f "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
 
 chmod 600 "${SETTINGS_FILE}"
 info -c vlan "save_settings.sh: updated ${SETTINGS_FILE}"

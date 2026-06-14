@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.49"                      #
+#                    - File: install.sh || version="0.54"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -717,24 +717,24 @@ ssh_keys_effectively_installed() {
 # ========================================================================== #
 # (Embedded subset in this script to avoid external dependencies)
 
-# has_configured_nodes — Report if any NODE1..NODE5 entries contain IPs
+# has_configured_nodes — Report if any NODE1..NODE10 entries contain IPs
 # Returns: 0 when at least one valid IPv4 is present, 1 otherwise
 # Explanation: Allows installer to decide whether to call nodeenable later
 has_configured_nodes() {
     [ -f "$SETTINGS_FILE" ] || return 1
-    local nodes
-    nodes=$(grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-        grep -v "none" | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
-    [ -n "$nodes" ]
+    local _MERV_MAX_NODES_LOCAL=10
+    grep -o '"NODE[0-9][0-9]*"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*"NODE\([0-9][0-9]*\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1 \2/p' | \
+        awk -v max="$_MERV_MAX_NODES_LOCAL" \
+          '$2!="none" && $2~/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1>=1 && $1<=max {found=1} END{exit !found}'
 }
 
 count_configured_nodes() {
-    grep -o '"NODE[1-5]"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
-        sed -n 's/.*:[[:space:]]*"\([^"]*\)".*/\1/p' | \
-        grep -v "none" | \
-        grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    local _MERV_MAX_NODES_LOCAL=10
+    grep -o '"NODE[0-9][0-9]*"[[:space:]]*:[[:space:]]*"[^"]*"' "$SETTINGS_FILE" 2>/dev/null | \
+        sed -n 's/.*"NODE\([0-9][0-9]*\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1 \2/p' | \
+        awk -v max="$_MERV_MAX_NODES_LOCAL" \
+          '$2!="none" && $2~/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1>=1 && $1<=max {c++} END{print c+0}'
 }
 
 # ========================================================================== #
@@ -1020,27 +1020,27 @@ download_mervlan() {
     return 1
   fi
 
-        # Permissions: BusyBox-safe (no find). 755 for all .sh except the two settings files -> 644
-    # First set 644 for settings/log_settings.sh and settings/var_settings.sh if present
+        # Permissions: BusyBox-safe glob (no find). Default 755 for all .sh; case statement
+    # overrides library/config files (settings/lib_*.sh, mac_shield_snapshot.sh,
+    # mervlan_templates.sh, log_settings.sh, var_settings.sh) to 644.
         echo "[download_mervlan] adjusting file permissions (.sh)"
     for depth in "" "*/" "*/*/"; do
         for f in $MERV_BASE/${depth}*.sh; do
             [ -f "$f" ] 2>/dev/null || continue
             base="$(basename "$f")"
-            if [ "$base" = "log_settings.sh" ] || [ "$base" = "var_settings.sh" ]; then
-                chmod 644 "$f" 2>/dev/null || :
-            fi
-        done
-    done
-
-    # Then apply 755 to all other .sh files
-    for depth in "" "*/" "*/*/"; do
-        for f in $MERV_BASE/${depth}*.sh; do
-            [ -f "$f" ] 2>/dev/null || continue
-            base="$(basename "$f")"
-            if [ "$base" != "log_settings.sh" ] && [ "$base" != "var_settings.sh" ]; then
-                chmod 755 "$f" 2>/dev/null || :
-            fi
+            case "$base" in
+                log_settings.sh|var_settings.sh|\
+                lib_debug.sh|lib_json.sh|lib_ssh.sh|\
+                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|\
+                lib_radio.sh|\
+                mervlan_templates.sh|mac_shield_snapshot.sh|\
+                lib_br0_guard.sh)
+                    chmod 644 "$f" 2>/dev/null || :
+                    ;;
+                *)
+                    chmod 755 "$f" 2>/dev/null || :
+                    ;;
+            esac
         done
     done
         echo "[download_mervlan] permission step complete"
@@ -1098,6 +1098,9 @@ create_dirs() {
         "$TMP_DIR"/results/client_collection \
         "$PUBLIC_DIR" \
         "$PUBLIC_DIR/settings" \
+        "$PUBLIC_DIR/docs" \
+        "$PUBLIC_DIR/diagrams" \
+        "$PUBLIC_DIR/vendor" \
         "$PUBLIC_DIR/.ssh" \
         "$PUBLIC_DIR/tmp/results" \
         "$PUBLIC_DIR/tmp/logs"
@@ -1228,7 +1231,37 @@ case "$MODE" in
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
         ;;
     *)
-        # Standard / upgrade install: no special pre-work
+        # Standard / upgrade install: verify addon files are already present
+        for _req in \
+            mervlan.asp \
+            www/index.html \
+            www/vlan_index_style.css \
+            www/vlan_form_style.css \
+            settings/settings.json
+        do
+            [ -f "$MERV_BASE/$_req" ] || {
+                echo "[install] ERROR: Missing required file: $MERV_BASE/$_req" >&2
+                echo "[install] The addon files are not installed yet." >&2
+                echo "[install] For a first install, run: sh install.sh full" >&2
+                exit 1
+            }
+        done
+
+        for _optional in \
+            www/help.html \
+            www/view_logs.html \
+            www/vendor/marked.umd.js \
+            www/vendor/github-markdown-dark.css \
+            www/vendor/THIRD_PARTY_LICENSES.md \
+            docs/HELP.md \
+            docs/diagrams/topology-1_local.svg \
+            docs/diagrams/topology-2_aimesh.svg \
+            docs/diagrams/topology-3_standalone-ap.svg \
+            docs/diagrams/topology-4_node-to-main.svg
+        do
+            [ -f "$MERV_BASE/$_optional" ] || \
+                echo "[install] WARNING: Optional file missing: $MERV_BASE/$_optional" >&2
+        done
         ;;
 esac
 
@@ -1293,6 +1326,14 @@ cp -p "$ADDON_DIR/$ADDON/www/vlan_index_style.css"  "$PUBLIC_DIR/vlan_index_styl
 cp -p "$ADDON_DIR/$ADDON/www/vlan_form_style.css"   "$PUBLIC_DIR/vlan_form_style.css" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/help.html"             "$PUBLIC_DIR/help.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/view_logs.html"        "$PUBLIC_DIR/view_logs.html" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/marked.umd.js"  "$PUBLIC_DIR/vendor/marked.umd.js" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/github-markdown-dark.css" "$PUBLIC_DIR/vendor/github-markdown-dark.css" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/vendor/THIRD_PARTY_LICENSES.md" "$PUBLIC_DIR/vendor/THIRD_PARTY_LICENSES.json" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/HELP.md"              "$PUBLIC_DIR/docs/HELP.json" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-1_local.svg" "$PUBLIC_DIR/diagrams/topology-1_local.svg" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-2_aimesh.svg" "$PUBLIC_DIR/diagrams/topology-2_aimesh.svg" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-3_standalone-ap.svg" "$PUBLIC_DIR/diagrams/topology-3_standalone-ap.svg" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-4_node-to-main.svg" "$PUBLIC_DIR/diagrams/topology-4_node-to-main.svg" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/settings/settings.json"    "$PUBLIC_DIR/settings/settings.json" 2>/dev/null
 # Note: hw_settings.json has been consolidated into settings/settings.json.
 # The SPA now reads the Hardware block from settings/settings.json directly;
@@ -1345,7 +1386,12 @@ mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
 # 7. Record metadata (optional but good practice)
 am_settings_set mervlan_page "$am_webui_page"
 am_settings_set mervlan_state "enabled"
-am_settings_set mervlan_version "v0.46"
+MERVLAN_VERSION="$(awk 'NF { print $NF; exit }' "$MERV_BASE/changelog.txt" 2>/dev/null)"
+case "$MERVLAN_VERSION" in
+    v*) : ;;
+    *) MERVLAN_VERSION="unknown" ;;
+esac
+am_settings_set mervlan_version "$MERVLAN_VERSION"
 
 logger -t "$ADDON" "Installed tab 'MerVLAN' under LAN -> $am_webui_page"
 echo "[install] Web UI tab installed: LAN -> MerVLAN ($am_webui_page)"

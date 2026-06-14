@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: lib_ssid_filter.sh || version="0.51"                   #
+#               - File: lib_ssid_filter.sh || version="0.52"                   #
 # ============================================================================ #
 # - Purpose:    Node-scoped SSID/VLAN slot filtering for multi-node setups.    #
 #               Determines which SSID slots are "visible" on the current node. #
@@ -19,12 +19,12 @@
 
 # ============================================================================ #
 # FILTER INITIALIZATION                                                        #
-# Determines this node's assignment token (MAIN, NODE1..NODE5) based on        #
+# Determines this node's assignment token (MAIN, NODE1..NODE10) based on        #
 # NODE_ID from settings.json or environment. Must be called after NODE_ID      #
 # is resolved.                                                                 #
 # ============================================================================ #
 
-# Cache for assignment token (MAIN, NODE1..NODE5)
+# Cache for assignment token (MAIN, NODE1..NODE10)
 _SSID_FILTER_TOKEN=""
 
 # One-shot warning flag to avoid log spam when MAX_SSIDS=0
@@ -45,12 +45,17 @@ ssid_filter_init() {
     none|0|"")
       _SSID_FILTER_TOKEN="MAIN"
       ;;
-    1|2|3|4|5)
-      _SSID_FILTER_TOKEN="NODE${_sf_nodeid}"
+    ''|*[!0-9]*)
+      # Non-numeric NODE_ID; default to MAIN for safety
+      _SSID_FILTER_TOKEN="MAIN"
       ;;
     *)
-      # Invalid NODE_ID; default to MAIN for safety
-      _SSID_FILTER_TOKEN="MAIN"
+      if [ "$_sf_nodeid" -ge 1 ] 2>/dev/null && [ "$_sf_nodeid" -le "${MERV_MAX_NODES:-10}" ] 2>/dev/null; then
+        _SSID_FILTER_TOKEN="NODE${_sf_nodeid}"
+      else
+        # Out-of-range NODE_ID; default to MAIN for safety
+        _SSID_FILTER_TOKEN="MAIN"
+      fi
       ;;
   esac
 }
@@ -65,7 +70,7 @@ ssid_filter_init() {
 #       $2=settings_file (optional, defaults to SETTINGS_FILE)
 # Returns: 0 if slot is allowed on this node, 1 if not
 # Explanation: Reads SSIDassign_XX from settings.json. If the assignment
-#   string contains this node's token (MAIN, NODE1..5), returns 0 (allowed).
+#   string contains this node's token (MAIN, NODE1..NODE<MERV_MAX_NODES>), returns 0.
 #   If SSIDassign_XX is missing, defaults to MAIN-only assignment.
 #   If SSIDassign_XX is exactly "none", slot is denied to all nodes.
 is_ssid_slot_allowed() {
@@ -135,7 +140,7 @@ is_ssid_slot_allowed() {
   fi
   
   # Check if our token appears in the comma-separated list
-  # Token can be: MAIN, NODE1, NODE2, NODE3, NODE4, NODE5
+  # Token can be: MAIN, NODE1..NODE10
   # Non-assignments are "none" in each position
   case ",$_sf_assign," in
     *,"$_SSID_FILTER_TOKEN",*)
