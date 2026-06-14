@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.12" -->
+  <!-- index.html version="0.53.13" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -3364,8 +3364,9 @@ function toggleCliFullsize() {
                 const left = (screen.width - width) / 2;
                 const top = (screen.height - height) / 2;
 
-                const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,toolbar=no,menubar=no,location=no`;
-                window.open('help.html', 'VLANManagerHelp', features);
+                const features = `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,toolbar=no,menubar=no,location=no,noopener`;
+                const helpWindow = window.open('help.html', 'VLANManagerHelp', features);
+                if (helpWindow) helpWindow.opener = null;
         }
 
   function pollOnce(){
