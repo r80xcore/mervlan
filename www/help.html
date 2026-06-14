@@ -1,1323 +1,480 @@
 <!DOCTYPE html>
 <html>
 <head>
-      <!-- help.html version="0.51" -->
+  <!-- help.html version="0.52" -->
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MerVLAN VLAN Manager - Help & Usage Guide</title>
+  <link rel="stylesheet" href="vendor/github-markdown-dark.css" />
   <style>
-    body { 
-        background: #1E1E1E; 
-        color: #DADADA; 
-        font-family: Tahoma, Arial, sans-serif; 
-        margin: 0; 
-        padding: 15px;
-        height: 100vh;
-        box-sizing: border-box;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-    }
-    
-    .header { 
-        text-align: center; 
-        margin-bottom: 15px; 
-        border-bottom: 1px solid #444;
-        padding-bottom: 10px;
-    }
-    
-    h1 { 
-        color: #FFFFFF; 
-        margin: 0;
-        font-size: 18px;
+    html,
+    body {
+      height: 100%;
     }
 
-    .tabs {
-        display: flex;
-        border-bottom: 1px solid #444;
-        margin-bottom: 10px;
-        flex-wrap: wrap;
+    body {
+      background: #1e1e1e;
+      color: #dadada;
+      font-family: Tahoma, Arial, sans-serif;
+      margin: 0;
+      padding: 15px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
 
-    .tab {
-        padding: 8px 16px;
-        background: #2D2D30;
-        border: 1px solid #444;
-        border-bottom: none;
-        border-radius: 4px 4px 0 0;
-        cursor: pointer;
-        margin-right: 5px;
-        transition: background-color 0.2s;
-        user-select: none;
+    .header {
+      text-align: center;
+      margin-bottom: 15px;
+      border-bottom: 1px solid #444;
+      padding-bottom: 10px;
+      flex: 0 0 auto;
     }
 
-    .tab.active {
-        background: #4A90E2;
-        color: white;
+    .header h1 {
+      color: #fff;
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.3;
     }
 
-    .tab:hover {
-        background: #357ABD;
+    .header .subtitle {
+      margin-top: 5px;
+      color: #9ca3af;
+      font-size: 12px;
     }
 
     .content {
-        background: #000;
-        border: 1px solid #444;
-        border-radius: 0 0 8px 8px;
-        padding: 15px;
-        flex: 1;
-        min-height: 0;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        font-size: 14px;
-        line-height: 1.5;
-        scrollbar-width: thin;
-        scrollbar-color: #4A90E2 #1E1E1E;
+      background: #0d1117;
+      border: 1px solid #444;
+      border-radius: 8px 8px 0 0;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: #4a90e2 #1e1e1e;
     }
 
-    .content::-webkit-scrollbar { width: 10px; }
-    .content::-webkit-scrollbar-track { background: #1E1E1E; }
-    .content::-webkit-scrollbar-thumb {
-        background: #4A90E2;
-        border-radius: 8px;
-        border: 2px solid #1E1E1E;
+    .content::-webkit-scrollbar {
+      width: 10px;
     }
-    .content::-webkit-scrollbar-thumb:hover { background: #357ABD; }
+
+    .content::-webkit-scrollbar-track {
+      background: #1e1e1e;
+    }
+
+    .content::-webkit-scrollbar-thumb {
+      background: #4a90e2;
+      border-radius: 8px;
+      border: 2px solid #1e1e1e;
+    }
+
+    .content::-webkit-scrollbar-thumb:hover {
+      background: #357abd;
+    }
+
+    .markdown-body {
+      box-sizing: border-box;
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 28px;
+      background: #0d1117;
+      color: #c9d1d9;
+    }
+
+    .markdown-body img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    .diagram-loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 72px;
+      margin: 12px 0;
+      padding: 12px;
+      color: #9ca3af;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+    }
+
+    .diagram-loading.is-error {
+      color: #ff7b72;
+      border-color: #f85149;
+    }
+
+    .markdown-body a {
+      color: #58a6ff;
+    }
+
+    .markdown-body kbd {
+      display: inline-block;
+      padding: 3px 5px;
+      font: 11px ui-monospace, SFMono-Regular, SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      line-height: 10px;
+      color: #c9d1d9;
+      vertical-align: middle;
+      background-color: #161b22;
+      border: solid 1px rgba(110, 118, 129, 0.4);
+      border-bottom-color: rgba(110, 118, 129, 0.7);
+      border-radius: 6px;
+      box-shadow: inset 0 -1px 0 rgba(110, 118, 129, 0.4);
+    }
+
+    .markdown-alert {
+      padding: 8px 16px;
+      margin-bottom: 16px;
+      color: #c9d1d9;
+      border-left: 4px solid #3fb950;
+      background: rgba(56, 139, 253, 0.06);
+    }
+
+    .markdown-alert > :last-child {
+      margin-bottom: 0;
+    }
+
+    .markdown-alert-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .markdown-alert-note {
+      border-left-color: #1f6feb;
+    }
+
+    .markdown-alert-note .markdown-alert-title {
+      color: #58a6ff;
+    }
+
+    .markdown-alert-tip {
+      border-left-color: #238636;
+    }
+
+    .markdown-alert-tip .markdown-alert-title {
+      color: #3fb950;
+    }
+
+    .markdown-alert-important {
+      border-left-color: #8957e5;
+    }
+
+    .markdown-alert-important .markdown-alert-title {
+      color: #a371f7;
+    }
+
+    .markdown-alert-warning {
+      border-left-color: #d29922;
+    }
+
+    .markdown-alert-warning .markdown-alert-title {
+      color: #d29922;
+    }
+
+    .markdown-alert-caution {
+      border-left-color: #f85149;
+    }
+
+    .markdown-alert-caution .markdown-alert-title {
+      color: #ff7b72;
+    }
+
+    .message {
+      color: #9ca3af;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .message.error {
+      color: #ff7b72;
+    }
 
     .button-bar {
-        position: sticky;
-        bottom: 0;
-        display: flex;
-        justify-content: flex-end;
-        background: #1E1E1E;
-        padding: 5px 0 5px 0;
-        border-top: 1px solid #444;
+      position: sticky;
+      bottom: 0;
+      display: flex;
+      justify-content: flex-end;
+      background: #1e1e1e;
+      padding: 5px 0;
+      border-top: 1px solid #444;
+      flex: 0 0 auto;
     }
 
     button {
-        background: #4A90E2;
-        border: 1px solid #555;
-        color: #fff;
-        height: 28px;
-        font-size: 14px;
-        padding: 0 15px;
-        border-radius: 4px;
-        cursor: pointer;
-        transition: background-color 0.2s;
+      background: #4a90e2;
+      border: 1px solid #555;
+      color: #fff;
+      height: 28px;
+      font-size: 14px;
+      padding: 0 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s;
     }
 
-    button:hover { background: #357ABD; }
+    button:hover {
+      background: #357abd;
+    }
 
     .danger {
-        background: #E74C3C;
+      background: #e74c3c;
     }
+
     .danger:hover {
-        background: #C0392B;
+      background: #c0392b;
     }
 
-    h2 {
-        color: #4A90E2;
-        margin-top: 10px;
-        font-size: 16px;
-        border-bottom: 1px solid #333;
-        padding-bottom: 3px;
-    }
+    @media (max-width: 720px) {
+      body {
+        padding: 10px;
+      }
 
-    code {
-        background: #2D2D30;
-        color: #4A90E2;
-        padding: 2px 4px;
-        border-radius: 3px;
-    }
-
-    .help-section {
-        white-space: normal;
-        line-height: 1.6;
-        font-size: 14px;
-    }
-
-    .help-section p {
-        margin: 8px 0;
-        color: #DADADA;
-    }
-
-    .help-section ul {
-        margin: 6px 0 10px 0;
-        padding-left: 22px;
-    }
-
-    .help-section ul li {
-        margin: 4px 0;
-        color: #DADADA;
-    }
-
-    .help-section .sep {
-        color: #444;
-        margin: 14px 0 12px 0;
-        display: block;
-    }
-
-    .help-section .intro {
-        color: #AAAAAA;
-        margin-bottom: 14px;
-    }
-
-    .help-section .note-box {
-        background: #1f1a00;
-        border-left: 3px solid #E8C85A;
-        padding: 9px 13px;
-        margin: 10px 0 14px 0;
-        color: #E8C85A;
-        font-size: 13px;
-        line-height: 1.5;
-    }
-
-    .device-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin: 10px 0 16px 0;
-        font-size: 13px;
-    }
-
-    .device-table th {
-        background: #2D2D30;
-        color: #4A90E2;
-        padding: 7px 12px;
-        text-align: left;
-        border-bottom: 2px solid #4A90E2;
-        letter-spacing: 0.4px;
-        font-size: 13px;
-    }
-
-    .device-table td {
-        padding: 6px 12px;
-        border-bottom: 1px solid #2a2a2a;
-        color: #DADADA;
-    }
-
-    .device-table tbody tr:nth-child(even) td {
-        background: #161616;
-    }
-
-    .device-table tbody tr:hover td {
-        background: #1e2d45;
-        transition: background 0.15s;
-    }
-
-    .device-table .note-cell {
-        color: #E8C85A;
-        font-size: 12px;
-    }
-
-    .info-box {
-        background: #0d1a2e;
-        border-left: 3px solid #4A90E2;
-        padding: 9px 13px;
-        margin: 10px 0 14px 0;
-        color: #DADADA;
-        font-size: 13px;
-        line-height: 1.5;
-    }
-
-    .log-sample {
-        background: #0a0a0a;
-        border: 1px solid #2a2a2a;
-        border-radius: 4px;
-        padding: 10px 14px;
-        margin: 6px 0 14px 0;
-        font-family: 'Courier New', monospace;
-        font-size: 12px;
-        color: #AAAAAA;
-        white-space: pre;
-        overflow-x: auto;
-    }
-
-    .flow-bar {
-        background: #0d1a2e;
-        border: 1px solid #1e2d45;
-        border-radius: 4px;
-        padding: 9px 14px;
-        margin: 8px 0 14px 0;
-        color: #4A90E2;
-        font-size: 13px;
-        text-align: center;
-        letter-spacing: 0.3px;
-    }
-
-    .link-block {
-        background: #111;
-        border: 1px solid #2a2a2a;
-        border-radius: 5px;
-        padding: 11px 14px;
-        margin: 8px 0 14px 0;
-    }
-
-    .link-block .link-title {
-        color: #DADADA;
-        font-weight: bold;
-        font-size: 13px;
-        margin-bottom: 2px;
-    }
-
-    .link-block .link-sub {
-        color: #777;
-        font-size: 12px;
-        margin-bottom: 6px;
-    }
-
-    .link-block a {
-        color: #4A90E2;
-        text-decoration: none;
-        font-size: 12px;
-        word-break: break-all;
-    }
-
-    .link-block a:hover { text-decoration: underline; }
-
-    .scenario-block {
-        background: #0e0e0e;
-        border: 1px solid #2a2a2a;
-        border-radius: 4px;
-        padding: 9px 14px 9px 24px;   /* left was 14px → now 24px */
-        margin: 6px 0 10px 0;
-        font-size: 13px;
-        color: #AAAAAA;
-        line-height: 1.5;
-    }
-
-    .scenario-block strong:first-of-type {
-        color: #DADADA;
-        display: block;
-        margin-bottom: 4px;
-        margin-left: -10px;            /* pull header back to original edge */
-    }
-
-    /* This allows any other strong tags inside the text to remain inline and bold */
-    .scenario-block strong {
-        color: #DADADA;
-        font-weight: bold;
-    }
-    .nav-footer {
-        margin-top: 18px;
-        padding-top: 8px;
-        border-top: 1px solid #2a2a2a;
-        color: #666;
-        font-size: 13px;
-    }
-
-    .tag-warn {
-        background: #3a1a00;
-        color: #E8C85A;
-        border-radius: 3px;
-        padding: 1px 7px;
-        font-size: 11px;
-        font-weight: bold;
-    }
-
-    .tag-off {
-        background: #1e1e1e;
-        color: #777;
-        border: 1px solid #333;
-        border-radius: 3px;
-        padding: 1px 7px;
-        font-size: 11px;
-        font-weight: bold;
-    }
-
-    .help-section ol {
-        margin: 6px 0 10px 0;
-        padding-left: 22px;
-    }
-
-    .help-section ol li {
-        margin: 5px 0;
-        color: #DADADA;
-        line-height: 1.6;
+      .markdown-body {
+        padding: 18px;
+      }
     }
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>MerVLAN VLAN Manager - Help & Usage Guide</h1>
+    <h1>MerVLAN Help &amp; Usage Guide</h1>
+    <div class="subtitle">Loaded from docs/HELP.json</div>
   </div>
 
-  <div class="tabs">
-    <div class="tab active" data-tab="start">Getting Started</div>
-    <div class="tab" data-tab="ssid">SSID Setup</div>
-    <div class="tab" data-tab="lan">LAN Setup</div>
-    <div class="tab" data-tab="apply">Apply Changes</div>
-    <div class="tab" data-tab="ssh">SSH Key Install</div>
-    <div class="tab" data-tab="logs">Logs & Monitoring</div>
-    <div class="tab" data-tab="cli">CLI Usage</div>
-    <div class="tab" data-tab="unsupported">Device Support</div>
-    <div class="tab" data-tab="support">Get Help</div>
-    <div class="tab" data-tab="wiki">Wiki</div>
+  <div class="content" id="content">
+    <article class="markdown-body" id="helpContent">
+      <div class="message">Loading help...</div>
+    </article>
   </div>
-
-  <div class="content" id="content"></div>
 
   <div class="button-bar">
     <button class="danger" onclick="window.close()">Close</button>
   </div>
 
+  <script src="vendor/marked.umd.js"></script>
   <script>
-    const SECTIONS = {
-      start: `<div class="help-section">
-<h2>GETTING STARTED WITH MERVLAN</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, ebtables rules, and SSID-to-bridge bindings — locally on a single router or across multiple devices over SSH. Below is an overview of the supported network topologies before you start configuring.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>NETWORK TOPOLOGIES</h2>
-
-<div class="note-box" style="border-color:#E74C3C; background:#1a0808; color:#E74C3C;">
-  <strong>⛔ WIRELESS BACKHAUL IS NOT SUPPORTED</strong><br>
-  Wi-Fi backhaul cannot carry 802.1Q VLAN tags on Asus hardware. <strong>Ethernet backhaul is required between all devices in every topology.</strong> If any device in your setup connects to the main router over Wi-Fi, VLAN traffic will not be isolated correctly and the configuration will not work.
-</div>
-
-<div class="scenario-block">
-  <strong>1 — Single Device</strong>
-  MerVLAN is installed and configured on one router. No additional devices. VLANs are applied locally — no SSH, no nodes, no sync needed. Connects to a managed switch via Ethernet (WAN port). This is the simplest and most common use case.
-</div>
-
-<div class="scenario-block">
-  <strong>2 — Single Device with AiMesh Nodes</strong>
-  MerVLAN is installed and configured on the main router only. AiMesh nodes are added in the Nodes panel. SSH keys are generated and installed on the main router and automatically propagated to AiMesh nodes by the Asus firmware after a reboot — no manual key installation required on the nodes. All devices must be connected to a managed switch via Ethernet (WAN port). Apply reaches all nodes over SSH.
-</div>
-
-<div class="scenario-block">
-  <strong>3 — Single Device with Standalone APs (AP Mode)</strong>
-  MerVLAN is installed and configured on the main/master router. Standalone APs (non-AiMesh, running in AP mode) are added as nodes. Because these APs are not part of an AiMesh mesh, <strong>SSH keys must be manually installed on each AP</strong> — the firmware does not propagate them automatically. All devices must be connected to a managed switch via Ethernet (WAN port).
-</div>
-
-<div class="scenario-block">
-  <strong>4 — Nodes Connected Directly to Main Router <span class="tag-warn">EXPERIMENTAL</span></strong>
-  An extension of topologies 2 or 3 where downstream APs are plugged directly into the LAN ports of the main MerVLAN router via Ethernet, instead of an external managed switch. Because node-to-node trunking is not supported at this stage, <strong>APs must connect to the main unit</strong>. The main router's WAN port still needs to be connected to your managed switch, while the specific LAN ports used for the APs must be configured as 802.1Q trunk ports in MerVLAN's LAN Setup. This topology is experimental. Compatibility and stability cannot be guaranteed—not recommended unless you are debugging or love to experiment.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<div class="note-box">
-  <strong>⚠️ DRY RUN IS ON BY DEFAULT</strong><br>
-  When you first install MerVLAN, Dry Run mode is enabled. Clicking [Apply] simulates the configuration but makes <strong>NO actual changes</strong> to your network.<br><br>
-  Before your first real apply: <strong>General Settings → Disable "Dry Run" → Save Settings</strong><br>
-  You can re-enable it anytime to safely test a new config before committing it.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>GENERAL SETTINGS — THREE TOGGLES</h2>
-<p>Review these three global toggles in the General Settings panel before your first apply.</p>
-<table class="device-table">
-  <thead><tr><th>Toggle</th><th>Default</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><strong>DRY RUN</strong></td><td><span class="tag-warn">ON</span></td><td>Simulates apply without touching the network. Disable when ready to go live.</td></tr>
-    <tr><td><strong>STP</strong></td><td><span class="tag-off">OFF</span></td><td>Spanning Tree Protocol — prevents loops in multi-node topologies. Leave OFF for single-router setups.</td></tr>
-    <tr><td><strong>ENS</strong></td><td><span class="tag-off">OFF</span></td><td>Enable Native SSID — allows VLANs on base radios (wl0, wl1). Most users do not need this; use Guest Network SSIDs instead. See the SSID Setup tab for more details.</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>SERVICE BUTTONS — BOOT &amp; HEALTH</h2>
-<p>Boot persistence and the automatic VLAN health monitor are controlled together by three buttons in the General Settings panel.</p>
-<table class="device-table">
-  <thead><tr><th>Button</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr>
-      <td><strong>Enable Service</strong></td>
-      <td>Injects MerVLAN into <code>services-start</code> so VLANs are re-applied on every reboot, and activates the cron-based health monitor on the main router and all configured nodes.</td>
-    </tr>
-    <tr>
-      <td><strong>Disable Service</strong></td>
-      <td>Removes the <code>services-start</code> boot entry and disables the health cron on the main router and all nodes. The service-event heal hook is left in place.</td>
-    </tr>
-    <tr>
-      <td><strong>Service Status</strong></td>
-      <td>Polls the main router and every configured node and prints their current service state to the CLI log.</td>
-    </tr>
-  </tbody>
-</table>
-<p><strong>Service Status output example:</strong></p>
-<div class="log-sample">Status:
-&lt;--- Main Unit ---&gt;
-RT-AX95Q boot=enabled addon=active service-event=active cron=present is_node=no
-&lt;--- Configured Nodes ---&gt;
-RT-AX95Q 192.168.186.201:boot=enabled addon=node-on event=active cron=present is_node=yes</div>
-<div class="info-box">
-  <strong>Field meanings:</strong><br>
-  <strong>boot</strong> — enabled/disabled (services-start injection)<br>
-  <strong>addon</strong> — active (running on main) · node-on (running on node) · missing (MerVLAN not found)<br>
-  <strong>service-event</strong> — active (heal hook installed) · disabled · custom (modified externally)<br>
-  <strong>cron</strong> — present (health job scheduled) · absent<br>
-  <strong>is_node</strong> — yes/no (indicates if the unit is a node)
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>SETUP CHECKLIST — Single Router</h2>
-<ol>
-  <li><strong>Review General Settings</strong>
-    <ul>
-      <li>Confirm hardware profile detected (shown in the UI badge)</li>
-      <li>Disable Dry Run when ready to apply for real</li>
-    </ul>
-  </li>
-  <li><strong>Configure SSIDs</strong> — see the SSID Setup tab
-    <ul><li>Map each Guest SSID to a VLAN ID and set AP Isolation</li></ul>
-  </li>
-  <li><strong>Configure LAN Ports</strong> (optional) — see the LAN Setup tab</li>
-  <li><strong>Save Settings</strong> — click [Save Settings]</li>
-  <li><strong>Apply</strong> — click [Apply VLAN Manager] and watch the CLI log</li>
-</ol>
-<div class="info-box">✅ VLANs are now live! Once your config is confirmed working, click <strong>Enable Service</strong> to make it persist across reboots.You can monitor the active VLANs in the INFO panel (see "Logs & Monitoring" for details).</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>SETUP CHECKLIST — Multi-Node (AiMesh or Full AP)</h2>
-<ol>
-  <li><strong>Install SSH Keys</strong> — click [SSH Keys Install]
-    <ul>
-      <li>Copy the public key from the CLI log</li>
-      <li>AiMesh nodes: paste the key into the main router's Administration → System → Authorized Keys, then reboot each AiMesh node</li>
-      <li>Full AP nodes: paste the key into each AP's Administration → System → Authorized Keys individually</li>
-    </ul>
-  </li>
-  <li><strong>Add Your Nodes</strong>
-    <ul>
-      <li>Enter each node's IP in the Nodes panel, rename if desired</li>
-      <li>Click [Save Settings] before syncing</li>
-    </ul>
-  </li>
-  <li><strong>Sync Nodes</strong> — click [Sync Nodes]
-    <ul>
-      <li>Copies MerVLAN files to all nodes</li>
-      <li>Trunk config is automatically stripped (main router only)</li>
-    </ul>
-  </li>
-  <li><strong>Configure SSIDs</strong> — map SSIDs to VLANs and assign to the correct nodes</li>
-  <li><strong>Configure LAN Ports</strong> if needed</li>
-  <li><strong>Save Settings</strong></li>
-  <li><strong>Apply</strong> — choose "Local + Nodes" and watch the CLI log</li>
-</ol>
-<div class="info-box">✅ VLANs are now live! Once your config is confirmed working, click <strong>Enable Service</strong> to make it persist across reboots.You can monitor the active VLANs in the INFO panel (see "Logs & Monitoring" for details).</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>IMPORTANT TIPS</h2>
-<ul>
-  <li>Always <strong>Save</strong> before applying — unsaved changes are not applied</li>
-  <li>Start with Dry Run ON to validate your config without risk</li>
-  <li>Check the CLI log — it shows exactly what was skipped or failed</li>
-  <li>Node Assignment defaults to MAIN; single-router users can ignore it</li>
-  <li>VLANs auto-recover after firmware events via the built-in heal system</li>
-</ul>
-<div class="nav-footer">Ready to configure? Head to "SSID Setup" →</div>
-</div>`,
-      ssid: `<div class="help-section">
-<h2>SSID CONFIGURATION</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">MerVLAN follows this flow for each SSID slot. Up to 12 slots are available — leave a slot blank to skip it.</p>
-<div class="flow-bar">SSID Name &nbsp;→&nbsp; VLAN ID &nbsp;→&nbsp; AP Isolation &nbsp;→&nbsp; Node Assignment</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>SSID NAME</h2>
-<ul>
-  <li>Enter the exact SSID name from your router's Wireless settings</li>
-  <li>The SSID must already exist and be enabled — looked up by name</li>
-  <li>Leave blank to skip that slot</li>
-  <li>Status: ✅ Found &nbsp;|&nbsp; ❌ Not found</li>
-</ul>
-<div class="note-box">
-  <strong>⚠️ GUEST NETWORK SSIDs ARE STRONGLY RECOMMENDED</strong><br><br>
-  Your router has <strong>base radios</strong> (your primary "HomeNet_2G" / "HomeNet_5G" SSIDs) and <strong>Guest Network interfaces</strong> (wl0.1, wl1.1, etc.) created under Wireless → Guest Network in the Asus UI.<br><br>
-  MerVLAN is designed to work with Guest Network SSIDs. Assigning a VLAN to a base radio requires enabling <strong>ENS (Enable Native SSID)</strong> in General Settings. Without ENS, base radio SSIDs are silently skipped with a warning in the log.
-</div>
-<div class="info-box">
-  <strong>Why Guest SSIDs are safer — the br0 removal problem</strong><br><br>
-  When MerVLAN assigns a VLAN to any SSID, it must first remove that wireless interface from <code>br0</code> (the router's default LAN bridge) and attach it to a dedicated VLAN bridge instead.<br><br>
-  Guest Network interfaces (wl0.1, wl1.1, etc.) handle this cleanly. <strong>Base radios (wl0, wl1, wl2) do not behave consistently.</strong> Depending on the router model and firmware version, removing a base radio from br0 can trigger the Asus wireless subsystem to:<br>
-  <ul style="margin-top:6px;">
-    <li>Silently move the interface back into br0 on the next wireless event</li>
-    <li>Only partially complete the bridge change, leaving the radio in an inconsistent state</li>
-    <li>Trigger a full wireless restart that drops all clients briefly</li>
-  </ul>
-  <br>
-  <strong>You are free to try base radios with ENS enabled</strong> — some models handle it just fine. But if you notice your main SSID losing VLAN isolation, dropping clients unexpectedly, or the heal system triggering repeatedly, this is most likely why.<br><br>
-  <strong>Best practice:</strong> Create a dedicated Guest SSID for each VLAN segment and map those here. Leave your main SSID on the default br0.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>VLAN ID</h2>
-<ul>
-  <li>Choose a number between 2 and 4094</li>
-  <li>Each SSID can have its own VLAN, or share one with another SSID</li>
-  <li>Sharing a VLAN ID means both SSIDs join the same network</li>
-  <li>Status: ✅ Valid &nbsp;|&nbsp; 🟡 Duplicate detected</li>
-</ul>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>AP ISOLATION</h2>
-<ul>
-  <li><strong>ON</strong> — Wireless clients cannot communicate with each other</li>
-  <li><strong>OFF</strong> — Clients on the same VLAN can communicate normally</li>
-  <li>Recommended ON for Guest and IoT networks</li>
-  <li>Recommended OFF for trusted family or work networks</li>
-  <li>Only activates once both SSID and VLAN fields are valid</li>
-</ul>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>NODE ASSIGNMENT <small style="color:#777; font-weight:normal;">(Multi-Node Only)</small></h2>
-<p>Controls which devices in your network manage each SSID.</p>
-<ul>
-  <li><strong>MAIN</strong> = the main router</li>
-  <li><strong>NODE1–NODE10</strong> = your configured access points or AiMesh nodes</li>
-  <li>Multiple nodes can be selected per SSID</li>
-  <li>Nodes without hardware detection are shown greyed out</li>
-  <li>Defaults to MAIN — single-router users can ignore this entirely</li>
-</ul>
-<div class="info-box">
-  <strong>Tips:</strong><br>
-  • Only select nodes that actually broadcast that SSID<br>
-  • If an SSID is only on a node, deselect MAIN to avoid unnecessary apply time<br>
-  • When in doubt, select all nodes that broadcast the SSID
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>EXAMPLE SETUP</h2>
-<table class="device-table">
-  <thead><tr><th>Slot</th><th>SSID</th><th>VLAN</th><th>AP Isolation</th><th>Nodes</th></tr></thead>
-  <tbody>
-    <tr><td>1</td><td>IoT_2G</td><td>30</td><td>ON</td><td>MAIN, NODE1</td></tr>
-    <tr><td>2</td><td>IoT_5G</td><td>30</td><td>ON</td><td>MAIN, NODE1</td></tr>
-    <tr><td>3</td><td>Guest_2G</td><td>20</td><td>ON</td><td>MAIN</td></tr>
-    <tr><td>4</td><td>Guest_5G</td><td>20</td><td>ON</td><td>MAIN</td></tr>
-    <tr><td>5</td><td>Kids_2G</td><td>40</td><td>OFF</td><td>NODE2</td></tr>
-  </tbody>
-</table>
-<p>Slots 1 and 2 share VLAN 30 — both bands on the same IoT network.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>STATUS ICONS</h2>
-<ul>
-  <li>✅ SSID found and valid</li>
-  <li>❌ SSID not found in wireless config</li>
-  <li>🟩 Edited but not yet saved</li>
-  <li>🟡 Duplicate VLAN ID (check if intentional)</li>
-</ul>
-<div class="nav-footer">Next: Configure LAN ports if needed →</div>
-</div>`,
-
-      lan: `<div class="help-section">
-<h2>LAN PORT CONFIGURATION</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">Assign VLANs to physical LAN ports for wired device isolation. A port with the same VLAN as an SSID shares that network with wireless clients on that SSID.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>PORT ASSIGNMENT</h2>
-<p>For each LAN port, assign a <strong>VLAN ID</strong> (2–4094) or leave blank for the default untagged network. Match an SSID's VLAN to bridge wireless and wired traffic together.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>TRUNK MODE <small style="color:#E8C85A; font-size:11px; font-weight:normal;">(EXPERIMENTAL — Main Router Only)</small></h2>
-<p>Trunk mode tags multiple VLANs on a single LAN port. Intended for connecting a managed switch or downstream AP that handles 802.1Q VLAN tagging itself.</p>
-<ul>
-  <li>Enable Trunk on a port, then select which VLANs are tagged on it</li>
-  <li>Set the native (untagged) VLAN for that port</li>
-  <li>Uses strict ebtables VLAN filtering where available</li>
-</ul>
-<div class="note-box">
-  <strong>⚠️ TRUNK IS MAIN ROUTER ONLY</strong><br>
-  Trunk configuration is automatically stripped from node settings when you sync or apply "Local + Nodes". Trunk cannot be applied on AiMesh or AP nodes.<br><br>
-  Trunk is still experimental. Test thoroughly before relying on it in production.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>ADVANCED PORT MAPPING OVERRIDE (APMO)</h2>
-<p>If your device's port labels don't match the physical ports, or if the WAN interface was incorrectly detected, use APMO to correct the hardware profile manually.</p>
-<ul>
-  <li>Click the <strong>[Experimental]</strong> badge or hardware status indicator in the main UI</li>
-  <li>Re-map each ethX interface to the correct LAN port label</li>
-  <li>Adjust the WAN interface and port count if needed</li>
-  <li>Save — stored in settings.json and persists across MerVLAN updates</li>
-</ul>
-<p>See the Device Support tab for the full list of pre-mapped devices.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>STATUS ICONS</h2>
-<ul>
-  <li>✅ Valid VLAN configured</li>
-  <li>❎ No VLAN assigned (default network)</li>
-  <li>🟩 Edited but not saved</li>
-  <li>🟡 Duplicate VLAN (check if intentional)</li>
-  <li>❌ Invalid VLAN ID</li>
-</ul>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>COMMON SCENARIOS</h2>
-<div class="scenario-block">
-  <strong>Scenario 1 — IoT wired + wireless on the same segment</strong>
-  SSID "IoT_2G" → VLAN 30 &nbsp;·&nbsp; LAN4: VLAN 30<br>
-  A wired device on LAN4 joins the same isolated IoT network as wireless clients.
-</div>
-<div class="scenario-block">
-  <strong>Scenario 2 — Full per-port isolation</strong>
-  LAN1: VLAN 10 &nbsp;·&nbsp; LAN2: VLAN 20 &nbsp;·&nbsp; LAN3: VLAN 30 &nbsp;·&nbsp; LAN4: VLAN 40<br>
-  Every port is its own isolated segment.
-</div>
-<div class="scenario-block">
-  <strong>Scenario 3 — One isolated port, rest default</strong>
-  LAN1–LAN3: blank (default) &nbsp;·&nbsp; LAN4: VLAN 30<br>
-  Only LAN4 is isolated; the rest of the LAN is unaffected.
-</div>
-<div class="nav-footer">Ready to apply? Check the "Apply Changes" tab →</div>
-</div>`,
-      apply: `<div class="help-section">
-<h2>APPLYING YOUR CONFIGURATION</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">Once configured, it's time to push your VLANs live.</p>
-
-<div class="note-box">
-  <strong>⚠️ DRY RUN IS ON BY DEFAULT</strong><br>
-  MerVLAN ships with Dry Run mode enabled. The full apply pipeline runs — validation, bridge creation, SSID binding — but <strong>NO changes are committed</strong> to the network.<br><br>
-  To apply real changes: <strong>General Settings → Dry Run: Off → Save Settings → Apply</strong><br>
-  If nothing seems to change after an apply, look for <code>[DRY RUN]</code> lines in the CLI output.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>APPLY MODES <small style="color:#777; font-weight:normal;">(shown when nodes are configured)</small></h2>
-<table class="device-table">
-  <thead><tr><th>Mode</th><th>What it does</th><th>When to use</th></tr></thead>
-  <tbody>
-    <tr><td>Local Unit Only</td><td>Applies to this router only. Nodes unchanged.</td><td>Testing or debugging the main router</td></tr>
-    <tr><td><strong>Local + Nodes</strong></td><td>Applies main router first, then all nodes via SSH.</td><td><strong>Normal operation (recommended)</strong></td></tr>
-    <tr><td>Nodes Only</td><td>Skips main router, updates nodes only.</td><td>Debugging a specific node</td></tr>
-  </tbody>
-</table>
-<p>Single router: no mode selection — applies immediately.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>BEFORE APPLYING</h2>
-<ol>
-  <li><strong>Save your configuration</strong> — click [Save Settings]. Unsaved changes are NOT applied.</li>
-  <li><strong>Disable Dry Run</strong> — General Settings → Dry Run: Off → Save Settings</li>
-  <li><strong>Click [Apply VLAN Manager]</strong> — choose apply mode if multi-node, then watch the CLI log.</li>
-</ol>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>WHAT HAPPENS DURING APPLY</h2>
-<table class="device-table">
-  <tbody>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 1</td><td>Hardware profile validated</td></tr>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 2</td><td>SSID names resolved to wireless interfaces</td></tr>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 3</td><td>VLAN bridges created (brX per VLAN ID)</td></tr>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 4</td><td>SSID interfaces bound to their VLAN bridges</td></tr>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 5</td><td>LAN port VLANs applied</td></tr>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 6</td><td>[Multi-node] Settings pushed to nodes; steps 1–5 repeated remotely</td></tr>
-    <tr><td style="color:#4A90E2; font-weight:bold; white-space:nowrap;">Step 7</td><td>Trunk configuration applied on main router (always skipped on nodes)</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>BOOT PERSISTENCE &amp; HEALTH SERVICE</h2>
-<p>By default, VLANs do <strong>NOT</strong> survive a router reboot. Use the Service buttons in General Settings to enable persistence and automatic health monitoring together.</p>
-<table class="device-table">
-  <thead><tr><th>Button</th><th>Effect</th></tr></thead>
-  <tbody>
-    <tr><td><strong>Enable Service</strong></td><td>Injects boot entry into <code>services-start</code> + activates the cron health monitor on main router and all nodes.</td></tr>
-    <tr><td><strong>Disable Service</strong></td><td>Removes boot entry + disables health cron on main router and all nodes.</td></tr>
-    <tr><td><strong>Service Status</strong></td><td>Prints boot, addon, service-event, and cron state for main router and every node.</td></tr>
-  </tbody>
-</table>
-<div class="info-box">
-  The Boot Service (when enabled):<br>
-  • Waits up to 30s for SSIDs to become available before re-applying VLANs<br>
-  • Runs in the background — does not delay other services or slow down boot<br>
-  • All activity logged to <code>boot_wrap.log</code>
-</div>
-<div class="note-box">
-  <strong>⚠️</strong> Click <strong>Enable Service</strong> only after your config is confirmed working live. A broken config that runs on boot requires a router restart to clear.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>TROUBLESHOOTING</h2>
-<table class="device-table">
-  <thead><tr><th>Problem</th><th>Solution</th></tr></thead>
-  <tbody>
-    <tr><td>Apply runs but nothing changes</td><td>Dry Run is likely still ON — look for <code>[DRY RUN]</code> in CLI output and disable it in General Settings.</td></tr>
-    <tr><td>SSIDs not binding</td><td>Verify SSID names match exactly (case-sensitive). If using a base radio, enable ENS in General Settings.</td></tr>
-    <tr><td>Nodes not updating</td><td>Run [Sync Nodes] first, then apply. Verify node IPs and SSH keys are installed.</td></tr>
-    <tr><td>Port mapping incorrect</td><td>Use APMO to correct the hardware profile (see LAN Setup tab).</td></tr>
-    <tr><td>VLANs lost after reboot</td><td>Service not enabled — click <strong>Enable Service</strong> in General Settings.</td></tr>
-  </tbody>
-</table>
-<div class="nav-footer">Want to monitor results? Check "Logs &amp; Monitoring" →</div>
-</div>`,
-      logs: `<div class="help-section">
-<h2>LOGS &amp; MONITORING</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">MerVLAN provides real-time feedback and persistent logs for every operation.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>CLI LOG <small style="color:#777; font-weight:normal;">(Main Window)</small></h2>
-<p>The console shows real-time output during applies and node operations.</p>
-<ul>
-  <li>Validation results and configuration warnings</li>
-  <li>Apply progress step by step</li>
-  <li>SSID bind confirmations and failures</li>
-  <li>SSH connection status for each node</li>
-  <li>Node filter info — which node is handling which SSID</li>
-</ul>
-<p>[Clear CLI] clears the console. Output auto-scrolls to the latest entry.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>FULL LOG VIEWER <small style="color:#777; font-weight:normal;">(Separate Window)</small></h2>
-<p>Click [View Full Logs] for timestamped, persistent logs across all operations. Per-file view: vlan_manager, cli_output, boot_wrap, heal.</p>
-<p>Log files on the router (stored in RAM — cleared on reboot):</p>
-<div class="log-sample">/tmp/mervlan_tmp/logs/vlan_manager.log
-/tmp/mervlan_tmp/logs/cli_output.log
-/tmp/mervlan_tmp/logs/boot_wrap.log</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>AUTO-HEAL SYSTEM</h2>
-<p>MerVLAN monitors VLAN health automatically every minute in the background.</p>
-<table class="device-table">
-  <thead><tr><th>Phase</th><th>What happens</th></tr></thead>
-  <tbody>
-    <tr><td><strong>Phase 1</strong></td><td>Fast check — single-pass VLAN bridge scan</td></tr>
-    <tr><td><strong>Phase 2</strong></td><td>If fast check fails: 10-pass validation over ~27s (3 consecutive mismatches trigger heal)</td></tr>
-    <tr><td><strong>Heal</strong></td><td>Persistent mismatch → mervlan_manager.sh re-applies your config automatically</td></tr>
-    <tr><td><strong>Wireless events</strong></td><td>Wait up to 120s for wireless stack to settle + deferred 90s recheck to prevent false positives</td></tr>
-  </tbody>
-</table>
-<p><strong>Log messages you may see:</strong></p>
-<div class="log-sample">"Heal: event [restart_wireless] matched watchlist"
-  → A firmware event triggered a VLAN health check
-
-"VLAN bridges present but wl subinterfaces detected in br0"
-  → Wireless leak detected (race condition) — auto-heal will re-apply
-
-"Heal: VLAN config is healthy — no action needed"
-  → Check passed, everything is intact
-
-"Heal: applying VLAN configuration"
-  → A heal re-apply was triggered
-
-"Heal: scheduling deferred recheck in 90s for [event]"
-  → A wireless event finished; a follow-up check is queued</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>ACTIVE VLANs PANEL</h2>
-<p>Located below the CLI log. Shows which VLAN bridges are live on the main router and each node. Click [Refresh Active VLANs] to update. Typical output:</p>
-<div class="log-sample">MAIN:  br10  br20  br30
-NODE1 (192.168.1.50):  br20  br30
-NODE2 (192.168.1.51):  br30</div>
-<div class="info-box">
-  <strong>Note:</strong> br0 is the router's default LAN bridge and should NOT appear here. If you only see br0, VLANs have not been applied — check that Dry Run is disabled.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>LOG REFERENCE</h2>
-<table class="device-table">
-  <thead><tr><th>Log message</th><th>Meaning</th></tr></thead>
-  <tbody>
-    <tr><td><code>✓ SSID 'X' resolved to wl1.1</code></td><td>✅ SSID found and mapped</td></tr>
-    <tr><td><code>✓ Successfully bound to br30</code></td><td>✅ Interface added to VLAN bridge</td></tr>
-    <tr><td><code>Filtering SSID identity=MAIN</code></td><td>✅ Node filter applied correctly</td></tr>
-    <tr><td><code>Node setup completed successfully</code></td><td>✅ Remote node apply succeeded</td></tr>
-    <tr><td><code>Heal: VLAN config is healthy</code></td><td>✅ Auto-heal check passed</td></tr>
-    <tr><td><code>SSID 'X' not found on any band</code></td><td>⚠️ SSID name mismatch or SSID disabled</td></tr>
-    <tr><td><code>Skipping native SSID — ENS not enabled</code></td><td>⚠️ Base radio skipped (expected if ENS is OFF)</td></tr>
-    <tr><td><code>SSH connection failed</code></td><td>⚠️ Node SSH key or IP address issue</td></tr>
-    <tr><td><code>Fatal: Hardware profile not ready</code></td><td>⚠️ Device not probed; use APMO</td></tr>
-    <tr><td><code>wl.* detected in br0</code></td><td>⚠️ Race condition; auto-heal will re-apply</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>DEBUGGING TIPS</h2>
-<table class="device-table">
-  <thead><tr><th>Symptom</th><th>What to check</th></tr></thead>
-  <tbody>
-    <tr><td>VLANs disappear after reboot</td><td>Boot Service is not enabled — enable it in General Settings</td></tr>
-    <tr><td>Apply runs but VLANs don't appear</td><td>Dry Run is likely still ON — look for <code>[DRY RUN]</code> in CLI</td></tr>
-    <tr><td>VLANs disappear after wireless restart</td><td>restart_wireless race condition — auto-heal handles it; check heal log</td></tr>
-    <tr><td>Node not applying</td><td>View Full Logs for SSH error; run [Sync Nodes] then apply again</td></tr>
-  </tbody>
-</table>
-<div class="nav-footer">Need help? See the "Get Help" tab for support links →</div>
-</div>`,
-      cli: `<div class="help-section">
-<h2>CLI USAGE</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">These commands are useful when working over SSH on the main router. Most users should use the web UI first; CLI commands are mainly for recovery, manual updates, testing, and advanced troubleshooting.</p>
-
-<div class="note-box">
-  <strong>Run commands from the addon directory unless shown otherwise:</strong><br>
-  <code>cd /jffs/addons/mervlan</code>
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>MANUAL UPDATE COMMANDS</h2>
-<table class="device-table">
-  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>sh functions/update_mervlan.sh</code></td><td>Update from the stable/main channel.</td></tr>
-    <tr><td><code>sh functions/update_mervlan.sh dev</code></td><td>Update from the development channel.</td></tr>
-    <tr><td><code>sh functions/update_mervlan.sh update dev</code></td><td>Explicit development-channel update. Same intent as the UI dev update button.</td></tr>
-    <tr><td><code>sh functions/update_mervlan.sh restore</code></td><td>Open the restore flow and select one of the local MerVLAN backups.</td></tr>
-  </tbody>
-</table>
-
-<div class="info-box">
-  Updates preserve settings, SSH keys, MAC shield databases, and local backups where possible. After updating, the script refreshes the public web UI files and reapplies service hooks.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>INSTALL, REINSTALL, AND UNINSTALL</h2>
-<table class="device-table">
-  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>sh install.sh full</code></td><td>Fresh install from the stable/main channel. Downloads the package, installs files, runs hardware probe, and sets up the UI.</td></tr>
-    <tr><td><code>sh install.sh full dev</code></td><td>Fresh install from the development channel.</td></tr>
-    <tr><td><code>TMP_DIR=/tmp/mervlan_staging sh install.sh download</code></td><td>Download a MerVLAN tarball to a staging folder without installing it.</td></tr>
-    <tr><td><code>TMP_DIR=/tmp/mervlan_staging sh install.sh tarball</code></td><td>Install from a previously downloaded tarball in the staging folder.</td></tr>
-    <tr><td><code>sh install.sh credentials</code></td><td>Update stored SSH username and SSH port only.</td></tr>
-    <tr><td><code>sh uninstall.sh</code></td><td>Remove the web UI entry and service hooks, but keep the addon files and data.</td></tr>
-    <tr><td><code>sh uninstall.sh full</code></td><td>Full uninstall. Removes web UI, hooks, addon files, data, and node-side install where possible.</td></tr>
-    <tr><td><code>sh uninstall.sh &amp;&amp; sh install.sh</code></td><td>Manual UI refresh/reinstall from the already-installed local files. Useful after manually changing <code>mervlan.asp</code>, public UI files, or install wiring without doing a full update.</td></tr>
-  </tbody>
-</table>
-
-<div class="note-box">
-  <strong>Be careful with full uninstall:</strong> it is intended for a clean removal or clean reinstall. Use normal uninstall + install when you only need to refresh the web UI mount and public files.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>SERVICE AND BOOT CONTROL</h2>
-<table class="device-table">
-  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>sh functions/mervlan_boot.sh status</code></td><td>Show boot, addon, service-event, cron, node, and MAC shield state.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh enable</code></td><td>Enable MerVLAN at boot and enable the health cron.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh disable</code></td><td>Disable boot persistence and tear down active shield chains, while keeping settings and databases.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh setupenable</code></td><td>Install or repair service-event and services-start hooks.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh setupdisable</code></td><td>Remove MerVLAN hook blocks from service-event and services-start.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh cronenable</code></td><td>Enable the periodic health check cron job.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh crondisable</code></td><td>Disable the periodic health check cron job.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh nodeenable</code></td><td>Propagate node service setup to configured nodes over SSH.</td></tr>
-    <tr><td><code>sh functions/mervlan_boot.sh nodedisable</code></td><td>Remove MerVLAN service hooks from configured nodes over SSH.</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>MANUAL APPLY AND NODE OPERATIONS</h2>
-<table class="device-table">
-  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>sh functions/mervlan_manager.sh</code></td><td>Apply the current settings locally on the router.</td></tr>
-    <tr><td><code>sh functions/mervlan_manager.sh --dry-run</code></td><td>Run the manager without making live network changes.</td></tr>
-    <tr><td><code>sh functions/sync_nodes.sh</code></td><td>Copy MerVLAN files and node-filtered settings to configured nodes.</td></tr>
-    <tr><td><code>sh functions/execute_nodes.sh</code></td><td>Run the node apply workflow over SSH.</td></tr>
-    <tr><td><code>sh functions/execute_nodes.sh nodesonly</code></td><td>Run only the node-side apply workflow.</td></tr>
-    <tr><td><code>sh functions/hw_probe.sh</code></td><td>Refresh the local hardware profile in settings.json.</td></tr>
-  </tbody>
-</table>
-
-<div class="info-box">
-  The normal UI Apply path handles save, sync, local apply, and node apply in the expected order. Use these CLI commands when debugging or recovering from a partial state.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>CLIENT LIST AND MAC SHIELD</h2>
-<table class="device-table">
-  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>sh functions/collect_clients.sh</code></td><td>Rebuild the Active VLAN Clients JSON from the main router and configured nodes.</td></tr>
-    <tr><td><code>sh functions/mac_refresh.sh</code></td><td>Clear and rebuild the MAC shield database from currently connected VLAN clients. Use after moving devices back to br0 so they do not stay blocked by old shield entries.</td></tr>
-    <tr><td><code>sh functions/mac_client_meta.sh</code></td><td>Materialize client display names and MAC shield overrides after metadata changes. Normally triggered by the UI.</td></tr>
-    <tr><td><code>cat /tmp/mervlan_tmp/mac_shield.db</code></td><td>Show the active in-RAM MAC shield database.</td></tr>
-    <tr><td><code>cat /jffs/addons/mervlan/tmp/mac_shield.db</code></td><td>Show the persistent JFFS MAC shield checkpoint.</td></tr>
-    <tr><td><code>cat /jffs/addons/mervlan/tmp/mac_shield_override.db</code></td><td>Show MACs that are unlocked from MAC shield blocking.</td></tr>
-    <tr><td><code>cat /jffs/addons/mervlan/tmp/client_name_override.db</code></td><td>Show friendly client-name mappings used by the UI.</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>LOGS AND QUICK DEBUGGING</h2>
-<table class="device-table">
-  <thead><tr><th style="width:38%">Command</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>tail -n 80 /tmp/mervlan_tmp/logs/cli_output.log</code></td><td>Show recent CLI output from UI-triggered actions.</td></tr>
-    <tr><td><code>tail -n 120 /tmp/mervlan_tmp/logs/vlan_manager.log</code></td><td>Show recent manager, heal, MAC shield, and service logs.</td></tr>
-    <tr><td><code>tail -n 80 /tmp/mervlan_tmp/logs/boot_wrap.log</code></td><td>Show recent boot wrapper activity.</td></tr>
-    <tr><td><code>cat /tmp/mervlan_tmp/results/vlan_clients.json</code></td><td>View the generated client inventory JSON used by the Active VLAN Clients panel.</td></tr>
-    <tr><td><code>: &gt; /tmp/mervlan_tmp/logs/cli_output.log</code></td><td>Clear the CLI output log manually.</td></tr>
-  </tbody>
-</table>
-
-<div class="note-box">
-  <strong>Do not run <code>service-event-handler.sh</code> directly.</strong> It expects firmware-provided service-event variables and is meant to be called by Asuswrt-Merlin, not by hand.
-</div>
-</div>`,
-      unsupported: `<div class="help-section">
-
-<h2>DEVICE SUPPORT</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-
-<p class="intro">MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merlin routers. Each profile maps physical LAN ports to the correct kernel interfaces (ethX) and identifies the WAN port.</p>
-
-<h2>FULLY SUPPORTED DEVICES</h2>
-
-<table class="device-table">
-  <thead>
-    <tr>
-      <th>Model</th>
-      <th>LAN Ports</th>
-      <th>Notes</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr><td>GT-AX6000</td><td>5</td><td></td></tr>
-    <tr><td>RT-AX86U</td><td>5</td><td></td></tr>
-    <tr><td>RT-AX86U Pro</td><td>5</td><td></td></tr>
-    <tr><td>RT-AX88U</td><td>5</td><td></td></tr>
-    <tr><td>RT-AX86S</td><td>4</td><td></td></tr>
-    <tr><td>RT-AX92U</td><td>4</td><td></td></tr>
-    <tr><td>RT-AC86U</td><td>4</td><td></td></tr>
-    <tr><td>RT-AX82U</td><td>4</td><td></td></tr>
-    <tr><td>RT-AX5400</td><td>4</td><td></td></tr>
-    <tr><td>RT-AX58U</td><td>4</td><td></td></tr>
-    <tr><td>TUF-AX3000_V2</td><td>4</td><td></td></tr>
-    <tr><td>RT-AX95Q</td><td>3</td><td></td></tr>
-    <tr><td>RT-AXE95Q</td><td>3</td><td></td></tr>
-    <tr><td>RT-ET8</td><td>3</td><td></td></tr>
-    <tr><td>RT-BE92U</td><td>1&nbsp;(shared)</td><td class="note-cell">⚠️ LAN 1–4 share one VLAN bridge — no per-port isolation</td></tr>
-  </tbody>
-</table>
-
-<p>These devices are auto-detected on startup — no manual configuration needed. More profiles are added with each release.</p>
-
-<div class="note-box">
-  <strong>⚠️ RT-BE92U — Hardware Limitation</strong><br>
-  Due to the internal switch design on this model, all four physical LAN ports share a single
-  VLAN-capable interface. Only one VLAN ID can be assigned and it applies to LAN 1–4 as a group.
-  Per-port VLAN isolation is not supported on this model.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-
-<h2>IF YOUR DEVICE IS NOT LISTED</h2>
-
-<p>MerVLAN will still attempt to run, but port assignments may be incorrect or incomplete.
-Use the APMO modal to configure your hardware profile manually.</p>
-
-<p><strong>How to access APMO:</strong></p>
-<ul>
-  <li>Click the <strong>[Experimental]</strong> badge or hardware status indicator in the main UI header</li>
-</ul>
-
-<p><strong>In the APMO modal you can:</strong></p>
-<ul>
-  <li>Map each ethX interface to the correct LAN port label</li>
-  <li>Set the correct WAN interface (e.g., eth0 or eth4)</li>
-  <li>Confirm the LAN port count</li>
-  <li>Save the profile — stored in settings.json, persists across MerVLAN updates</li>
-</ul>
-
-<p><strong>Tips for identifying your port layout:</strong></p>
-<ul>
-  <li>Connect one device at a time to each LAN port and note the interface</li>
-  <li>Check the Asus product page for your model's port-to-chip mapping</li>
-  <li>Ask on Discord or SNB Forums — others may have already mapped your device</li>
-</ul>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-
-<h2>SKIPPING APMO</h2>
-
-<p>Without a hardware profile, MerVLAN will guess port mappings from available interfaces. This may lead to:</p>
-<ul>
-  <li>Wrong VLAN assigned to the wrong physical port</li>
-  <li>WAN port misidentified — <strong>this breaks internet connectivity</strong></li>
-  <li>Trunk configuration applied on the wrong interface</li>
-  <li>SSIDs binding correctly while wired VLANs fail silently</li>
-</ul>
-<p>At minimum, verify the WAN interface is correct before applying.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-
-<h2>SHARING YOUR PROFILE</h2>
-
-<p>Got a working APMO profile for an unlisted device? Please share it — it can be built into a future release.</p>
-<ul>
-  <li>Post the ethX mapping on SNB Forums or Discord</li>
-  <li>Open a GitHub Issue with your PRODUCTID and port layout</li>
-  <li>Include firmware version and your test results</li>
-</ul>
-<p>See the "Get Help" tab for all links.</p>
-
-</div>`,
-
-      ssh: `<div class="help-section">
-<h2>SSH KEY INSTALL</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node and apply VLAN configuration remotely. AiMesh nodes handle key propagation automatically, but standalone nodes (Full APs) require manual installation as MerVLAN cannot inject it automatically.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>HOW IT WORKS</h2>
-<p>Clicking <strong>[SSH Keys Install]</strong> generates an ED25519 key pair on the main router and displays the public key in the CLI log. You then copy that key and paste it manually into the Authorized Keys field on each node via the Asus web UI.</p>
-<div class="info-box">
-  <strong>One-way trust by design</strong><br><br>
-  The private key lives only on the main router and is never copied to nodes. Nodes hold the public key — this allows the main router to authenticate <em>to</em> them via SSH, but nodes cannot SSH back to the main router using this key pair. This is intentional: the main router initiates all connections, and there is no risk of key accumulation or duplicate injection because you control exactly where the public key is pasted.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>STEP 1 — GENERATE THE KEY PAIR</h2>
-<ol>
-  <li>Click <strong>[SSH Keys Install]</strong> in the Nodes panel</li>
-  <li>The public key is printed in the CLI log — it is a single line starting with <code>ssh-ed25519</code></li>
-  <li>Copy that full line — you will paste it on each node in the next step</li>
-</ol>
-<div class="info-box">
-  If a key pair already exists, the script reuses it and prints the existing public key. You do not need to re-install it on nodes unless the key was regenerated.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>STEP 2 — AIMESH NODES</h2>
-<p>For AiMesh nodes that are managed by this router, Asus handles key propagation — but only during the node's boot process.</p>
-<ol>
-  <li>On the <strong>main router</strong>, go to:<br>
-    <strong>Administration → System → Authorized Keys</strong></li>
-  <li>Paste the public key and save</li>
-  <li><strong>Reboot each AiMesh node</strong> — Asus syncs authorized keys to nodes during their boot; the key will not be active until the node has rebooted</li>
-</ol>
-<div class="note-box">
-  <strong>⚠️ AiMesh nodes need a reboot to pick up the key.</strong><br><br>
-  The main router does <strong>not</strong> need to be rebooted. Only the AiMesh nodes do. After they come back up, MerVLAN will be able to connect to them via SSH.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>STEP 2 — STANDALONE / FULL AP NODES</h2>
-<p>Standalone APs running in AP mode are independent devices — they do not receive keys from the main router automatically. You must add the public key to each one individually.</p>
-<ol>
-  <li>On each standalone AP, open its web interface and go to:<br>
-    <strong>Administration → System → Authorized Keys</strong></li>
-  <li>Paste the public key (the <code>ssh-ed25519 ...</code> line copied from the CLI log) and save</li>
-  <li>Repeat for every standalone AP node</li>
-</ol>
-<div class="note-box">
-  <strong>⚠️ Every standalone AP requires this step individually.</strong><br><br>
-  Without the public key on a node, every SSH connection attempt will fail with an authentication error. The CLI log will show <code>SSH connection failed</code> for that node. The main router does not need to be rebooted.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>VERIFYING THE INSTALLATION</h2>
-<p>After keys are installed and any required node reboots are done:</p>
-<ul>
-  <li>Add each node's IP in the Nodes panel and click <strong>[Save Settings]</strong></li>
-  <li>Click <strong>[Sync Nodes]</strong> and watch the CLI log</li>
-  <li>A successful connection shows: <code>✓ SSH connection successful to &lt;IP&gt;</code></li>
-  <li>A failed connection shows: <code>SSH connection failed</code> — key not yet active on that node</li>
-</ul>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>TROUBLESHOOTING</h2>
-<table class="device-table">
-  <thead><tr><th>Problem</th><th>Solution</th></tr></thead>
-  <tbody>
-    <tr><td>SSH connection failed on all nodes</td><td>Re-run [SSH Keys Install] to confirm the key exists. Check: <code>ls /jffs/addons/mervlan/.ssh/</code></td></tr>
-    <tr><td>AiMesh node still failing after key was added to main router</td><td>The AiMesh node needs a reboot — Asus only propagates authorized keys to nodes during their boot process</td></tr>
-    <tr><td>Standalone AP failing after key was pasted</td><td>Verify the key was pasted correctly and saved. The key is one line starting with <code>ssh-ed25519</code></td></tr>
-    <tr><td>SSH stopped working after a firmware update</td><td>Firmware updates can wipe JFFS. Re-run [SSH Keys Install], then re-paste the key on all nodes and reboot AiMesh nodes</td></tr>
-    <tr><td>Key already exists message</td><td>Normal — MerVLAN reuses an existing key pair. Re-install on nodes only if the key was regenerated</td></tr>
-  </tbody>
-</table>
-<div class="nav-footer">Keys installed? Head to "Apply Changes" to go live →</div>
-</div>`,
-
-      support: `<div class="help-section">
-<h2>GET HELP &amp; SUPPORT</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">Need help? Found a bug? Have a feature idea? The MerVLAN community is active and happy to assist.</p>
-
-<div class="note-box" style="border-color:#2a6496;">
-  <strong>🐛 Bugs and broken features → GitHub Issues, please</strong><br><br>
-  If you've found a bug, a broken feature, or something that behaves unexpectedly, please report it on <a href="https://github.com/r80xcore/mervlan/issues" target="_blank" style="color:#7ab3d4;">GitHub Issues</a> rather than the forums or Discord. Having everything in one place makes it much easier to track, prioritise, and avoid duplicates — and nothing gets lost in a chat scroll.<br><br>
-  SNB and Discord are great for setup questions and general help. GitHub is the right place for anything that needs to be fixed.
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<div class="link-block">
-  <div class="link-title">SNB FORUMS <span style="color:#777; font-weight:normal; font-size:12px;">Community Discussion</span></div>
-  <div class="link-sub">Best for: setup questions, config examples, community tips</div>
-  <a href="https://www.snbforums.com/threads/mervlan-v0-52-1-dev-0-52-7-simple-and-powerful-vlan-management-beta.95936/" target="_blank">snbforums.com — MerVLAN thread</a>
-  <ul>
-    <li>Active community with developer responses</li>
-    <li>Real-world setup guides and configuration examples</li>
-    <li>Feature discussions and general networking advice</li>
-  </ul>
-</div>
-
-<div class="link-block">
-  <div class="link-title">DISCORD <span style="color:#777; font-weight:normal; font-size:12px;">Real-Time Chat</span></div>
-  <div class="link-sub">Best for: quick questions, live troubleshooting, pre-release chat</div>
-  <a href="https://discord.com/invite/8c3C8q54hn" target="_blank">discord.com/invite/8c3C8q54hn</a>
-  <ul>
-    <li>Direct access to developers</li>
-    <li>Fast community support</li>
-    <li>Easy log sharing and screenshot-based debugging</li>
-  </ul>
-</div>
-
-<div class="link-block">
-  <div class="link-title">GITHUB ISSUES <span style="color:#777; font-weight:normal; font-size:12px;">Bug Reports &amp; Feature Requests</span></div>
-  <div class="link-sub">Best for: reproducible bugs, formal feature requests</div>
-  <a href="https://github.com/r80xcore/mervlan/issues" target="_blank">github.com/r80xcore/mervlan/issues</a>
-  <ul>
-    <li>Search existing issues first — it may already be reported</li>
-    <li>Include device model, Merlin firmware version, and logs</li>
-    <li>Describe steps to reproduce and note features in use (trunk, ENS, APMO)</li>
-  </ul>
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>WHAT TO INCLUDE WHEN ASKING FOR HELP</h2>
-<table class="device-table">
-  <thead><tr><th>Category</th><th>Details to include</th></tr></thead>
-  <tbody>
-    <tr><td><strong>Device</strong></td><td>Router model, Merlin firmware version, router mode (Router / AP / AiMesh node)</td></tr>
-    <tr><td><strong>Config</strong></td><td>Number of SSIDs and VLANs, whether you're using Trunk, ENS, APMO, or multi-node</td></tr>
-    <tr><td><strong>Logs</strong></td><td>CLI output from the main window + full logs from [View Full Logs]. For node issues, include that node's section.</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>QUICK SELF-HELP CHECKLIST</h2>
-<p>Before posting, run through these:</p>
-<ul>
-  <li>✓ Is Dry Run disabled? <em>(most common issue for new users)</em></li>
-  <li>✓ Did you click [Save Settings] before applying?</li>
-  <li>✓ Do SSID names match exactly? <em>(case-sensitive)</em></li>
-  <li>✓ Did you run [Sync Nodes] before applying to nodes?</li>
-  <li>✓ Is Boot Service enabled if you need persistence?</li>
-  <li>✓ Did you check [View Full Logs] for error lines?</li>
-  <li>✓ Have you tried a reboot if something seems stuck?</li>
-</ul>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>CONTRIBUTING</h2>
-<ul>
-  <li>Share your APMO hardware profile for unlisted devices</li>
-  <li>Report bugs with full logs and firmware version</li>
-  <li>Test pre-release builds and share feedback on Discord</li>
-  <li>Star the GitHub repo to help with visibility</li>
-</ul>
-<p style="margin-top:18px; color:#666;">Happy VLANing! 🌐</p>
-</div>`,
-
-      wiki: `<div class="help-section">
-<h2>WIKI — REFERENCE &amp; GLOSSARY</h2>
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<p class="intro">Background reference for MerVLAN. Step-by-step guides are in the other tabs — this page covers what each script does, how they connect, and what technical terms mean.</p>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>SCRIPTS</h2>
-<p>MerVLAN is built from several shell scripts, each with a single responsibility.</p>
-<table class="device-table">
-  <thead><tr><th style="width:30%">Script</th><th>What it does</th></tr></thead>
-  <tbody>
-    <tr><td><code>mervlan_manager.sh</code></td><td>The core apply engine. Resolves SSIDs to wireless interfaces, creates per-VLAN bridges, binds interfaces to those bridges, and applies LAN port VLANs. Called during apply, on boot, and by the heal system.</td></tr>
-    <tr><td><code>mervlan_trunk.sh</code></td><td>Handles trunk port configuration on the main router. Applies 802.1Q VLAN tagging rules on the designated LAN port. Called by the manager.</td></tr>
-    <tr><td><code>mervlan_boot_wrap.sh</code></td><td>The boot entry point called by services-start on reboot. Waits up to 30s for wireless interfaces to become available, then calls mervlan_boot.sh.</td></tr>
-    <tr><td><code>mervlan_boot.sh</code></td><td>Orchestrates the boot sequence. Calls the manager to re-apply VLANs and handles node boot coordination over SSH.</td></tr>
-    <tr><td><code>service-event-handler.sh</code></td><td>Intercepts Asus firmware service events (e.g. restart_wireless). Forwards events that can affect VLAN state to the heal system.</td></tr>
-    <tr><td><code>heal_event.sh</code></td><td>The VLAN health monitor. Runs every minute via cron. Checks whether bridges and interface bindings are intact. Triggers a re-apply via the manager if a persistent fault is detected.</td></tr>
-    <tr><td><code>sync_nodes.sh</code></td><td>Copies MerVLAN files to each configured node over SSH. Rewrites settings.json per node before sending — trunk config is stripped and the node flag is set on the remote copy.</td></tr>
-    <tr><td><code>execute_nodes.sh</code></td><td>Runs mervlan_manager.sh on each remote node via SSH. Used during "Local + Nodes" applies and remote enable/disable service commands.</td></tr>
-    <tr><td><code>dropbear_sshkey_gen.sh</code></td><td>Generates the ED25519 key pair used for all node SSH connections. Stores keys in <code>/jffs/addons/mervlan/.ssh/</code>.</td></tr>
-    <tr><td><code>hw_probe.sh</code></td><td>Probes the device to detect its hardware profile — identifies ethX interfaces, port count, and the WAN port.</td></tr>
-    <tr><td><code>device_support_mapper.sh</code></td><td>Maps detected interfaces to physical port labels using the built-in device database. Flags the device for APMO if it is not recognized.</td></tr>
-    <tr><td><code>save_settings.sh</code></td><td>Receives form data submitted from the UI and writes it to settings.json on the router.</td></tr>
-    <tr><td><code>collect_clients.sh</code></td><td>Gathers connected client data from the main router and all nodes for the Clients Overview panel in the UI.</td></tr>
-  </tbody>
-</table>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>HOW THE SCRIPTS CONNECT</h2>
-<div class="scenario-block">
-  <strong>Apply — single router</strong>
-  UI saves via save_settings.sh → settings.json updated → mervlan_manager.sh applies bridges and bindings → mervlan_trunk.sh applies trunk config (if enabled)
-</div>
-<div class="scenario-block">
-  <strong>Apply — with nodes</strong>
-  mervlan_manager.sh (local) → sync_nodes.sh pushes files to each node → execute_nodes.sh runs mervlan_manager.sh on each node remotely
-</div>
-<div class="scenario-block">
-  <strong>Boot — after reboot</strong>
-  services-start → mervlan_boot_wrap.sh (waits for SSIDs) → mervlan_boot.sh → mervlan_manager.sh
-</div>
-<div class="scenario-block">
-  <strong>Health monitoring — every minute</strong>
-  cron → heal_event.sh checks VLAN state → mervlan_manager.sh re-applies if a fault persists
-</div>
-<div class="scenario-block">
-  <strong>Firmware event — e.g. wireless restart</strong>
-  Asus firmware fires service-event → service-event-handler.sh intercepts → heal_event.sh runs a health check → mervlan_manager.sh re-applies if needed
-</div>
-
-<span class="sep">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
-<h2>GLOSSARY</h2>
-<p>Technical terms used across the guide, in plain language.</p>
-<table class="device-table">
-  <thead><tr><th style="width:22%">Term</th><th>Meaning</th></tr></thead>
-  <tbody>
-    <tr><td><strong>802.1Q</strong></td><td>IEEE standard for VLAN tagging on Ethernet frames. A small tag is added to each frame to indicate which VLAN it belongs to. Required by trunk ports and managed switches.</td></tr>
-    <tr><td><strong>AiMesh</strong></td><td>Asus's mesh networking system. AiMesh nodes are managed by the main router and receive SSH authorized keys from it automatically after a reboot.</td></tr>
-    <tr><td><strong>APMO</strong></td><td>Advanced Port Mapping Override. Lets you manually correct the hardware profile when automatic detection is wrong or the device is not in the built-in database.</td></tr>
-    <tr><td><strong>Authorized Keys</strong></td><td>A file on each router listing SSH public keys that are allowed to connect without a password. MerVLAN's public key must be present here on every node.</td></tr>
-    <tr><td><strong>Base radio</strong></td><td>The primary wireless interface for a band — wl0 (2.4 GHz), wl1 (5 GHz), wl2 (6 GHz). Assigning VLANs to base radios is possible but less stable than using Guest Network SSIDs.</td></tr>
-    <tr><td><strong>br0</strong></td><td>The router's default LAN bridge. All interfaces are in br0 out of the box. MerVLAN moves relevant interfaces out of br0 and into dedicated per-VLAN bridges during apply.</td></tr>
-    <tr><td><strong>Cron</strong></td><td>A time-based job scheduler built into the router OS. MerVLAN's health monitor runs as a cron job every minute when the service is enabled.</td></tr>
-    <tr><td><strong>Dropbear</strong></td><td>The SSH server and client built into Asuswrt-Merlin. MerVLAN uses Dropbear's SSH client to connect from the main router to nodes.</td></tr>
-    <tr><td><strong>Dry Run</strong></td><td>A MerVLAN mode where the full apply pipeline runs but no changes are committed to the network. ON by default — used to safely validate a config before going live.</td></tr>
-    <tr><td><strong>ebtables</strong></td><td>A packet filtering tool that works at Layer 2 (Ethernet level). MerVLAN uses it to enforce VLAN isolation and quarantine rules on network bridges.</td></tr>
-    <tr><td><strong>ED25519</strong></td><td>A modern SSH key algorithm. The type of key MerVLAN generates for authenticating from the main router to nodes.</td></tr>
-    <tr><td><strong>ENS</strong></td><td>Enable Native SSID. A MerVLAN toggle that allows VLANs to be assigned to base radios. OFF by default — Guest Network SSIDs are recommended instead.</td></tr>
-    <tr><td><strong>ethX</strong></td><td>Kernel names for Ethernet interfaces (eth0, eth1, eth2, etc.). Each physical LAN and WAN port on the router maps to one of these internally.</td></tr>
-    <tr><td><strong>Guest SSID</strong></td><td>A secondary Wi-Fi network created under Wireless → Guest Network in the Asus UI. Uses a separate virtual interface (wl0.1, wl1.1, etc.) and is the recommended type for VLAN assignment.</td></tr>
-    <tr><td><strong>Hardware profile</strong></td><td>A device-specific map of ethX interfaces to physical port labels, including which port is the WAN. MerVLAN needs this to know where to apply VLAN rules.</td></tr>
-    <tr><td><strong>JFFS</strong></td><td>A writable flash filesystem on Asus routers, mounted at /jffs. Where MerVLAN is installed, settings are stored, and SSH keys live. Can be wiped by a factory reset or firmware update.</td></tr>
-    <tr><td><strong>Node</strong></td><td>A secondary router or access point managed remotely by MerVLAN over SSH. Runs its own instance of MerVLAN in node mode.</td></tr>
-    <tr><td><strong>Service event</strong></td><td>A firmware-generated signal that something changed on the router — for example, restart_wireless or dhcpc-up. MerVLAN monitors these to detect when VLAN state may have been disrupted.</td></tr>
-    <tr><td><strong>services-start</strong></td><td>An Asuswrt-Merlin script that runs automatically when the router finishes booting. MerVLAN injects a call here to re-apply VLANs on every reboot.</td></tr>
-    <tr><td><strong>SSH</strong></td><td>Secure Shell. An encrypted protocol for running commands on a remote device. MerVLAN uses SSH to sync files and run the VLAN manager on nodes.</td></tr>
-    <tr><td><strong>SSID</strong></td><td>Service Set Identifier. The name of a Wi-Fi network as seen when scanning for networks.</td></tr>
-    <tr><td><strong>STP</strong></td><td>Spanning Tree Protocol. Prevents network loops in topologies where multiple paths exist between devices. Relevant in multi-node setups with redundant links — leave OFF for single-router setups.</td></tr>
-    <tr><td><strong>Trunk port</strong></td><td>An Ethernet port configured to carry tagged traffic for multiple VLANs simultaneously using 802.1Q. Requires a managed switch or downstream device that understands VLAN tags.</td></tr>
-    <tr><td><strong>VLAN</strong></td><td>Virtual Local Area Network. Logically divides one physical network into isolated segments. Devices on different VLANs cannot communicate unless explicitly routed between them.</td></tr>
-    <tr><td><strong>VLAN bridge</strong></td><td>A kernel network bridge dedicated to one VLAN (e.g. br20 for VLAN 20). MerVLAN creates one per VLAN ID and attaches the relevant wireless and wired interfaces to it.</td></tr>
-    <tr><td><strong>VLAN ID</strong></td><td>A number between 2 and 4094 that identifies a specific VLAN. Interfaces and ports sharing the same VLAN ID are on the same network segment.</td></tr>
-    <tr><td><strong>WAN</strong></td><td>Wide Area Network — the internet-facing port on the router. MerVLAN must correctly identify this port to avoid applying VLAN rules to it by mistake.</td></tr>
-  </tbody>
-</table>
-</div>`
-    };
-
-    const contentEl = document.getElementById('content');
-    const tabs = document.querySelectorAll('.tab');
-    const HTML_SECTIONS = new Set(['start', 'ssid', 'lan', 'apply', 'ssh', 'logs', 'cli', 'unsupported', 'support', 'wiki']);
-
-    function showTab(tabName) {
-      tabs.forEach(t => t.classList.remove('active'));
-      document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
-      const content = SECTIONS[tabName] || "No content available.";
-      if (HTML_SECTIONS.has(tabName)) {
-        contentEl.innerHTML = content;
-      } else {
-        contentEl.textContent = content;
+    (function () {
+      var HELP_DOC = "docs/HELP.json";
+      var contentEl = document.getElementById("content");
+      var helpEl = document.getElementById("helpContent");
+      var alertTitles = {
+        note: "Note",
+        tip: "Tip",
+        important: "Important",
+        warning: "Warning",
+        caution: "Caution"
+      };
+
+      function setMessage(text, isError) {
+        helpEl.innerHTML = "";
+        var message = document.createElement("div");
+        message.className = "message" + (isError ? " error" : "");
+        message.textContent = text;
+        helpEl.appendChild(message);
       }
-      contentEl.scrollTop = 0;
-    }
 
-    tabs.forEach(tab => {
-      tab.addEventListener('click', () => showTab(tab.getAttribute('data-tab')));
-    });
+      function getMarkedParser() {
+        if (window.marked && typeof window.marked.parse === "function") {
+          return window.marked;
+        }
+        if (window.marked && typeof window.marked === "function") {
+          return window.marked;
+        }
+        return null;
+      }
 
-    // Default to Getting Started tab
-    showTab('start');
+      function renderMarkdown(markdownText) {
+        var markedParser = getMarkedParser();
+        if (!markedParser) {
+          throw new Error("Markdown renderer failed to load");
+        }
+
+        if (typeof markedParser.setOptions === "function") {
+          markedParser.setOptions({
+            gfm: true,
+            breaks: false,
+            silent: false
+          });
+        }
+
+        var html = typeof markedParser.parse === "function"
+          ? markedParser.parse(markdownText)
+          : markedParser(markdownText);
+
+        insertRenderedHtml(html);
+        enhanceRenderedHelp();
+      }
+
+      function insertRenderedHtml(html) {
+        var template = document.createElement("template");
+        template.innerHTML = html;
+        var diagrams = prepareDiagramImages(template.content);
+        helpEl.innerHTML = "";
+        helpEl.appendChild(template.content);
+        loadDiagramImages(diagrams);
+      }
+
+      function enhanceRenderedHelp() {
+        styleGitHubAlerts();
+        prepareLinks();
+        contentEl.scrollTop = 0;
+      }
+
+      function prepareDiagramImages(root) {
+        var diagrams = [];
+        var images = root.querySelectorAll("img[src]");
+        Array.prototype.forEach.call(images, function (image) {
+          var src = image.getAttribute("src") || "";
+          if (!/^diagrams\/.+\.(png|svg)$/i.test(src)) {
+            image.setAttribute("loading", "lazy");
+            image.setAttribute("decoding", "async");
+            return;
+          }
+
+          var placeholder = document.createElement("div");
+          placeholder.className = "diagram-loading";
+          placeholder.textContent = "Loading diagram...";
+
+          image.setAttribute("data-src", src);
+          image.removeAttribute("src");
+          image.setAttribute("decoding", "async");
+          image.style.display = "none";
+
+          image.parentNode.insertBefore(placeholder, image);
+          diagrams.push({
+            image: image,
+            placeholder: placeholder,
+            src: src
+          });
+        });
+        return diagrams;
+      }
+
+      function loadDiagramImages(diagrams) {
+        var queue = [];
+        var loading = false;
+
+        function enqueue(diagram) {
+          queue.push(diagram);
+          if (!loading) {
+            loadNext();
+          }
+        }
+
+        function loadNext() {
+          var diagram = queue.shift();
+          if (!diagram) {
+            loading = false;
+            return;
+          }
+
+          loading = true;
+          var preload = new Image();
+          preload.onload = function () {
+            diagram.image.setAttribute("src", diagram.src);
+            diagram.image.style.display = "";
+            if (diagram.placeholder.parentNode) {
+              diagram.placeholder.parentNode.removeChild(diagram.placeholder);
+            }
+            window.setTimeout(loadNext, 150);
+          };
+          preload.onerror = function () {
+            diagram.placeholder.className = "diagram-loading is-error";
+            diagram.placeholder.textContent = "Could not load diagram.";
+            window.setTimeout(loadNext, 150);
+          };
+          preload.src = diagram.src;
+        }
+
+        if ("IntersectionObserver" in window) {
+          var observer = new IntersectionObserver(function (entries) {
+            Array.prototype.forEach.call(entries, function (entry) {
+              if (!entry.isIntersecting) {
+                return;
+              }
+              observer.unobserve(entry.target);
+              enqueue(entry.target._diagram);
+            });
+          }, {
+            root: contentEl,
+            rootMargin: "160px 0px"
+          });
+
+          diagrams.forEach(function (diagram) {
+            diagram.placeholder._diagram = diagram;
+            observer.observe(diagram.placeholder);
+          });
+          return;
+        }
+
+        diagrams.forEach(enqueue);
+      }
+
+      function styleGitHubAlerts() {
+        var blockquotes = helpEl.querySelectorAll("blockquote");
+        Array.prototype.forEach.call(blockquotes, function (blockquote) {
+          var firstParagraph = blockquote.querySelector("p");
+          if (!firstParagraph) {
+            return;
+          }
+
+          var match = firstParagraph.textContent.match(/^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i);
+          if (!match) {
+            return;
+          }
+
+          var alertType = match[1].toLowerCase();
+          firstParagraph.innerHTML = firstParagraph.innerHTML.replace(
+            /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(<br\s*\/?>)?\s*/i,
+            ""
+          );
+
+          blockquote.classList.add("markdown-alert", "markdown-alert-" + alertType);
+
+          var title = document.createElement("div");
+          title.className = "markdown-alert-title";
+          title.textContent = alertTitles[alertType] || alertType;
+          blockquote.insertBefore(title, blockquote.firstChild);
+
+          if (!firstParagraph.textContent.trim()) {
+            firstParagraph.parentNode.removeChild(firstParagraph);
+          }
+        });
+      }
+
+      function prepareLinks() {
+        var links = helpEl.querySelectorAll("a[href]");
+        Array.prototype.forEach.call(links, function (link) {
+          var href = link.getAttribute("href") || "";
+          if (/^(https?:)?\/\//i.test(href)) {
+            link.setAttribute("target", "_blank");
+            link.setAttribute("rel", "noopener noreferrer");
+          }
+        });
+      }
+
+      function loadHelp() {
+        setMessage("Loading help...", false);
+        fetch(HELP_DOC)
+          .then(function (response) {
+            if (!response.ok) {
+              throw new Error("HTTP " + response.status);
+            }
+            return response.text();
+          })
+          .then(renderMarkdown)
+          .catch(function (error) {
+            setMessage("Error loading " + HELP_DOC + ": " + error.message, true);
+          });
+      }
+
+      loadHelp();
+    })();
   </script>
 </body>
 </html>
