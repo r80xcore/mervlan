@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.58"                   #
+#                - File: update_mervlan.sh || version="0.59"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -151,20 +151,13 @@ if [ -n "$SSH_PUBKEY_RELATIVE" ]; then
 $SSH_PUBKEY_RELATIVE"
 fi
 
-REQUIRED_STAGE_FILES="install.sh
+CORE_STAGE_FILES="install.sh
 uninstall.sh
 changelog.txt
-README.md
 mervlan.asp
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
-functions/heal_event.sh
-functions/service-event-handler.sh
-functions/sync_nodes.sh
-functions/collect_clients.sh
-functions/collect_local_clients.sh
-functions/dropbear_sshkey_gen.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
 functions/save_settings.sh
@@ -172,26 +165,46 @@ functions/update_mervlan.sh
 settings/settings.json
 settings/var_settings.sh
 settings/log_settings.sh
-settings/lib_br0_guard.sh
-settings/lib_debug.sh
 settings/lib_json.sh
 settings/lib_ssh.sh
+templates/mervlan_templates.sh
+www/index.html
+www/vlan_form_style.css
+www/vlan_index_style.css"
+
+OPTIONAL_STAGE_FILES="README.md
+functions/heal_event.sh
+functions/service-event-handler.sh
+functions/sync_nodes.sh
+functions/collect_clients.sh
+functions/collect_local_clients.sh
+functions/dropbear_sshkey_gen.sh
+functions/execute_nodes.sh
+functions/mac_refresh.sh
+functions/mac_client_meta.sh
+settings/lib_br0_guard.sh
+settings/lib_debug.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
 settings/lib_radio.sh
 settings/mac_shield_snapshot.sh
-functions/mac_refresh.sh
-functions/mac_client_meta.sh
-templates/mervlan_templates.sh
-www/index.html
 www/help.html
 www/view_logs.html
-www/vlan_form_style.css
-www/vlan_index_style.css"
+www/vendor/marked.umd.js
+www/vendor/github-markdown-dark.css
+www/vendor/THIRD_PARTY_LICENSES.md
+docs/HELP.md
+docs/diagrams/topology-1_local.svg
+docs/diagrams/topology-2_aimesh.svg
+docs/diagrams/topology-3_standalone-ap.svg
+docs/diagrams/topology-4_node-to-main.svg"
 
 # required directories in a valid package
-REQUIRED_STAGE_DIRS="functions settings templates www"
+CORE_STAGE_DIRS="functions settings templates www"
+
+# optional directories are allowed to differ between branches
+OPTIONAL_STAGE_DIRS="www/vendor docs docs/diagrams"
 
 # ========================================================================== #
 # SETTINGS.JSON MERGE HELPERS                                                #
@@ -966,23 +979,35 @@ cp -a "$topdir"/. "$STAGE_DIR"/ 2>/dev/null || \
 
 info -c cli,vlan "Validating staged files"
 missing=0
-for required in $REQUIRED_STAGE_FILES; do
+for required in $CORE_STAGE_FILES; do
 	if [ ! -f "$STAGE_DIR/$required" ]; then
-		warn -c cli,vlan "Missing required file in stage: $required"
+		warn -c cli,vlan "Missing core file in stage: $required"
 		missing=1
 	fi
 done
 
 # ensure required top-level directories are present too (clearer messages)
-for d in $REQUIRED_STAGE_DIRS; do
+for d in $CORE_STAGE_DIRS; do
 	if [ ! -d "$STAGE_DIR/$d" ]; then
-		warn -c cli,vlan "Missing required directory in stage: $d/"
+		warn -c cli,vlan "Missing core directory in stage: $d/"
 		missing=1
 	fi
 done
 
+for optional in $OPTIONAL_STAGE_FILES; do
+	if [ ! -f "$STAGE_DIR/$optional" ]; then
+		warn -c cli,vlan "Optional staged file missing: $optional This may be expected if the update has removed this file/files, but if not, it could indicate an incomplete download or archive structure change. Include this info when reporting potential issues."
+	fi
+done
+
+for d in $OPTIONAL_STAGE_DIRS; do
+	if [ ! -d "$STAGE_DIR/$d" ]; then
+		warn -c cli,vlan "Optional staged directory missing: $d/ This may be expected if the update has removed this directory/directories, but if not, it could indicate an incomplete download or archive structure change. Include this info when reporting potential issues."
+	fi
+done
+
 if [ "$missing" -ne 0 ]; then
-	fail_update validating "Validation failed; downloaded archive does not look like a valid MerVLAN package"
+	fail_update validating "Validation failed; downloaded archive is missing core MerVLAN files. Include validation and file warnings when reporting this issue."
 fi
 info -c cli,vlan "Staged content validated successfully"
 
