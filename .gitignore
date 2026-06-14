@@ -2,3 +2,4 @@
 functions/sync_nodes.sh.bak
 functions/wireless_backhaul.sh
 roadmap.txt
+puppeteer-config.json
