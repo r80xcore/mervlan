@@ -1,3 +1,40 @@
+mervlan v0.53.13
+
+Release note
+- This version is intended to be merged into main after dev testing.
+
+help.html
+- Reworked the help page to render Markdown using "marked 18.0.5" and "github-markdown-dark".
+- Uses docs/HELP.md as the single source file. During install/update it is copied to the public web path as docs/HELP.json to avoid Asus httpd issues with .md files.
+- License information for vendored help assets is available in www/vendor/THIRD_PARTY_LICENSES.md.
+
+HELP.md (NEW FILE)
+- Added the main help source under /docs.
+- Updated topology documentation for better understanding and more detail.
+- Uses .svg files for rendering the topology diagrams.
+- Updated the supported-device table to match the active hw_probe.sh hardware profiles.
+
+README.md
+- Added links to HELP.md in the README.
+- Moved "Help wanted: LAN/ETH port mapping (device support)" further down the README for better structure.
+
+Diagrams
+- Rendered and source diagrams are available in docs/diagrams and docs/diagrams-src.
+
+update_mervlan.sh
+- Relaxed file validation so missing core files still fail hard, while non-essential files only warn.
+  This makes branch changes safer by avoiding hard failures from overly strict validation.
+
+
+install.sh
+- Correctly copies the new help, diagram, and vendor files to the public (www) directory.
+
+Added support for the following models:
+- RT-AX56U
+- RT-AX88U_PRO (restored after being lost during a previous update)
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.12
 
 Improved SSID capacity detection:
