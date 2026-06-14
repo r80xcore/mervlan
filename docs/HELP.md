@@ -28,6 +28,11 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, 
 >
 > Wi-Fi backhaul cannot carry 802.1Q VLAN tags on Asus hardware. **Ethernet backhaul is required between all devices in every topology.** If any device in your setup connects to the main router over Wi-Fi, VLAN traffic will not be isolated correctly and the configuration will not work.
 
+> [!IMPORTANT]
+> **Static IP addresses are mandatory for APs/nodes**
+>
+> Static IP addresses are required for all APs/nodes, both AiMesh and standalone, to ensure stable configuration. MerVLAN uses SSH to sync and apply configuration to nodes. Give each AP/node a fixed IP address or DHCP reservation before configuring MerVLAN.
+> 
 <br>
 
 > **1 - Single Device** <kbd>RECOMMENDED</kbd>
