@@ -182,7 +182,6 @@ functions/dropbear_sshkey_gen.sh
 functions/execute_nodes.sh
 functions/mac_refresh.sh
 functions/mac_client_meta.sh
-functions/wireless_backhaul.sh
 settings/lib_br0_guard.sh
 settings/lib_debug.sh
 settings/lib_ssid_filter.sh
@@ -193,14 +192,13 @@ settings/mac_shield_snapshot.sh
 www/help.html
 www/view_logs.html
 www/vendor/marked.umd.js
-www/vendor/purify.min.js
 www/vendor/github-markdown-dark.css
 www/vendor/THIRD_PARTY_LICENSES.md
 docs/HELP.md
-docs/diagrams/topology-1_local.png
-docs/diagrams/topology-2_aimesh.png
-docs/diagrams/topology-3_standalone-ap.png
-docs/diagrams/topology-4_node-to-main.png"
+docs/diagrams/topology-1_local.svg
+docs/diagrams/topology-2_aimesh.svg
+docs/diagrams/topology-3_standalone-ap.svg
+docs/diagrams/topology-4_node-to-main.svg"
 
 # required directories in a valid package
 CORE_STAGE_DIRS="functions settings templates www"

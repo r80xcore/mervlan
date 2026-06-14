@@ -36,7 +36,7 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, 
 > This unit connects to a managed switch through its **WAN port** using an 802.1Q VLAN trunk.  
 > This is the simplest and most common setup. Use this unless you specifically need VLAN-aware Wi-Fi coverage from additional APs or AiMesh nodes.
 >
-> <p align="center"> <img src="diagrams/topology-1_local.png" alt="Topology 1 - Single Device" width="100%"> </p>
+> <p align="center"> <img src="diagrams/topology-1_local.svg" alt="Topology 1 - Single Device" width="100%"> </p>
 
 <br>
 
@@ -47,7 +47,7 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, 
 > Every unit connects to the managed switch through its **WAN port** using an 802.1Q VLAN trunk.  
 > Use this topology when you want MerVLAN-managed VLAN SSIDs on wired AiMesh nodes.
 >
-> <p align="center"> <img src="diagrams/topology-2_aimesh.png" alt="Topology 2 - Single Device with AiMesh Nodes" width="100%"> </p>
+> <p align="center"> <img src="diagrams/topology-2_aimesh.svg" alt="Topology 2 - Single Device with AiMesh Nodes" width="100%"> </p>
 
 <br>
 
@@ -58,7 +58,7 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, 
 > Every unit connects to the managed switch through its **WAN port** using an 802.1Q VLAN trunk.  
 > Use this topology when you run separate Asuswrt-Merlin APs instead of AiMesh or mix'n'match units.
 >
-> <p align="center"> <img src="diagrams/topology-3_standalone-ap.png" alt="Topology 3 - Single Device with Standalone APs" width="100%"> </p>
+> <p align="center"> <img src="diagrams/topology-3_standalone-ap.svg" alt="Topology 3 - Single Device with Standalone APs" width="100%"> </p>
 
 <br>
 
@@ -69,7 +69,7 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, 
 > AP-to-AP and node-to-node trunking is not supported here. Downstream APs must connect directly to the main unit.  
 > Use this only if you understand the trunk requirements and are prepared to test carefully.
 >
-> <p align="center"> <img src="diagrams/topology-4_node-to-main.png" alt="Topology 4 - Nodes Connected Directly to Main Unit" width="100%"> </p>
+> <p align="center"> <img src="diagrams/topology-4_node-to-main.svg" alt="Topology 4 - Nodes Connected Directly to Main Unit" width="100%"> </p>
 
  <br>
 

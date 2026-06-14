@@ -257,7 +257,6 @@
   </div>
 
   <script src="vendor/marked.umd.js"></script>
-  <script src="vendor/purify.min.js"></script>
   <script>
     (function () {
       var HELP_DOC = "docs/HELP.json";
@@ -307,12 +306,6 @@
           ? markedParser.parse(markdownText)
           : markedParser(markdownText);
 
-        if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
-          html = window.DOMPurify.sanitize(html, {
-            ADD_ATTR: ["align", "target", "rel"]
-          });
-        }
-
         insertRenderedHtml(html);
         enhanceRenderedHelp();
       }
@@ -337,7 +330,7 @@
         var images = root.querySelectorAll("img[src]");
         Array.prototype.forEach.call(images, function (image) {
           var src = image.getAttribute("src") || "";
-          if (!/^diagrams\/.+\.png$/i.test(src)) {
+          if (!/^diagrams\/.+\.(png|svg)$/i.test(src)) {
             image.setAttribute("loading", "lazy");
             image.setAttribute("decoding", "async");
             return;
