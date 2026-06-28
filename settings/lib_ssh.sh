@@ -627,6 +627,7 @@ merv_ssh_exec() {
       _merv_timeout_run "$MERV_SSH_TIMEOUT" \
         dbclient -p "$_port" -y -i "$SSH_KEY" \
         "$_user@$_node_ip" "$_remote_cmd" \
+        </dev/null \
         2>"$_tmp"
     )
     _rc=$?
