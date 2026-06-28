@@ -765,15 +765,26 @@ else
     # PHASE 3: Verify completion markers on all nodes                            #
     # ============================================================================ #
     info -c cli,vlan "--- Phase 3: Verifying node completions ---"
-    
-    while read -r node_id node_ip; do
+
+    _verify_node_tmp="$TMPDIR/execute_verify_nodes.$$"
+    printf '%s\n' "$READY_NODES" > "$_verify_node_tmp"
+    _verify_node_count=$(wc -l < "$_verify_node_tmp" 2>/dev/null | tr -cd '0-9')
+    [ -n "$_verify_node_count" ] || _verify_node_count=0
+    _verify_node_idx=1
+
+    while [ "$_verify_node_idx" -le "$_verify_node_count" ]; do
+        _verify_node_line=$(sed -n "${_verify_node_idx}p" "$_verify_node_tmp" 2>/dev/null)
+        _verify_node_idx=$((_verify_node_idx + 1))
+        [ -n "$_verify_node_line" ] || continue
+        set -- $_verify_node_line
+        node_id="$1"
+        node_ip="$2"
         [ -n "$node_id" ] || continue
         if ! verify_node_completion "$node_id" "$node_ip"; then
             overall_success=false
         fi
-    done <<EOF3
-$READY_NODES
-EOF3
+    done
+    rm -f "$_verify_node_tmp" 2>/dev/null || :
     
     # ============================================================================ #
     # PHASE 4: Run collect_clients.sh after all nodes verified                   #
@@ -805,12 +816,24 @@ info -c cli,vlan "=== Execution Summary ==="
 # Final cleanup: clear all node completion markers to prevent false positives
 if [ -n "$READY_NODES" ]; then
     info -c cli,vlan "Cleaning up node completion markers..."
-    while read -r node_id node_ip; do
+
+    _cleanup_node_tmp="$TMPDIR/execute_cleanup_nodes.$$"
+    printf '%s\n' "$READY_NODES" > "$_cleanup_node_tmp"
+    _cleanup_node_count=$(wc -l < "$_cleanup_node_tmp" 2>/dev/null | tr -cd '0-9')
+    [ -n "$_cleanup_node_count" ] || _cleanup_node_count=0
+    _cleanup_node_idx=1
+
+    while [ "$_cleanup_node_idx" -le "$_cleanup_node_count" ]; do
+        _cleanup_node_line=$(sed -n "${_cleanup_node_idx}p" "$_cleanup_node_tmp" 2>/dev/null)
+        _cleanup_node_idx=$((_cleanup_node_idx + 1))
+        [ -n "$_cleanup_node_line" ] || continue
+        set -- $_cleanup_node_line
+        node_id="$1"
+        node_ip="$2"
         [ -n "$node_id" ] || continue
         clear_node_completion_marker "$node_id" "$node_ip"
-    done <<EOFCLEAN
-$READY_NODES
-EOFCLEAN
+    done
+    rm -f "$_cleanup_node_tmp" 2>/dev/null || :
 fi
 
 if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then
