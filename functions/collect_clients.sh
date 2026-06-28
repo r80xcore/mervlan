@@ -147,8 +147,15 @@ collect_from_node() {
   # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
   remote_cmd="$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json"
   
-  result=$(merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" 2>/dev/null)
-  rc=$?
+  _result_tmp="$COLLECTDIR/node_${node_ip}.out.$$"
+  result=""
+  if merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" >"$_result_tmp" 2>/dev/null; then
+    rc=0
+    result="$(cat "$_result_tmp" 2>/dev/null)"
+  else
+    rc=$?
+  fi
+  rm -f "$_result_tmp" 2>/dev/null || :
 
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
     printf '%s' "$result" > "$output_file"
