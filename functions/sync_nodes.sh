@@ -1010,7 +1010,17 @@ overall_success=true
 _sync_node_tmp="$TMPDIR/sync_node_ips.$$"
 printf '%s\n' "$NODE_IPS" > "$_sync_node_tmp"
 
-while read -r node_id node_ip; do
+_sync_node_count=$(wc -l < "$_sync_node_tmp" 2>/dev/null | tr -cd '0-9')
+[ -n "$_sync_node_count" ] || _sync_node_count=0
+_sync_node_idx=1
+
+while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
+    _sync_node_line=$(sed -n "${_sync_node_idx}p" "$_sync_node_tmp" 2>/dev/null)
+    _sync_node_idx=$((_sync_node_idx + 1))
+    [ -n "$_sync_node_line" ] || continue
+    set -- $_sync_node_line
+    node_id="$1"
+    node_ip="$2"
     [ -n "$node_id" ] || continue
     info -c cli,vlan "Processing node: NODE${node_id} ($node_ip)"
     dbg_log "Beginning node synchronization"
@@ -1168,7 +1178,7 @@ while read -r node_id node_ip; do
     
     info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
     echo ""
-done < "$_sync_node_tmp"
+done
 rm -f "$_sync_node_tmp" 2>/dev/null || :
 # Global nodeenable sweep removed; handled per-node in loop above
 

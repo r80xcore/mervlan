@@ -630,7 +630,17 @@ info -c cli,vlan "--- Phase 1: Preparing nodes ---"
 _exec_node_tmp="$TMPDIR/execute_node_ips.$$"
 printf '%s\n' "$NODE_IPS" > "$_exec_node_tmp"
 
-while read -r node_id node_ip; do
+_exec_node_count=$(wc -l < "$_exec_node_tmp" 2>/dev/null | tr -cd '0-9')
+[ -n "$_exec_node_count" ] || _exec_node_count=0
+_exec_node_idx=1
+
+while [ "$_exec_node_idx" -le "$_exec_node_count" ]; do
+    _exec_node_line=$(sed -n "${_exec_node_idx}p" "$_exec_node_tmp" 2>/dev/null)
+    _exec_node_idx=$((_exec_node_idx + 1))
+    [ -n "$_exec_node_line" ] || continue
+    set -- $_exec_node_line
+    node_id="$1"
+    node_ip="$2"
     [ -n "$node_id" ] || continue
     info -c cli,vlan "Preparing node: $node_ip (NODE${node_id})"
     
@@ -668,7 +678,7 @@ while read -r node_id node_ip; do
     # Add to ready list
     READY_NODES="$READY_NODES
 $node_id $node_ip"
-done < "$_exec_node_tmp"
+done
 rm -f "$_exec_node_tmp" 2>/dev/null || :
 
 # Trim leading newline
@@ -696,11 +706,21 @@ else
     _ready_node_tmp="$TMPDIR/execute_ready_nodes.$$"
     printf '%s\n' "$READY_NODES" > "$_ready_node_tmp"
 
-    while read -r node_id node_ip; do
+    _ready_node_count=$(wc -l < "$_ready_node_tmp" 2>/dev/null | tr -cd '0-9')
+    [ -n "$_ready_node_count" ] || _ready_node_count=0
+    _ready_node_idx=1
+
+    while [ "$_ready_node_idx" -le "$_ready_node_count" ]; do
+        _ready_node_line=$(sed -n "${_ready_node_idx}p" "$_ready_node_tmp" 2>/dev/null)
+        _ready_node_idx=$((_ready_node_idx + 1))
+        [ -n "$_ready_node_line" ] || continue
+        set -- $_ready_node_line
+        node_id="$1"
+        node_ip="$2"
         [ -n "$node_id" ] || continue
         info -c cli,vlan "Launching execution on $node_ip (NODE${node_id})..."
         execute_vlan_manager_on_node "$node_id" "$node_ip" &
-    done < "$_ready_node_tmp"
+    done
     rm -f "$_ready_node_tmp" 2>/dev/null || :
     
     # Launch main router execution in background (with --no-collect flag)
