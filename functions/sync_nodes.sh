@@ -1007,6 +1007,9 @@ pull_node_hardware() {
 info -c cli,vlan "Starting file synchronization..."
 overall_success=true
 
+_sync_node_tmp="$TMPDIR/sync_node_ips.$$"
+printf '%s\n' "$NODE_IPS" > "$_sync_node_tmp"
+
 while read -r node_id node_ip; do
     [ -n "$node_id" ] || continue
     info -c cli,vlan "Processing node: NODE${node_id} ($node_ip)"
@@ -1165,9 +1168,8 @@ while read -r node_id node_ip; do
     
     info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
     echo ""
-done <<EOF
-$NODE_IPS
-EOF
+done < "$_sync_node_tmp"
+rm -f "$_sync_node_tmp" 2>/dev/null || :
 # Global nodeenable sweep removed; handled per-node in loop above
 
 # ========================================================================== #

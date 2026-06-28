@@ -659,6 +659,11 @@ merv_ssh_exec() {
       elif echo "$_err" | grep -qi "No route to host"; then
         MERV_SSH_LAST_REASON="no-route"
         MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' no route to host"
+      elif [ "$_rc" -eq 126 ] || [ "$_rc" -eq 127 ]; then
+        MERV_SSH_LAST_REASON="remote-cmd-failed"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' remote command exited rc=$_rc"
+        # Missing remote files/binaries will not improve by retrying.
+        return 5
       else
         MERV_SSH_LAST_REASON="ssh-failed"
         MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' dbclient failed rc=$_rc (attempt $_attempt/$MERV_SSH_RETRIES)"
@@ -680,7 +685,9 @@ merv_ssh_exec() {
 merv_ssh_test() {
   # merv_ssh_test <node_num> <node_ip>
   # returns 0 if remote echo works
-  merv_ssh_exec "$1" "$2" "echo connected" | grep -q "connected"
+  _merv_test_out="$(merv_ssh_exec "$1" "$2" "echo connected" 2>/dev/null)"
+  [ $? -eq 0 ] || return 1
+  printf '%s\n' "$_merv_test_out" | grep -q "connected"
 }
 
 merv_ssh_skip_log() {
