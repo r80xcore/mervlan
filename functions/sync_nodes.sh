@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.61"                      #
+#               - File: sync_nodes.sh || version="0.62"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -950,6 +950,8 @@ pull_node_hardware() {
     _pnh_output=""
     _pnh_productid=""
     _pnh_maxeth=""
+    _pnh_label_overrides=""
+    _pnh_has_label_overrides=0
 
     if [ "$DRY_RUN" = "yes" ]; then
         info -c cli,vlan "[DRY-RUN] Would run hw_probe and pull hardware values from NODE${_pnh_id} ($_pnh_ip)"
@@ -966,6 +968,7 @@ pull_node_hardware() {
         . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
         printf 'PRODUCTID=%s\n' \"\$(json_get_section_value Hardware PRODUCTID '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
         printf 'MAX_ETH_PORTS=%s\n' \"\$(json_get_section_value Hardware MAX_ETH_PORTS '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
+        printf 'LAN_PORT_LABEL_OVERRIDES=%s\n' \"\$(json_get_section_value Hardware LAN_PORT_LABEL_OVERRIDES '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
     " 2>/dev/null)
 
     if printf '%s' "$_pnh_output" | grep -q 'HWPROBE_FAILED'; then
@@ -975,6 +978,10 @@ pull_node_hardware() {
 
     _pnh_productid=$(printf '%s' "$_pnh_output" | sed -n 's/^PRODUCTID=//p' | tr -d '\r\n')
     _pnh_maxeth=$(printf '%s' "$_pnh_output" | sed -n 's/^MAX_ETH_PORTS=//p' | tr -d '\r\n')
+    if printf '%s\n' "$_pnh_output" | grep -q '^LAN_PORT_LABEL_OVERRIDES='; then
+        _pnh_has_label_overrides=1
+        _pnh_label_overrides=$(printf '%s\n' "$_pnh_output" | sed -n 's/^LAN_PORT_LABEL_OVERRIDES=//p' | tr -d '\r\n')
+    fi
 
     # Validate we got something
     if [ -z "$_pnh_productid" ] && [ -z "$_pnh_maxeth" ]; then
@@ -997,6 +1004,18 @@ pull_node_hardware() {
         else
             warn -c cli,vlan "⚠️ Failed to write MAX_ETH_PORTS_NODE${_pnh_id}"
         fi
+    fi
+
+    # Empty is meaningful: clear stale labels when a node changes profile or
+    # uses a manual hardware map.
+    if [ "$_pnh_has_label_overrides" = "1" ]; then
+        if json_set_section_value "Hardware" "LAN_PORT_LABEL_OVERRIDES_NODE${_pnh_id}" "$_pnh_label_overrides" "$SETTINGS_FILE"; then
+            info -c cli,vlan "LAN_PORT_LABEL_OVERRIDES_NODE${_pnh_id}=${_pnh_label_overrides:-<empty>}"
+        else
+            warn -c cli,vlan "Failed to write LAN_PORT_LABEL_OVERRIDES_NODE${_pnh_id}"
+        fi
+    else
+        warn -c cli,vlan "NODE${_pnh_id} did not return LAN label metadata"
     fi
 
     return 0

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: hw_probe.sh || version="0.57"                      #
+#                   - File: hw_probe.sh || version="0.58"                      #
 # ============================================================================ #
 # - Purpose:  Probe system hardware and record hardware keys in the central    #
 #             settings store (settings.json). Writes non-destructively via     #
@@ -132,6 +132,7 @@ MAX_SSIDS=$(merv_cap_ssids "$MAX_SSIDS" "$SETTINGS_FILE")
 # ============================================================================ #
 
 USE_MAP_OVERRIDE=0
+LAN_PORT_LABEL_OVERRIDES=""
 
 # Read device identity from General section
 _OVR_IS_NODE=$(json_get_section_value "General" "IS_NODE" "$SETTINGS_FILE" 2>/dev/null)
@@ -242,6 +243,7 @@ if [ "$USE_MAP_OVERRIDE" = "1" ]; then
   MAX_ETH_PORTS="$OVERRIDE_MAX_ETH_PORTS"
   ETH_PORTS=""
   LAN_PORT_LABELS=""
+  LAN_PORT_LABEL_OVERRIDES=""
   if [ "$MAX_ETH_PORTS" -gt 0 ]; then
     _ovr_i=1
     while [ "$_ovr_i" -le "$MAX_ETH_PORTS" ]; do
@@ -278,7 +280,7 @@ RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PO
 RT-AX88U) MODEL="RT-AX88U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-AX88U_PRO) MODEL="RT-AX88U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-BE88U) MODEL="RT-BE88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8"; MAX_ETH_PORTS=8; WAN_IF="eth0" ;;
-RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; MAX_ETH_PORTS=1; WAN_IF="eth0" ;;
+RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; LAN_PORT_LABEL_OVERRIDES="1=LAN_1-4_(shared)"; MAX_ETH_PORTS=1; WAN_IF="eth0" ;;
 GT-AX11000) MODEL="GT-AX11000"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 GT-AXE16000) MODEL="GT-AXE16000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
@@ -330,6 +332,83 @@ XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"
 esac
 fi
 
+# Sanitize optional presentation-only LAN label overrides. Entries use the
+# form SLOT=DISPLAY_TEXT, separated by semicolons. Invalid entries are dropped
+# without affecting hardware detection; the first valid value for a slot wins.
+sanitize_lan_port_label_overrides() {
+  _lplo_raw="$1"
+  _lplo_max="$2"
+  _lplo_result=""
+  _lplo_seen=";"
+  _lplo_remaining="$_lplo_raw"
+
+  [ -n "$_lplo_raw" ] || { printf '%s\n' ""; return 0; }
+
+  while :; do
+    _lplo_last=0
+    case "$_lplo_remaining" in
+      *';'*) _lplo_entry=${_lplo_remaining%%;*}; _lplo_remaining=${_lplo_remaining#*;} ;;
+      *)     _lplo_entry=$_lplo_remaining; _lplo_remaining=""; _lplo_last=1 ;;
+    esac
+
+    _lplo_entry=$(printf '%s' "$_lplo_entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ -n "$_lplo_entry" ]; then
+      case "$_lplo_entry" in
+        *=*=*)
+          warn "Ignoring LAN label override '$_lplo_entry': expected exactly one '='"
+          ;;
+        *=*)
+          _lplo_slot=${_lplo_entry%%=*}
+          _lplo_label=${_lplo_entry#*=}
+          _lplo_slot=$(printf '%s' "$_lplo_slot" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          _lplo_label=$(printf '%s' "$_lplo_label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          case "$_lplo_slot" in
+            ''|*[!0-9]*)
+              warn "Ignoring LAN label override '$_lplo_entry': slot must be numeric"
+              ;;
+            *)
+              _lplo_slot_norm=$(printf '%s' "$_lplo_slot" | sed 's/^0*//')
+              [ -n "$_lplo_slot_norm" ] || _lplo_slot_norm=0
+              if [ "$_lplo_slot_norm" -lt 1 ] || [ "$_lplo_slot_norm" -gt "$_lplo_max" ]; then
+                warn "Ignoring LAN label override '$_lplo_entry': slot must be between 1 and $_lplo_max"
+              elif [ -z "$_lplo_label" ]; then
+                warn "Ignoring LAN label override '$_lplo_entry': label is empty"
+              elif ! printf '%s' "$_lplo_label" | LC_ALL=C grep -q '^[-A-Za-z0-9_()./+ ][-A-Za-z0-9_()./+ ]*$'; then
+                warn "Ignoring LAN label override '$_lplo_entry': label contains unsupported characters"
+              else
+                case "$_lplo_seen" in
+                  *";$_lplo_slot_norm;"*)
+                    warn "Ignoring duplicate LAN label override for slot $_lplo_slot_norm"
+                    ;;
+                  *)
+                    _lplo_seen="${_lplo_seen}${_lplo_slot_norm};"
+                    _lplo_clean="${_lplo_slot_norm}=${_lplo_label}"
+                    if [ -n "$_lplo_result" ]; then
+                      _lplo_result="${_lplo_result};${_lplo_clean}"
+                    else
+                      _lplo_result="$_lplo_clean"
+                    fi
+                    ;;
+                esac
+              fi
+              ;;
+          esac
+          ;;
+        *)
+          warn "Ignoring LAN label override '$_lplo_entry': missing '='"
+          ;;
+      esac
+    fi
+
+    [ "$_lplo_last" = "1" ] && break
+  done
+
+  printf '%s\n' "$_lplo_result"
+}
+
+LAN_PORT_LABEL_OVERRIDES=$(sanitize_lan_port_label_overrides "$LAN_PORT_LABEL_OVERRIDES" "$MAX_ETH_PORTS")
+
 # ============================================================================ #
 #                        WAN INTERFACE VALIDATION                              #
 # Verify WAN interface exists; fallback to nvram if default not found.         #
@@ -371,6 +450,8 @@ json_set_flag "MAX_SSIDS" "${MAX_SSIDS}" "$HW_TARGET" || warn "Failed to write M
 json_set_flag "GUEST_SLOTS" "${GUEST_SLOTS}" "$HW_TARGET" || warn "Failed to write GUEST_SLOTS"
 json_set_flag "WAN_IF" "$WAN_IF" "$HW_TARGET" || warn "Failed to write WAN_IF"
 json_set_flag "MAX_ETH_PORTS" "${MAX_ETH_PORTS}" "$HW_TARGET" || warn "Failed to write MAX_ETH_PORTS"
+json_set_section_value "Hardware" "LAN_PORT_LABEL_OVERRIDES" "$LAN_PORT_LABEL_OVERRIDES" "$HW_TARGET" \
+  || warn "Failed to write LAN_PORT_LABEL_OVERRIDES"
 
 # Lists: store as space-separated strings for later parsing
 json_set_array "RADIO_INDEXES" "$RADIO_INDEXES" "$HW_TARGET" || warn "Failed to write RADIO_INDEXES"
@@ -421,6 +502,7 @@ echo "  Guest slots per radio: $GUEST_SLOTS"
 echo "  Max SSIDs: $MAX_SSIDS"
 echo "  Ethernet ports: $ETH_PORTS"
 echo "  Labels: $LAN_PORT_LABELS"
+echo "  Label overrides: ${LAN_PORT_LABEL_OVERRIDES:-none}"
 echo "  WAN interface: $WAN_IF"
 echo "  Output: $HW_TARGET (Hardware section in settings.json)"
 

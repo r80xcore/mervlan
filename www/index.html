@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.22-dev" -->
+  <!-- index.html version="0.53.23-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -423,21 +423,23 @@
       <form id="settingsForm" action="#" onsubmit="event.preventDefault(); return false;">
         <!-- SSIDs -->
         <!-- SSIDs -->
-        <table id="ssidTable" class="FormTable_table vlan-table">
-          <tr>
-            <th>
-              <div class="ssid-header-wrap">
-                <button type="button" class="lan-node-btn ssid-view-btn is-active" data-ssid-view="config" title="Show VLAN and AP Isolation settings">Config</button>
-                <span>SSID</span>
-                <button type="button" class="lan-node-btn ssid-view-btn" data-ssid-view="assign" title="Show Node Assignment">Assign</button>
-              </div>
-            </th>
-            <th class="ssid-col-config">VLAN ID</th>
-            <th class="ssid-col-config">AP Isolation</th>
-            <th class="ssid-col-config">Status</th>
-            <th class="ssid-col-assign ssid-col-hidden" colspan="3">Node Assignment</th>
-          </tr>
-        </table>
+        <div class="ssid-table-stage">
+          <table id="ssidTable" class="FormTable_table vlan-table">
+            <tr>
+              <th>
+                <div class="ssid-header-wrap">
+                  <button type="button" class="lan-node-btn ssid-view-btn is-active" data-ssid-view="config" title="Show VLAN and AP Isolation settings">Config</button>
+                  <span>SSID</span>
+                  <button type="button" class="lan-node-btn ssid-view-btn" data-ssid-view="assign" title="Show Node Assignment">Assign</button>
+                </div>
+              </th>
+              <th class="ssid-col-config">VLAN ID</th>
+              <th class="ssid-col-config">AP Isolation</th>
+              <th class="ssid-col-config">Status</th>
+              <th class="ssid-col-assign ssid-col-hidden" colspan="3">Node Assignment</th>
+            </tr>
+          </table>
+        </div>
 
   <!-- LAN Ports -->
   <!-- <div class="table-align-nogap"><h2>LAN Port VLANs</h2></div> -->
@@ -445,7 +447,12 @@
           <tr>
             <th>
               <div class="lan-header-wrap">
-                <span>Ethernet Port</span>
+                <div class="lan-header-identity">
+                  <span class="lan-product-id-badge" id="lanProductIdBadge">
+                    <span class="lan-product-id-model" id="lanProductIdModel"></span>
+                    <span class="lan-product-id-type">Ethernet</span>
+                  </span>
+                </div>
                 <div class="lan-node-toggle" role="group" aria-label="LAN port target">
                   <button type="button" class="lan-node-btn is-active" data-lan-target="main" title="Edit main router LAN VLANs">Main</button>
                 </div>
@@ -1544,11 +1551,13 @@
             GUEST_SLOTS: "0",
             ETH_PORTS: [],
             LAN_PORT_LABELS: [],
+            LAN_PORT_LABEL_OVERRIDES: "",
             WAN_IF: "",
             MAX_ETH_PORTS: "0"
           };
           nodeNums().forEach(n => { hardware[`PRODUCTID_NODE${n}`] = ""; });
           nodeNums().forEach(n => { hardware[`MAX_ETH_PORTS_NODE${n}`] = "0"; });
+          nodeNums().forEach(n => { hardware[`LAN_PORT_LABEL_OVERRIDES_NODE${n}`] = ""; });
 
           // Hardware override per device
           const overrideBlock = () => ({ MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" });
@@ -1688,11 +1697,15 @@
             MAX_SSID_CAP: 16,
             MAX_ETH_PORTS: 0,
             PRODUCTID: "",
+            LAN_PORT_LABEL_OVERRIDES: "",
+            MAP_OVERRIDE_MAIN: false,
             LOADED: false
           };
           for (let i = 1; i <= MAX_NODES; i++) {
             hw["PRODUCTID_NODE" + i] = "";
             hw["MAX_ETH_PORTS_NODE" + i] = 0;
+            hw["LAN_PORT_LABEL_OVERRIDES_NODE" + i] = "";
+            hw["MAP_OVERRIDE_NODE" + i] = false;
           }
           return hw;
         })();
@@ -1774,6 +1787,9 @@
           HW_SETTINGS.PRODUCTID = productId;
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+          HW_SETTINGS.LAN_PORT_LABEL_OVERRIDES = typeof hw?.LAN_PORT_LABEL_OVERRIDES === "string"
+            ? hw.LAN_PORT_LABEL_OVERRIDES.trim()
+            : "";
 
           // Load Limits section for SSID slot cap
           const limits = (json && typeof json === "object") ? json.Limits : null;
@@ -1788,6 +1804,8 @@
             const ethVal = parseInt(hw?.[ethKey], 10);
             HW_SETTINGS[pidKey] = pidVal;
             HW_SETTINGS[ethKey] = Number.isInteger(ethVal) && ethVal > 0 ? ethVal : 0;
+            const labelKey = "LAN_PORT_LABEL_OVERRIDES_NODE" + i;
+            HW_SETTINGS[labelKey] = hw && typeof hw[labelKey] === "string" ? hw[labelKey].trim() : "";
           }
 
           // Apply Hardware_Override to HW_SETTINGS for main + nodes
@@ -1814,6 +1832,10 @@
          */
         function applyHwOverrides(settingsObj) {
           const ovr = settingsObj?.Hardware_Override;
+          HW_SETTINGS.MAP_OVERRIDE_MAIN = false;
+          for (let i = 1; i <= MAX_NODES; i++) {
+            HW_SETTINGS["MAP_OVERRIDE_NODE" + i] = false;
+          }
           if (!ovr) return;
 
           // MAIN override
@@ -1821,6 +1843,7 @@
           if (mainOvr && String(mainOvr.MAP_OVERRIDE) === "1") {
             const maxEth = parseInt(mainOvr.OVERRIDE_MAX_ETH_PORTS, 10);
             if (Number.isInteger(maxEth) && maxEth >= 0 && maxEth <= 8) {
+              HW_SETTINGS.MAP_OVERRIDE_MAIN = true;
               HW_SETTINGS.MAX_ETH_PORTS = maxEth;
             }
           }
@@ -1831,6 +1854,7 @@
             if (nodeOvr && String(nodeOvr.MAP_OVERRIDE) === "1") {
               const maxEth = parseInt(nodeOvr.OVERRIDE_MAX_ETH_PORTS, 10);
               if (Number.isInteger(maxEth) && maxEth >= 0 && maxEth <= 8) {
+                HW_SETTINGS["MAP_OVERRIDE_NODE" + i] = true;
                 HW_SETTINGS["MAX_ETH_PORTS_NODE" + i] = maxEth;
               }
             }
@@ -1862,6 +1886,9 @@
           HW_SETTINGS.PRODUCTID = typeof hw.PRODUCTID === "string" ? hw.PRODUCTID.trim().toUpperCase() : "";
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+          HW_SETTINGS.LAN_PORT_LABEL_OVERRIDES = typeof hw.LAN_PORT_LABEL_OVERRIDES === "string"
+            ? hw.LAN_PORT_LABEL_OVERRIDES.trim()
+            : "";
 
           // Refresh Limits.MAX_SSID_CAP so effectiveMaxSsids() stays in sync after a
           // settings save/load without a full page reload.
@@ -1879,6 +1906,8 @@
             const ethVal = parseInt(hw[ethKey], 10);
             HW_SETTINGS[pidKey] = pidVal;
             HW_SETTINGS[ethKey] = Number.isInteger(ethVal) && ethVal > 0 ? ethVal : 0;
+            const labelKey = "LAN_PORT_LABEL_OVERRIDES_NODE" + i;
+            HW_SETTINGS[labelKey] = typeof hw[labelKey] === "string" ? hw[labelKey].trim() : "";
           }
 
           // Apply Hardware_Override to HW_SETTINGS for main + nodes
@@ -1920,6 +1949,7 @@
           updateLanNodeButtonStates();
           updateSSIDAssignCheckboxes();
           updateLanRowVisibility(CURRENT_LAN_TARGET);
+          updateLanPortLabels(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
 
           // Re-fill form with cached settings (tables were just rebuilt)
@@ -1941,6 +1971,71 @@
           if (!match) return 0;
           const n = parseInt(match[1], 10);
           return HW_SETTINGS["MAX_ETH_PORTS_NODE" + n] || 0;
+        }
+
+        function isHardwareMapOverrideEnabled(target) {
+          if (!target || target === "main") {
+            return HW_SETTINGS.MAP_OVERRIDE_MAIN === true;
+          }
+          const match = String(target).match(/^NODE(\d+)$/);
+          if (!match) return false;
+          return HW_SETTINGS["MAP_OVERRIDE_NODE" + match[1]] === true;
+        }
+
+        function getLanPortLabelOverrideRawForTarget(target) {
+          if (isHardwareMapOverrideEnabled(target)) return "";
+          if (!target || target === "main") {
+            return HW_SETTINGS.LAN_PORT_LABEL_OVERRIDES || "";
+          }
+          const match = String(target).match(/^NODE(\d+)$/);
+          if (!match) return "";
+          return HW_SETTINGS["LAN_PORT_LABEL_OVERRIDES_NODE" + match[1]] || "";
+        }
+
+        function parseLanPortLabelOverrides(raw, maxPorts) {
+          const result = Object.create(null);
+          if (typeof raw !== "string" || !raw.trim()) return result;
+          if (!Number.isInteger(maxPorts) || maxPorts < 1) return result;
+
+          raw.split(";").forEach(rawEntry => {
+            const entry = rawEntry.trim();
+            if (!entry) return;
+            const separator = entry.indexOf("=");
+            if (separator <= 0 || separator !== entry.lastIndexOf("=")) return;
+
+            const slotText = entry.slice(0, separator).trim();
+            const encodedLabel = entry.slice(separator + 1).trim();
+            if (!/^\d+$/.test(slotText) || !encodedLabel) return;
+            if (!/^[-A-Za-z0-9_().\/+ ]+$/.test(encodedLabel)) return;
+
+            const slot = Number(slotText);
+            if (!Number.isInteger(slot) || slot < 1 || slot > maxPorts) return;
+            if (Object.prototype.hasOwnProperty.call(result, slot)) return;
+
+            const label = encodedLabel.replace(/_/g, " ").replace(/\s+/g, " ").trim();
+            if (label) result[slot] = label;
+          });
+
+          return result;
+        }
+
+        function getLanPortLabelOverridesForTarget(target) {
+          return parseLanPortLabelOverrides(
+            getLanPortLabelOverrideRawForTarget(target),
+            getMaxEthPortsForTarget(target)
+          );
+        }
+
+        function updateLanPortLabels(target) {
+          const overrides = getLanPortLabelOverridesForTarget(target);
+          document.querySelectorAll("[data-lan-port-label-slot]").forEach(element => {
+            const slot = Number(element.dataset.lanPortLabelSlot);
+            if (!Number.isInteger(slot) || slot < 1) return;
+            element.textContent = Object.prototype.hasOwnProperty.call(overrides, slot)
+              ? overrides[slot]
+              : `LAN ${slot}`;
+            element.title = element.textContent;
+          });
         }
 
         /**
@@ -1985,7 +2080,7 @@
             const idx = String(i).padStart(2, "0");
             ssidTable.insertAdjacentHTML("beforeend", `
               <tr>
-                <td><input class="input_25_table vlan-input" name="SSID_${idx}" size="25" type="text" onchange="markEdited(${i})" title="${TOOLTIP.SSID}"></td>
+                <td><input class="input_25_table vlan-input" name="SSID_${idx}" maxlength="32" size="32" type="text" onchange="markEdited(${i})" title="${TOOLTIP.SSID}"></td>
                 <td class="ssid-col-config"><input class="input_6_table vlan-input" name="VLAN_${idx}" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited(${i})" title="${TOOLTIP.VLAN}"></td>
                 <td class="ssid-col-config"><select class="input_option" name="APISO_${idx}" onchange="markEdited(${i})" title="${TOOLTIP.APISO}">
                       <option value="0">Off</option>
@@ -2004,14 +2099,11 @@
 
           // build LAN port rows
           for (let i = 1; i <= overallMax; i++) {
-            const isFirstRow = (i === 1);
-            const productIdBadge = isFirstRow ? '<span class="lan-product-id-badge" id="lanProductIdBadge"></span>' : '';
             lanTable.insertAdjacentHTML("beforeend", `
               <tr data-lan-index="${i}">
                 <td class="lan-table__port">
                   <div class="lan-label-wrap">
-                    ${productIdBadge}
-                    <span class="lan-label-main">LAN ${i}</span>
+                    <span class="lan-label-main" data-lan-port-label-slot="${i}">LAN ${i}</span>
                     <label class="lan-trunk-toggle experimental-only experimental-hidden">
                       <input
                         type="checkbox"
@@ -2097,6 +2189,7 @@
           rebuildTrunkVlanOptionsFromSettings({});
           updateExperimentalVisibility();
           updateLanRowVisibility(CURRENT_LAN_TARGET);
+          updateLanPortLabels(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
           if (typeof setupSSIDViewToggle === "function") setupSSIDViewToggle();
           updateAPIsolationAvailability();
@@ -2339,14 +2432,19 @@ function showTooltip() {
      */
     function updateLanProductIdBadge(target) {
       const badge = document.getElementById("lanProductIdBadge");
-      if (!badge) return;
+      const model = document.getElementById("lanProductIdModel");
+      if (!badge || !model) return;
       const pid = getProductIdForTarget(target);
       if (pid) {
-        badge.textContent = pid;
+        model.textContent = pid;
+        model.style.display = "";
+        badge.title = `${pid} Ethernet`;
         badge.style.display = "";
       } else {
-        badge.textContent = "";
-        badge.style.display = "none";
+        model.textContent = "";
+        model.style.display = "none";
+        badge.title = "Ethernet";
+        badge.style.display = "";
       }
     }
 
@@ -2407,6 +2505,7 @@ function showTooltip() {
       updateLanInputNames(CURRENT_LAN_TARGET);
       loadLanFieldsFromCache(CURRENT_LAN_TARGET);
       updateLanRowVisibility(CURRENT_LAN_TARGET);
+      updateLanPortLabels(CURRENT_LAN_TARGET);
       updateLanProductIdBadge(CURRENT_LAN_TARGET);
       updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
@@ -2432,6 +2531,10 @@ function showTooltip() {
       CURRENT_SSID_VIEW = view;
       const ssidTable = document.getElementById("ssidTable");
       if (!ssidTable) return;
+      const formBox = document.querySelector(".form-box--main");
+      const isAssignView = view === "assign";
+      ssidTable.classList.toggle("is-assign-view", isAssignView);
+      if (formBox) formBox.classList.toggle("ssid-assign-view", isAssignView);
       
       // Toggle header and data columns
       ssidTable.querySelectorAll(".ssid-col-config").forEach(el => {
@@ -2446,9 +2549,9 @@ function showTooltip() {
         btn.classList.toggle("is-active", btn.dataset.ssidView === view);
       });
 
-      // Config and Assign have different natural widths. Allow this explicit
-      // view switch to shrink again so Assign does not permanently stretch Config.
-      scheduleFormPaneWidthUpdate({ allowShrink: true });
+      // The main form stays at its normal width. Assign expands only the SSID
+      // table via its view class, leaving every section below it stationary.
+      updateFormPaneWidth();
       scheduleHostIframeResize();
     }
 
@@ -3228,7 +3331,9 @@ function showTooltip() {
 
     const FORM_PANE_MIN_WIDTH = 440;
     const FORM_PANE_MAX_WIDTH = 720;
-    const FORM_PANE_PADDING_ALLOWANCE = 32;
+    const FORM_PANE_CONTENT_WIDTH_FALLBACK = 539;
+    const FORM_PANE_TRIM_FALLBACK = 10;
+    const OUTER_RAIL_SIZE_FALLBACK = 5;
     let pendingFormWidthUpdate = null;
     let pendingFormWidthAllowShrink = false;
     let lastFormPaneWidth = FORM_PANE_MIN_WIDTH;
@@ -3243,54 +3348,20 @@ function showTooltip() {
     }
 
     function updateFormPaneWidth(opts){
-      opts = opts || {};
-      const allowShrink = !!opts.allowShrink;
-
       const ssidTable = document.getElementById("ssidTable");
       if(!ssidTable) return;
 
       const root = document.documentElement;
-  const previousInlineWidth = root.style.getPropertyValue("--form-pane-width");
-  const previousWidth = Number.isFinite(lastFormPaneWidth) ? lastFormPaneWidth : FORM_PANE_MIN_WIDTH;
-      root.style.setProperty("--form-pane-width", "max-content");
-
-      let requiredWidth = 0;
-      const tableWidth = ssidTable.scrollWidth || ssidTable.offsetWidth || 0;
-      if(tableWidth){
-        requiredWidth = Math.max(requiredWidth, tableWidth + FORM_PANE_PADDING_ALLOWANCE);
-      }
-
-      const nodeSection = document.querySelector(".node-section");
-      if(nodeSection){
-        const nodeWidth = nodeSection.scrollWidth || nodeSection.offsetWidth || 0;
-        requiredWidth = Math.max(requiredWidth, nodeWidth + FORM_PANE_PADDING_ALLOWANCE);
-      }
-
-      document.querySelectorAll(".form-box.controls-panel").forEach(panel => {
-        const panelWidth = panel.scrollWidth || panel.offsetWidth || 0;
-        requiredWidth = Math.max(requiredWidth, panelWidth);
-      });
-
-      if(!requiredWidth){
-        if(previousInlineWidth){
-          root.style.setProperty("--form-pane-width", previousInlineWidth);
-        } else {
-          root.style.removeProperty("--form-pane-width");
-        }
-        lastFormPaneWidth = previousWidth;
-        updateCliOverlayPosition();
-        return;
-      }
-
-      const clamped = Math.min(
+      const rootStyles = window.getComputedStyle(root);
+      const contentWidth = parseFloat(rootStyles.getPropertyValue("--form-pane-content-width")) || FORM_PANE_CONTENT_WIDTH_FALLBACK;
+      const widthTrim = parseFloat(rootStyles.getPropertyValue("--form-pane-width-trim")) || FORM_PANE_TRIM_FALLBACK;
+      const outerRailSize = parseFloat(rootStyles.getPropertyValue("--outer-rail-size")) || OUTER_RAIL_SIZE_FALLBACK;
+      const targetWidth = contentWidth + widthTrim + outerRailSize;
+      lastFormPaneWidth = Math.min(
         FORM_PANE_MAX_WIDTH,
-        Math.max(FORM_PANE_MIN_WIDTH, Math.ceil(requiredWidth))
+        Math.max(FORM_PANE_MIN_WIDTH, targetWidth)
       );
-      const finalWidth = allowShrink
-        ? clamped
-        : Math.min(FORM_PANE_MAX_WIDTH, Math.max(previousWidth, clamped));
-      lastFormPaneWidth = finalWidth;
-      root.style.setProperty("--form-pane-width", `${finalWidth}px`);
+      root.style.setProperty("--form-pane-width", `${lastFormPaneWidth}px`);
       updateCliOverlayPosition();
     }
 
@@ -3657,6 +3728,9 @@ function showTooltip() {
       }
       function toggleCli(){
         const isCollapsed = cliPanel && cliPanel.classList.contains('collapsed');
+        if(isCollapsed && CURRENT_SSID_VIEW === 'assign'){
+          setSSIDView('config');
+        }
         setCliState(isCollapsed);
       }
       if(cliLatch){
@@ -5881,11 +5955,13 @@ async function runMacRefresh() {
       }
       // Ensure tables are ready before filling (handles early Load clicks)
       ensureTablesReady();
+      updateLanPortLabels(CURRENT_LAN_TARGET);
       updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
       if (hwChanged) {
         updateLanNodeButtonStates();
         updateSSIDAssignCheckboxes();
         updateLanRowVisibility(CURRENT_LAN_TARGET);
+        updateLanPortLabels(CURRENT_LAN_TARGET);
         updateLanProductIdBadge(CURRENT_LAN_TARGET);
       }
       fillFormFromSettings(CURRENT_SETTINGS_CACHE);
