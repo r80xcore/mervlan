@@ -1,3 +1,36 @@
+mervlan v0.53.23-dev
+
+New: Model-aware Ethernet display labels
+- Hardware profiles can now give individual Ethernet slots clearer names without changing their VLAN mappings, port numbering, or configuration keys.
+- Main routers and AiMesh nodes retain their own labels, and switching targets updates the visible names immediately.
+- Added an initial shared-port label for RT-BE92U hardware.
+- Invalid or missing label information safely falls back to the familiar LAN 1, LAN 2, and similar names.
+- Manual APMO mappings deliberately use generic LAN labels so model-specific descriptions cannot become misleading.
+
+Fixed: Stable form sizing and assignment layout
+- Fixed a width feedback issue that could progressively stretch the AP Isolation and Status columns.
+- SSID fields now display and enforce the full 32-character SSID limit.
+- Node Assignment now keeps all ten node choices on one line while leaving the Ethernet and lower sections stationary.
+- The INFO control now sits correctly beneath the form frame, opens smoothly, and closes immediately with the form.
+
+Fixed: Prevent boot shield from retaining DHCP hold (Thanks @inventor7777 - PR #38)
+
+Improved: Ethernet presentation and compact framing
+- Moved the router model into a compact two-line Ethernet badge, with long names shortened visually and preserved in a tooltip.
+- Ethernet labels now start from a consistent position and handle longer descriptions cleanly on both Main and Node views.
+- Added a matching outer frame around the expanded assignment view and unified the adjustable frame spacing at 5 pixels.
+- Removed the stray border from the experimental form container.
+
+Improved: Update and restore guidance
+- Reworked the help text for update channels, backups, restores, rollback, command-line options, and recovery so the common paths are easier to follow.
+- Updated the README and HELP documentation with clearer setup checklists, port-assignment guidance, troubleshooting, command references, and device-support instructions.
+
+Maintenance: Hardware metadata compatibility
+- Added backward-compatible defaults and node synchronization for Ethernet display-label metadata.
+- Advanced version metadata for the web interface, hardware probe, and node synchronization scripts.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.22-dev
 
 New: Interactive, verifiable standalone installer
