@@ -139,8 +139,10 @@ _mode_shield() {
   fi
 
   # Step 1: arm the DHCP hold up-front so the window is closed before the
-  # watchdog even forks. quiet mode suppresses the per-tick log noise.
-  merv_dhcp_hold_arm quiet
+  # watchdog even forks.  The boot shield owns a separate marker, so it must
+  # not create merv_dhcp_hold.active here: otherwise a final watchdog tick can
+  # recreate that shared manager/heal marker after the manager releases it.
+  merv_dhcp_hold_arm quiet no-marker
   info -c boot,vlan "Shield: MERV_DHCP_HOLD armed (boot critical section)"
 
   # Step 2: replay the persistent MERV_MAC snapshot if we have one. Best-effort;
@@ -182,9 +184,9 @@ _mode_shield() {
       fi
 
       # Re-arm DHCP hold against any rc-driven ebtables flush during the boot
-      # storm. Idempotent — fast-paths to a no-op when the chain + jumps are
-      # already in place.
-      merv_dhcp_hold_arm quiet 2>/dev/null || true
+      # storm. Keep ownership on the boot marker only. A manager/heal caller
+      # that needs a durable hold writes merv_dhcp_hold.active itself.
+      merv_dhcp_hold_arm quiet no-marker 2>/dev/null || true
 
       sleep 1
       _now=$(date +%s 2>/dev/null || echo 0)

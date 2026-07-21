@@ -486,10 +486,17 @@ restore_merv_qt_shield() {
 # section. A .active marker under $LOCKDIR lets any tick re-arm idempotently.
 # ============================================================================
 
-# merv_dhcp_hold_arm [quiet]
+# merv_dhcp_hold_arm [quiet] [no-marker]
+#
+# The hold marker records ownership by manager/heal callers so their guard
+# ticks can restore the rule if firmware flushes ebtables mid-operation.  The
+# boot shield is deliberately not an owner: it has its own
+# merv_boot_shield.active marker and must not recreate the shared ownership
+# marker after the manager has released it.
 merv_dhcp_hold_arm() {
-  local _hold_rules _changed _quiet
+  local _hold_rules _changed _quiet _marker_mode
   _quiet="${1:-0}"
+  _marker_mode="${2:-marker}"
   _changed=0
 
   type ebtables >/dev/null 2>&1 || return 0
@@ -512,7 +519,8 @@ merv_dhcp_hold_arm() {
     _changed=1
   fi
 
-  echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
+  [ "$_marker_mode" = "no-marker" ] || \
+    echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
   [ "$_changed" -eq 1 ] && [ "$_quiet" != "quiet" ] && \
     info -c vlan "DHCP hold: armed for br0 critical section"
 }
