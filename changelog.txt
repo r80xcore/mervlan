@@ -307,8 +307,8 @@ New: Settings modal
 - Apply button is disabled until a change is made; queues settings save first,
   then service actions (boot enable/disable) in the correct order.
 - Refresh button that pulls service status and shows it during the current session.
-  The current status is built by mervlan_boot.sh and is stored in the tmp www
-  directory /tmp/var/wwwext/mervlan/tmp/resultsservice_status.json.
+  The current status is built by mervlan_boot.sh and is stored in the tmpfs web directory
+  /www/user/mervlan/tmp/results/service_status.json.
 
 New: Pause Event Reactions
 - New PAUSE flag in settings.json (General section, default "off").
