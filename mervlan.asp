@@ -1,7 +1,7 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <!-- mervlan.asp version="0.55" -->
+  <!-- mervlan.asp version="0.56" -->
 <meta http-equiv="X-UA-Compatible" content="IE=Edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <meta http-equiv="Pragma" content="no-cache">
@@ -150,7 +150,11 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   var amng = document.getElementById("amng_custom");
   var rawAmngValue = (opts && typeof opts.rawAmng === "string") ? opts.rawAmng : null;
   if (rawAmngValue !== null) {
-    if (amng) amng.value = rawAmngValue;
+    if (!amng) {
+      alert("amng_custom not found in parent form");
+      return false;
+    }
+    amng.value = rawAmngValue;
   } else if (settingsObjOrNull != null) {
     if (!amng) {
       alert("amng_custom not found in parent form");

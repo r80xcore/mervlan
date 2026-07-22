@@ -10,6 +10,9 @@ Fixed: Safer update, restore, and node activation
 - Node synchronization now stages and verifies each node before activation, restores the previous node copy after a failed switch, and no longer clears a node before a valid replacement is ready.
 - The main router is validated before any configured node is changed, reducing the chance that one failed operation can disrupt the full network.
 - Corrected backup creation and deletion logs so they always report the archive that was actually handled.
+- Action acknowledgement files now safely encode multiline messages so browser result parsing cannot be broken by newline or carriage-return characters.
+- Raw parent-form payload submission now stops with a clear error if its required hidden field is unavailable instead of submitting an empty or stale value.
+- The legacy custom update-ref fallback now consistently selects the newest stored value before validation.
 
 Improved: Backup integrity and recovery readiness
 - New manual backups include integrity metadata and are checked both as archives and as complete MerVLAN installations before they are published.
@@ -21,6 +24,7 @@ Maintenance: Transaction and recovery safeguards
 - Update, restore, backup, deletion, node synchronization, and emergency recovery use coordinated maintenance protection to avoid overlapping operations.
 - Added bounded test hooks and stricter settings, checksum, path, space, and staged-file verification for failure and power-loss testing.
 - Advanced version metadata for the web interface, updater, backup manager, and node synchronization, and introduced the recovery helper at version 0.1.
+- Advanced version metadata for the action acknowledgement helper, parent web interface, and service-event handler after review hardening.
 
 ################ END OF CURRENT CHANGELOG
 

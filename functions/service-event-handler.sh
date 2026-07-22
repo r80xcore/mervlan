@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.61"                  #
+#          - File: service-event-handler.sh || version="0.62"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -617,7 +617,7 @@ case "${TYPE}_${EVENT}" in
   updaterelease_vlanmgr)
     # Update MerVLAN addon to a specific tagged release or custom branch
     # Ref is written to custom_settings.txt by Merlin (not nvram) via vlanmgr_update_ref key
-    _upd_ref="$(grep '^vlanmgr_update_ref=' /jffs/addons/custom_settings.txt 2>/dev/null | head -n1 | cut -d'=' -f2- | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-')"
+    _upd_ref="$(grep '^vlanmgr_update_ref=' "$CUSTOM_SETTINGS_FILE" 2>/dev/null | tail -n1 | cut -d'=' -f2- | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-')"
     case "$_upd_ref" in
         refs/tags/v[0-9]*|refs/heads/?*)
             dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update "$_upd_ref"

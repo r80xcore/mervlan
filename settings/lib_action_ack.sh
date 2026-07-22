@@ -1,5 +1,5 @@
 #!/bin/sh
-#              - File: lib_action_ack.sh || version="0.01"                    #
+#              - File: lib_action_ack.sh || version="0.02"                    #
 # Generic correlated action acknowledgements for MerVLAN UI operations.
 
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] && return 0 2>/dev/null
@@ -17,7 +17,20 @@ action_ack_sanitize_action() {
 }
 
 action_ack_json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g'
+  # Add one transport newline for awk to consume.  Any newline already in the
+  # value becomes a separate record and is emitted as the JSON escape "\\n";
+  # this also preserves a trailing newline in the original shell value.
+  printf '%s\n' "$1" | awk '
+    BEGIN { ORS="" }
+    {
+      if (NR > 1) printf "\\n"
+      gsub(/\\/, "\\\\")
+      gsub(/"/, "\\\"")
+      gsub(/\r/, "\\r")
+      gsub(/\t/, "\\t")
+      printf "%s", $0
+    }
+  '
 }
 
 # action_ack_write <token> <action> <status> <result-json> <message> <warnings-json> [error-code]
