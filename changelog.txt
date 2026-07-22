@@ -1,3 +1,29 @@
+mervlan v0.53.24-dev
+
+New: Standalone emergency recovery
+- Added a self-contained recovery helper alongside persistent backups so a damaged or missing active installation can be restored without relying on its scripts.
+- Persistent backups remain safely stored in JFFS, while the convenient one-shot Undo Restore remains temporary and is naturally cleared by a reboot.
+
+Fixed: Safer update, restore, and node activation
+- Updates and restores now validate a complete replacement before switching installations, then use same-filesystem activation so the working copy is never deliberately deleted first.
+- Interrupted restores attempt to put the original installation and boot state back automatically, while preserving recovery data if automatic rollback cannot finish.
+- Node synchronization now stages and verifies each node before activation, restores the previous node copy after a failed switch, and no longer clears a node before a valid replacement is ready.
+- The main router is validated before any configured node is changed, reducing the chance that one failed operation can disrupt the full network.
+- Corrected backup creation and deletion logs so they always report the archive that was actually handled.
+
+Improved: Backup integrity and recovery readiness
+- New manual backups include integrity metadata and are checked both as archives and as complete MerVLAN installations before they are published.
+- Existing backups without the new integrity metadata remain supported and still receive full content validation before restore.
+- Temporary activation trees now stay inside the backup directory, are cleaned after successful work, and are preserved for inspection when the active installation is incomplete.
+- Backup inventory refreshes also keep the emergency recovery helper current, making the recovery path easy to find when it is needed.
+
+Maintenance: Transaction and recovery safeguards
+- Update, restore, backup, deletion, node synchronization, and emergency recovery use coordinated maintenance protection to avoid overlapping operations.
+- Added bounded test hooks and stricter settings, checksum, path, space, and staged-file verification for failure and power-loss testing.
+- Advanced version metadata for the web interface, updater, backup manager, and node synchronization, and introduced the recovery helper at version 0.1.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.23-dev
 
 New: Model-aware Ethernet display labels

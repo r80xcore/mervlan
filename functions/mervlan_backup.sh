@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#                - File: mervlan_backup.sh || version="0.1"                   #
+#                - File: mervlan_backup.sh || version="0.2"                   #
 # ============================================================================ #
 # Backup inventory, manual backup, deletion, and transactional restore engine. #
 # Public CLI entry remains functions/update_mervlan.sh.                        #
@@ -30,19 +30,70 @@ readonly MB_UNDO_ROOT="${MERVLAN_UNDO_DIR_OVERRIDE:-$MB_TMP_ROOT/undo}"
 readonly MB_UNDO_RESTORE_ARCHIVE="$MB_UNDO_ROOT/mervlan.undo.restore.tar.gz"
 readonly MB_UNDO_RESTORE_META="$MB_UNDO_ROOT/restore.meta"
 readonly MB_UNDO_UPDATE_MARKER="$MB_UNDO_ROOT/update.meta"
+readonly MB_RECOVERY_SOURCE="$MERV_BASE/functions/mervlan_recover.sh"
+readonly MB_RECOVERY_SCRIPT="$MB_BACKUP_ROOT/recover.sh"
+readonly MB_JFFS_STAGE="$MB_BACKUP_ROOT/.mervlan.new.$$"
+readonly MB_JFFS_OLD="$MB_BACKUP_ROOT/.mervlan.old.$$"
 readonly MB_MANUAL_LIMIT=3
 readonly MB_AUTO_LIMIT=3
 readonly MB_TEST_MODE="${MERVLAN_BACKUP_TEST_MODE:-0}"
 readonly MB_TEST_FAIL_PHASE="${MERVLAN_BACKUP_TEST_FAIL_PHASE:-}"
+readonly MB_TEST_PAUSE_PHASE="${MERVLAN_BACKUP_TEST_PAUSE_PHASE:-}"
+readonly MB_TEST_PAUSE_SECONDS="${MERVLAN_BACKUP_TEST_PAUSE_SECONDS:-5}"
 
 MB_LOCK_OWNED=0
 MB_REQUEST_TOKEN=""
 MB_OPERATION=""
 MB_TARGET=""
 MB_UNDO_CLEANUP_WARNING=0
+MB_SIGNAL_HANDLING=0
+MB_ACTIVATION_STARTED=0
+MB_ROLLBACK_DONE=0
+MB_PRESERVE_WORK=0
+MB_PRESERVE_JFFS=0
+MB_RESTORE_ORIGINAL=""
+MB_RESTORE_ORIGINAL_BOOT=0
+
+mb_remove_jffs_stage() {
+  _mb_stage_path="$1"
+  case "$_mb_stage_path" in
+    "$MB_BACKUP_ROOT"/.mervlan.new.*|"$MB_BACKUP_ROOT"/.mervlan.old.*)
+      [ -e "$_mb_stage_path" ] && rm -rf "$_mb_stage_path" 2>/dev/null || :
+      ;;
+  esac
+}
+
+mb_reconcile_stale_stages() {
+  _mb_active_valid=1
+  for _mb_required in install.sh uninstall.sh changelog.txt mervlan.asp \
+    functions/update_mervlan.sh functions/mervlan_boot.sh settings/settings.json www/index.html
+  do
+    [ -f "$MERV_BASE/$_mb_required" ] || _mb_active_valid=0
+  done
+  if [ "$_mb_active_valid" != "1" ]; then
+    warn -c cli,vlan "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees"
+    return 0
+  fi
+  for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.new.*; do
+    [ -d "$_mb_stale" ] || continue
+    mb_remove_jffs_stage "$_mb_stale"
+  done
+  for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.old.*; do
+    [ -d "$_mb_stale" ] || continue
+    mb_remove_jffs_stage "$_mb_stale"
+  done
+}
 
 mb_cleanup() {
-  [ -d "$MB_WORK_ROOT" ] && rm -rf "$MB_WORK_ROOT" 2>/dev/null || :
+  if [ "$MB_PRESERVE_JFFS" != "1" ]; then
+    mb_remove_jffs_stage "$MB_JFFS_STAGE"
+  fi
+  if [ "$MB_PRESERVE_JFFS" != "1" ] && [ "$MB_ACTIVATION_STARTED" != "1" ]; then
+    mb_remove_jffs_stage "$MB_JFFS_OLD"
+  fi
+  if [ "$MB_PRESERVE_WORK" != "1" ] && [ -d "$MB_WORK_ROOT" ]; then
+    rm -rf "$MB_WORK_ROOT" 2>/dev/null || :
+  fi
   if [ "$MB_LOCK_OWNED" = "1" ]; then
     if type merv_lock_release >/dev/null 2>&1; then
       merv_lock_release "$MB_LOCK" 2>/dev/null || :
@@ -57,7 +108,27 @@ mb_cleanup() {
     *) type log_maintain_all >/dev/null 2>&1 && log_maintain_all ;;
   esac
 }
-trap mb_cleanup EXIT INT TERM
+
+mb_handle_signal() {
+  _mb_signal_status="$1"
+  [ "$MB_SIGNAL_HANDLING" = "0" ] || exit "$_mb_signal_status"
+  MB_SIGNAL_HANDLING=1
+  trap - INT TERM
+  warn -c cli,vlan "Maintenance operation interrupted; stopping safely"
+  if [ "$MB_ACTIVATION_STARTED" = "1" ] && [ "$MB_ROLLBACK_DONE" != "1" ] && \
+     [ -n "$MB_RESTORE_ORIGINAL" ] && [ -d "$MB_RESTORE_ORIGINAL" ]; then
+    if ! mb_rollback_restore "$MB_RESTORE_ORIGINAL" "$MB_RESTORE_ORIGINAL_BOOT"; then
+      MB_PRESERVE_WORK=1
+      error -c cli,vlan "Automatic rollback failed; temporary recovery data remains at $MB_WORK_ROOT"
+    fi
+  fi
+  mb_write_result interrupted signal "Operation interrupted. Automatic rollback was attempted when required."
+  exit "$_mb_signal_status"
+}
+
+trap mb_cleanup EXIT
+trap 'mb_handle_signal 130' INT
+trap 'mb_handle_signal 143' TERM
 
 mb_json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g; s/\t/\\t/g'
@@ -67,6 +138,15 @@ mb_make_token() {
   _mb_token=$(printf '%s' "$1" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-')
   [ -n "$_mb_token" ] || _mb_token="cli-$$-$(date +%s 2>/dev/null)"
   printf '%s' "$_mb_token"
+}
+
+mb_test_pause() {
+  [ "$MB_TEST_MODE" = "1" ] || return 0
+  [ "$MB_TEST_PAUSE_PHASE" = "$1" ] || return 0
+  _mb_pause_seconds="$MB_TEST_PAUSE_SECONDS"
+  case "$_mb_pause_seconds" in ''|*[!0-9]*) _mb_pause_seconds=5 ;; esac
+  [ "$_mb_pause_seconds" -le 30 ] || _mb_pause_seconds=30
+  sleep "$_mb_pause_seconds"
 }
 
 mb_path_size_kb() {
@@ -97,6 +177,82 @@ mb_fs_id() {
 
 mb_number_or_zero() {
   case "$1" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
+}
+
+mb_settings_file_valid() {
+  _mb_settings_file="$1"
+  [ -s "$_mb_settings_file" ] || return 1
+  for _mb_settings_key in General SSH Nodes SSH_USER SSH_PORT; do
+    grep -q "\"${_mb_settings_key}\"[[:space:]]*:" "$_mb_settings_file" 2>/dev/null || return 1
+  done
+  _mb_settings_opens=$(tr -cd '{' < "$_mb_settings_file" 2>/dev/null | wc -c | tr -d '[:space:]')
+  _mb_settings_closes=$(tr -cd '}' < "$_mb_settings_file" 2>/dev/null | wc -c | tr -d '[:space:]')
+  [ -n "$_mb_settings_opens" ] && [ "$_mb_settings_opens" = "$_mb_settings_closes" ]
+}
+
+mb_checksum_value() {
+  type md5sum >/dev/null 2>&1 || return 1
+  md5sum "$1" 2>/dev/null | awk 'NR == 1 { print $1 }'
+}
+
+mb_prepare_archive_metadata() {
+  _mb_meta_archive="$1"
+  _mb_meta_id="$2"
+  _mb_meta_output="$3"
+  mb_is_archive_id "$_mb_meta_id" || return 1
+  _mb_meta_checksum=$(mb_checksum_value "$_mb_meta_archive") || return 1
+  case "$_mb_meta_checksum" in ''|*[!0123456789abcdefABCDEF]*) return 1 ;; esac
+  [ "${#_mb_meta_checksum}" -eq 32 ] || return 1
+  {
+    printf 'format=1\n'
+    printf 'archive=%s\n' "$_mb_meta_id"
+    printf 'algorithm=md5\n'
+    printf 'checksum=%s\n' "$_mb_meta_checksum"
+    printf 'created=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+  } > "$_mb_meta_output" 2>/dev/null || return 1
+  chmod 600 "$_mb_meta_output" 2>/dev/null || :
+}
+
+mb_metadata_value() {
+  _mb_metadata_file="$1"
+  _mb_metadata_key="$2"
+  [ -f "$_mb_metadata_file" ] || return 1
+  sed -n "s/^${_mb_metadata_key}=//p" "$_mb_metadata_file" 2>/dev/null | tail -n1
+}
+
+mb_verify_archive_integrity() {
+  _mb_integrity_archive="$1"
+  _mb_integrity_id=${_mb_integrity_archive##*/}
+  _mb_integrity_meta="${_mb_integrity_archive}.meta"
+  [ -f "$_mb_integrity_archive" ] || return 1
+  # Backups created before integrity metadata was introduced remain supported;
+  # their archive tree is still fully validated before restore.
+  [ -f "$_mb_integrity_meta" ] || return 0
+  [ "$(mb_metadata_value "$_mb_integrity_meta" format)" = "1" ] || return 1
+  [ "$(mb_metadata_value "$_mb_integrity_meta" archive)" = "$_mb_integrity_id" ] || return 1
+  [ "$(mb_metadata_value "$_mb_integrity_meta" algorithm)" = "md5" ] || return 1
+  _mb_integrity_expected=$(mb_metadata_value "$_mb_integrity_meta" checksum)
+  _mb_integrity_actual=$(mb_checksum_value "$_mb_integrity_archive") || return 1
+  [ -n "$_mb_integrity_expected" ] && [ "$_mb_integrity_expected" = "$_mb_integrity_actual" ]
+}
+
+mb_install_recovery_helper() {
+  [ -f "$MB_RECOVERY_SOURCE" ] || return 1
+  mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || return 1
+  chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || :
+  _mb_recovery_tmp="$MB_BACKUP_ROOT/.recover.sh.partial.$$"
+  rm -f "$_mb_recovery_tmp" 2>/dev/null || :
+  cp -p "$MB_RECOVERY_SOURCE" "$_mb_recovery_tmp" 2>/dev/null || return 1
+  chmod 700 "$_mb_recovery_tmp" 2>/dev/null || :
+  mv -f "$_mb_recovery_tmp" "$MB_RECOVERY_SCRIPT" 2>/dev/null || {
+    rm -f "$_mb_recovery_tmp" 2>/dev/null || :
+    return 1
+  }
+}
+
+mb_remove_archive_artifacts() {
+  _mb_remove_archive="$1"
+  rm -f "$_mb_remove_archive" "${_mb_remove_archive}.meta" 2>/dev/null
 }
 
 mb_public_asp_path() {
@@ -175,6 +331,7 @@ mb_require_space_kb() {
   _mb_space_path="$1"
   _mb_space_required="$2"
   _mb_space_label="$3"
+  [ "$MB_TEST_MODE" = "1" ] && return 0
   case "$_mb_space_required" in ''|*[!0-9]*) _mb_space_required=0 ;; esac
   _mb_space_stats=$(mb_fs_stats_kb "$_mb_space_path")
   _mb_space_total=${_mb_space_stats%%|*}
@@ -259,6 +416,7 @@ mb_acquire_lock() {
 
 mb_require_lock() {
   if mb_acquire_lock; then
+    mb_reconcile_stale_stages
     return 0
   fi
   _mb_busy_message="Another MerVLAN update, backup, restore, or deletion is already running."
@@ -593,13 +751,40 @@ mb_create_manual() {
     mb_fail validation "The created manual backup failed archive validation."
     return 1
   fi
-  if ! mv -f "$_mb_partial" "$_mb_final" 2>/dev/null; then
+  rm -rf "$MB_WORK_ROOT/manual-verify" 2>/dev/null || :
+  if ! mb_validate_archive_tree "$_mb_partial" "$MB_WORK_ROOT/manual-verify"; then
     rm -f "$_mb_partial" 2>/dev/null || :
+    mb_fail validation "The created manual backup is unsafe, incomplete, or contains invalid settings."
+    return 1
+  fi
+  _mb_meta_final="${_mb_final}.meta"
+  _mb_meta_partial="${_mb_meta_final}.partial.$$"
+  if ! mb_prepare_archive_metadata "$_mb_partial" "$_mb_id" "$_mb_meta_partial"; then
+    rm -f "$_mb_partial" "$_mb_meta_partial" 2>/dev/null || :
+    mb_fail validation "Could not calculate integrity metadata for the manual backup."
+    return 1
+  fi
+  if ! mv -f "$_mb_meta_partial" "$_mb_meta_final" 2>/dev/null; then
+    rm -f "$_mb_partial" "$_mb_meta_partial" 2>/dev/null || :
+    mb_fail publishing "Could not publish manual backup integrity metadata."
+    return 1
+  fi
+  if ! mv -f "$_mb_partial" "$_mb_final" 2>/dev/null; then
+    rm -f "$_mb_partial" "$_mb_meta_final" 2>/dev/null || :
     mb_fail publishing "Could not publish the completed manual backup."
     return 1
   fi
+  if ! mb_verify_archive_integrity "$_mb_final"; then
+    mb_remove_archive_artifacts "$_mb_final" 2>/dev/null || :
+    mb_fail validation "The published manual backup failed its integrity check."
+    return 1
+  fi
+  mb_install_recovery_helper || warn -c cli,vlan "Backup created, but the emergency recovery helper could not be refreshed"
   mb_refresh_inventory
-  info -c cli,vlan "Manual backup completed successfully: $_mb_id"
+  # Inventory generation iterates archives with shared POSIX-shell variables.
+  # MB_TARGET is the stable operation identifier and cannot be replaced by the
+  # last archive visited while refreshing the UI inventory.
+  info -c cli,vlan "Manual backup completed successfully: $MB_TARGET"
   mb_write_result success complete "Manual backup created successfully."
   return 0
 }
@@ -625,11 +810,11 @@ mb_delete_one() {
   mb_require_lock || return 1
   _mb_path=$(mb_resolve_selection "$_mb_id") || { mb_fail selection "Selected backup no longer exists."; return 1; }
   mb_write_result running deleting "Deleting $_mb_id."
-  rm -f "$_mb_path" 2>/dev/null || { mb_fail deleting "Failed to delete $_mb_id."; return 1; }
+  mb_remove_archive_artifacts "$_mb_path" 2>/dev/null || { mb_fail deleting "Failed to delete $_mb_id."; return 1; }
   [ ! -e "$_mb_path" ] || { mb_fail deleting "Backup still exists after deletion attempt."; return 1; }
   [ "$(mb_meta_line "$MB_UNDO_UPDATE_MARKER" 1)" = "$_mb_id" ] && rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null || :
   mb_refresh_inventory
-  info -c cli,vlan "Backup deleted successfully: $_mb_id"
+  info -c cli,vlan "Backup deleted successfully: $MB_TARGET"
   mb_write_result success complete "Backup deleted successfully."
   return 0
 }
@@ -645,22 +830,15 @@ mb_delete_all() {
     return 2
   fi
   mb_require_lock || return 1
-  _mb_expected="${MERVLAN_BACKUP_DIR_OVERRIDE:-${MERV_BASE%/*}/mervlan_backups}"
-  [ -n "$MB_BACKUP_ROOT" ] && [ "$MB_BACKUP_ROOT" = "$_mb_expected" ] || { mb_fail safety "Backup root safety validation failed."; return 1; }
-  case "$MB_BACKUP_ROOT" in /|/jffs|/jffs/addons|/tmp|'') mb_fail safety "Refusing unsafe backup root: $MB_BACKUP_ROOT"; return 1 ;; esac
-  mkdir -p "${MB_BACKUP_ROOT%/*}" 2>/dev/null || { mb_fail deleting "Backup parent directory is unavailable."; return 1; }
-  _mb_old="${MB_BACKUP_ROOT}.delete.$$"
   mb_write_result running deleting "Deleting all persistent MerVLAN backups."
-  if [ -d "$MB_BACKUP_ROOT" ]; then
-    mv "$MB_BACKUP_ROOT" "$_mb_old" 2>/dev/null || { mb_fail deleting "Could not isolate the backup directory for deletion."; return 1; }
-  fi
-  if ! mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null; then
-    [ -d "$_mb_old" ] && mv "$_mb_old" "$MB_BACKUP_ROOT" 2>/dev/null || :
-    mb_fail deleting "Could not recreate the backup directory; original contents were retained."
-    return 1
-  fi
+  mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail deleting "Backup directory is unavailable."; return 1; }
   chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || :
-  [ -d "$_mb_old" ] && rm -rf "$_mb_old" 2>/dev/null || :
+  _mb_delete_failed=0
+  for _mb_delete_path in $(mb_list_paths); do
+    mb_remove_archive_artifacts "$_mb_delete_path" 2>/dev/null || _mb_delete_failed=1
+  done
+  [ "$_mb_delete_failed" = "0" ] || { mb_fail deleting "One or more recognized backup files could not be deleted."; return 1; }
+  mb_install_recovery_helper || warn -c cli,vlan "Persistent backups were deleted, but the emergency recovery helper could not be refreshed"
   rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null || :
   mb_refresh_inventory
   info -c cli,vlan "All persistent MerVLAN backups deleted successfully"
@@ -687,6 +865,7 @@ mb_validate_archive_tree() {
   for _mb_required in install.sh uninstall.sh changelog.txt mervlan.asp functions/update_mervlan.sh functions/mervlan_boot.sh settings/settings.json www/index.html; do
     [ -f "$MB_RESTORE_TREE/$_mb_required" ] || return 1
   done
+  mb_settings_file_valid "$MB_RESTORE_TREE/settings/settings.json" || return 1
   return 0
 }
 
@@ -742,24 +921,6 @@ mb_list_configured_nodes() {
   [ -f "${SETTINGS_FILE:-$MERV_BASE/settings/settings.json}" ] || return 1
   type merv_node_list >/dev/null 2>&1 || return 1
   merv_node_list
-}
-
-mb_clean_restored_nodes() {
-  _mb_nodes="$1"
-  _mb_node_failed=0
-  while read -r _mb_node_id _mb_node_ip; do
-    [ -n "$_mb_node_ip" ] || continue
-    if merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "rm -rf /jffs/addons/mervlan" >/dev/null 2>&1; then
-      info -c cli,vlan "Cleared remote addon directory on NODE${_mb_node_id} ($_mb_node_ip) before restore sync"
-    else
-      type merv_ssh_skip_log >/dev/null 2>&1 && \
-        merv_ssh_skip_log "$_mb_node_id" "$_mb_node_ip" "restore remote cleanup"
-      _mb_node_failed=1
-    fi
-  done <<EOF
-$_mb_nodes
-EOF
-  [ "$_mb_node_failed" = "0" ]
 }
 
 mb_push_restored_mac_db() {
@@ -878,30 +1039,35 @@ mb_rollback_restore() {
   _mb_old_tree="$1"
   _mb_old_boot="$2"
   warn -c cli,vlan "Restore failed after activation; rolling back the original installation"
-  if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
+  if [ "$MB_TEST_MODE" != "1" ] && [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
     # Quiesce the failed target and remove its exact template generation before
     # the original source is put back.  Keep node teardown explicit so a local
     # setup action cannot hide or duplicate the remote lifecycle.
-    sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
+    MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
     MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1 || :
-    sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1 || :
   fi
-  [ -d "$MERV_BASE" ] && rm -rf "$MERV_BASE" 2>/dev/null || :
+  mb_remove_jffs_stage "$MB_JFFS_STAGE"
+  if [ -d "$MERV_BASE" ]; then
+    mv "$MERV_BASE" "$MB_JFFS_STAGE" 2>/dev/null || return 1
+  fi
   if mv "$_mb_old_tree" "$MERV_BASE" 2>/dev/null; then
+    mb_remove_jffs_stage "$MB_JFFS_STAGE"
+    MB_ROLLBACK_DONE=1
+    MB_ACTIVATION_STARTED=0
     mb_refresh_public_tree "$MERV_BASE" >/dev/null 2>&1 || :
     mb_apply_boot_state "$MERV_BASE" "$_mb_old_boot" 1 >/dev/null 2>&1 || :
     _mb_rollback_nodes=$(mb_list_configured_nodes 2>/dev/null || :)
     if [ -n "$_mb_rollback_nodes" ] && type ssh_keys_effectively_installed >/dev/null 2>&1 && ssh_keys_effectively_installed; then
       if [ -x "$MERV_BASE/functions/sync_nodes.sh" ]; then
-        mb_clean_restored_nodes "$_mb_rollback_nodes" >/dev/null 2>&1 || :
-        sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1 || :
+        MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1 || :
       fi
       mb_apply_restored_node_boot_state "$_mb_rollback_nodes" "$_mb_old_boot" >/dev/null 2>&1 || :
     fi
     error -c cli,vlan "Restore failed; original installation was restored"
     return 0
   fi
-  error -c cli,vlan "CRITICAL: restore and rollback both failed; original tree remains at $_mb_old_tree"
+  MB_PRESERVE_WORK=1
+  error -c cli,vlan "CRITICAL: restore and rollback both failed; temporary original remains at $_mb_old_tree"
   return 1
 }
 
@@ -989,21 +1155,25 @@ mb_restore() {
       ;;
   esac
   mkdir -p "$MB_WORK_ROOT" 2>/dev/null || { mb_fail workspace "Could not prepare restore workspace."; return 1; }
-  _mb_stage="${MERV_BASE%/*}/.mervlan.restore-stage.$$"
-  _mb_old="${MERV_BASE%/*}/.mervlan.restore-old.$$"
-  rm -rf "$_mb_stage" "$_mb_old" 2>/dev/null || :
-  _mb_expanded_kb=$(mb_archive_expanded_kb "$_mb_archive")
-  [ "$_mb_expanded_kb" -gt 0 ] || _mb_expanded_kb=$(mb_path_size_kb "$MERV_BASE")
-  if ! mb_require_space_kb "${MERV_BASE%/*}" "$_mb_expanded_kb" "restore staging"; then
-    mb_fail space "$MB_SPACE_MESSAGE"
+  if ! mb_verify_archive_integrity "$_mb_archive"; then
+    mb_fail validation "Backup integrity metadata does not match the selected archive."
     return 1
   fi
-  if [ "$_mb_create_undo" = "1" ]; then
-    _mb_current_kb=$(mb_path_size_kb "$MERV_BASE")
-    if ! mb_require_space_kb "$MB_UNDO_ROOT" "$_mb_current_kb" "temporary Undo Restore"; then
-      mb_fail space "$MB_SPACE_MESSAGE"
-      return 1
-    fi
+  _mb_stage="$MB_WORK_ROOT/restore-stage"
+  _mb_old="$MB_JFFS_OLD"
+  rm -rf "$_mb_stage" 2>/dev/null || :
+  if [ -e "$MB_JFFS_STAGE" ] || [ -e "$_mb_old" ]; then
+    MB_PRESERVE_JFFS=1
+    mb_fail recovery "A preserved activation tree uses this process slot. No recovery data was removed; run $MB_BACKUP_ROOT/recover.sh after inspection."
+    return 1
+  fi
+  _mb_expanded_kb=$(mb_archive_expanded_kb "$_mb_archive")
+  [ "$_mb_expanded_kb" -gt 0 ] || _mb_expanded_kb=$(mb_path_size_kb "$MERV_BASE")
+  _mb_current_kb=$(mb_path_size_kb "$MERV_BASE")
+  _mb_tmp_required=$((_mb_expanded_kb + _mb_current_kb))
+  if ! mb_require_space_kb "$MB_WORK_ROOT" "$_mb_tmp_required" "temporary restore and rollback"; then
+    mb_fail space "$MB_SPACE_MESSAGE"
+    return 1
   fi
   mb_write_result running validating "Validating selected backup."
   info -c cli,vlan "Validating restore archive $_mb_id"
@@ -1020,27 +1190,45 @@ mb_restore() {
   for _mb_db in mac_shield.db mac_shield_override.db client_name_override.db; do
     [ -f "$MB_RESTORE_TREE/tmp/$_mb_db" ] && cp -p "$MB_RESTORE_TREE/tmp/$_mb_db" "$MB_WORK_ROOT/preserve/$_mb_db" 2>/dev/null || :
   done
+  mb_write_result running preparing_activation "Creating the validated temporary JFFS activation stage."
+  mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail preparing_activation "Could not prepare the persistent backup directory."; return 1; }
+  if ! mb_require_space_kb "$MB_BACKUP_ROOT" "$_mb_expanded_kb" "temporary JFFS activation stage"; then
+    mb_fail space "$MB_SPACE_MESSAGE"
+    return 1
+  fi
+  if [ -e "$MB_JFFS_STAGE" ] || [ -e "$MB_JFFS_OLD" ]; then
+    MB_PRESERVE_JFFS=1
+    mb_fail recovery "A preserved activation tree blocks this restore. No recovery data was removed; run $MB_BACKUP_ROOT/recover.sh after inspection."
+    return 1
+  fi
+  if ! cp -pR "$MB_RESTORE_TREE" "$MB_JFFS_STAGE" 2>/dev/null || \
+     ! mb_settings_file_valid "$MB_JFFS_STAGE/settings/settings.json"; then
+    mb_remove_jffs_stage "$MB_JFFS_STAGE"
+    mb_fail preparing_activation "Could not create and validate the JFFS activation stage."
+    return 1
+  fi
+  MB_RESTORE_ORIGINAL="$MB_JFFS_OLD"
+  MB_RESTORE_ORIGINAL_BOOT="$_mb_current_boot"
   mb_write_result running disabling_hooks "Disabling current MerVLAN hooks."
   if [ "$MB_TEST_MODE" != "1" ] && [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
     # Stop active boot/cron work first, then remove old-version main and node
     # injections before any files are replaced.
-    sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
+    MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
     MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1 || :
-    sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1 || :
   fi
   mb_write_result running activating "Activating the selected backup."
-  if ! mv "$MERV_BASE" "$_mb_old" 2>/dev/null; then
-    rm -rf "$_mb_stage" 2>/dev/null || :
-    mb_fail activating "Could not move the current installation aside."
+  MB_ACTIVATION_STARTED=1
+  case "$MERV_BASE" in /|/jffs|/jffs/addons|/tmp|'') mb_fail safety "Refusing unsafe active path: $MERV_BASE"; return 1 ;; esac
+  if ! mv "$MERV_BASE" "$MB_JFFS_OLD" 2>/dev/null; then
+    mb_fail activating "Could not preserve the active installation for rollback."
     return 1
   fi
-  if ! mv "$MB_RESTORE_TREE" "$MERV_BASE" 2>/dev/null; then
-    mv "$_mb_old" "$MERV_BASE" 2>/dev/null || :
-    rm -rf "$_mb_stage" 2>/dev/null || :
-    mb_apply_boot_state "$MERV_BASE" "$_mb_current_boot" >/dev/null 2>&1 || :
-    mb_fail activating "Could not activate the restored installation; the original installation was put back."
+  if ! mv "$MB_JFFS_STAGE" "$MERV_BASE" 2>/dev/null; then
+    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
+    mb_fail activating "Could not activate the restored installation; rollback was attempted."
     return 1
   fi
+  mb_test_pause target_active
   rm -rf "$_mb_stage" 2>/dev/null || :
   json_set_section_value General BOOT_ENABLED "$_mb_current_boot" "$_mb_old/settings/settings.json" >/dev/null 2>&1 || :
   chmod 755 "$MERV_BASE"/*.sh "$MERV_BASE"/functions/*.sh 2>/dev/null || :
@@ -1085,10 +1273,8 @@ mb_restore() {
       warn -c cli,vlan "Restored sync_nodes.sh is unavailable; node restore was skipped"
       _mb_partial=1
     else
-      mb_write_result running cleaning_nodes "Preparing configured nodes for the restored installation."
-      mb_clean_restored_nodes "$_mb_restored_nodes" || { warn -c cli,vlan "One or more restored nodes could not be cleaned before synchronization"; _mb_partial=1; }
       mb_write_result running syncing_nodes "Synchronizing the restored installation to configured nodes."
-      sh "$MERV_BASE/functions/sync_nodes.sh" || { warn -c cli,vlan "Restored node synchronization reported errors"; _mb_partial=1; }
+      MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" || { warn -c cli,vlan "Restored node synchronization reported errors"; _mb_partial=1; }
       mb_write_result running restoring_node_data "Restoring the shared MAC Shield database to configured nodes."
       mb_push_restored_mac_db "$_mb_restored_nodes" || { warn -c cli,vlan "Restored MAC Shield data could not be applied to every configured node"; _mb_partial=1; }
       mb_write_result running restoring_node_boot "Re-applying the restored boot state to configured nodes."
@@ -1144,6 +1330,8 @@ mb_restore() {
   else
     mb_write_result success complete "$_mb_success_message"
   fi
+  MB_ACTIVATION_STARTED=0
+  MB_RESTORE_ORIGINAL=""
   return 0
 }
 
@@ -1183,6 +1371,7 @@ case "$1" in
   inventory)
     MB_REQUEST_TOKEN=$(mb_make_token "$2")
     MB_OPERATION=backup_inventory
+    mb_install_recovery_helper || warn -c cli,vlan "Emergency recovery helper is unavailable"
     mb_write_inventory "$MB_INVENTORY_FILE" || { mb_fail inventory "Could not generate backup inventory."; exit 1; }
     mb_write_result success complete "Backup inventory refreshed."
     ;;
