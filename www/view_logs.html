@@ -3,7 +3,7 @@
 <head>
     <!-- view_logs.html version="0.45" -->
   <meta charset="utf-8" />
-  <title>XT8 VLAN Manager - Log Viewer</title>
+  <title>MerVLAN Log Viewer</title>
   <style>
     body { 
         background: #1E1E1E; 
@@ -55,6 +55,8 @@
     
     .tabs {
         display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
         margin-bottom: 10px;
         border-bottom: 1px solid #444;
     }
@@ -66,7 +68,7 @@
         border-bottom: none;
         border-radius: 4px 4px 0 0;
         cursor: pointer;
-        margin-right: 5px;
+        margin-right: 0;
         transition: background-color 0.2s;
     }
     
@@ -146,7 +148,7 @@
         
         /* Scrollbar styling to match index.html */
         scrollbar-width: thin;
-        scrollbar-color: #4A90E2 #1E1E1E;
+        scrollbar-color: #569AC7 #1F2D35;
     }
     
     .log-content::-webkit-scrollbar { 
@@ -155,21 +157,21 @@
     }
     
     .log-content::-webkit-scrollbar-track { 
-        background: #1E1E1E; 
+        background: #1F2D35;
     }
     
     .log-content::-webkit-scrollbar-thumb { 
-        background: #4A90E2; 
+        background: #569AC7;
         border-radius: 8px; 
-        border: 2px solid #1E1E1E; 
+        border: 2px solid #1F2D35;
     }
     
     .log-content::-webkit-scrollbar-thumb:hover { 
-        background: #357ABD; 
+        background: #77A5C6;
     }
     
     .log-content::-webkit-scrollbar-corner { 
-        background: #1E1E1E; 
+        background: #1F2D35;
     }
     
     .status {
@@ -192,7 +194,7 @@
 </head>
 <body>
   <div class="header">
-    <h1>XT8 VLAN Manager - Log Viewer</h1>
+    <h1>MerVLAN Log Viewer</h1>
   </div>
   
   <div class="controls">
@@ -227,8 +229,9 @@
   </div>
   
   <div class="tabs">
-        <div class="tab active" data-log="vlanmgr">MerVLAN log</div>
-    <!--     <div class="tab" data-log="syslog">Syslog</div>  -->
+    <div class="tab active" data-log="vlanmgr">VLAN Manager</div>
+    <div class="tab" data-log="cli">CLI Output</div>
+    <div class="tab" data-log="boot">Boot &amp; Startup</div>
   </div>
   
   <div class="log-container">
@@ -241,7 +244,8 @@ Loading log content...
     // Access logs via symlinked tmp directory
     const LOG_PATHS = {
         vlanmgr: "tmp/logs/vlan_manager.json",
-        syslog: "/tmp/logs/syslog.json" // Note: syslog tab is currently disabled
+        cli: "tmp/logs/cli_output.json",
+        boot: "tmp/logs/boot_wrap.json"
     };
     
     let currentLog = 'vlanmgr';
@@ -266,15 +270,6 @@ Loading log content...
         el.scrollTop = el.scrollHeight;
     }
     
-    function filterSyslogContent(content) {
-        if (currentLog !== 'syslog') return content;
-        
-        // Filter out lines containing view_logs.html
-        return content.split('\n')
-            .filter(line => !line.includes('view_logs.html'))
-            .join('\n');
-    }
-    
     async function loadLog() {
         // Don't load if we're in the middle of switching tabs or user is selecting text
         if (isTabSwitching || isUserSelecting) {
@@ -282,15 +277,13 @@ Loading log content...
         }
         
         try {
-            // Simple fetch without cache-busting parameters to reduce log spam
-            const response = await fetch(LOG_PATHS[currentLog]);
+            // Avoid stale ASUS/browser cache without adding query strings that
+            // can create noisy access-log variants.
+            const response = await fetch(LOG_PATHS[currentLog], { cache: 'no-store' });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
-            let content = await response.text();
-            
-            // Filter syslog content if needed
-            content = filterSyslogContent(content);
+            const content = await response.text();
             
             const logContent = document.getElementById('logContent');
             const shouldScroll = autoScroll && isAtBottom(logContent);
@@ -368,8 +361,8 @@ Loading log content...
         
         // Use setTimeout to allow UI to update before fetching
         setTimeout(() => {
-            loadLog();
             isTabSwitching = false;
+            loadLog();
         }, 50);
     }
     

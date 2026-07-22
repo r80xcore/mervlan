@@ -1,3 +1,391 @@
+mervlan v0.53.24-dev
+
+New: Standalone emergency recovery
+- Added a self-contained recovery helper alongside persistent backups so a damaged or missing active installation can be restored without relying on its scripts.
+- Persistent backups remain safely stored in JFFS, while the convenient one-shot Undo Restore remains temporary and is naturally cleared by a reboot.
+
+Fixed: Safer update, restore, and node activation
+- Updates and restores now validate a complete replacement before switching installations, then use same-filesystem activation so the working copy is never deliberately deleted first.
+- Interrupted restores attempt to put the original installation and boot state back automatically, while preserving recovery data if automatic rollback cannot finish.
+- Node synchronization now stages and verifies each node before activation, restores the previous node copy after a failed switch, and no longer clears a node before a valid replacement is ready.
+- The main router is validated before any configured node is changed, reducing the chance that one failed operation can disrupt the full network.
+- Corrected backup creation and deletion logs so they always report the archive that was actually handled.
+- Action acknowledgement files now safely encode multiline messages so browser result parsing cannot be broken by newline or carriage-return characters.
+- Raw parent-form payload submission now stops with a clear error if its required hidden field is unavailable instead of submitting an empty or stale value.
+- The legacy custom update-ref fallback now consistently selects the newest stored value before validation.
+
+Improved: Backup integrity and recovery readiness
+- New manual backups include integrity metadata and are checked both as archives and as complete MerVLAN installations before they are published.
+- Existing backups without the new integrity metadata remain supported and still receive full content validation before restore.
+- Temporary activation trees now stay inside the backup directory, are cleaned after successful work, and are preserved for inspection when the active installation is incomplete.
+- Backup inventory refreshes also keep the emergency recovery helper current, making the recovery path easy to find when it is needed.
+
+Maintenance: Transaction and recovery safeguards
+- Update, restore, backup, deletion, node synchronization, and emergency recovery use coordinated maintenance protection to avoid overlapping operations.
+- Added bounded test hooks and stricter settings, checksum, path, space, and staged-file verification for failure and power-loss testing.
+- Advanced version metadata for the web interface, updater, backup manager, and node synchronization, and introduced the recovery helper at version 0.1.
+- Advanced version metadata for the action acknowledgement helper, parent web interface, and service-event handler after review hardening.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.23-dev
+
+New: Model-aware Ethernet display labels
+- Hardware profiles can now give individual Ethernet slots clearer names without changing their VLAN mappings, port numbering, or configuration keys.
+- Main routers and AiMesh nodes retain their own labels, and switching targets updates the visible names immediately.
+- Added an initial shared-port label for RT-BE92U hardware.
+- Invalid or missing label information safely falls back to the familiar LAN 1, LAN 2, and similar names.
+- Manual APMO mappings deliberately use generic LAN labels so model-specific descriptions cannot become misleading.
+
+Fixed: Stable form sizing and assignment layout
+- Fixed a width feedback issue that could progressively stretch the AP Isolation and Status columns.
+- SSID fields now display and enforce the full 32-character SSID limit.
+- Node Assignment now keeps all ten node choices on one line while leaving the Ethernet and lower sections stationary.
+- The INFO control now sits correctly beneath the form frame, opens smoothly, and closes immediately with the form.
+
+Fixed: Prevent boot shield from retaining DHCP hold (Thanks @inventor7777 - PR #38)
+
+Improved: Ethernet presentation and compact framing
+- Moved the router model into a compact two-line Ethernet badge, with long names shortened visually and preserved in a tooltip.
+- Ethernet labels now start from a consistent position and handle longer descriptions cleanly on both Main and Node views.
+- Added a matching outer frame around the expanded assignment view and unified the adjustable frame spacing at 5 pixels.
+- Removed the stray border from the experimental form container.
+
+Improved: Update and restore guidance
+- Reworked the help text for update channels, backups, restores, rollback, command-line options, and recovery so the common paths are easier to follow.
+- Updated the README and HELP documentation with clearer setup checklists, port-assignment guidance, troubleshooting, command references, and device-support instructions.
+
+Maintenance: Hardware metadata compatibility
+- Added backward-compatible defaults and node synchronization for Ethernet display-label metadata.
+- Advanced version metadata for the web interface, hardware probe, and node synchronization scripts.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.22-dev
+
+New: Interactive, verifiable standalone installer
+- `install.sh full` now provides one guided source, existing-installation, and
+  SSH configuration flow with latest-release resolution and a main fallback.
+- Added `install.sh full --test-run`, which exercises the real download,
+  validation, settings migration, hardware detection, runtime, and optional
+  Web UI/menu flow in isolated paths before proving cleanup and active-data
+  isolation. The old `full dev` form remains a compatibility alias.
+- Full reinstall can preserve the same settings, client databases, and SSH key
+  files as the updater, while clean installs require explicit confirmation.
+- Normal, test, tarball, boot-time, and reinstall paths now end with a verified
+  PASS/FAIL/SKIPPED result summary instead of an unconditional success line.
+- Stable resolution now tries the latest published GitHub Release, then
+  semantically selects the newest stable `vX.Y.Z` tag before using `main` as a
+  warning-level fallback. Full installs show timed phase progress and retain a
+  concise diagnostic log at `/tmp/mervlan-installer-last.log`.
+- Preserved settings are merged with one output rewrite instead of one rewrite
+  per value, eliminating the long silent pause on router storage. The optional
+  test page now derives its shell directly from the downloaded `mervlan.asp`
+  and changes only its title, height, and isolated diagnostic iframe target.
+  Test cleanup atomically removes and remounts the temporary menu entry, checks
+  the complete menu-tree digest, and tells the user to refresh the browser DOM.
+  Bind refresh no longer relies on firmware-specific `/proc/mounts` formatting
+  and repairs a stale served-menu inode even when `/tmp/menuTree.js` is clean.
+
+New: Integrated backup and transactional restore management
+- The version modal now has Update and Restore tabs. Restore lists live on-router
+  automatic/manual archives and can create, restore, delete, or delete all with
+  explicit confirmations and correlated backend completion results.
+- Added up to three tagged manual backups alongside the three automatically
+  rotated update backups. Manual backups are never silently rotated; the user
+  must delete one before creating a fourth.
+- update_mervlan.sh now provides interactive and argument-driven backup, list,
+  selected-delete, delete-all, and exact-archive restore commands for GUI/CLI
+  parity. Existing update and numeric restore entry points remain compatible.
+- Restore validates archive paths and core files before activation, stages on
+  the installation filesystem, keeps the current tree for rollback, refreshes
+  public files and hooks, honors the restored boot state, synchronizes nodes,
+  and keeps the displaced installation as one temporary Undo Restore file.
+- Multi-device restore now reads the node list from the selected backup, clears
+  stale addon files on those nodes, synchronizes the restored node runtime,
+  pushes the restored MAC Shield database/overrides, and reapplies the backed-up
+  enabled or disabled boot state on every reachable node.
+- Automatic update backups now retain the real pre-update BOOT_ENABLED value and
+  MAC Shield checkpoint instead of capturing update teardown's temporary
+  disabled/removed state.
+- Updates, backup creation, deletion, and restore now share a stale-safe
+  maintenance lock so different service-event names cannot overlap destructive
+  operations.
+- Added atomic backup_inventory.json and maintenance_result.json publication,
+  request-token correlation, independent retention pools, and strict encoded
+  service-event validation for tags and archive identifiers.
+- The Restore page now reports the full MerVLAN-managed JFFS footprint and its
+  RAM-backed /tmp plus published /www footprint. It verifies whether /tmp and
+  /www share a filesystem before combining them, avoids following public links,
+  and retains operation-specific capacity preflights with a safety reserve.
+- Added one reboot-volatile Undo Restore archive and one reboot-volatile Undo
+  Update shortcut. Restore undo no longer consumes automatic rotation; update
+  undo reuses the existing automatic pre-update archive instead of duplicating
+  it in RAM. Both actions revalidate their source and are consumed on success.
+- Selected delete/restore actions now send compact validated archive keys so
+  firmware action-name limits cannot silently drop the request. The modal also
+  unlocks if a maintenance request never starts or the modal is reopened.
+- Delete All Backups now sits beside Delete Selected and explains its persistent
+  deletion/temporary-undo scope through a themed keyboard-accessible tooltip.
+- Added a comprehensive internal reinstall mode for update, restore, and their
+  rollback paths. It rebuilds the same ASP/menu, web assets, symlinks, runtime
+  directories, missing logs, metadata, and permissions as installation while
+  preserving logs and leaving hook/node reconciliation to the transaction. A
+  reinstall-only completeness check rejects missing ASP/menu/assets, links,
+  logs, or conditional SSH-key publication instead of silently continuing.
+- Update and restore now deliberately stop main/node activity, remove the old
+  generation's template blocks, synchronize target files, always reinstall the
+  configured-node service/addon baseline, and then explicitly apply the saved
+  enabled or disabled BOOT_ENABLED state. Final reports retry mismatches once;
+  persistent main mismatches roll back and named node failures are warnings.
+- Update now offers Keep or Clear Existing Logs in the web UI and through
+  --logs=keep/--logs=clear. Clear runs only after the shared lock is acquired
+  and truncates in place before the first update audit entry, so the complete
+  new update remains available and public log links stay valid.
+- Central log maintenance now bounds every managed log to the newest 2,000
+  lines and 1 MiB by default. The existing health cron performs a cheap due
+  gate and invokes the shared helper no more than once per 24 hours; maintenance
+  also runs at the end of update, restore, and backup operations.
+- Repeated GUI updates now snapshot the retained VLAN log before submission and
+  evaluate only output appended by the current request. Old success/failure
+  lines can no longer finish a new update early; retained, cleared, and trimmed
+  log transitions are all handled.
+- The updater now uses an explicit checking/running/success/failure/detached
+  lifecycle instead of temporarily disabling its action. While installation is
+  active, target controls and Restore are visibly locked and the disabled action
+  shows a stationary Updating label with zero-to-three animated dots. Success
+  hides the live viewer and replaces the action with Refresh Now; confirmed
+  failure restores retry controls, while timeouts remain safely locked.
+- Update progress now wraps the current log entry across three visible rows.
+  Both Update and Restore dynamically remeasure and re-anchor the version modal
+  as their content changes, keeping it centered within the visible addon edges.
+- Exiting an active update now preserves the router-side operation as a detached
+  session, prevents accidental duplicate updates if the modal is reopened, and
+  directs monitoring to INFO and an F5 refresh after success. Its Stay/Exit
+  actions sit at the warning's upper-right so explanatory text can wrap beneath.
+- The log viewer now exposes only the three real addon logs: VLAN Manager, CLI
+  Output, and Boot & Startup. Removed the unused Syslog UI path, fixed immediate
+  tab loading/cache behavior, and added boot_wrap.json publication for every
+  normal or reinstall provisioning path without truncating an active boot log.
+- Restore no longer creates a horizontal scrollbar, and its modal/inventory
+  scrollbars now match the CLI and Active VLAN Clients theme. APMO now expands
+  the addon/modal naturally instead of forcing an unnecessary internal scroller.
+- The Restore modal now derives its maximum height from the visible addon panel
+  and balances its upper/lower spacing. Storage figures are right-aligned,
+  backup counts align with Check Backups, and redundant help/status copy is
+  compact enough to avoid unnecessary wrapping.
+- Full installs now use and remove an installer-owned extraction workspace.
+  Explicit download mode still retains its tarball, tarball installation keeps
+  that source archive while cleaning extraction, and caller-provided TMP_DIR is
+  no longer overwritten by the runtime directory default.
+
+Documentation:
+- Updated README.md and docs/HELP.md for the Restore tab, manual backup naming
+  and limits, CLI/argument commands, deletion warnings, rollback behavior, and
+  the automatic post-restore lifecycle, log policy/limits, comprehensive public
+  reprovisioning, template refresh ordering, and final main/node verification.
+  HELP.md now also documents every Update/Restore modal control and the new
+  log-preserving reinstall commands, ownership boundaries, and limitations.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.21-dev
+
+Fixed: GUI custom-branch and tagged-release updates not starting
+- Custom branch is now a dedicated bottom-level channel instead of a synthetic
+  entry inside the GitHub release picker. Its target is rebuilt from the live
+  branch field at click time, so stale release metadata cannot be reused.
+- Branch and tag names are encoded into a dedicated updateref_vlanmgr service
+  event and decoded/validated by service-event-handler.sh. Ref selection no
+  longer depends on custom_settings.txt being written before the event starts.
+- Update comparisons now allow installing an older dev or latest-stable branch
+  head, preserve the dev-to-stable explanation for older releases, and show the
+  same downgrade warning on every channel whenever the target version is known
+  to be older than the installed build. Custom branches participate when their
+  changelog publishes a comparable version.
+
+Documentation:
+- Updated README.md and docs/HELP.md to mirror the current addon UI and behavior,
+  including the Settings modal controls, verified save/action sequencing,
+  Apply-on-Boot status and partial-node handling, the five-minute health cron,
+  all four update channels, tagged release selection and downgrades, custom
+  branch installs, and the current manual branch/tag update commands.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.20-dev
+
+Fixed: GUI custom-branch and tagged-release updates not starting
+- Ref submissions now call the legacy MVM_exec/updatedev_vlanmgr path directly
+  from index.html. This prevents an older or stale mervlan.asp wrapper from
+  replacing the selected custom branch/tag with its main or release target.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.19-dev
+
+Maintenance: Development version metadata only
+- Advanced the index.html and changelog development version metadata from
+  v0.53.18-dev to v0.53.19-dev. No functional source behavior changed.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.18-dev
+
+Fixed: GUI custom-branch and tagged-release updates not starting
+- Ref-based GUI updates now travel through the legacy updatedev_vlanmgr event,
+  allowing older installed service-event handlers to launch the new updater.
+- update_mervlan.sh consumes vlanmgr_update_ref as a validated one-shot value,
+  then removes it so later main, dev, or CLI updates cannot inherit a stale ref.
+- Parent action rejection and deduplication are now reported immediately instead
+  of leaving the update spinner running with only a queued-action message.
+- The action acknowledgement library is optional during archive validation so
+  switching to older main/dev/tag targets that predate the library still works.
+- Stable latest, dev, custom branch, and tagged-release codeload archives are all
+  validated through the same updater target-resolution flow.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.17-dev
+
+Fixed: BOOT_ENABLED and PAUSE not loading in the UI after settings load
+- flattenStructuredSettingsPayload, expandFlatSettingsToStructured, and
+  structuredSettingsDefaultsTemplate were missing BOOT_ENABLED and PAUSE from
+  their General section mappings, so both values were silently dropped on every
+  load/save cycle. All three functions updated.
+
+Improved: Remote version detection
+- Update checks now preserve version suffixes such as "-dev" when checking branch versions.
+
+Fixed: Settings modal actions now execute in a confirmed sequence
+- Replaced fixed save/action delays with an awaitable transaction. All ordinary
+  setting changes are persisted in one request and verified against settings.json
+  before any action-owned setting is executed.
+- BOOT_ENABLED is no longer changed optimistically by the settings save. The
+  enable/disable backend action remains the authoritative owner of that value.
+- Boot enable/disable requests now carry a unique request token and publish an
+  atomic action_result.json acknowledgement. The UI accepts only a matching
+  token/action/result and reports timeout, error, or partial completion clearly.
+- The modal stays open and disables its controls while a transaction is active;
+  failures reload authoritative settings instead of presenting the requested
+  values as successfully applied.
+
+Improved: Extensible settings and action transactions
+- Modal settings are defined in one SERVICE_SETTINGS_DEFINITIONS registry. New
+  persisted toggles automatically use the shared snapshot, dirty-check,
+  validation, save, busy-state, and verification pipeline.
+- Action-backed settings use ordered transaction stages with optional dependency
+  declarations, per-action timeouts, progress text, and expected result values.
+- Added reusable settings/lib_action_ack.sh helpers and a generic
+  MVM_triggerVerified parent-page bridge so future backend actions can use the
+  same correlated acknowledgement format without adding another polling system.
+- Installer and updater manifests now deploy the new acknowledgement library with
+  the correct read-only library permissions.
+
+################ END OF CURRENT CHANGELOG
+
+mervlan v0.53.16-dev
+
+This update introduces a major overhaul to versioning, updates, and
+UI organization to make MerVLAN cleaner and more flexible.
+
+We are transitioning the main branch to a formal release structure
+(`v[number]` for stable, `v[number]-dev` for dev). This allows the new
+UI updater to handle seamless upgrading, downgrading, and cross-branch
+switching. Additionally, to drastically de-clutter the main interface,
+most on/off settings have been consolidated into a centralized "Settings"
+modal. This includes a new "Pause Event Reactions" feature to temporarily
+suppress automatic router network rebuilds while changing options.
+
+New: Settings modal
+- Replaced the "Enable experimental features" checkbox and the three separate
+  Enable/Disable/Service Status buttons with a single "Settings" button that
+  opens a modal with toggle switches for all service and behavior options.
+- Toggles in the modal: Apply on Boot, Pause Event Reactions, Experimental
+  Features, STP, Dry Run, and Enable Native SSID (ENS).
+- Modal always fetches fresh settings on open so values are never stale.
+- Apply button is disabled until a change is made; queues settings save first,
+  then service actions (boot enable/disable) in the correct order.
+- Refresh button that pulls service status and shows it during the current session.
+  The current status is built by mervlan_boot.sh and is stored in the tmpfs web directory
+  /www/user/mervlan/tmp/results/service_status.json.
+
+New: Pause Event Reactions
+- New PAUSE flag in settings.json (General section, default "off").
+- When enabled via the Settings modal, service-event-handler.sh suppresses all
+  router-triggered rebuilds (wifi/eth changes, etc.) while letting UI button
+  actions pass through normally. Useful when making multiple settings changes
+  without triggering a rebuild on each one.
+- mervlan_boot_wrap.sh automatically clears a stale PAUSE flag on boot so a
+  forgotten pause never survives a reboot.
+- Settings button shows an amber indicator dot when pause is active.
+
+Fixed: settings.json symlink — persistent and public copies no longer diverge
+- install.sh now creates /www/user/mervlan/settings/settings.json as a symlink
+  to the JFFS-persistent /jffs/addons/mervlan/settings/settings.json instead of
+  a copy. Single source of truth: any write through either path hits the same
+  file, and the symlink is recreated on every boot since /www is tmpfs.
+
+Improved: Apply VLAN - detected nodes modal
+- The modal is now centered to the addon and has been reworked to look better.
+  The buttons and the modal are smaller and the names and descriptions has
+  been improved. All functions are identical to before.
+
+Improved: UI section naming
+- "General Settings" renamed to "Preset Configuration".
+- "Controls" renamed to "MerVLAN Deployment".
+- STP, Dry Run, and ENS selects moved from the Preset Configuration panel into
+  the Settings modal; panel now contains only Save/Load/Clear buttons.
+
+New: Release-based update system
+- The update modal now fetches available releases directly from GitHub and
+  shows a dropdown with up to 5 recent versions to choose from (tag + date).
+  This is called "Stable (releases)"
+- Fallback option if Github API has reached the API limit. This option is only
+  able to pull the latest release but does not use Github API.
+  This is called "Stable (latest only)"
+- Changelog for the selected release can be expanded and collapsed inline
+  with a "Show Changelog" / "Hide Changelog" toggle.
+- Downgrade warning is shown when selecting a version older than what is
+  currently installed, with an "Install anyway" option.
+- Switching between dev and stable at the same version number is now
+  detected and offered as a "Switch to Stable" or "Switch to Dev" action
+  instead of being blocked as "already installed".
+- The dev channel version check is unchanged; it still reads from the
+  dev branch changelog, but also gained the changelog viewer.
+- Added a "Refresh Now" button that appears after a successful update so
+  the browser can be reloaded to pick up the new UI.
+- The update modal now asks for confirmation before closing if an update
+  is actively in progress, preventing accidental cancellation.
+
+New: Custom branch install (developer option)
+- A "Custom branch (dev only)..." entry at the bottom of the release
+  dropdown lets developers install directly from any branch by name
+  (e.g. dev-test1). Clearly marked as not a normal update path.
+- The branch is verified against GitHub before the install is triggered.
+  If the branch does not exist, an error is shown immediately without
+  starting the update process.
+
+Improved: Update feedback and reliability
+- The update spinner now stops automatically on failure (detects error
+  patterns in the update log) instead of running indefinitely.
+- A 5-minute safety timeout stops the spinner if neither success nor
+  failure is detected, and directs the user to the CLI log.
+- Fixed the mechanism used to pass the selected release ref from the UI
+  to the update script on the router, resolving a bug where the update
+  never actually started after clicking "Update now" on a release.
+
+service-event-handler.sh
+- New updaterelease_vlanmgr action handles release and custom branch
+  updates. Reads the target ref written by the UI and validates it
+  before invoking update_mervlan.sh.
+
+update_mervlan.sh
+- No changes. All existing CLI usage (main, dev, refs/tags/vX.Y.Z,
+  refs/heads/branch) continues to work exactly as before.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.15
 
 Fixed: RT-AX86S name badge showing "RT-AX86U" in the UI (hw_probe.sh)

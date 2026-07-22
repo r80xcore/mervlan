@@ -18,9 +18,9 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. This guide covers setup, 
 10. [Get Help & Support](#9-get-help--support)
 11. [Wiki - Reference & Glossary](#10-wiki---reference--glossary)
 
-<h2 id="1-getting-started-with-mervlan">1. Getting Started With MerVLAN</h2>
+<h2 id="1-getting-started-with-mervlan">1. Getting Started With MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, ebtables rules, and SSID-to-bridge bindings - locally on a single router or across multiple devices over automated SSH. Below is an overview of the supported network topologies before you start configuring.
+MerVLAN adds VLAN configuration to Asuswrt-Merlin APs and can manage one device or multiple nodes over SSH. Start by choosing the topology that matches your network.
 
 ### Network Topologies
 
@@ -80,110 +80,77 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. It manages VLAN bridges, 
 
  <br>
 
-### General Settings - Three Toggles
+<a id="settings-modal"></a>
+
+### Settings Modal
 
 > [!WARNING]
 > **Dry Run is on by default**
 >
-> When you first install MerVLAN, Dry Run mode is enabled. Clicking <kbd>Apply</kbd> simulates the configuration but makes **NO actual changes** to your network.
+> When you first install MerVLAN, Dry Run is enabled. Clicking <kbd>Apply VLAN</kbd> checks and simulates the configuration but makes **no network changes**.
 >
-> Before your first real apply: **General Settings -> Disable "Dry Run" -> Save Settings**
+> Before your first real apply: **Settings → Dry Run: Off → Apply**, then click <kbd>Apply VLAN</kbd>.
 > You can re-enable it anytime to safely test a new config before committing it.
 
-Review these three global toggles in the General Settings panel before your first apply.
+Open <kbd>Settings</kbd> from the main MerVLAN page and review these options before your first apply.
 
-| Toggle      | Default       | What it does                                                                                                                                                        |
-| ----------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **DRY RUN** | <kbd>ON</kbd> | Simulates apply without touching the network. Disable when ready to go live.                                                                                        |
-| **STP**     | <kbd>OFF</kbd> | Spanning Tree Protocol - prevents loops in multi-node topologies. Leave OFF for single-router setups.                                                               |
-| **ENS**     | <kbd>OFF</kbd> | Enable Native SSID - allows VLANs on base radios (wl0, wl1). Most users do not need this; use Guest Network SSIDs instead. See the SSID Setup tab for more details. |
-<br>
+| Setting or control | Default | What it does |
+| --- | --- | --- |
+| **Enable STP** | <kbd>OFF</kbd> | Enables Spanning Tree Protocol to prevent loops in multi-node topologies. Leave it off for normal single-router setups. |
+| **Dry Run** | <kbd>ON</kbd> | Simulates apply without changing the network. Disable it when you are ready to go live. |
+| **Enable Native SSID (ENS)** | <kbd>OFF</kbd> | Allows VLANs on base radios such as wl0 and wl1. Most users should use Guest Network SSIDs instead. |
+| **Apply on Boot** | <kbd>OFF</kbd> | Re-applies MerVLAN after a reboot and enables automatic health checks on the main router and configured nodes. Enable it only after confirming that your live configuration works. |
+| **Pause Event Reactions** | <kbd>OFF</kbd> | Temporarily suppresses router-triggered rebuilds while making bulk ASUS Wi-Fi changes. UI actions still work, and pause is cleared automatically on reboot. Sync nodes after changing it. |
+| **Experimental Features** | <kbd>OFF</kbd> | Enables features that are still under active testing. |
+| **Boot service status** | &mdash; | Shows whether Apply on Boot is currently enabled or disabled. |
+| **Refresh (&#x27F3;)** | &mdash; | Checks boot, addon, health service, and MAC Shield status on the main router and configured nodes. Detailed results are also written to the command output. |
 
-### Service Buttons - Boot & Health
-
-Boot persistence and the automatic VLAN health monitor are controlled together by three buttons in the General Settings panel.
-
-| Button              | What it does                                                                                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Enable Service**  | Injects MerVLAN into `services-start` so VLANs are re-applied on every reboot, and activates the cron-based health monitor on the main router and all configured nodes. |
-| **Disable Service** | Removes the `services-start` boot entry and disables the health cron on the main router and all nodes. The service-event heal hook is left in place.                    |
-| **Service Status**  | Polls the main router and every configured node and prints their current service state to the CLI log.                                                                  |
-
-**Service Status output example:**
-
-```text
-Status:
-<--- Main Unit --->
-RT-AX95Q boot=enabled addon=active service-event=active cron=present is_node=no
-<--- Configured Nodes --->
-RT-AX95Q 192.168.186.201:boot=enabled addon=node-on event=active cron=present is_node=yes
-```
-
-> [!NOTE]
-> **Field meanings:**
-> **boot** - enabled/disabled (services-start injection)
-> **addon** - active (running on main) - node-on (running on node) - missing (MerVLAN not found)
-> **service-event** - active (heal hook installed) - disabled - custom (modified externally)
-> **cron** - present (health job scheduled) - absent
-> **is_node** - yes/no (indicates if the unit is a node)
+Click <kbd>Apply</kbd> to save changes made in this window. While the save is running, the controls are temporarily locked. A successful save leaves the window open and displays `Settings Saved!`. If the main router succeeds but a configured node fails, MerVLAN reports partial success and keeps the setting that was applied successfully on the main router.
 
 ### Setup Checklist - Single Router
 
-1. **Review General Settings**
-    - Confirm hardware profile detected (shown in the UI badge)
-    - Disable Dry Run when ready to apply for real
-2. **Configure SSIDs** - see the SSID Setup tab
-    - Map each Guest SSID to a VLAN ID and set AP Isolation
-3. **Configure LAN Ports** (optional) - see the LAN Setup tab
-4. **Save Settings** - click <kbd>Save Settings</kbd>
-5. **Apply** - click <kbd>Apply VLAN Manager</kbd> and watch the CLI log
+1. **Review Settings**
+    - Confirm that the hardware profile was detected.
+    - Leave Dry Run on while checking the configuration. Turn it off only when you are ready for a real apply.
+2. **Configure SSIDs** - map each Guest SSID to a VLAN ID. See [SSID Configuration](#2-ssid-configuration).
+3. **Configure LAN Ports** if needed. See [LAN Port Configuration](#3-lan-port-configuration).
+4. **Save** - click <kbd>Save</kbd>. Unsaved changes are not applied.
+5. **Apply** - click <kbd>Apply VLAN</kbd> and watch the command output.
 
-> [!TIP]
-> VLANs are now live! Once your config is confirmed working, click **Enable Service** to make it persist across reboots. You can monitor the active VLANs in the INFO panel (see "Logs & Monitoring" for details).
+### Setup Checklist - Multi-Node (AiMesh or Standalone AP)
 
-### Setup Checklist - Multi-Node (AiMesh or Full AP)
-
-1. **Install SSH Keys** - click <kbd>SSH Keys Install</kbd>
-    - Copy the public key from the CLI log
-    - AiMesh nodes: paste the key into the main router's Administration -> System -> Authorized Keys, then reboot each AiMesh node
-    - Full AP nodes: paste the key into each AP's Administration -> System -> Authorized Keys individually
+1. **Install SSH Keys** - follow [SSH Key Install](#5-ssh-key-install).
 2. **Add Your Nodes**
-    - Enter each node's IP in the Nodes panel, rename if desired
-    - Click <kbd>Save Settings</kbd> before syncing
-3. **Sync Nodes** - click <kbd>Sync Nodes</kbd>
-    - Copies MerVLAN files to all nodes
-    - Trunk config is automatically stripped (main router only)
-4. **Configure SSIDs** - map SSIDs to VLANs and assign to the correct nodes
-5. **Configure LAN Ports** if needed
-6. **Save Settings**
-7. **Apply** - choose "Local + Nodes" and watch the CLI log
+    - Enter each node's IP in the Nodes panel and rename it if desired.
+    - Click <kbd>Save</kbd> before syncing.
+3. **Sync Nodes** - click <kbd>Sync Nodes</kbd> to copy MerVLAN and detect node hardware.
+4. **Configure SSIDs** - map SSIDs to VLANs and assign them to the correct devices.
+5. **Configure LAN Ports** - use the numbered node selectors if a node needs wired VLANs.
+6. Click <kbd>Save</kbd>, then <kbd>Sync Nodes</kbd> again after changing the configuration.
+7. **Apply** - click <kbd>Apply VLAN</kbd>, choose <kbd>Router + Nodes</kbd>, and watch the command output.
 
-> [!TIP]
-> VLANs are now live! Once your config is confirmed working, click **Enable Service** to make it persist across reboots. You can monitor the active VLANs in the INFO panel (see "Logs & Monitoring" for details).
+> [!IMPORTANT]
+> After either setup works correctly with Dry Run off, open <kbd>Settings</kbd>, enable **Apply on Boot**, and click <kbd>Apply</kbd>. This makes the configuration survive a reboot and enables automatic health checks. See [Logs & Monitoring](#6-logs--monitoring) to verify the result.
 
 ### Important Tips
 
-- Always **Save** before applying - unsaved changes are not applied
-- Start with Dry Run ON to validate your config without risk
-- Check the CLI log - it shows exactly what was skipped or failed
-- Node Assignment defaults to MAIN; single-router users can ignore it
-- VLANs auto-recover after firmware events via the built-in heal system
+- Check the command output after saving, syncing, or applying. It shows what succeeded, was skipped, or failed.
+- Node Assignment defaults to MAIN; single-router users can ignore it.
+- When Apply on Boot is enabled, MerVLAN checks the configuration after relevant firmware events and repairs it when needed.
 - During Apply, the unit may be temporarily unresponsive while MerVLAN protects VLAN clients from falling back into `br0`.
 - VLAN clients will not appear correctly in ASUS built-in client or traffic views. Use MerVLAN's own VLAN/client views for VLAN-side status.
 
 > [!TIP]
-> Ready to configure? Head to **SSID Configuration**.
+> Ready to configure? Continue to [SSID Configuration](#2-ssid-configuration).
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="2-ssid-configuration">2. SSID Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
 MerVLAN follows this flow for each available SSID slot. The number of slots depends on the radios and wireless interfaces supported by the device. Leave a slot blank to skip it.
 
 > [!TIP]
-> **Flow:** SSID Name -> VLAN ID -> AP Isolation -> Node Assignment
+> **Flow:** SSID Name → VLAN ID → AP Isolation → Node Assignment
 
 ### SSID Name
 
@@ -195,24 +162,12 @@ MerVLAN follows this flow for each available SSID slot. The number of slots depe
 > [!IMPORTANT]
 > **Guest Network SSIDs are strongly recommended**
 >
-> Your router has **base radios** (your primary "HomeNet_2G" / "HomeNet_5G" SSIDs) and **Guest Network interfaces** (wl0.1, wl1.1, etc.) created under Wireless -> Guest Network in the Asus UI.
+> Your router has **base radios** (your primary "HomeNet_2G" / "HomeNet_5G" SSIDs) and **Guest Network interfaces** (wl0.1, wl1.1, etc.) created under Wireless → Guest Network in the Asus UI.
 >
-> MerVLAN is designed to work with Guest Network SSIDs. Assigning a VLAN to a base radio requires enabling **ENS (Enable Native SSID)** in General Settings. Without ENS, base radio SSIDs are silently skipped with a warning in the log.
+> MerVLAN is designed to work with Guest Network SSIDs. Assigning a VLAN to a base radio requires enabling **Enable Native SSID (ENS)** in the Settings modal. Without ENS, base radio SSIDs are silently skipped with a warning in the log.
 
 > [!NOTE]
-> **Why Guest SSIDs are safer - the br0 removal problem**
->
->  When MerVLAN assigns a VLAN to any SSID, it must first remove that wireless interface from `br0` (the router's default LAN bridge) and attach it to a dedicated VLAN bridge instead.
->
->  Guest Network interfaces (wl0.1, wl1.1, etc.) handle this cleanly. **Base radios (wl0, wl1, wl2) do not behave consistently.** Depending on the router model and firmware version, removing a base radio from br0 can trigger the Asus wireless subsystem to:
->
-> - Silently move the interface back into br0 on the next wireless event
-> - Only partially complete the bridge change, leaving the radio in an inconsistent state
-> - Trigger a full wireless restart that drops all clients briefly
->
-> **You are free to try base radios with ENS enabled** - some models handle it just fine. But if you notice your main SSID losing VLAN isolation, dropping clients unexpectedly, or the heal system triggering repeatedly, this is most likely why.
->
-> **Best practice:** Create a dedicated Guest SSID for each VLAN segment and map those here. Leave your main SSID on the default br0.
+> MerVLAN must move a selected wireless interface out of the default `br0` bridge. Guest interfaces normally handle this reliably, while base radios can be moved back by ASUS wireless events on some models. If a base-radio VLAN loses isolation or repeatedly triggers recovery, use a dedicated Guest SSID instead.
 
 ### VLAN ID
 
@@ -266,11 +221,9 @@ Slots 1 and 2 share VLAN 30 - both bands on the same IoT network.
 - <kbd>Duplicate</kbd> - duplicate VLAN ID (check if intentional)
 
 > [!TIP]
-> Next: configure LAN ports if needed.
+> Next, configure [LAN ports](#3-lan-port-configuration) if needed.
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="3-lan-port-configuration">3. LAN Port Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
@@ -279,6 +232,12 @@ Assign VLANs to physical LAN ports for wired device isolation. A port with the s
 ### Port Assignment
 
 For each LAN port, assign a **VLAN ID** (2-4094) or leave blank for the default untagged network. Match an SSID's VLAN to bridge wireless and wired traffic together.
+
+### Main and Node Port Assignments
+
+Use <kbd>Main</kbd> or a numbered node selector above the LAN table to choose which device you are editing. Each node has its own port assignments; the main router's values are not used as automatic defaults on nodes.
+
+If a node is unavailable in the selector, configure its IP, click <kbd>Save</kbd>, and run <kbd>Sync Nodes</kbd> so MerVLAN can detect its hardware. After changing a node's ports, click <kbd>Save</kbd> and run <kbd>Sync Nodes</kbd> again before applying.
 
 ### Trunk Mode (Experimental - Main Router Only)
 
@@ -291,20 +250,17 @@ Trunk mode tags multiple VLANs on a single LAN port. Intended for connecting a m
 > [!CAUTION]
 > **Trunk is main router only**
 >
-> Trunk configuration is automatically stripped from node settings when you sync or apply "Local + Nodes". Trunk cannot be applied on AiMesh or AP nodes.
+> Trunk configuration is automatically stripped from node settings when you sync or apply <kbd>Router + Nodes</kbd>. Trunk cannot be applied on AiMesh or standalone AP nodes.
 >
 > Trunk is still experimental. Test thoroughly before relying on it in production.
+
+<a id="apmo"></a>
 
 ### Advanced Port Mapping Override (APMO)
 
 If your device's port labels don't match the physical ports, or if the WAN interface was incorrectly detected, use APMO to correct the hardware profile manually.
 
-- Click the <kbd>Experimental</kbd> badge or hardware status indicator in the main UI
-- Re-map each ethX interface to the correct LAN port label
-- Adjust the WAN interface and port count if needed
-- Save - stored in settings.json and persists across MerVLAN updates
-
-See the Device Support tab for the full list of pre-mapped devices.
+Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) for instructions and the full list of pre-mapped devices.
 
 ### Status Icons
 
@@ -318,30 +274,28 @@ See the Device Support tab for the full list of pre-mapped devices.
 
 > **Scenario 1 - IoT wired + wireless on the same segment**
 >
-> - SSID `IoT_2G` -> VLAN 30
-> - LAN4 -> VLAN 30
+> - SSID `IoT_2G` → VLAN 30
+> - LAN4 → VLAN 30
 > - A wired device on LAN4 joins the same isolated IoT network as wireless clients.
 
 > **Scenario 2 - Full per-port isolation**
 >
-> - LAN1 -> VLAN 10
-> - LAN2 -> VLAN 20
-> - LAN3 -> VLAN 30
-> - LAN4 -> VLAN 40
+> - LAN1 → VLAN 10
+> - LAN2 → VLAN 20
+> - LAN3 → VLAN 30
+> - LAN4 → VLAN 40
 > - Every port is its own isolated segment.
 
 > **Scenario 3 - One isolated port, rest default**
 >
-> - LAN1-LAN3 -> blank/default
-> - LAN4 -> VLAN 30
+> - LAN1-LAN3 → blank/default
+> - LAN4 → VLAN 30
 > - Only LAN4 is isolated; the rest of the LAN is unaffected.
 
 > [!TIP]
-> Ready to apply? Check the **Apply Changes** section.
+> Ready to apply? Continue to [Applying Your Configuration](#4-applying-your-configuration).
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="4-applying-your-configuration">4. Applying Your Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
@@ -350,105 +304,89 @@ Once configured, it's time to push your VLANs live.
 > [!WARNING]
 > **Dry Run is on by default**
 >
-> MerVLAN ships with Dry Run mode enabled. The full apply pipeline runs - validation, bridge creation, SSID binding - but **NO changes are committed** to the network.
+> MerVLAN ships with Dry Run enabled. It validates the configuration and reports the planned bridge and SSID actions, but makes **no network changes**.
 >
-> To apply real changes: **General Settings -> Dry Run: Off -> Save Settings -> Apply**
-> If nothing seems to change after an apply, look for `[DRY RUN]` lines in the CLI output.
+> To apply real changes: **Settings → Dry Run: Off → Apply**, then click <kbd>Apply VLAN</kbd>.
+> If nothing seems to change after an apply, look for `[DRY RUN]` lines in the command output.
 
 ### Apply Modes (Shown When Nodes Are Configured)
 
-| Mode              | What it does                                       | When to use                          |
-| ----------------- | -------------------------------------------------- | ------------------------------------ |
-| Local Unit Only   | Applies to this router only. Nodes unchanged.      | Testing or debugging the main router |
-| **Local + Nodes** | Applies main router first, then all nodes via SSH. | **Normal operation (recommended)**   |
-| Nodes Only        | Skips main router, updates nodes only.             | Debugging a specific node            |
+| Mode | What it does | When to use |
+| --- | --- | --- |
+| Local Router Only | Applies to this router only. Nodes are unchanged. | Testing or debugging the main router |
+| **Router + Nodes** | Applies to the main router and all configured nodes. | **Normal multi-node operation** |
+| Nodes Only | Applies to configured nodes and skips the main router. | Debugging node configuration |
 
 Single router: no mode selection - applies immediately.
 
 ### Before Applying
-<br>
 
-> [!IMPORTANT] 
-> **Temporary interruption during Apply is expected** 
-> 
-> When MerVLAN applies VLAN changes, the unit may become temporarily unresponsive until the apply process is finished. This is expected behavior.
->
-> During bridge changes, MerVLAN enables MAC and DHCP guard protection to prevent clients from falling back into `br0` while their VLAN interfaces are being moved. This may briefly interrupt access to the router/AP, but it prevents clients from escaping their assigned VLAN during the transition. 
->
-> MerVLAN intentionally prioritizes VLAN isolation over temporary availability during apply.
-<br>
-1. **Save your configuration** - click <kbd>Save Settings</kbd>. Unsaved changes are NOT applied.
-2. **Disable Dry Run** - General Settings -> Dry Run: Off -> Save Settings
-3. Click <kbd>Apply VLAN Manager</kbd> - choose apply mode if multi-node, then watch the CLI log.
-<br>
+> [!IMPORTANT]
+> **A temporary interruption during Apply is expected.** Access to the AP may briefly pause while interfaces move between bridges. MerVLAN keeps VLAN clients from falling back to the default LAN during this transition.
+
+1. **Save your configuration** - click <kbd>Save</kbd>. Unsaved changes are not applied.
+2. **Disable Dry Run** - open <kbd>Settings</kbd>, set Dry Run to Off, and click <kbd>Apply</kbd>.
+3. Click <kbd>Apply VLAN</kbd> - choose an apply mode if nodes are configured, then watch the command output.
+
 > [!TIP]
-> If you are configuring Nodes, please continue to the **SSH Key Install** section before applying.
-<br>
+> If you are configuring nodes, complete [SSH Key Install](#5-ssh-key-install) before applying.
+
 ### What Happens During Apply
 
 1. Hardware profile is validated.
 2. SSID names are resolved to wireless interfaces.
-3. VLAN bridges are created (`brX` per VLAN ID).
-4. SSID interfaces are bound to their VLAN bridges.
-5. LAN port VLANs are applied.
-6. Multi-node mode pushes settings to nodes and repeats steps 1-5 remotely.
-7. Trunk configuration is applied on the main router and always skipped on nodes.
+3. VLAN bridges and SSID bindings are created.
+4. LAN-port assignments and any main-router trunk are applied.
+5. In a node mode, the required settings are sent to the selected nodes and applied there.
 
 ### Boot Persistence & Health Service
 
-By default, VLANs do **NOT** survive a router reboot. Use the Service buttons in General Settings to enable persistence and automatic health monitoring together.
-
-| Button              | Effect                                                                                                     |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Enable Service**  | Injects boot entry into `services-start` + activates the cron health monitor on main router and all nodes. |
-| **Disable Service** | Removes boot entry + disables health cron on main router and all nodes.                                    |
-| **Service Status**  | Prints boot, addon, service-event, and cron state for main router and every node.                          |
+By default, VLANs do **not** survive a router reboot. After confirming that a real apply works, open <kbd>Settings</kbd>, enable **Apply on Boot**, and click <kbd>Apply</kbd>. This enables boot persistence and automatic health monitoring on the main router and configured nodes. The status and refresh controls are described in the [Settings Modal](#settings-modal).
 
 > [!NOTE]
-> The Boot Service (when enabled):
+> Apply on Boot (when enabled):
 >
 > - Waits up to 30s for SSIDs to become available before re-applying VLANs
 > - Runs in the background - does not delay other services or slow down boot
 > - Logs all activity to `boot_wrap.log`
 
 > [!CAUTION]
-> Click **Enable Service** only after your config is confirmed working live. A broken config that runs on boot requires a router restart to clear.
+> Enable **Apply on Boot** only after your configuration is confirmed working live. A broken configuration that runs on boot may require a router restart or SSH recovery to clear.
 
 ### Troubleshooting
 
 | Problem                        | Solution                                                                                                 |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| Apply runs but nothing changes | Dry Run is likely still ON - look for `[DRY RUN]` in CLI output and disable it in General Settings.      |
-| SSIDs not binding              | Verify SSID names match exactly (case-sensitive). If using a base radio, enable ENS in General Settings. |
+| Apply runs but nothing changes | Dry Run is likely still ON - look for `[DRY RUN]` in the command output and disable it in Settings.      |
+| SSIDs not binding              | Verify SSID names match exactly (case-sensitive). If using a base radio, enable ENS in Settings.         |
 | Nodes not updating             | Run <kbd>Sync Nodes</kbd> first, then apply. Verify node IPs and SSH keys are installed.                 |
-| Port mapping incorrect         | Use APMO to correct the hardware profile (see LAN Setup tab).                                            |
-| VLANs lost after reboot        | Service not enabled - click **Enable Service** in General Settings.                                      |
+| Port mapping incorrect         | Use [APMO](#apmo) to correct the hardware profile.                                                       |
+| VLANs lost after reboot        | Open Settings, enable **Apply on Boot**, and click <kbd>Apply</kbd>.                                      |
 
 > [!TIP]
-> Want to monitor results? Check **Logs & Monitoring**.
+> Want to monitor results? Continue to [Logs & Monitoring](#6-logs--monitoring).
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="5-ssh-key-install">5. SSH Key Install <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node and apply VLAN configuration remotely. AiMesh nodes handle key propagation automatically, but standalone nodes (Full APs) require manual installation as MerVLAN cannot inject it automatically.
+SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node. AiMesh nodes receive authorized keys from the main router during boot, while standalone APs require the key to be installed on each device.
 
 ### How It Works
 
-Clicking <kbd>SSH Keys Install</kbd> generates an ED25519 key pair on the main router and displays the public key in the CLI log. You then copy that key and paste it manually into the Authorized Keys field on each node via the Asus web UI.
+Click <kbd>SSH Key Install</kbd> to open the key window. Use <kbd>Generate Keys</kbd> to create or reuse the main router's ED25519 key pair, then click <kbd>Load</kbd> to display the public key. Copy that key into the Authorized Keys field required by your node type.
 
 > [!NOTE]
 > **One-way trust by design**
 >
->  The private key lives only on the main router and is never copied to nodes. Nodes hold the public key - this allows the main router to authenticate *to* them via SSH, but nodes cannot SSH back to the main router using this key pair. This is intentional: the main router initiates all connections, and there is no risk of key accumulation or duplicate injection because you control exactly where the public key is pasted.
+> The private key remains on the main router. Nodes receive only the public key, allowing the main router to connect to them without giving nodes the same access back.
 
 ### Step 1 - Generate the Key Pair
 
-1. Click <kbd>SSH Keys Install</kbd> in the Nodes panel
-2. The public key is printed in the CLI log - it is a single line starting with `ssh-ed25519`
-3. Copy that full line - you will paste it on each node in the next step
+1. Click <kbd>SSH Key Install</kbd>.
+2. Click <kbd>Generate Keys</kbd> and wait for the action to finish.
+3. Click <kbd>Load</kbd>. The public key is one line beginning with `ssh-ed25519`.
+4. Copy the complete line.
 
 > [!TIP]
 > If a key pair already exists, the script reuses it and prints the existing public key. You do not need to re-install it on nodes unless the key was regenerated.
@@ -457,70 +395,56 @@ Clicking <kbd>SSH Keys Install</kbd> generates an ED25519 key pair on the main r
 
 For AiMesh nodes that are managed by this router, Asus handles key propagation - but only during the node's boot process.
 
-1. On the **main router**, go to: **Administration -> System -> Authorized Keys**
-2. Paste the public key and save
-3. **Reboot each AiMesh node** - Asus syncs authorized keys to nodes during their boot; the key will not be active until the node has rebooted
+1. On the **main router**, go to **Administration → System → Authorized Keys**.
+2. Paste the public key and save.
+3. **Reboot each AiMesh node.** The key becomes active on the node during boot; the main router does not need to be rebooted.
 
-> [!WARNING]
-> **AiMesh nodes need a reboot to pick up the key**
->
-> The main router does **not** need to be rebooted. Only the AiMesh nodes do. After they come back up, MerVLAN will be able to connect to them via SSH.
-
-### Step 2B - Standalone / Full AP Nodes
+### Step 2B - Standalone AP Nodes
 
 Standalone APs running in AP mode are independent devices - they do not receive keys from the main router automatically. You must add the public key to each one individually.
 
-1. On each standalone AP, open its web interface and go to: **Administration -> System -> Authorized Keys**
-2. Paste the public key (the `ssh-ed25519 ...` line copied from the CLI log) and save
-3. Repeat for every standalone AP node
+1. On each standalone AP, open its web interface and go to **Administration → System → Authorized Keys**.
+2. Paste the public key and save.
+3. Repeat for every standalone AP node.
 
-> [!WARNING]
-> **Every standalone AP requires this step individually**
->
-> Without the public key on a node, every SSH connection attempt will fail with an authentication error. The CLI log will show `SSH connection failed` for that node. The main router does not need to be rebooted.
+A node without the public key will report `SSH connection failed` in the command output. The main router does not need to be rebooted.
 
 ### Verifying the Installation
 
 After keys are installed and any required node reboots are done:
 
-- Add each node's IP in the Nodes panel and click <kbd>Save Settings</kbd>
-- Click <kbd>Sync Nodes</kbd> and watch the CLI log
+- Add each node's IP in the Nodes panel and click <kbd>Save</kbd>
+- Click <kbd>Sync Nodes</kbd> and watch the command output
 - A successful connection shows: `OK SSH connection successful to <IP>`
 - A failed connection shows: `SSH connection failed` - key not yet active on that node
 
 ### Troubleshooting
 
-| Problem                                                      | Solution                                                                                                              |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| SSH connection failed on all nodes                           | Re-run <kbd>SSH Keys Install</kbd> to confirm the key exists. Check: `ls /jffs/addons/mervlan/.ssh/`                  |
-| AiMesh node still failing after key was added to main router | The AiMesh node needs a reboot - Asus only propagates authorized keys to nodes during their boot process              |
-| Standalone AP failing after key was pasted                   | Verify the key was pasted correctly and saved. The key is one line starting with `ssh-ed25519`                        |
-| SSH stopped working after a firmware update                  | Firmware updates can wipe JFFS. Re-run <kbd>SSH Keys Install</kbd>, then re-paste the key on all nodes and reboot AiMesh nodes |
-| Key already exists message                                   | Normal - MerVLAN reuses an existing key pair. Re-install on nodes only if the key was regenerated                     |
+| Problem | Solution |
+| --- | --- |
+| SSH connection failed on all nodes | Open <kbd>SSH Key Install</kbd>, click <kbd>Load</kbd>, and confirm that a key appears. |
+| AiMesh node still failing after the key was saved | Reboot the AiMesh node so the firmware propagates the authorized key. |
+| Standalone AP failing after the key was saved | Verify that the complete `ssh-ed25519` line was pasted and saved on that AP. |
+| SSH stopped working after a firmware update | Generate or load the key again, then reinstall it where required. |
+| Key already exists message | This is normal. MerVLAN reuses its existing key pair. |
 
 > [!TIP]
-> Keys installed? Head to **Apply Changes** to go live.
+> Keys installed? Return to [Applying Your Configuration](#4-applying-your-configuration).
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="6-logs--monitoring">6. Logs & Monitoring <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-MerVLAN provides real-time feedback and persistent logs for every operation.
+MerVLAN provides real-time command output and runtime logs for its operations.
 
 > [!NOTE]
 > **VLAN clients will not appear in ASUS client views**
 >
-> Clients attached to MerVLAN VLAN bridges will not appear correctly in the built-in ASUS client list, Network Map, or traffic/client monitoring views.
->
-> This happens because those ASUS views mostly track clients on the default LAN bridge, `br0`. Once MerVLAN moves a client interface into a dedicated VLAN bridge such as `br20`, `br30`, or `br40`, the built-in ASUS tools no longer see that client through its normal internal collection system.
->
-> Use MerVLAN's Active VLANs and client/log views when checking VLAN-connected clients.
+> ASUS client and traffic views mainly track the default `br0` bridge, so they may not show clients moved to MerVLAN VLAN bridges correctly. Use MerVLAN's **Active VLAN Clients** panel when checking VLAN-connected clients.
 
-### CLI Log (Main Window)
+### Command Output (Main Window)
 
-The console shows real-time output during applies and node operations.
+Open the <kbd>INFO</kbd> panel to see **VLAN Manager Command Output**. It shows real-time results for saving, syncing, applying, and maintenance actions.
 
 - Validation results and configuration warnings
 - Apply progress step by step
@@ -528,13 +452,13 @@ The console shows real-time output during applies and node operations.
 - SSH connection status for each node
 - Node filter info - which node is handling which SSID
 
-<kbd>Clear CLI</kbd> clears the console. Output auto-scrolls to the latest entry.
+Use <kbd>View Logs</kbd> for the full log viewer or <kbd>Clear</kbd> to clear the visible command output.
 
 ### Full Log Viewer (Separate Window)
 
-Click <kbd>View Full Logs</kbd> for timestamped, persistent logs across all operations. Per-file view: vlan_manager, cli_output, boot_wrap, heal.
+Click <kbd>View Logs</kbd> for timestamped **VLAN Manager**, **CLI Output**, and **Boot & Startup** tabs. Health activity is included in the VLAN Manager and CLI logs.
 
-Log files on the router (stored in RAM - cleared on reboot):
+Log files on the router:
 
 ```text
 /tmp/mervlan_tmp/logs/vlan_manager.log
@@ -542,226 +466,107 @@ Log files on the router (stored in RAM - cleared on reboot):
 /tmp/mervlan_tmp/logs/boot_wrap.log
 ```
 
+Logs are stored in RAM and are cleared on reboot. MerVLAN automatically limits their size. During an update, you can keep the existing history or clear older entries; the new update is always logged.
+
 ### Auto-Heal System
 
-MerVLAN monitors VLAN health automatically every minute in the background.
+When Apply on Boot is enabled, MerVLAN checks VLAN health every five minutes and after relevant firmware events. It waits for wireless changes to settle and only reapplies the configuration when a problem persists. Check the VLAN Manager log if recovery is triggered repeatedly.
 
-| Phase               | What happens                                                                                   |
-| ------------------- | ---------------------------------------------------------------------------------------------- |
-| **Phase 1**         | Fast check - single-pass VLAN bridge scan                                                      |
-| **Phase 2**         | If fast check fails: 10-pass validation over ~27s (3 consecutive mismatches trigger heal)      |
-| **Heal**            | Persistent mismatch -> mervlan_manager.sh re-applies your config automatically                 |
-| **Wireless events** | Wait up to 120s for wireless stack to settle + deferred 90s recheck to prevent false positives |
+### Active VLAN Clients Panel
 
-**Log messages you may see:**
+The panel below the command output groups detected VLAN clients by device and VLAN. Use its refresh button to update the visible list. You can also edit friendly names, show inactive or relayed observations, and rebuild MAC Shield after moving a device back to `br0`.
 
-```text
-"Heal: event [restart_wireless] matched watchlist"
-  -> A firmware event triggered a VLAN health check
+### Quick Troubleshooting
 
-"VLAN bridges present but wl subinterfaces detected in br0"
-  -> Wireless leak detected (race condition) - auto-heal will re-apply
-
-"Heal: VLAN config is healthy - no action needed"
-  -> Check passed, everything is intact
-
-"Heal: applying VLAN configuration"
-  -> A heal re-apply was triggered
-
-"Heal: scheduling deferred recheck in 90s for [event]"
-  -> A wireless event finished; a follow-up check is queued
-```
-
-### Active VLANs Panel
-
-Located below the CLI log. Shows which VLAN bridges are live on the main router and each node. Click <kbd>Refresh Active VLANs</kbd> to update. Typical output:
-
-```text
-MAIN:  br10  br20  br30
-NODE1 (192.168.1.50):  br20  br30
-NODE2 (192.168.1.51):  br30
-```
-
-> [!NOTE]
-> `br0` is the router's default LAN bridge and should NOT appear here. If you only see `br0`, VLANs have not been applied - check that Dry Run is disabled.
-
-### Log Reference
-
-| Log message                              | Meaning                                             |
-| ---------------------------------------- | --------------------------------------------------- |
-| `OK SSID 'X' resolved to wl1.1`          | OK SSID found and mapped                            |
-| `OK Successfully bound to br30`          | OK Interface added to VLAN bridge                   |
-| `Filtering SSID identity=MAIN`           | OK Node filter applied correctly                    |
-| `Node setup completed successfully`      | OK Remote node apply succeeded                      |
-| `Heal: VLAN config is healthy`           | OK Auto-heal check passed                           |
-| `SSID 'X' not found on any band`         | Warning: SSID name mismatch or SSID disabled         |
-| `Skipping native SSID - ENS not enabled` | Warning: base radio skipped (expected if ENS is OFF) |
-| `SSH connection failed`                  | Warning: node SSH key or IP address issue            |
-| `Fatal: Hardware profile not ready`      | Warning: device not probed; use APMO                 |
-| `wl.* detected in br0`                   | Warning: race condition; auto-heal will re-apply     |
-
-### Debugging Tips
-
-| Symptom                                | What to check                                                          |
-| -------------------------------------- | ---------------------------------------------------------------------- |
-| VLANs disappear after reboot           | Boot Service is not enabled - enable it in General Settings            |
-| Apply runs but VLANs don't appear      | Dry Run is likely still ON - look for `[DRY RUN]` in CLI               |
-| VLANs disappear after wireless restart | restart_wireless race condition - auto-heal handles it; check heal log |
-| Node not applying                      | View Full Logs for SSH error; run <kbd>Sync Nodes</kbd> then apply again |
+| Symptom | What to check |
+| --- | --- |
+| Apply runs but VLANs do not appear | Confirm that Dry Run is off and look for `[DRY RUN]` in the command output. |
+| SSID is skipped | Confirm the SSID name and check whether ENS is required for a base radio. |
+| Node does not apply | Open <kbd>View Logs</kbd> for SSH errors, run <kbd>Sync Nodes</kbd>, and apply again. |
+| VLANs disappear after reboot | Enable Apply on Boot in <kbd>Settings</kbd>. |
+| Recovery runs repeatedly | Check the VLAN Manager log for missing bridges, interfaces returning to `br0`, or wireless-event warnings. |
 
 > [!TIP]
-> Need help? See the **Get Help** tab for support links.
+> Need more help? See [Get Help & Support](#9-get-help--support).
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="updating-mervlan">7. Updating or Restoring MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
 > [!NOTE]
-> Updates preserve your settings, SSH keys, MAC Shield databases, and local backups whenever possible. After updating, MerVLAN refreshes the public web UI files and reapplies the required service hooks. Refresh your browser after the update to load the latest web interface.
+> By default, updates preserve your settings, SSH keys, MAC Shield data, local backups, and existing logs. You can optionally clear old logs before an update; the new update is still logged from beginning to end.
 
-MerVLAN can be updated in place without losing its existing configuration or SSH credentials.
+The web UI is the recommended way to update, create backups, restore an earlier installation, or use a temporary undo option. Open the version window by clicking the version button in the bottom-right corner.
 
-The recommended method is through the web UI. Click the version button in the bottom-right corner, select the branch you want to use, check for updates, and install the available version.
+### Choosing an Update Channel
 
-MerVLAN uses the following update channels:
-
-- **`main`** is the recommended public beta and release branch.
-  - Normal installations and updates use this branch.
-  - Tagged GitHub pre-releases are created from tested commits on `main`.
-  - GitHub release assets are not currently used by the installer; updates continue to download directly from the branch.
-
-- **`dev`** is the active development and integration branch.
-  - It may contain unfinished, experimental, or less-tested changes.
-  - It does not receive tagged GitHub releases.
-  - It is intended for development installations and testing upcoming changes.
-
-Temporary test branches, normally named using the `dev-test<number>` format, may also be used during active development. These branches can contain incomplete or untested code and should only be used when directly involved in testing or when requested by the maintainer.
+| Channel | What it installs |
+| --- | --- |
+| **Stable (releases)** | A selected tagged release. This channel supports both upgrades and downgrades. |
+| **Stable (latest only)** | The current `main` branch version, without a version picker. This is also the easiest way to return from a development build to `main`. |
+| **Development (dev)** | The current `dev` branch version. It may include newer fixes and features that are not yet available on `main`, but changes may be less tested, reworked, or removed before release. |
+| **Custom branch (dev only)** | A temporary branch intended for developers and selected testers working on a specific change. |
 
 > [!WARNING]
-> MerVLAN is currently in public beta. The `main` branch is the recommended channel, but bugs and breaking changes are still possible. The `dev` and temporary test branches carry a higher risk of incomplete or unstable behaviour.
+> **Custom branches** are intended for developers and selected testers. Use one only when you understand its purpose or have been asked to test a specific change.
 
-### Updating through the web UI
+### Updating Through the Web UI
 
-The web UI supports switching between `main` and `dev` when the selected branch contains a version newer than the one currently installed.
+1. Open the version window and leave the **Update** tab selected.
+2. Choose an update channel.
+3. Choose whether to retain or clear the existing logs.
+4. Click <kbd>Check for updates</kbd>. For **Stable (releases)**, choose a tagged version. For **Custom branch**, enter the branch name directly instead.
+5. Review the version comparison and any downgrade warning. Where available, click <kbd>Show Changelog</kbd> to review the changes before continuing.
+6. Start the update and keep the version window open to follow its progress.
+7. When the update finishes, refresh your browser to load the new interface.
 
-Downgrading or installing an older version through the web UI is not currently supported. To move to an older branch version or restore a previous local backup, use the manual updater over SSH.
+Closing the version window does not cancel an update that has already started, but you will lose live progress tracking in that window. The completion message will tell you whether **Undo Update** is available until the next reboot.
 
-### Manual Update Commands
+### Backups and the Restore Tab
 
-| Command | What it does |
+Open the **Restore** tab to view and manage local restore points.
+
+| Restore point | How it works |
 | --- | --- |
-| <pre>`sh functions/update_mervlan.sh`</pre> | Update MerVLAN to the latest version available on the `main` public beta channel. |
-| <pre>`sh functions/update_mervlan.sh dev`</pre> | Update MerVLAN to the latest version available on the `dev` development channel. |
-| <pre>`sh functions/update_mervlan.sh update dev`</pre> | Explicitly run a development-channel update. This performs the same type of update as selecting `dev` through the web UI. |
-| <pre>`sh functions/update_mervlan.sh restore`</pre> | Open the restore menu and restore a previously created local MerVLAN backup. |
-| <pre>`sh functions/update_mervlan.sh BRANCH`</pre> | Replace `BRANCH` with the name of a custom development or test branch.<br>For example, run `sh functions/update_mervlan.sh dev-test9` to update MerVLAN from the `dev-test9` branch. |
+| **Automatic backup** | Created before an update. MerVLAN keeps the three newest automatic backups. |
+| **Manual backup** | Created on demand with a name you choose. Up to three are retained and none are removed automatically. |
+| **Undo Restore** | A temporary copy of the installation replaced by the last successful restore. It is lost on reboot and consumed after a successful undo. |
+| **Undo Update** | A temporary shortcut to the automatic backup created before the last successful update. The shortcut is lost on reboot. |
 
-The manual updater supports cross-updating between `main`, `dev`, and custom branches. This allows development installations to move between channels even when the target version is not newer than the currently installed version.
+The tab also shows MerVLAN's managed storage use and the free space available on the relevant filesystems. Every backup, update, restore, and undo performs its own space check before making changes.
 
-> [!CAUTION]
-> Custom branches are not permanent release channels. A temporary branch may be changed or removed without notice. Before moving to one, make sure you know its purpose and have a usable local backup.
+From this tab you can:
 
-### Update Process
+- Refresh the backup list.
+- Create a named manual backup.
+- Restore or delete a selected backup.
+- Delete all persistent backups after entering `DELETE ALL`.
+- Use an available **Undo Restore** or **Undo Update** option.
 
-During an update, the updater will:
+Deleting the automatic backup used by **Undo Update** also removes that shortcut. **Delete All Backups** does not remove the separate temporary **Undo Restore** file.
 
-- Download the selected branch from GitHub.
-- Validate the required files and directories.
-- Stage the new version before replacing the installed files.
-- Preserve `settings/settings.json`, SSH keys, MAC Shield databases, and local backups whenever possible.
-- Perform an atomic replacement of the installed version.
-- Re-run the hardware probe.
-- Refresh the public web UI files.
-- Reinstall the required service hooks.
-- Automatically synchronize configured remote nodes when SSH is enabled and the nodes are reachable.
+### Restoring a Backup
 
-If an update does not behave as expected, or the configuration becomes corrupted, use the built-in restore function to return to one of the locally stored MerVLAN backups.
-
-Configured remote APs that are reachable over SSH are automatically synchronized as part of the normal update process.
-
-Updating through the web UI remains the recommended method for normal use. Manual SSH updates are mainly intended for development, branch switching, downgrading, troubleshooting, and recovery.
-
-
-### Restoring a Previous Backup
-
-MerVLAN keeps the three newest local backups created during updates. Restoring a backup replaces the current MerVLAN installation, settings, and stored data with the selected restore point.
-
-1. Connect to the main router over SSH.
-2. Open the MerVLAN directory:
-
-   `cd /jffs/addons/mervlan`
-
-3. Start restore mode:
-
-   `sh functions/update_mervlan.sh restore`
-
-4. Select one of the available backups. The newest backup is listed first.
-5. Review the selected backup and enter `y` to confirm.
-6. When completed, MerVLAN displays the version that was replaced and the version restored.
+1. Open the version window and select **Restore**.
+2. Click <kbd>Check Backups</kbd>.
+3. Select an automatic or manual backup.
+4. Click <kbd>Restore Selected</kbd> and confirm the selected backup.
+5. Keep the version window open while the restore runs.
+6. Review the completion message for any node warnings.
+7. Click <kbd>Refresh UI</kbd> when the restore finishes.
 
 > [!CAUTION]
-> A restore is a complete rollback, not a settings-only restore. Changes made after the selected backup was created will be replaced.
+> A restore replaces the complete MerVLAN installation, including its version, settings, and stored data. It is not a settings-only restore, so changes made after that backup was created will be replaced.
 
-### Post-Restore Steps
+Before changing the active installation, MerVLAN validates the selected backup and keeps the current installation available for automatic recovery. If the restored installation cannot be activated or verified on the main unit, MerVLAN puts the previous installation back.
 
-A restore replaces the MerVLAN addon directory with the selected backup, but it does not automatically refresh the public web files, rebuild the hardware profile, reinstall service hooks, restore the active boot state, or synchronize configured nodes. The following steps complete those tasks after the restore.
+Configured nodes are synchronized when they are reachable. A node failure is reported as a warning instead of discarding an otherwise successful restore on the main unit. Existing runtime logs are retained so you can review what happened.
 
-Run all commands on the main router from the MerVLAN base directory:
+After a successful restore, **Undo Restore** may be available until reboot. It returns to the installation that was active immediately before the restore. After a successful update, **Undo Update** may be available for the automatic pre-update backup.
 
-`cd /jffs/addons/mervlan`
-
-#### 1. Refresh the Public Web Files and Hardware Profile
-
-`sh uninstall.sh && sh install.sh && sh functions/hw_probe.sh`
-
-#### 2. Reinstall the Main Router Service Hooks
-
-`sh functions/mervlan_boot.sh setupdisable && sh functions/mervlan_boot.sh setupenable`
-
-#### 3. Re-enable MerVLAN at Boot
-
-Run this only when you want MerVLAN to apply the configured VLANs automatically after the router starts:
-
-`sh functions/mervlan_boot.sh disable && sh functions/mervlan_boot.sh enable`
-
-#### 4. Synchronize and Re-enable Configured Nodes
-
-Run these commands only when remote AiMesh or AP nodes are configured:
-
-`sh functions/sync_nodes.sh`
-
-`sh functions/mervlan_boot.sh nodedisable && sh functions/mervlan_boot.sh nodeenable`
-
-#### 5. Verify the Restored Installation
-
-`sh functions/mervlan_boot.sh status`
-
-Refresh the browser after completing these steps to load the restored web interface.
+For manual update, backup, restore, and undo commands, see [Update, Backup, and Restore Commands](#update-backup-and-restore-commands).
 
 ---
-
-### Combined Commands
-
-#### Without Configured Nodes
-
-Refresh the installation, rebuild the hardware profile, reinstall the service hooks, and enable MerVLAN at boot:
-
-`sh uninstall.sh && sh install.sh && sh functions/hw_probe.sh && sh functions/mervlan_boot.sh setupdisable && sh functions/mervlan_boot.sh setupenable && sh functions/mervlan_boot.sh disable && sh functions/mervlan_boot.sh enable`
-
-#### With Configured Nodes
-
-Also synchronize the restored files to configured nodes and reinstall their service hooks:
-
-`sh uninstall.sh && sh install.sh && sh functions/hw_probe.sh && sh functions/mervlan_boot.sh setupdisable && sh functions/mervlan_boot.sh setupenable && sh functions/mervlan_boot.sh disable && sh functions/mervlan_boot.sh enable && sh functions/sync_nodes.sh && sh functions/mervlan_boot.sh nodedisable && sh functions/mervlan_boot.sh nodeenable`
-
-> [!NOTE]
-> The combined commands enable MerVLAN at boot. To leave automatic boot application disabled, remove `&& sh functions/mervlan_boot.sh enable` from the command.
-
-<br>
-<br>
-<br>
 
 <h2 id="7-cli-usage">8. CLI Usage <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
@@ -772,59 +577,112 @@ These commands are useful when working over SSH on the main router. Most users s
 >
 > `cd /jffs/addons/mervlan`
 
-### Manual Update Commands
+<a id="update-backup-and-restore-commands"></a>
+
+### Update, Backup, and Restore Commands
+
+#### Update
 
 | Command | What it does |
 | --- | --- |
-| <pre>`sh functions/update_mervlan.sh`</pre> | Update from the main public beta channel. |
-| <pre>`sh functions/update_mervlan.sh dev`</pre> | Update from the development channel. |
-| <pre>`sh functions/update_mervlan.sh update dev`</pre> | Explicit development-channel update. Same intent as the UI dev update button. |
-| <pre>`sh functions/update_mervlan.sh restore`</pre> | Open the restore flow and select one of the local MerVLAN backups. |
-| <pre>`sh functions/update_mervlan.sh BRANCH`</pre> | Replace `BRANCH` with the name of a custom branch for development or test installations.<br>For example, run `sh functions/update_mervlan.sh dev-test9` to update MerVLAN from the `dev-test9` branch. |
+| `sh functions/update_mervlan.sh` | Install the current `main` branch version. |
+| `sh functions/update_mervlan.sh dev` | Install the current `dev` branch version. |
+| `sh functions/update_mervlan.sh update dev --logs=keep` | Update from `dev` and retain existing logs. This is the default log policy. |
+| `sh functions/update_mervlan.sh update dev --logs=clear` | Update from `dev` and clear older logs after the update lock is acquired. The new update is still logged. |
+| `sh functions/update_mervlan.sh refs/heads/BRANCH` | Install a named custom branch. Replace `BRANCH` with the required branch name. |
+| `sh functions/update_mervlan.sh refs/tags/v0.53.15` | Install a tagged release. Replace the example with the required tag. |
 
-> [!NOTE]
-> Updates preserve your settings, SSH keys, MAC Shield databases, and local backups whenever possible. After updating, MerVLAN refreshes the public web UI files and reapplies the required service hooks. Refresh your browser after the update to load the latest web interface.
-
-### Install, Reinstall, and Uninstall
+#### Backup
 
 | Command | What it does |
 | --- | --- |
-| <pre>`sh install.sh full`</pre> | Perform a fresh installation from the `main` public beta channel. Downloads the package, installs the required files, runs the hardware probe, and sets up the web UI. |
-| <pre>`sh install.sh full dev`</pre> | Perform a fresh installation from the `dev` development channel. |
-| <pre>`TMP_DIR=/tmp/mervlan_staging sh install.sh download`</pre> | Download the MerVLAN tarball to a staging directory without installing it. |
-| <pre>`TMP_DIR=/tmp/mervlan_staging sh install.sh tarball`</pre> | Install MerVLAN from a previously downloaded tarball in the staging directory. |
-| <pre>`sh install.sh credentials`</pre> | Update only the stored SSH username and SSH port. |
-| <pre>`sh uninstall.sh`</pre> | Remove the web UI entry and service hooks while preserving the addon files, settings, and data. |
-| <pre>`sh uninstall.sh full`</pre> | Perform a full uninstall. Removes the web UI, service hooks, addon files, settings, data, and node-side installations where possible. |
-| <pre>`sh uninstall.sh && sh install.sh`</pre> | Reinstall the web UI and service hooks using the existing local addon files. Useful after manually changing `mervlan.asp`, public UI files, or installation wiring without performing a full update. Note that boot hook and cron will be disabled. Enable manually via UI afterwards. |
+| `sh functions/update_mervlan.sh backup` | Open the interactive backup menu. |
+| `sh functions/update_mervlan.sh backup list` | List all automatic and manual backups. |
+| `sh functions/update_mervlan.sh backup list --json` | Print the backup inventory as JSON. |
+| `sh functions/update_mervlan.sh backup create TAG` | Create a manual backup after confirmation. Replace `TAG` with a 1-24 character name using letters, numbers, `_`, or `-`. |
+| `sh functions/update_mervlan.sh backup delete ARCHIVE` | Delete a selected backup after confirmation. |
+| `sh functions/update_mervlan.sh backup delete-all` | Delete all persistent backups after confirmation. |
+
+#### Restore and Undo
+
+| Command | What it does |
+| --- | --- |
+| `sh functions/update_mervlan.sh restore` | Open the interactive restore and backup-management menu. |
+| `sh functions/update_mervlan.sh restore ARCHIVE yes` | Restore an exact automatic or manual backup without an interactive confirmation. |
+| `sh functions/update_mervlan.sh undo restore yes` | Undo the last successful restore while its temporary backup is available. |
+| `sh functions/update_mervlan.sh undo update yes` | Undo the last successful update while its temporary shortcut and automatic backup are available. |
 
 > [!CAUTION]
-> **Be careful when using the full uninstall command.** It is intended for complete removal or a clean reinstall. Use the normal uninstall and install commands when you only need to refresh the web UI mount, public files, or service hooks.
+> Commands ending in `yes` skip the interactive confirmation. Check the selected backup name carefully before using them.
+
+<a id="install-reinstall-and-uninstall-commands"></a>
+
+### Install, Reinstall, and Uninstall Commands
+
+#### Install
+
+| Command | What it does |
+| --- | --- |
+| `sh install.sh full` | Start the guided installer. Choose Stable or Development, review node SSH settings, and preserve or replace an existing installation. |
+| `sh install.sh full --test-run` | Run the installer in isolated test paths without changing the active installation. It can optionally create a temporary **MerVLAN Test** page and removes the test files afterward. |
+| `sh install.sh full dev` | Compatibility alias that opens the guided installer with Development preselected. |
+| `sh install.sh credentials` | Change the SSH username and port used for configured nodes. |
+
+Stable installation uses the latest published release. If that cannot be resolved, the installer tries the newest stable version tag and then uses `main` as a fallback. Installer warnings and errors are saved in `/tmp/mervlan-installer-last.log` until the next full installer run.
+
+If test mode creates the temporary Web UI page, refresh any already-open Merlin page after the test finishes so the removed test tab disappears from its menu.
+
+#### Refresh the Current Installation
+
+| Command | What it does |
+| --- | --- |
+| `sh uninstall.sh reinstall && sh install.sh reinstall` | Refresh the web UI and published runtime files from the currently installed source while preserving logs and service state. This is the recommended manual refresh command. |
+| `sh install.sh reinstall` | Rebuild the published files without removing the existing publication first. Use this to finish the refresh if the install half was interrupted. |
+
+These commands are useful after editing local web or public files. They do not download an update, create an update backup, synchronize nodes, or apply settings. Use Update or Restore when changing the installed version or recovering stored data. Use the normal Save, Sync Nodes, and Apply VLAN controls for configuration changes.
+
+#### Advanced Installation
+
+| Command | What it does |
+| --- | --- |
+| `TMP_DIR=/tmp/mervlan_staging sh install.sh download` | Download and retain the MerVLAN archive without installing it. |
+| `TMP_DIR=/tmp/mervlan_staging sh install.sh tarball` | Install from the archive retained in the selected staging directory. |
+
+#### Uninstall
+
+| Command | What it does |
+| --- | --- |
+| `sh uninstall.sh` | Remove the web UI and service hooks while preserving the addon files, settings, and stored data. |
+| `sh uninstall.sh full` | Completely remove MerVLAN, including its files, settings, stored data, and reachable node installations. Saved update and manual backups are kept. |
+| `sh uninstall.sh full && rm -rf /jffs/addons/mervlan_backups` | Run a full uninstall, then permanently delete all saved update and manual backups. |
+
+> [!CAUTION]
+> A full uninstall permanently removes MerVLAN data. Adding the backup-removal command also permanently deletes every saved backup. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
 
 ### Service and Boot Control
 
 | Command | What it does |
 | --- | --- |
-| <pre>`sh functions/mervlan_boot.sh status`</pre> | Show the current boot, addon, service-event, cron, node, and MAC Shield status. |
-| <pre>`sh functions/mervlan_boot.sh enable`</pre> | Enable MerVLAN at boot and enable the periodic health-check cron job. |
-| <pre>`sh functions/mervlan_boot.sh disable`</pre> | Disable boot persistence and remove active MAC Shield chains while preserving settings and databases. |
-| <pre>`sh functions/mervlan_boot.sh setupenable`</pre> | Install or repair the `service-event` and `services-start` hooks. |
-| <pre>`sh functions/mervlan_boot.sh setupdisable`</pre> | Remove the MerVLAN hook blocks from `service-event` and `services-start`. |
-| <pre>`sh functions/mervlan_boot.sh cronenable`</pre> | Enable the periodic health-check cron job. |
-| <pre>`sh functions/mervlan_boot.sh crondisable`</pre> | Disable the periodic health-check cron job. |
-| <pre>`sh functions/mervlan_boot.sh nodeenable`</pre> | Install or repair MerVLAN service hooks on configured nodes over SSH. |
-| <pre>`sh functions/mervlan_boot.sh nodedisable`</pre> | Remove MerVLAN service hooks from configured nodes over SSH. |
+| `sh functions/mervlan_boot.sh status` | Show the current boot, addon, service-event, cron, node, and MAC Shield status. |
+| `sh functions/mervlan_boot.sh enable` | Enable MerVLAN at boot and enable the periodic health-check cron job. |
+| `sh functions/mervlan_boot.sh disable` | Disable boot persistence and remove active MAC Shield chains while preserving settings and databases. |
+| `sh functions/mervlan_boot.sh setupenable` | Install or repair the `service-event` and `services-start` hooks. |
+| `sh functions/mervlan_boot.sh setupdisable` | Remove the MerVLAN hook blocks from `service-event` and `services-start`. |
+| `sh functions/mervlan_boot.sh cronenable` | Enable the periodic health-check cron job. |
+| `sh functions/mervlan_boot.sh crondisable` | Disable the periodic health-check cron job. |
+| `sh functions/mervlan_boot.sh nodeenable` | Install or repair MerVLAN service hooks on configured nodes over SSH. |
+| `sh functions/mervlan_boot.sh nodedisable` | Remove MerVLAN service hooks from configured nodes over SSH. |
 
 ### Manual Apply and Node Operations
 
 | Command | What it does |
 | --- | --- |
-| <pre>`sh functions/mervlan_manager.sh`</pre> | Apply the current MerVLAN settings locally on the main router. |
-| <pre>`sh functions/mervlan_manager.sh --dry-run`</pre> | Run the manager in dry-run mode without making live network changes. |
-| <pre>`sh functions/sync_nodes.sh`</pre> | Copy MerVLAN files and node-filtered settings to configured nodes. |
-| <pre>`sh functions/execute_nodes.sh`</pre> | Run the complete node apply workflow over SSH. |
-| <pre>`sh functions/execute_nodes.sh nodesonly`</pre> | Run only the node-side apply workflow. |
-| <pre>`sh functions/hw_probe.sh`</pre> | Detect the local hardware configuration and refresh the hardware profile in `settings.json`. |
+| `sh functions/mervlan_manager.sh` | Apply the current MerVLAN settings locally on the main router. |
+| `sh functions/mervlan_manager.sh --dry-run` | Run the manager in dry-run mode without making live network changes. |
+| `sh functions/sync_nodes.sh` | Copy MerVLAN files and node-filtered settings to configured nodes. |
+| `sh functions/execute_nodes.sh` | Run the complete node apply workflow over SSH. |
+| `sh functions/execute_nodes.sh nodesonly` | Run only the node-side apply workflow. |
+| `sh functions/hw_probe.sh` | Detect the local hardware configuration and refresh the hardware profile in `settings.json`. |
 
 > [!NOTE]
 > The normal UI Apply process saves the configuration, synchronizes configured nodes, applies the local settings, and applies the node settings in the required order. Use these CLI commands mainly for development, debugging, or recovery from a partial state.
@@ -833,30 +691,30 @@ These commands are useful when working over SSH on the main router. Most users s
 
 | Command | What it does |
 | --- | --- |
-| <pre>`sh functions/collect_clients.sh`</pre> | Rebuild the Active VLAN Clients data using information from the main router and configured nodes. |
-| <pre>`sh functions/mac_refresh.sh`</pre> | Clear and rebuild the MAC Shield database using currently connected VLAN clients. Run this after moving devices back to `br0` so they do not remain blocked by outdated shield entries. |
-| <pre>`sh functions/mac_client_meta.sh`</pre> | Apply client display-name mappings and MAC Shield overrides after metadata changes. This is normally triggered automatically by the web UI. |
-| <pre>`cat /tmp/mervlan_tmp/mac_shield.db`</pre> | Show the active in-memory MAC Shield database. |
-| <pre>`cat /jffs/addons/mervlan/tmp/mac_shield.db`</pre> | Show the persistent JFFS MAC Shield checkpoint. |
-| <pre>`cat /jffs/addons/mervlan/tmp/mac_shield_override.db`</pre> | Show the MAC addresses that are exempt from MAC Shield blocking. |
-| <pre>`cat /jffs/addons/mervlan/tmp/client_name_override.db`</pre> | Show the friendly client-name mappings used by the web UI. |
+| `sh functions/collect_clients.sh` | Rebuild the Active VLAN Clients data using information from the main router and configured nodes. |
+| `sh functions/mac_refresh.sh` | Clear and rebuild the MAC Shield database using currently connected VLAN clients. Run this after moving devices back to `br0` so they do not remain blocked by outdated shield entries. |
+| `sh functions/mac_client_meta.sh` | Apply client display-name mappings and MAC Shield overrides after metadata changes. This is normally triggered automatically by the web UI. |
+| `cat /tmp/mervlan_tmp/mac_shield.db` | Show the active in-memory MAC Shield database. |
+| `cat /jffs/addons/mervlan/tmp/mac_shield.db` | Show the persistent JFFS MAC Shield checkpoint. |
+| `cat /jffs/addons/mervlan/tmp/mac_shield_override.db` | Show the MAC addresses that are exempt from MAC Shield blocking. |
+| `cat /jffs/addons/mervlan/tmp/client_name_override.db` | Show the friendly client-name mappings used by the web UI. |
+
+<a id="logs-and-quick-debugging"></a>
 
 ### Logs and Quick Debugging
 
 | Command | What it does |
 | --- | --- |
-| <pre>`tail -n 80 /tmp/mervlan_tmp/logs/cli_output.log`</pre> | Show recent command output from actions triggered through the web UI. |
-| <pre>`tail -n 120 /tmp/mervlan_tmp/logs/vlan_manager.log`</pre> | Show recent manager, healing, MAC Shield, and service activity. |
-| <pre>`tail -n 80 /tmp/mervlan_tmp/logs/boot_wrap.log`</pre> | Show recent MerVLAN boot-wrapper activity. |
-| <pre>`cat /tmp/mervlan_tmp/results/vlan_clients.json`</pre> | Show the generated client inventory used by the Active VLAN Clients panel. |
-| <pre>`: > /tmp/mervlan_tmp/logs/cli_output.log`</pre> | Clear the CLI output log manually. |
+| `tail -n 80 /tmp/mervlan_tmp/logs/cli_output.log` | Show recent command output from actions triggered through the web UI. |
+| `tail -n 120 /tmp/mervlan_tmp/logs/vlan_manager.log` | Show recent manager, healing, MAC Shield, and service activity. |
+| `tail -n 80 /tmp/mervlan_tmp/logs/boot_wrap.log` | Show recent MerVLAN boot-wrapper activity. |
+| `cat /tmp/mervlan_tmp/results/vlan_clients.json` | Show the generated client inventory used by the Active VLAN Clients panel. |
+| `: > /tmp/mervlan_tmp/logs/cli_output.log` | Clear the CLI output log manually. |
 
 > [!CAUTION]
 > **Do not run `service-event-handler.sh` directly.** It expects service-event variables supplied by the firmware and is intended to be called by Asuswrt-Merlin, not executed manually.
 
-<br>
-<br>
-<br>
+---
 
 <h2 id="8-device-support">9. Device Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
@@ -892,12 +750,12 @@ MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merli
 These devices are auto-detected on startup - no manual configuration needed. More profiles are added with each release.
 
 > [!WARNING]
-> *RT-BE92U hardware limitation**
+> **RT-BE92U hardware limitation**
 >
 > Due to the internal switch design on this model, all four physical LAN ports share a single VLAN-capable interface. Only one VLAN ID can be assigned and it applies to LAN 1-4 as a group. Per-port VLAN isolation is not supported on this model.
 
 > [!WARNING]
-> *RT-AX88U hardware limitation**
+> **RT-AX88U hardware limitation**
 >
 > Due to the internal switch design on this model, LAN port 5-8 shares a single VLAN-capable interface. 
 
@@ -905,22 +763,16 @@ These devices are auto-detected on startup - no manual configuration needed. Mor
 
 MerVLAN will still attempt to run, but port assignments may be incorrect or incomplete. Use the APMO modal to configure your hardware profile manually.
 
-**How to access APMO:**
-
-- Click the <kbd>Experimental</kbd> badge or hardware status indicator in the main UI header
+Click <kbd>APMO</kbd> in the main UI. Select the main router or a configured node, then:
 
 **In the APMO modal you can:**
 
 - Map each ethX interface to the correct LAN port label
 - Set the correct WAN interface (e.g., eth0 or eth4)
 - Confirm the LAN port count
-- Save the profile - stored in settings.json, persists across MerVLAN updates
-
-**Tips for identifying your port layout:**
-
-- Connect one device at a time to each LAN port and note the interface
-- Check the Asus product page for your model's port-to-chip mapping
-- Ask on Discord or SNB Forums - others may have already mapped your device
+- Enable <kbd>Auto-refresh HW Profile</kbd> before saving, or click <kbd>Refresh HW Profile</kbd> after <kbd>Save</kbd>.
+- The saved profile is stored in `settings.json` and preserved during updates.
+- Run <kbd>Sync Nodes</kbd> after changing an override for a node.
 
 ### Skipping APMO
 
@@ -933,60 +785,40 @@ Without a hardware profile, MerVLAN will guess port mappings from available inte
 
 At minimum, verify the WAN interface is correct before applying.
 
-### Sharing Your Profile
+### Help Add Support for Your Device
 
-Got a working APMO profile for an unlisted device? Please share it - it can be built into a future release.
+The interactive mapper identifies the physical LAN-port order and prepares a GitHub report. MerVLAN does not need to be installed to run it.
 
-- Post the ethX mapping on SNB Forums or Discord
-- Open a GitHub Issue with your PRODUCTID and port layout
-- Include firmware version and your test results
+1. Leave the WAN cable connected and disconnect all LAN cables.
+2. Run the mapper over SSH:
 
-See the "Get Help" tab for all links.
+   ```sh
+   mkdir -p /tmp/mervlan_tmp && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/dev/functions/device_support_mapper.sh" -o "/tmp/mervlan_tmp/device_support_mapper.sh" && chmod 0755 /tmp/mervlan_tmp/device_support_mapper.sh && sh /tmp/mervlan_tmp/device_support_mapper.sh
+   ```
 
-<br>
-<br>
-<br>
+3. Follow the prompts for each physical LAN port.
+4. Submit the pre-filled GitHub issue link produced at the end.
+
+The report is stored under `/tmp/mervlan_tmp/results` and is lost on reboot. See [Get Help & Support](#9-get-help--support) if you need assistance.
+
+---
 
 <h2 id="9-get-help--support">10. Get Help & Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
 Need help? Found a bug? Have a feature idea? The MerVLAN community is active and happy to assist.
 
 > [!IMPORTANT]
-> **Bugs and broken features -> GitHub Issues, please**
+> **Bugs and broken features → GitHub Issues, please**
 >
 > If you've found a bug, a broken feature, or something that behaves unexpectedly, please report it on [GitHub Issues](https://github.com/r80xcore/mervlan/issues) rather than the forums or Discord. Having everything in one place makes it much easier to track, prioritise, and avoid duplicates - and nothing gets lost in a chat scroll.
 >
 > SNB and Discord are great for setup questions and general help. GitHub is the right place for anything that needs to be fixed.
 
-> **SNB Forums** - Community Discussion
->
-> _Best for: setup questions, config examples, community tips_
->
-> [snbforums.com - MerVLAN thread](https://www.snbforums.com/threads/mervlan-v0-52-1-dev-0-52-7-simple-and-powerful-vlan-management-beta.95936/)
->
-> - Active community with developer responses
-> - Real-world setup guides and configuration examples
-> - Feature discussions and general networking advice
-
-> **Discord** - Real-Time Chat
->
-> _Best for: quick questions, live troubleshooting, pre-release chat_
->
-> [discord.com/invite/8c3C8q54hn](https://discord.com/invite/8c3C8q54hn)
->
-> - Direct access to developers
-> - Fast community support
-> - Easy log sharing and screenshot-based debugging
-
-> **GitHub Issues** - Bug Reports & Feature Requests
->
-> _Best for: reproducible bugs, formal feature requests_
->
-> [github.com/r80xcore/mervlan/issues](https://github.com/r80xcore/mervlan/issues)
->
-> - Search existing issues first - it may already be reported
-> - Include device model, Merlin firmware version, and logs
-> - Describe steps to reproduce and note features in use (trunk, ENS, APMO)
+| Where | Best for |
+| --- | --- |
+| [SNB Forums](https://www.snbforums.com/threads/mervlan-v0-52-1-dev-0-52-7-simple-and-powerful-vlan-management-beta.95936/) | Setup questions, configuration examples, and community discussion. |
+| [Discord](https://discord.com/invite/8c3C8q54hn) | Quick questions, live troubleshooting, and pre-release discussion. |
+| [GitHub Issues](https://github.com/r80xcore/mervlan/issues) | Reproducible bugs and formal feature requests. Search existing issues before opening a new one. |
 
 ### What to Include When Asking for Help
 
@@ -994,78 +826,29 @@ Need help? Found a bug? Have a feature idea? The MerVLAN community is active and
 | ---------- | ---------------------------------------------------------------------------------------------------------------- |
 | **Device** | Router model, Merlin firmware version, router mode (Router / AP / AiMesh node)                                   |
 | **Config** | Number of SSIDs and VLANs, whether you're using Trunk, ENS, APMO, or multi-node                                  |
-| **Logs**   | CLI output from the main window + full logs from <kbd>View Full Logs</kbd>. For node issues, include that node's section. |
+| **Logs**   | Command output from the main window and relevant entries from <kbd>View Logs</kbd>. For node issues, include that node's section. |
 
 ### Quick Self-Help Checklist
 
 Before posting, run through these:
 
-- Is Dry Run disabled? *(most common issue for new users)*
-- Did you click <kbd>Save Settings</kbd> before applying?
+- Is Dry Run disabled in the Settings modal? *(most common issue for new users)*
+- Did you click <kbd>Save</kbd> before applying?
 - Do SSID names match exactly? *(case-sensitive)*
 - Did you run <kbd>Sync Nodes</kbd> before applying to nodes?
-- Is Boot Service enabled if you need persistence?
-- Did you check <kbd>View Full Logs</kbd> for error lines?
+- Is Apply on Boot enabled in Settings if you need persistence?
+- Did you check <kbd>View Logs</kbd> for error lines?
 - Have you tried a reboot if something seems stuck?
 
 ### Contributing
 
-- Share your APMO hardware profile for unlisted devices
-- Report bugs with full logs and firmware version
-- Test pre-release builds and share feedback on Discord
-- Star the GitHub repo to help with visibility
+To contribute code or test a temporary branch, see [Branches, Releases and Contributions](../README.md#branches-releases-and-contributions). Device profiles and bug reports can be submitted through the links above.
 
-Happy VLANing!
-
-<br>
-<br>
-<br>
+---
 
 <h2 id="10-wiki---reference--glossary">11. Wiki - Reference & Glossary <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-Background reference for MerVLAN. Step-by-step guides are in the other tabs - this page covers what each script does, how they connect, and what technical terms mean.
-
-### Scripts
-
-MerVLAN is built from several shell scripts, each with a single responsibility.
-
-| Script                     | What it does                                                                                                                                                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `mervlan_manager.sh`       | The core apply engine. Resolves SSIDs to wireless interfaces, creates per-VLAN bridges, binds interfaces to those bridges, and applies LAN port VLANs. Called during apply, on boot, and by the heal system. |
-| `mervlan_trunk.sh`         | Handles trunk port configuration on the main router. Applies 802.1Q VLAN tagging rules on the designated LAN port. Called by the manager.                                                                    |
-| `mervlan_boot_wrap.sh`     | The boot entry point called by services-start on reboot. Waits up to 30s for wireless interfaces to become available, then calls mervlan_boot.sh.                                                            |
-| `mervlan_boot.sh`          | Orchestrates the boot sequence. Calls the manager to re-apply VLANs and handles node boot coordination over SSH.                                                                                             |
-| `service-event-handler.sh` | Intercepts Asus firmware service events (e.g. restart_wireless). Forwards events that can affect VLAN state to the heal system.                                                                              |
-| `heal_event.sh`            | The VLAN health monitor. Runs every minute via cron. Checks whether bridges and interface bindings are intact. Triggers a re-apply via the manager if a persistent fault is detected.                        |
-| `sync_nodes.sh`            | Copies MerVLAN files to each configured node over SSH. Rewrites settings.json per node before sending - trunk config is stripped and the node flag is set on the remote copy.                                |
-| `execute_nodes.sh`         | Runs mervlan_manager.sh on each remote node via SSH. Used during "Local + Nodes" applies and remote enable/disable service commands.                                                                         |
-| `dropbear_sshkey_gen.sh`   | Generates the ED25519 key pair used for all node SSH connections. Stores keys in `/jffs/addons/mervlan/.ssh/`.                                                                                               |
-| `hw_probe.sh`              | Probes the device to detect its hardware profile - identifies ethX interfaces, port count, and the WAN port.                                                                                                 |
-| `device_support_mapper.sh` | Maps detected interfaces to physical port labels using the built-in device database. Flags the device for APMO if it is not recognized.                                                                      |
-| `save_settings.sh`         | Receives form data submitted from the UI and writes it to settings.json on the router.                                                                                                                       |
-| `collect_clients.sh`       | Gathers connected client data from the main router and all nodes for the Clients Overview panel in the UI.                                                                                                   |
-
-### How the Scripts Connect
-
-> **Apply - single router**
->
-> UI saves via save_settings.sh -> settings.json updated -> mervlan_manager.sh applies bridges and bindings -> mervlan_trunk.sh applies trunk config (if enabled)
-
-> **Apply - with nodes**
->
-> mervlan_manager.sh (local) -> sync_nodes.sh pushes files to each node -> execute_nodes.sh runs mervlan_manager.sh on each node remotely
-
-> **Boot - after reboot**
->
-> services-start -> mervlan_boot_wrap.sh (waits for SSIDs) -> mervlan_boot.sh -> mervlan_manager.sh
-
-> **Health monitoring - every minute**
->
-> cron -> heal_event.sh checks VLAN state -> mervlan_manager.sh re-applies if a fault persists
-
-> **Firmware event - e.g. wireless restart**
->
-> Asus firmware fires service-event -> service-event-handler.sh intercepts -> heal_event.sh runs a health check -> mervlan_manager.sh re-applies if needed
+This section explains technical terms used throughout the guide. Manual and recovery commands are collected in [CLI Usage](#7-cli-usage).
 
 ### Glossary
 
@@ -1076,21 +859,25 @@ Technical terms used across the guide, in plain language.
 | **802.1Q**           | IEEE standard for VLAN tagging on Ethernet frames. A small tag is added to each frame to indicate which VLAN it belongs to. Required by trunk ports and managed switches.                         |
 | **AiMesh**           | Asus's mesh networking system. AiMesh nodes are managed by the main router and receive SSH authorized keys from it automatically after a reboot.                                                  |
 | **APMO**             | Advanced Port Mapping Override. Lets you manually correct the hardware profile when automatic detection is wrong or the device is not in the built-in database.                                   |
+| **Apply on Boot**    | A Settings-modal control that re-applies MerVLAN after reboot and enables the periodic health cron on the main router and configured nodes.                                                        |
 | **Authorized Keys**  | A file on each router listing SSH public keys that are allowed to connect without a password. MerVLAN's public key must be present here on every node.                                            |
 | **Base radio**       | The primary wireless interface for a band - wl0 (2.4 GHz), wl1 (5 GHz), wl2 (6 GHz). Assigning VLANs to base radios is possible but less stable than using Guest Network SSIDs.                   |
 | **br0**              | The router's default LAN bridge. All interfaces are in br0 out of the box. MerVLAN moves relevant interfaces out of br0 and into dedicated per-VLAN bridges during apply.                         |
-| **Cron**             | A time-based job scheduler built into the router OS. MerVLAN's health monitor runs as a cron job every minute when the service is enabled.                                                        |
+| **Cron**             | A time-based job scheduler built into the router OS. MerVLAN's health monitor runs as a cron job every five minutes when Apply on Boot is enabled.                                                |
 | **Dropbear**         | The SSH server and client built into Asuswrt-Merlin. MerVLAN uses Dropbear's SSH client to connect from the main router to nodes.                                                                 |
-| **Dry Run**          | A MerVLAN mode where the full apply pipeline runs but no changes are committed to the network. ON by default - used to safely validate a config before going live.                                |
+| **Dry Run**          | A Settings-modal mode where the full apply pipeline runs but no changes are committed to the network. ON by default - used to safely validate a config before going live.                         |
 | **ebtables**         | A packet filtering tool that works at Layer 2 (Ethernet level). MerVLAN uses it to enforce VLAN isolation and quarantine rules on network bridges.                                                |
 | **ED25519**          | A modern SSH key algorithm. The type of key MerVLAN generates for authenticating from the main router to nodes.                                                                                   |
-| **ENS**              | Enable Native SSID. A MerVLAN toggle that allows VLANs to be assigned to base radios. OFF by default - Guest Network SSIDs are recommended instead.                                               |
+| **ENS**              | Enable Native SSID. A Settings-modal toggle that allows VLANs to be assigned to base radios. OFF by default - Guest Network SSIDs are recommended instead.                                        |
 | **ethX**             | Kernel names for Ethernet interfaces (eth0, eth1, eth2, etc.). Each physical LAN and WAN port on the router maps to one of these internally.                                                      |
-| **Guest SSID**       | A secondary Wi-Fi network created under Wireless -> Guest Network in the Asus UI. Uses a separate virtual interface (wl0.1, wl1.1, etc.) and is the recommended type for VLAN assignment.         |
+| **Guest SSID**       | A secondary Wi-Fi network created under Wireless → Guest Network in the Asus UI. Uses a separate virtual interface (wl0.1, wl1.1, etc.) and is the recommended type for VLAN assignment.         |
 | **Hardware profile** | A device-specific map of ethX interfaces to physical port labels, including which port is the WAN. MerVLAN needs this to know where to apply VLAN rules.                                          |
 | **JFFS**             | A writable flash filesystem on Asus routers, mounted at /jffs. Where MerVLAN is installed, settings are stored, and SSH keys live. Can be wiped by a factory reset or firmware update.            |
 | **Node**             | A secondary router or access point managed remotely by MerVLAN over SSH. Runs its own instance of MerVLAN in node mode.                                                                           |
+| **Partial success**  | The main-router action completed, but one or more configured node operations failed. The local state is retained and the Settings modal displays a warning.                                      |
+| **Pause Event Reactions** | A Settings-modal toggle that suppresses automatic router-event rebuilds during bulk changes while leaving direct UI actions available. It clears automatically on reboot.                   |
 | **Service event**    | A firmware-generated signal that something changed on the router - for example, restart_wireless or dhcpc-up. MerVLAN monitors these to detect when VLAN state may have been disrupted.           |
+| **Settings modal**   | The central UI for STP, Dry Run, ENS, Apply on Boot, Pause Event Reactions, and Experimental Features. It saves and verifies changes as one ordered transaction.                                  |
 | **services-start**   | An Asuswrt-Merlin script that runs automatically when the router finishes booting. MerVLAN injects a call here to re-apply VLANs on every reboot.                                                 |
 | **SSH**              | Secure Shell. An encrypted protocol for running commands on a remote device. MerVLAN uses SSH to sync files and run the VLAN manager on nodes.                                                    |
 | **SSID**             | Service Set Identifier. The name of a Wi-Fi network as seen when scanning for networks.                                                                                                           |

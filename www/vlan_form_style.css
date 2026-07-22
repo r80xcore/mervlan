@@ -362,7 +362,8 @@
         margin-left:2px;
         padding-left:0.4em;
         height:23px;
-        width:235px;
+        width:250px;
+        box-sizing:border-box;
         line-height:23px \9;    /*IE*/
         font-size:12px;
         font-family: Lucida Console;
@@ -531,12 +532,13 @@
 }
 
 .lan-label-wrap {
-        position:relative;
         display:flex;
         align-items:center;
-        justify-content:center;
+        justify-content:flex-start;
         min-height:30px;
-        padding-left:60px;
+        min-width:0;
+        box-sizing:border-box;
+        padding-left:10px;
         padding-right:60px;
         position:relative;
 }
@@ -556,7 +558,17 @@
 
 .lan-label-main {
         flex:1;
-        text-align:center;
+        min-width:0;
+        text-align:left;
+        white-space:normal;
+        overflow-wrap:anywhere;
+        word-break:break-word;
+        line-height:15px;
+        max-height:30px;
+        overflow:hidden;
+        display:-webkit-box;
+        -webkit-box-orient:vertical;
+        -webkit-line-clamp:2;
 }
 
 .lan-config-wrap {

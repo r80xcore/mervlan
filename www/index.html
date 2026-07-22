@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.15" -->
+  <!-- index.html version="0.53.24-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -77,13 +77,16 @@
     .update-log-line {
       font-family: monospace;
       font-size: 0.85rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      line-height: 1.35;
+      white-space: normal;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overflow-wrap: anywhere;
       border-top: 1px solid rgba(255, 255, 255, 0.08);
       padding-top: 4px;
       margin-top: 4px;
-      min-height: 1.4em;
+      height: 4.05em;
+      box-sizing: content-box;
     }
 
     .update-log-line--success {
@@ -93,6 +96,302 @@
     .update-log-line--error {
       color: #ff8a8a;
     }
+
+    .update-exit-warning {
+      padding: 6px 8px;
+      background: rgba(255, 138, 60, 0.12);
+      border: 1px solid rgba(255, 138, 60, 0.4);
+      border-radius: 4px;
+      font-size: 0.88rem;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+
+    .update-exit-warning::after {
+      content: "";
+      display: block;
+      clear: both;
+    }
+
+    .update-exit-warning__actions {
+      float: right;
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      margin: 0 0 4px 10px;
+    }
+
+    .update-btn--warn {
+      border-color: rgba(255, 138, 60, 0.6) !important;
+      color: #ffaa6b !important;
+    }
+
+    .update-downgrade-warn {
+      color: #ffaa6b;
+      font-size: 0.88rem;
+      margin: 4px 0 0;
+    }
+
+    .update-changelog-pre {
+      font-family: monospace;
+      font-size: 0.8rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 4px;
+      padding: 8px;
+      max-height: 200px;
+      overflow-y: auto;
+      color: #ccc;
+      margin: 4px 0 0;
+    }
+
+    .update-complete-msg {
+      font-size: 0.88rem;
+      color: #7bd77b;
+      margin-top: 6px;
+    }
+
+    .custom-branch-input {
+      width: 100%;
+      box-sizing: border-box;
+      background: #2a2a2a;
+      color: #eee;
+      border: 1px solid #555;
+      border-radius: 3px;
+      padding: 3px 6px;
+      font-size: 0.88rem;
+      text-transform: none;
+    }
+
+    .custom-branch-input:focus {
+      outline: 1px solid #6cbaf5;
+      border-color: #6cbaf5;
+    }
+
+    .custom-branch-devwarn {
+      color: #ff8a8a;
+      font-size: 0.82rem;
+      margin: 2px 0 0;
+    }
+
+    .channel-capability-hint {
+      font-size: 0.82rem;
+      color: #888;
+      margin: 3px 0 0;
+    }
+
+    .version-modal-tabs {
+      display: flex;
+      gap: 4px;
+      margin: 8px 0 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .version-modal-tab {
+      min-width: 105px;
+      border-bottom-left-radius: 0 !important;
+      border-bottom-right-radius: 0 !important;
+      opacity: 0.72;
+    }
+
+    .version-modal-tab.is-active {
+      opacity: 1;
+      color: #fff !important;
+      border-color: #6cbaf5 !important;
+      background: rgba(108, 186, 245, 0.2) !important;
+    }
+
+    .version-modal-tab:disabled {
+      opacity: 0.32;
+      cursor: not-allowed;
+      filter: grayscale(1);
+    }
+
+    #runUpdateBtn.update-action--busy {
+      min-width: 112px;
+      cursor: wait;
+    }
+
+    .update-action-busy__content {
+      display: inline-flex;
+      align-items: baseline;
+    }
+
+    .update-action-busy__dots {
+      display: inline-block;
+      width: 3ch;
+      text-align: left;
+    }
+
+    .backup-inventory-list {
+      max-height: 210px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      max-width: 100%;
+      box-sizing: border-box;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      margin-top: 6px;
+    }
+
+    .backup-inventory-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 7px 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      cursor: pointer;
+    }
+
+    .backup-inventory-row:last-child { border-bottom: 0; }
+    .backup-inventory-row:hover { background: rgba(255, 255, 255, 0.04); }
+    .backup-inventory-row input { margin-top: 3px; }
+    .backup-inventory-main { flex: 1; min-width: 0; }
+    .backup-inventory-title { font-weight: 600; overflow-wrap: anywhere; }
+    .backup-inventory-meta { color: #999; font-size: 0.8rem; margin-top: 2px; }
+    .backup-type-badge { color: #9ccbf0; text-transform: capitalize; }
+    .backup-empty { color: #999; padding: 12px 8px; text-align: center; }
+    .backup-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .backup-inventory-toolbar { align-items: center; justify-content: space-between; flex-wrap: nowrap; }
+    .backup-count-text { display: inline-flex; align-items: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .backup-storage-summary { display: grid; grid-template-columns: minmax(120px, auto) 1fr; align-items: center; gap: 12px; margin: 7px 0; padding: 7px 8px; border-radius: 4px; background: rgba(0, 0, 0, 0.16); color: #aaa; font-size: 0.82rem; line-height: 1.45; }
+    .backup-storage-heading { color: #bbb; white-space: nowrap; }
+    .backup-storage-values { display: grid; gap: 1px; min-width: 0; text-align: right; font-variant-numeric: tabular-nums; }
+    .backup-storage-row { white-space: nowrap; }
+    .backup-undo-section { border-top: 1px solid rgba(108, 186, 245, 0.28); padding-top: 9px; }
+    .backup-undo-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; }
+    .backup-undo-copy { flex: 1; min-width: 0; color: #999; font-size: 0.82rem; overflow-wrap: anywhere; }
+    .backup-undo-copy.is-available { color: #9ccbf0; }
+    .backup-manual-input { width: 100%; box-sizing: border-box; text-transform: none; }
+    .backup-tooltip-wrap { position: relative; display: inline-flex; }
+    .backup-action-tooltip {
+      position: absolute;
+      left: auto;
+      right: 0;
+      bottom: calc(100% + 8px);
+      z-index: 30;
+      width: min(330px, 70vw);
+      transform: none;
+      padding: 7px 9px;
+      border: 1px solid rgba(255, 138, 138, 0.5);
+      border-radius: 4px;
+      background: #20252b;
+      color: #f0f0f0;
+      font-size: 0.78rem;
+      line-height: 1.4;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 0.12s ease;
+    }
+    .backup-tooltip-wrap:hover .backup-action-tooltip,
+    .backup-tooltip-wrap:focus-within .backup-action-tooltip { opacity: 1; visibility: visible; }
+    .maintenance-status { min-height: 1.4em; margin: 5px 0; font-size: 0.88rem; }
+    .maintenance-status.is-success { color: #7bd77b; }
+    .maintenance-status.is-warning { color: #ffaa6b; }
+    .maintenance-status.is-error { color: #ff8a8a; }
+
+    #versionModal {
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+
+    #versionModal.version-modal--restore,
+    #versionModal.version-modal--restore .backup-inventory-list {
+      scrollbar-width: thin;
+      scrollbar-color: #569AC7 #1F2D35;
+    }
+
+    #versionModal.version-modal--restore::-webkit-scrollbar,
+    #versionModal.version-modal--restore .backup-inventory-list::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    #versionModal.version-modal--restore::-webkit-scrollbar-track,
+    #versionModal.version-modal--restore .backup-inventory-list::-webkit-scrollbar-track {
+      background: #1F2D35;
+    }
+
+    #versionModal.version-modal--restore::-webkit-scrollbar-thumb,
+    #versionModal.version-modal--restore .backup-inventory-list::-webkit-scrollbar-thumb {
+      background: #569AC7;
+      border-radius: 8px;
+      border: 2px solid #1F2D35;
+    }
+
+    #versionModal.version-modal--restore::-webkit-scrollbar-thumb:hover,
+    #versionModal.version-modal--restore .backup-inventory-list::-webkit-scrollbar-thumb:hover {
+      background: #77A5C6;
+    }
+
+    #versionModal.version-modal--restore::-webkit-scrollbar-corner,
+    #versionModal.version-modal--restore .backup-inventory-list::-webkit-scrollbar-corner {
+      background: #1F2D35;
+    }
+
+    #versionRestorePanel {
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+
+    #versionModal.version-modal--restore #versionRestorePanel > .modal__section { margin-bottom: 14px; }
+
+    @media (max-width: 480px) {
+      .backup-inventory-toolbar { align-items: flex-start; flex-wrap: wrap; }
+      .backup-storage-summary { grid-template-columns: 1fr; gap: 3px; }
+      .backup-storage-values { text-align: left; }
+    }
+
+    .maintenance-confirm-overlay {
+      position: fixed;
+      inset: auto;
+      z-index: 1200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      box-sizing: border-box;
+      border-radius: 0 6px 6px 6px;
+      background: rgba(18, 30, 36, 0.9);
+    }
+
+    .maintenance-confirm-overlay.is-visible { display: flex; }
+
+    .maintenance-confirm-card {
+      width: min(360px, 100%);
+      box-sizing: border-box;
+      padding: 18px;
+      border: 1px solid #569ac7;
+      border-radius: 5px;
+      background: #2f3a3e;
+      color: #fff;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    }
+
+    .maintenance-confirm-title {
+      margin: 0 0 10px;
+      color: #fff;
+      font-size: 16px;
+    }
+
+    .maintenance-confirm-message {
+      margin: 0 0 14px;
+      color: #ddd;
+      line-height: 1.5;
+      white-space: pre-line;
+      overflow-wrap: anywhere;
+    }
+
+    .maintenance-confirm-input-wrap { margin-bottom: 14px; }
+    .maintenance-confirm-input-wrap label { display: block; margin-bottom: 5px; color: #ffb36b; }
+    .maintenance-confirm-input { width: 100%; box-sizing: border-box; text-transform: none; }
+    .maintenance-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
     #unsupportedModelModal .modal__actions {
       justify-content: center;
@@ -124,21 +423,23 @@
       <form id="settingsForm" action="#" onsubmit="event.preventDefault(); return false;">
         <!-- SSIDs -->
         <!-- SSIDs -->
-        <table id="ssidTable" class="FormTable_table vlan-table">
-          <tr>
-            <th>
-              <div class="ssid-header-wrap">
-                <button type="button" class="lan-node-btn ssid-view-btn is-active" data-ssid-view="config" title="Show VLAN and AP Isolation settings">Config</button>
-                <span>SSID</span>
-                <button type="button" class="lan-node-btn ssid-view-btn" data-ssid-view="assign" title="Show Node Assignment">Assign</button>
-              </div>
-            </th>
-            <th class="ssid-col-config">VLAN ID</th>
-            <th class="ssid-col-config">AP Isolation</th>
-            <th class="ssid-col-config">Status</th>
-            <th class="ssid-col-assign ssid-col-hidden" colspan="3">Node Assignment</th>
-          </tr>
-        </table>
+        <div class="ssid-table-stage">
+          <table id="ssidTable" class="FormTable_table vlan-table">
+            <tr>
+              <th>
+                <div class="ssid-header-wrap">
+                  <button type="button" class="lan-node-btn ssid-view-btn is-active" data-ssid-view="config" title="Show VLAN and AP Isolation settings">Config</button>
+                  <span>SSID</span>
+                  <button type="button" class="lan-node-btn ssid-view-btn" data-ssid-view="assign" title="Show Node Assignment">Assign</button>
+                </div>
+              </th>
+              <th class="ssid-col-config">VLAN ID</th>
+              <th class="ssid-col-config">AP Isolation</th>
+              <th class="ssid-col-config">Status</th>
+              <th class="ssid-col-assign ssid-col-hidden" colspan="3">Node Assignment</th>
+            </tr>
+          </table>
+        </div>
 
   <!-- LAN Ports -->
   <!-- <div class="table-align-nogap"><h2>LAN Port VLANs</h2></div> -->
@@ -146,7 +447,12 @@
           <tr>
             <th>
               <div class="lan-header-wrap">
-                <span>Ethernet Port</span>
+                <div class="lan-header-identity">
+                  <span class="lan-product-id-badge" id="lanProductIdBadge">
+                    <span class="lan-product-id-model" id="lanProductIdModel"></span>
+                    <span class="lan-product-id-type">Ethernet</span>
+                  </span>
+                </div>
                 <div class="lan-node-toggle" role="group" aria-label="LAN port target">
                   <button type="button" class="lan-node-btn is-active" data-lan-target="main" title="Edit main router LAN VLANs">Main</button>
                 </div>
@@ -181,32 +487,15 @@
       </div>
       </form>
 
-      <!-- General Settings Panel -->
+      <!-- Preset Configuration Panel -->
       <div class="form-box controls-panel">
-        <h2>General Settings</h2>
-        <div class="button-row button-row-toggles">
-          <div class="gen-toggle-group">
-            <select id="stpToggle" name="ENABLE_STP" class="input_option" onchange="markEdited('ENABLE_STP')" title="STP: enable Spanning Tree Protocol with deterministic bridge MACs">
-              <option value="0">STP: Off</option>
-              <option value="1">STP: On</option>
-            </select>
-            <span id="statusENABLE_STP" class="status gen-status" title="❌ Missing/invalid value">❌</span>
-          </div>
-          <div class="gen-toggle-group">
-            <select id="dryRunToggle" name="DRY_RUN" class="input_option" onchange="markEdited('DRY_RUN')" title="Dry run: yes=simulate only, no changes">
-              <option value="no">Dry Run: Off</option>
-              <option value="yes">Dry Run: On</option>
-            </select>
-            <span id="statusDRY_RUN" class="status gen-status" title="❌ Missing/invalid value">❌</span>
-          </div>
-          <div class="gen-toggle-group">
-            <select id="ensToggle" name="ENABLE_NATIVE_SSID" class="input_option" onchange="markEdited('ENABLE_NATIVE_SSID')" title="Enable tagging of native SSIDs. Disabled by default and might break tagging on some devices if set to ON. Using Guest SSIDs instead is highly recommended">
-              <option value="0">ENS: Off</option>
-              <option value="1">ENS: On</option>
-            </select>
-            <span id="statusENABLE_NATIVE_SSID" class="status gen-status" title="❌ Missing/invalid value">❌</span>
-          </div>
-        </div>
+        <h2>Preset Configuration</h2>
+        <!-- STP / DRY_RUN / ENS are controlled via the Settings modal.
+             Keep hidden selects here so fillFormFromSettings / formToSettingsJSON
+             continue to work without any changes. -->
+        <select id="stpToggle"   name="ENABLE_STP"         style="display:none;"><option value="0">0</option><option value="1">1</option></select>
+        <select id="dryRunToggle" name="DRY_RUN"            style="display:none;"><option value="no">no</option><option value="yes">yes</option></select>
+        <select id="ensToggle"   name="ENABLE_NATIVE_SSID"  style="display:none;"><option value="0">0</option><option value="1">1</option></select>
         <div class="button-row button-row-actions">
           <button type="button" class="button_gen" onclick="uploadSettingsAndSave()" title="Upload settings.json and save (no CGI)">Save</button>
           <button type="button" class="button_gen" onclick="loadSettings()" title="Load current values">Load</button>
@@ -214,18 +503,14 @@
         </div>
       </div>
 
-        <!-- VLAN Controls -->
+        <!-- MerVLAN Deployment -->
         <div class="form-box controls-panel">
-          <h2>Controls</h2>
+          <h2>MerVLAN Deployment</h2>
       <div class="button-row button-row-main">
         <button type="button" class="button_gen" onclick="handleApplyClick(this)" title="Run vlan_manager locally">Apply VLAN</button>
         <button type="button" class="button_gen" id="syncNodesBtn" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
         <button type="button" class="button_gen" id="sshInstallBtn" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
-      <div class="button-row button-row-service">
-        <button type="button" class="button_gen" onclick="triggerAction('enableservice_vlanmgr', this, 'Enable Service')" title="Enable auto-start on boot">Enable Service</button>
-        <button type="button" class="button_gen" onclick="triggerAction('disableservice_vlanmgr', this, 'Disable Service')" title="Disable auto-start on boot">Disable Service</button>
-        <button type="button" class="button_gen" onclick="triggerAction('checkservice_vlanmgr', this, 'Service Status')" title="Service enabled on boot?">Service Status</button>
-          </div>
+
         </div>
 
       <!-- Legend -->
@@ -240,17 +525,18 @@
           </div>
         </div>
       </div>
-        <!-- Experimental toggle row -->
+        <!-- Settings / experimental row -->
         <div class="form-box form-box--experimental">
-          <label class="experimental-toggle">
-            <input
-              type="checkbox"
-              id="experimentalToggle"
-              name="EXPERIMENTAL"
-              title="Enable new features that may or may not be stable. You need to save after enabling this."
-            >
-            <span>Enable experimental features</span>
-          </label>
+          <!-- Hidden field keeps EXPERIMENTAL wired into the normal save pipeline -->
+          <input type="hidden" id="experimentalToggle" name="EXPERIMENTAL" value="0">
+
+          <button
+            type="button"
+            class="experimental-version"
+            id="serviceSettingsBtn"
+            title="Service and addon settings"
+            onclick="showServiceSettingsModal()"
+          >Settings</button>
           <button
             type="button"
             class="experimental-version"
@@ -394,25 +680,25 @@
   <div id="vlanManagerModal" class="modal modal--compact">
     <div class="modal__header">
       <h3 class="modal__title">Nodes Detected!</h3>
-      <button class="modal__close" onclick="document.getElementById('vlanManagerModal').style.display='none'">×</button>
+      <button class="modal__close" onclick="closeVlanManagerModal()">×</button>
     </div>
 
     <div class="modal__body">
       <p class="modal__intro">Choose how to run the VLAN Manager:</p>
       <div class="modal__section vlan-options">
         <button type="button" class="button_gen" onclick="runVlanManagerLocal()">
-          <div class="vlan-option__title">Run VLAN Manager (Local Only)</div>
-          <div class="vlan-option__subtitle">Apply VLAN configuration to this router only</div>
+          <div class="vlan-option__title">Local Router Only</div>
+          <div class="vlan-option__subtitle">Apply to this router only</div>
         </button>
 
         <button type="button" class="button_gen" onclick="runVlanManagerWithNodes()">
-          <div class="vlan-option__title">Run VLAN Manager + Nodes</div>
-          <div class="vlan-option__subtitle">Apply VLAN configuration to this router and all configured nodes</div>
+          <div class="vlan-option__title">Router + Nodes</div>
+          <div class="vlan-option__subtitle">Apply to this router and all nodes</div>
         </button>
 
         <button type="button" class="button_gen" onclick="runVlanManagerOnlyNodes()">
-          <div class="vlan-option__title">Run VLAN Manager on Nodes Only</div>
-          <div class="vlan-option__subtitle">Apply VLAN configuration to all configured nodes only</div>
+          <div class="vlan-option__title">Nodes Only</div>
+          <div class="vlan-option__subtitle">Apply to configured nodes onl</div>
         </button>
       </div>
     </div>
@@ -431,12 +717,39 @@
         <strong id="currentVersionText">v0.00</strong>
       </p>
 
+      <!-- Exit-during-update confirmation bar -->
+      <div id="updateExitWarning" class="update-exit-warning" style="display:none;">
+        <div class="update-exit-warning__actions">
+          <button type="button" class="button_gen" onclick="dismissUpdateExitWarning()">Stay</button>
+          <button type="button" class="button_gen update-btn--warn" onclick="forceCloseVersionModal()">Exit anyway</button>
+        </div>
+        <span id="updateExitWarningText">A maintenance operation is in progress. Really exit?</span>
+      </div>
+
+      <div class="version-modal-tabs" role="tablist" aria-label="Version maintenance">
+        <button type="button" id="versionUpdateTab" class="button_gen version-modal-tab is-active" role="tab" aria-selected="true" onclick="selectVersionModalTab('update')">Update</button>
+        <button type="button" id="versionRestoreTab" class="button_gen version-modal-tab" role="tab" aria-selected="false" onclick="selectVersionModalTab('restore')">Restore</button>
+      </div>
+
+      <div id="versionUpdatePanel" role="tabpanel">
+
       <div class="modal__section">
         <label for="versionChannelSelect"><strong>Channel:</strong></label>
-        <select id="versionChannelSelect" class="input_option">
-          <option value="main">Stable (main)</option>
+        <select id="versionChannelSelect" class="input_option" onchange="onChannelSelectChange()">
+          <option value="main">Stable (releases)</option>
+          <option value="main_direct">Stable (latest only)</option>
           <option value="dev">Development (dev)</option>
+          <option value="custom">Custom branch (dev only)</option>
         </select>
+        <p id="channelCapabilityHint" class="channel-capability-hint"></p>
+      </div>
+
+      <div class="modal__section">
+        <label class="backup-checkbox-label" for="clearLogsBeforeUpdate">
+          <input type="checkbox" id="clearLogsBeforeUpdate">
+          <strong>Clear existing logs before update</strong>
+        </label>
+        <p class="channel-capability-hint">When unchecked, existing history is retained subject to the configured log limits. Clearing occurs inside the locked update transaction, so the complete new update remains logged.</p>
       </div>
 
       <div class="modal__section">
@@ -451,22 +764,99 @@
         <span id="updateStatusText" class="muted" style="margin-left:8px;"></span>
       </div>
 
+      <!-- Stable: release version picker (populated after check) -->
+      <div class="modal__section" id="releaseSelectSection" style="display:none;">
+        <label for="releaseSelect"><strong>Version:</strong></label>
+        <select id="releaseSelect" class="input_option" onchange="onReleaseSelectChange()"></select>
+      </div>
+
+      <!-- Custom branch input (shown when custom branch option selected) -->
+      <div class="modal__section" id="customBranchSection" style="display:none;">
+        <input type="text" id="customBranchInput" class="custom-branch-input" placeholder="e.g. dev-test1" maxlength="100" oninput="onCustomBranchInput()">
+        <p class="custom-branch-devwarn">&#x26A0; Development use only. Not a supported update path. May break your install.</p>
+      </div>
+
+      <!-- Comparison text + downgrade warning -->
       <div class="modal__section" id="updateDetailsSection" style="display:none;">
-        <p>
-          Latest version on
-          <span id="latestChannelLabel">main</span>:
-          <strong id="latestVersionText">v0.00</strong>
-        </p>
         <p id="updateComparisonText"></p>
+        <p id="downgradeWarning" class="update-downgrade-warn" style="display:none;">
+          &#x26A0; This version is older than your current install. Downgrading may cause issues &#x2014; proceed with caution.
+        </p>
+      </div>
+
+      <!-- Changelog toggle button -->
+      <div class="modal__section" id="changelogToggleSection" style="display:none;">
+        <button type="button" class="button_gen" id="toggleChangelogBtn" onclick="toggleChangelogDisplay()">Show Changelog</button>
+      </div>
+
+      <!-- Inline changelog content -->
+      <div id="changelogSection" style="display:none;">
+        <pre id="changelogContent" class="update-changelog-pre"></pre>
       </div>
 
       <!-- One-line update log output -->
       <div class="modal__section modal__section--log" id="updateLogSection" style="display:none;">
         <div id="updateLogLine" class="update-log-line" aria-live="polite"></div>
+        <div id="updateCompleteMessage" class="update-complete-msg" style="display:none;">
+          Update complete &#x2014; please refresh your browser to load the new version.
+        </div>
+      </div>
+      </div>
+
+      <div id="versionRestorePanel" role="tabpanel" style="display:none;">
+        <div class="modal__section">
+          <div class="backup-actions backup-inventory-toolbar">
+            <button type="button" class="button_gen" id="refreshBackupsBtn" onclick="refreshBackupInventory(this)">Check Backups</button>
+            <span id="backupCountText" class="muted backup-count-text">Automatic: 0/3 &nbsp; Manual: 0/3</span>
+          </div>
+          <div class="backup-storage-summary" aria-live="polite">
+            <div id="managedStorageHeading" class="backup-storage-heading">MerVLAN storage use</div>
+            <div id="managedStorageRows" class="backup-storage-values">
+              <div class="backup-storage-row">JFFS: checking…</div>
+              <div class="backup-storage-row">RAM: checking…</div>
+            </div>
+          </div>
+          <div id="backupInventoryList" class="backup-inventory-list">
+            <div class="backup-empty">Select Check Backups to load restore points.</div>
+          </div>
+          <div class="backup-actions">
+            <button type="button" class="button_gen" id="restoreSelectedBtn" onclick="restoreSelectedBackup()" disabled>Restore Selected</button>
+            <button type="button" class="button_gen update-btn--warn" id="deleteSelectedBackupBtn" onclick="deleteSelectedBackup()" disabled>Delete Selected</button>
+            <span class="backup-tooltip-wrap">
+              <button type="button" class="button_gen update-btn--warn" id="deleteAllBackupsBtn" onclick="deleteAllBackups()" aria-describedby="deleteAllBackupsTooltip">Delete All Backups</button>
+              <span class="backup-action-tooltip" id="deleteAllBackupsTooltip" role="tooltip">Permanently deletes every persistent automatic and manual backup. Undo Update is cleared when its referenced archive is removed; temporary Undo Restore is retained. This cannot be undone.</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="modal__section">
+          <label for="manualBackupTag"><strong>Create Manual Backup:</strong></label>
+          <input type="text" id="manualBackupTag" class="input_option backup-manual-input" maxlength="24" placeholder="e.g. before-vlan-test" oninput="validateManualBackupTag()">
+          <p class="channel-capability-hint">Tag: 1–24 characters — A–Z, a–z, 0–9, - and _.</p>
+          <div class="backup-actions">
+            <button type="button" class="button_gen" id="createManualBackupBtn" onclick="createManualBackup()" disabled>Create Backup</button>
+          </div>
+        </div>
+
+        <div class="modal__section backup-undo-section">
+          <strong>Temporary Undo</strong>
+          <p class="channel-capability-hint">Temporary undo files are stored in /tmp until reboot.</p>
+          <div class="backup-undo-row">
+            <span id="undoRestoreStatus" class="backup-undo-copy">No Undo Restore file detected.</span>
+            <button type="button" class="button_gen" id="undoRestoreBtn" onclick="undoLastRestore()" disabled>Undo Restore</button>
+          </div>
+          <div class="backup-undo-row">
+            <span id="undoUpdateStatus" class="backup-undo-copy">No Undo Update shortcut detected.</span>
+            <button type="button" class="button_gen" id="undoUpdateBtn" onclick="undoLastUpdate()" disabled>Undo Update</button>
+          </div>
+        </div>
+
+        <div id="maintenanceStatus" class="maintenance-status" aria-live="polite"></div>
+        <button type="button" class="button_gen" id="maintenanceRefreshBtn" onclick="window.location.reload()" style="display:none;">Refresh UI</button>
       </div>
     </div>
 
-    <div class="modal__actions">
+    <div class="modal__actions" id="updateModalActions">
       <button
         type="button"
         class="button_gen"
@@ -476,6 +866,31 @@
       >
         Update now
       </button>
+      <button
+        type="button"
+        class="button_gen"
+        id="refreshNowBtn"
+        onclick="window.location.reload()"
+        style="display:none;"
+      >
+        Refresh Now
+      </button>
+    </div>
+
+  </div>
+
+  <div id="maintenanceConfirmOverlay" class="maintenance-confirm-overlay" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="maintenanceConfirmTitle" aria-describedby="maintenanceConfirmMessage" onkeydown="handleMaintenanceConfirmationKey(event)">
+    <div class="maintenance-confirm-card">
+      <h4 id="maintenanceConfirmTitle" class="maintenance-confirm-title">Confirm action</h4>
+      <p id="maintenanceConfirmMessage" class="maintenance-confirm-message"></p>
+      <div id="maintenanceConfirmInputWrap" class="maintenance-confirm-input-wrap" style="display:none;">
+        <label id="maintenanceConfirmInputLabel" for="maintenanceConfirmInput"></label>
+        <input type="text" id="maintenanceConfirmInput" class="input_option maintenance-confirm-input" autocomplete="off" oninput="validateMaintenanceConfirmationInput()">
+      </div>
+      <div class="maintenance-confirm-actions">
+        <button type="button" class="button_gen" id="maintenanceConfirmCancelBtn" onclick="settleMaintenanceConfirmation(false)">Cancel</button>
+        <button type="button" class="button_gen" id="maintenanceConfirmAcceptBtn" onclick="settleMaintenanceConfirmation(true)">Continue</button>
+      </div>
     </div>
   </div>
 
@@ -490,7 +905,7 @@
     .adv-override-target-indicator { font-size: 0.95em; font-weight: bold; color: #6cf; margin-bottom: 10px; padding: 4px 0; }
     .adv-override-row.adv-override-disabled { opacity: 0.38; pointer-events: none; }
     .adv-override-error { color: #f66; font-size: 0.92em; margin-top: 6px; padding: 4px 8px; border: 1px solid #f44; border-radius: 3px; background: rgba(255,68,68,0.08); }
-    #advancedOverrideModal .modal__body { max-height: 65vh; overflow-y: auto; }
+    #advancedOverrideModal .modal__body { max-height: none; overflow: visible; }
   </style>
   <div id="advancedOverrideModal" class="modal" style="display:none;">
     <div class="modal__header">
@@ -661,6 +1076,186 @@
     </div>
   </div>
 
+  <!-- ======== Service Settings Modal ======== -->
+  <style>
+    /* ---- pill toggle switch ---- */
+    .merv-toggle { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .merv-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .merv-toggle__track {
+      position: absolute; inset: 0; cursor: pointer;
+      background: #555; border-radius: 24px;
+      transition: background 0.2s;
+    }
+    .merv-toggle__track::before {
+      content: ""; position: absolute;
+      width: 18px; height: 18px; left: 3px; bottom: 3px;
+      background: #fff; border-radius: 50%;
+      transition: transform 0.18s;
+    }
+    .merv-toggle input:checked + .merv-toggle__track { background: #4caf50; }
+    .merv-toggle input:checked + .merv-toggle__track::before { transform: translateX(20px); }
+    .merv-toggle input:disabled + .merv-toggle__track { opacity: 0.4; cursor: not-allowed; }
+
+    /* ---- modal rows ---- */
+    .svc-settings-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 11px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .svc-settings-row:last-of-type { border-bottom: none; }
+    .svc-settings-label { display: flex; flex-direction: column; gap: 3px; }
+    .svc-settings-label > span:first-child { font-size: 0.95em; color: #ddd; }
+    .svc-settings-hint { font-size: 0.81em; color: #777; line-height: 1.35; }
+
+    /* ---- status bar and detail panel ---- */
+    .svc-settings-status {
+      margin-top: 12px; padding: 7px 10px;
+      background: rgba(108,186,245,0.07);
+      border: 1px solid rgba(108,186,245,0.18);
+      border-radius: 4px;
+      font-size: 0.87em; color: #aaa;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .svc-status-hint { font-size: 0.78em; color: #555; white-space: nowrap; }
+    .svc-refresh-btn { padding: 1px 7px; font-size: 1em; line-height: 1.4; flex-shrink: 0; }
+
+    .svc-status-detail {
+      margin-top: 6px; padding: 8px 10px;
+      background: rgba(108,186,245,0.04);
+      border: 1px solid rgba(108,186,245,0.10);
+      border-radius: 4px;
+    }
+    .svc-status-ts  { font-size: 0.78em; color: #555; margin-bottom: 5px; }
+    .svc-status-row {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+      padding: 3px 0; font-size: 0.85em;
+      border-top: 1px solid rgba(255,255,255,0.04);
+    }
+    .svc-status-row:first-of-type { border-top: none; }
+    .svc-unit-label { font-weight: 600; color: #bbb; min-width: 46px; }
+    .svc-unit-hw    { color: #888; }
+    .svc-unit-ip    { color: #666; font-size: 0.88em; }
+    .svc-dot-on     { color: #4caf50; }
+    .svc-dot-off    { color: #555; }
+    .svc-unit-mac   { font-size: 0.82em; margin-left: auto; }
+    .svc-transaction-status { margin-top: 8px; min-height: 1.35em; font-size: 0.85em; color: #aaa; }
+    .svc-transaction-status.is-success { color: #7bd77b; }
+    .svc-transaction-status.is-warning { color: #ffb432; }
+    .svc-transaction-status.is-error { color: #ff8a8a; }
+
+    /* ---- paused indicator on Settings button ---- */
+    #serviceSettingsBtn.is-paused {
+      border-color: rgba(255,180,50,0.75);
+      color: #ffb432;
+    }
+    #serviceSettingsBtn.is-paused::after {
+      content: " \25CF";
+      font-size: 0.65em;
+      vertical-align: middle;
+      color: #ffb432;
+    }
+  </style>
+
+  <div id="serviceSettingsModal" class="modal" style="display:none;">
+    <div class="modal__header">
+      <h3 class="modal__title">Settings</h3>
+      <button class="modal__close" onclick="closeServiceSettingsModal()">&#x2715;</button>
+    </div>
+    <div class="modal__body">
+
+      <!-- STP -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Enable STP</span>
+          <span class="svc-settings-hint">Spanning Tree Protocol with deterministic bridge MACs</span>
+        </div>
+        <label class="merv-toggle" title="Enable or disable STP">
+          <input type="checkbox" id="svcToggleSTP" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- Dry Run -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Dry Run</span>
+          <span class="svc-settings-hint">Simulate only — no changes applied to the router</span>
+        </div>
+        <label class="merv-toggle" title="Enable or disable dry run mode">
+          <input type="checkbox" id="svcToggleDryRun" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- ENS -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Enable Native SSID (ENS)</span>
+          <span class="svc-settings-hint">Tag native SSIDs. Off by default — may break tagging on some devices. Use Guest SSIDs instead.</span>
+        </div>
+        <label class="merv-toggle" title="Enable or disable native SSID tagging">
+          <input type="checkbox" id="svcToggleENS" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- Apply on Boot -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Apply on Boot</span>
+          <span class="svc-settings-hint">Run MerVLAN automatically at router startup and enable the cron health check</span>
+        </div>
+        <label class="merv-toggle" title="Enable or disable MerVLAN auto-start on boot">
+          <input type="checkbox" id="svcToggleBoot" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- Pause Event Reactions -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Pause Event Reactions</span>
+          <span class="svc-settings-hint">Suspend router-triggered rebuilds during bulk ASUS WiFi changes to avoid repeated rebuilds. Not needed for single changes. Disable to resume normal operation. If nodes are used, run a node sync whenever this setting is changed. Cleared automatically on reboot.</span>
+        </div>
+        <label class="merv-toggle" title="Pause router-event-driven rebuilds (UI buttons still work)">
+          <input type="checkbox" id="svcTogglePause" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- Experimental Features -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Experimental Features</span>
+          <span class="svc-settings-hint">Enable new features that may not be stable. A Save is performed automatically when applying.</span>
+        </div>
+        <label class="merv-toggle" title="Enable or disable experimental features">
+          <input type="checkbox" id="svcToggleExperimental" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- Service status (read-only) with refresh -->
+      <div class="svc-settings-status">
+        <span id="svcBootStatusLine" style="flex:1;">Boot service: —</span>
+        <span class="svc-status-hint">Refresh for full status</span>
+        <button type="button" class="button_gen svc-refresh-btn"
+          id="svcStatusRefreshBtn"
+          onclick="refreshServiceStatus(this)"
+          title="Run Service Status check — results shown here and in CLI log">&#x27F3;</button>
+      </div>
+      <!-- Full status detail panel: hidden until ⟳ is pressed -->
+      <div id="svcStatusDetail" class="svc-status-detail" style="display:none;"></div>
+      <div id="svcTransactionStatus" class="svc-transaction-status" role="status" aria-live="polite"></div>
+
+    </div>
+    <div class="modal__actions">
+      <button type="button" class="button_gen" id="svcSettingsApplyBtn"
+        onclick="applyServiceSettings()" disabled>Apply</button>
+      <button type="button" class="button_gen" id="svcSettingsCancelBtn" onclick="closeServiceSettingsModal()">Cancel</button>
+    </div>
+  </div>
+
   <!-- ======== Status & validation (SSID/VLAN/NODE ticks) ======== -->
 
 <script>
@@ -705,10 +1300,11 @@
         }
 
         async function fetchLatestVersionFromChangelog(branch) {
-          const effectiveBranch = branch === "dev" ? "dev" : "main";
+          const effectiveBranch = String(branch || "main").trim();
+          const encodedBranch = effectiveBranch.split("/").map(encodeURIComponent).join("/");
           const url =
             "https://raw.githubusercontent.com/r80xcore/mervlan/" +
-            effectiveBranch +
+            encodedBranch +
             "/changelog.txt?_=" +
             Date.now();
 
@@ -717,7 +1313,9 @@
             throw new Error("HTTP " + resp.status);
           }
           const text = await resp.text();
-          const match = text.match(/^mervlan\s+v?([0-9.]+)/im);
+          // Fallback: numeric versions only, without suffixes such as "-dev"
+          // const match = text.match(/^mervlan\s+v?([0-9.]+)/im);
+          const match = text.match(/^mervlan\s+v?([0-9]+(?:\.[0-9]+)*(?:-[a-z0-9.-]+)?)/im);
           if (!match || !match[1]) {
             throw new Error("No version line found in changelog");
           }
@@ -798,6 +1396,8 @@
         function flattenStructuredSettingsPayload(data) {
           const flat = {};
           const general = ensurePlainObject(data.General);
+          flat.BOOT_ENABLED = stringOrDefault(general.BOOT_ENABLED, "0");
+          flat.PAUSE = stringOrDefault(general.PAUSE, "off");
           flat.ENABLE_STP = stringOrDefault(general.ENABLE_STP, "0");
           flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
           flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
@@ -951,11 +1551,13 @@
             GUEST_SLOTS: "0",
             ETH_PORTS: [],
             LAN_PORT_LABELS: [],
+            LAN_PORT_LABEL_OVERRIDES: "",
             WAN_IF: "",
             MAX_ETH_PORTS: "0"
           };
           nodeNums().forEach(n => { hardware[`PRODUCTID_NODE${n}`] = ""; });
           nodeNums().forEach(n => { hardware[`MAX_ETH_PORTS_NODE${n}`] = "0"; });
+          nodeNums().forEach(n => { hardware[`LAN_PORT_LABEL_OVERRIDES_NODE${n}`] = ""; });
 
           // Hardware override per device
           const overrideBlock = () => ({ MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0", OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none", OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" });
@@ -969,6 +1571,7 @@
             General: {
               _description: "Global addon flags and behavior toggles",
               BOOT_ENABLED: "0",
+              PAUSE: "off",
               DRY_RUN: "yes",
               ENABLE_STP: "0",
               EXPERIMENTAL: "0",
@@ -1014,6 +1617,8 @@
         function expandFlatSettingsToStructured(flat, source) {
           const target = cloneStructuredSettingsPayload(source) || structuredSettingsDefaultsTemplate();
           const general = target.General = ensurePlainObject(target.General);
+          general.BOOT_ENABLED = stringOrDefault(flat.BOOT_ENABLED, general.BOOT_ENABLED ?? "0");
+          general.PAUSE = stringOrDefault(flat.PAUSE, general.PAUSE ?? "off");
           general.ENABLE_STP = stringOrDefault(flat.ENABLE_STP, general.ENABLE_STP ?? "0");
           general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
           general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
@@ -1092,11 +1697,15 @@
             MAX_SSID_CAP: 16,
             MAX_ETH_PORTS: 0,
             PRODUCTID: "",
+            LAN_PORT_LABEL_OVERRIDES: "",
+            MAP_OVERRIDE_MAIN: false,
             LOADED: false
           };
           for (let i = 1; i <= MAX_NODES; i++) {
             hw["PRODUCTID_NODE" + i] = "";
             hw["MAX_ETH_PORTS_NODE" + i] = 0;
+            hw["LAN_PORT_LABEL_OVERRIDES_NODE" + i] = "";
+            hw["MAP_OVERRIDE_NODE" + i] = false;
           }
           return hw;
         })();
@@ -1178,6 +1787,9 @@
           HW_SETTINGS.PRODUCTID = productId;
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+          HW_SETTINGS.LAN_PORT_LABEL_OVERRIDES = typeof hw?.LAN_PORT_LABEL_OVERRIDES === "string"
+            ? hw.LAN_PORT_LABEL_OVERRIDES.trim()
+            : "";
 
           // Load Limits section for SSID slot cap
           const limits = (json && typeof json === "object") ? json.Limits : null;
@@ -1192,6 +1804,8 @@
             const ethVal = parseInt(hw?.[ethKey], 10);
             HW_SETTINGS[pidKey] = pidVal;
             HW_SETTINGS[ethKey] = Number.isInteger(ethVal) && ethVal > 0 ? ethVal : 0;
+            const labelKey = "LAN_PORT_LABEL_OVERRIDES_NODE" + i;
+            HW_SETTINGS[labelKey] = hw && typeof hw[labelKey] === "string" ? hw[labelKey].trim() : "";
           }
 
           // Apply Hardware_Override to HW_SETTINGS for main + nodes
@@ -1218,6 +1832,10 @@
          */
         function applyHwOverrides(settingsObj) {
           const ovr = settingsObj?.Hardware_Override;
+          HW_SETTINGS.MAP_OVERRIDE_MAIN = false;
+          for (let i = 1; i <= MAX_NODES; i++) {
+            HW_SETTINGS["MAP_OVERRIDE_NODE" + i] = false;
+          }
           if (!ovr) return;
 
           // MAIN override
@@ -1225,6 +1843,7 @@
           if (mainOvr && String(mainOvr.MAP_OVERRIDE) === "1") {
             const maxEth = parseInt(mainOvr.OVERRIDE_MAX_ETH_PORTS, 10);
             if (Number.isInteger(maxEth) && maxEth >= 0 && maxEth <= 8) {
+              HW_SETTINGS.MAP_OVERRIDE_MAIN = true;
               HW_SETTINGS.MAX_ETH_PORTS = maxEth;
             }
           }
@@ -1235,6 +1854,7 @@
             if (nodeOvr && String(nodeOvr.MAP_OVERRIDE) === "1") {
               const maxEth = parseInt(nodeOvr.OVERRIDE_MAX_ETH_PORTS, 10);
               if (Number.isInteger(maxEth) && maxEth >= 0 && maxEth <= 8) {
+                HW_SETTINGS["MAP_OVERRIDE_NODE" + i] = true;
                 HW_SETTINGS["MAX_ETH_PORTS_NODE" + i] = maxEth;
               }
             }
@@ -1266,6 +1886,9 @@
           HW_SETTINGS.PRODUCTID = typeof hw.PRODUCTID === "string" ? hw.PRODUCTID.trim().toUpperCase() : "";
           HW_SETTINGS.MAX_ETH_PORTS = Number.isInteger(maxEth) && maxEth > 0 ? maxEth : 0;
           HW_SETTINGS.MAX_SSIDS = Number.isInteger(maxSsids) && maxSsids > 0 ? maxSsids : 0;
+          HW_SETTINGS.LAN_PORT_LABEL_OVERRIDES = typeof hw.LAN_PORT_LABEL_OVERRIDES === "string"
+            ? hw.LAN_PORT_LABEL_OVERRIDES.trim()
+            : "";
 
           // Refresh Limits.MAX_SSID_CAP so effectiveMaxSsids() stays in sync after a
           // settings save/load without a full page reload.
@@ -1283,6 +1906,8 @@
             const ethVal = parseInt(hw[ethKey], 10);
             HW_SETTINGS[pidKey] = pidVal;
             HW_SETTINGS[ethKey] = Number.isInteger(ethVal) && ethVal > 0 ? ethVal : 0;
+            const labelKey = "LAN_PORT_LABEL_OVERRIDES_NODE" + i;
+            HW_SETTINGS[labelKey] = typeof hw[labelKey] === "string" ? hw[labelKey].trim() : "";
           }
 
           // Apply Hardware_Override to HW_SETTINGS for main + nodes
@@ -1324,6 +1949,7 @@
           updateLanNodeButtonStates();
           updateSSIDAssignCheckboxes();
           updateLanRowVisibility(CURRENT_LAN_TARGET);
+          updateLanPortLabels(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
 
           // Re-fill form with cached settings (tables were just rebuilt)
@@ -1345,6 +1971,71 @@
           if (!match) return 0;
           const n = parseInt(match[1], 10);
           return HW_SETTINGS["MAX_ETH_PORTS_NODE" + n] || 0;
+        }
+
+        function isHardwareMapOverrideEnabled(target) {
+          if (!target || target === "main") {
+            return HW_SETTINGS.MAP_OVERRIDE_MAIN === true;
+          }
+          const match = String(target).match(/^NODE(\d+)$/);
+          if (!match) return false;
+          return HW_SETTINGS["MAP_OVERRIDE_NODE" + match[1]] === true;
+        }
+
+        function getLanPortLabelOverrideRawForTarget(target) {
+          if (isHardwareMapOverrideEnabled(target)) return "";
+          if (!target || target === "main") {
+            return HW_SETTINGS.LAN_PORT_LABEL_OVERRIDES || "";
+          }
+          const match = String(target).match(/^NODE(\d+)$/);
+          if (!match) return "";
+          return HW_SETTINGS["LAN_PORT_LABEL_OVERRIDES_NODE" + match[1]] || "";
+        }
+
+        function parseLanPortLabelOverrides(raw, maxPorts) {
+          const result = Object.create(null);
+          if (typeof raw !== "string" || !raw.trim()) return result;
+          if (!Number.isInteger(maxPorts) || maxPorts < 1) return result;
+
+          raw.split(";").forEach(rawEntry => {
+            const entry = rawEntry.trim();
+            if (!entry) return;
+            const separator = entry.indexOf("=");
+            if (separator <= 0 || separator !== entry.lastIndexOf("=")) return;
+
+            const slotText = entry.slice(0, separator).trim();
+            const encodedLabel = entry.slice(separator + 1).trim();
+            if (!/^\d+$/.test(slotText) || !encodedLabel) return;
+            if (!/^[-A-Za-z0-9_().\/+ ]+$/.test(encodedLabel)) return;
+
+            const slot = Number(slotText);
+            if (!Number.isInteger(slot) || slot < 1 || slot > maxPorts) return;
+            if (Object.prototype.hasOwnProperty.call(result, slot)) return;
+
+            const label = encodedLabel.replace(/_/g, " ").replace(/\s+/g, " ").trim();
+            if (label) result[slot] = label;
+          });
+
+          return result;
+        }
+
+        function getLanPortLabelOverridesForTarget(target) {
+          return parseLanPortLabelOverrides(
+            getLanPortLabelOverrideRawForTarget(target),
+            getMaxEthPortsForTarget(target)
+          );
+        }
+
+        function updateLanPortLabels(target) {
+          const overrides = getLanPortLabelOverridesForTarget(target);
+          document.querySelectorAll("[data-lan-port-label-slot]").forEach(element => {
+            const slot = Number(element.dataset.lanPortLabelSlot);
+            if (!Number.isInteger(slot) || slot < 1) return;
+            element.textContent = Object.prototype.hasOwnProperty.call(overrides, slot)
+              ? overrides[slot]
+              : `LAN ${slot}`;
+            element.title = element.textContent;
+          });
         }
 
         /**
@@ -1389,7 +2080,7 @@
             const idx = String(i).padStart(2, "0");
             ssidTable.insertAdjacentHTML("beforeend", `
               <tr>
-                <td><input class="input_25_table vlan-input" name="SSID_${idx}" size="25" type="text" onchange="markEdited(${i})" title="${TOOLTIP.SSID}"></td>
+                <td><input class="input_25_table vlan-input" name="SSID_${idx}" maxlength="32" size="32" type="text" onchange="markEdited(${i})" title="${TOOLTIP.SSID}"></td>
                 <td class="ssid-col-config"><input class="input_6_table vlan-input" name="VLAN_${idx}" maxlength="4" size="4" type="text" oninput="validateVlanField(this); markEdited(${i})" title="${TOOLTIP.VLAN}"></td>
                 <td class="ssid-col-config"><select class="input_option" name="APISO_${idx}" onchange="markEdited(${i})" title="${TOOLTIP.APISO}">
                       <option value="0">Off</option>
@@ -1408,14 +2099,11 @@
 
           // build LAN port rows
           for (let i = 1; i <= overallMax; i++) {
-            const isFirstRow = (i === 1);
-            const productIdBadge = isFirstRow ? '<span class="lan-product-id-badge" id="lanProductIdBadge"></span>' : '';
             lanTable.insertAdjacentHTML("beforeend", `
               <tr data-lan-index="${i}">
                 <td class="lan-table__port">
                   <div class="lan-label-wrap">
-                    ${productIdBadge}
-                    <span class="lan-label-main">LAN ${i}</span>
+                    <span class="lan-label-main" data-lan-port-label-slot="${i}">LAN ${i}</span>
                     <label class="lan-trunk-toggle experimental-only experimental-hidden">
                       <input
                         type="checkbox"
@@ -1501,6 +2189,7 @@
           rebuildTrunkVlanOptionsFromSettings({});
           updateExperimentalVisibility();
           updateLanRowVisibility(CURRENT_LAN_TARGET);
+          updateLanPortLabels(CURRENT_LAN_TARGET);
           updateLanProductIdBadge(CURRENT_LAN_TARGET);
           if (typeof setupSSIDViewToggle === "function") setupSSIDViewToggle();
           updateAPIsolationAvailability();
@@ -1743,14 +2432,19 @@ function showTooltip() {
      */
     function updateLanProductIdBadge(target) {
       const badge = document.getElementById("lanProductIdBadge");
-      if (!badge) return;
+      const model = document.getElementById("lanProductIdModel");
+      if (!badge || !model) return;
       const pid = getProductIdForTarget(target);
       if (pid) {
-        badge.textContent = pid;
+        model.textContent = pid;
+        model.style.display = "";
+        badge.title = `${pid} Ethernet`;
         badge.style.display = "";
       } else {
-        badge.textContent = "";
-        badge.style.display = "none";
+        model.textContent = "";
+        model.style.display = "none";
+        badge.title = "Ethernet";
+        badge.style.display = "";
       }
     }
 
@@ -1811,6 +2505,7 @@ function showTooltip() {
       updateLanInputNames(CURRENT_LAN_TARGET);
       loadLanFieldsFromCache(CURRENT_LAN_TARGET);
       updateLanRowVisibility(CURRENT_LAN_TARGET);
+      updateLanPortLabels(CURRENT_LAN_TARGET);
       updateLanProductIdBadge(CURRENT_LAN_TARGET);
       updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
@@ -1836,6 +2531,10 @@ function showTooltip() {
       CURRENT_SSID_VIEW = view;
       const ssidTable = document.getElementById("ssidTable");
       if (!ssidTable) return;
+      const formBox = document.querySelector(".form-box--main");
+      const isAssignView = view === "assign";
+      ssidTable.classList.toggle("is-assign-view", isAssignView);
+      if (formBox) formBox.classList.toggle("ssid-assign-view", isAssignView);
       
       // Toggle header and data columns
       ssidTable.querySelectorAll(".ssid-col-config").forEach(el => {
@@ -1850,9 +2549,9 @@ function showTooltip() {
         btn.classList.toggle("is-active", btn.dataset.ssidView === view);
       });
 
-      // Config and Assign have different natural widths. Allow this explicit
-      // view switch to shrink again so Assign does not permanently stretch Config.
-      scheduleFormPaneWidthUpdate({ allowShrink: true });
+      // The main form stays at its normal width. Assign expands only the SSID
+      // table via its view class, leaving every section below it stationary.
+      updateFormPaneWidth();
       scheduleHostIframeResize();
     }
 
@@ -2252,7 +2951,10 @@ function showTooltip() {
 
     function isExperimentalEnabled(){
       const expToggle = document.getElementById("experimentalToggle");
-      return !!(expToggle && expToggle.checked);
+      if (!expToggle) return false;
+      // Hidden input (current): read .value; checkbox (legacy): read .checked
+      if (expToggle.type === 'checkbox') return expToggle.checked;
+      return expToggle.value === '1';
     }
 
     function updateExperimentalVisibility(){
@@ -2629,7 +3331,9 @@ function showTooltip() {
 
     const FORM_PANE_MIN_WIDTH = 440;
     const FORM_PANE_MAX_WIDTH = 720;
-    const FORM_PANE_PADDING_ALLOWANCE = 32;
+    const FORM_PANE_CONTENT_WIDTH_FALLBACK = 539;
+    const FORM_PANE_TRIM_FALLBACK = 10;
+    const OUTER_RAIL_SIZE_FALLBACK = 5;
     let pendingFormWidthUpdate = null;
     let pendingFormWidthAllowShrink = false;
     let lastFormPaneWidth = FORM_PANE_MIN_WIDTH;
@@ -2644,54 +3348,20 @@ function showTooltip() {
     }
 
     function updateFormPaneWidth(opts){
-      opts = opts || {};
-      const allowShrink = !!opts.allowShrink;
-
       const ssidTable = document.getElementById("ssidTable");
       if(!ssidTable) return;
 
       const root = document.documentElement;
-  const previousInlineWidth = root.style.getPropertyValue("--form-pane-width");
-  const previousWidth = Number.isFinite(lastFormPaneWidth) ? lastFormPaneWidth : FORM_PANE_MIN_WIDTH;
-      root.style.setProperty("--form-pane-width", "max-content");
-
-      let requiredWidth = 0;
-      const tableWidth = ssidTable.scrollWidth || ssidTable.offsetWidth || 0;
-      if(tableWidth){
-        requiredWidth = Math.max(requiredWidth, tableWidth + FORM_PANE_PADDING_ALLOWANCE);
-      }
-
-      const nodeSection = document.querySelector(".node-section");
-      if(nodeSection){
-        const nodeWidth = nodeSection.scrollWidth || nodeSection.offsetWidth || 0;
-        requiredWidth = Math.max(requiredWidth, nodeWidth + FORM_PANE_PADDING_ALLOWANCE);
-      }
-
-      document.querySelectorAll(".form-box.controls-panel").forEach(panel => {
-        const panelWidth = panel.scrollWidth || panel.offsetWidth || 0;
-        requiredWidth = Math.max(requiredWidth, panelWidth);
-      });
-
-      if(!requiredWidth){
-        if(previousInlineWidth){
-          root.style.setProperty("--form-pane-width", previousInlineWidth);
-        } else {
-          root.style.removeProperty("--form-pane-width");
-        }
-        lastFormPaneWidth = previousWidth;
-        updateCliOverlayPosition();
-        return;
-      }
-
-      const clamped = Math.min(
+      const rootStyles = window.getComputedStyle(root);
+      const contentWidth = parseFloat(rootStyles.getPropertyValue("--form-pane-content-width")) || FORM_PANE_CONTENT_WIDTH_FALLBACK;
+      const widthTrim = parseFloat(rootStyles.getPropertyValue("--form-pane-width-trim")) || FORM_PANE_TRIM_FALLBACK;
+      const outerRailSize = parseFloat(rootStyles.getPropertyValue("--outer-rail-size")) || OUTER_RAIL_SIZE_FALLBACK;
+      const targetWidth = contentWidth + widthTrim + outerRailSize;
+      lastFormPaneWidth = Math.min(
         FORM_PANE_MAX_WIDTH,
-        Math.max(FORM_PANE_MIN_WIDTH, Math.ceil(requiredWidth))
+        Math.max(FORM_PANE_MIN_WIDTH, targetWidth)
       );
-      const finalWidth = allowShrink
-        ? clamped
-        : Math.min(FORM_PANE_MAX_WIDTH, Math.max(previousWidth, clamped));
-      lastFormPaneWidth = finalWidth;
-      root.style.setProperty("--form-pane-width", `${finalWidth}px`);
+      root.style.setProperty("--form-pane-width", `${lastFormPaneWidth}px`);
       updateCliOverlayPosition();
     }
 
@@ -2735,6 +3405,7 @@ function showTooltip() {
         document.querySelector('.container'),
         cliPanel && cliPanel.classList.contains('expanded') ? cliPanel.querySelector('.cli-shell') : null,
         document.getElementById('advancedOverrideModal'),
+        document.getElementById('serviceSettingsModal'),
         document.getElementById('sshKeyModal'),
         document.getElementById('unsupportedModelModal'),
         document.getElementById('versionModal')
@@ -2833,6 +3504,8 @@ function showTooltip() {
       setNodeCollapse(false);
       const experimentalToggle = document.getElementById("experimentalToggle");
       if(experimentalToggle){
+        // Works for both hidden input (value) and checkbox (checked)
+        experimentalToggle.value   = '0';
         experimentalToggle.checked = false;
       }
       // Clear SSIDassign checkboxes (reset to MAIN only)
@@ -3013,7 +3686,8 @@ function showTooltip() {
           isModalVisibleById('sshKeyModal') ||
           isModalVisibleById('versionModal') ||
           isModalVisibleById('unsupportedModelModal') ||
-          isModalVisibleById('advancedOverrideModal')
+          isModalVisibleById('advancedOverrideModal') ||
+          isModalVisibleById('serviceSettingsModal')
         );
       }
       function setCliState(expand){
@@ -3054,6 +3728,9 @@ function showTooltip() {
       }
       function toggleCli(){
         const isCollapsed = cliPanel && cliPanel.classList.contains('collapsed');
+        if(isCollapsed && CURRENT_SSID_VIEW === 'assign'){
+          setSSIDView('config');
+        }
         setCliState(isCollapsed);
       }
       if(cliLatch){
@@ -3110,7 +3787,14 @@ function showTooltip() {
           // settings.json is stored under the settings/ directory
           SETTINGS: "settings/settings.json",
           // clients overview JSON
-          CLIENTS_JSON: "tmp/results/vlan_clients.json"
+          CLIENTS_JSON: "tmp/results/vlan_clients.json",
+          // service status JSON written by mervlan_boot.sh status (tmpfs, not persistent)
+          SERVICE_STATUS: "tmp/results/service_status.json",
+          // correlated completion result for verified backend actions
+          ACTION_RESULT: "tmp/results/action_result.json",
+          // backup inventory and correlated backup/restore operation result
+          BACKUP_INVENTORY: "tmp/results/backup_inventory.json",
+          MAINTENANCE_RESULT: "tmp/results/maintenance_result.json"
         };
 
     function isAtBottom(el){ return el.scrollTop + el.clientHeight >= el.scrollHeight - 10; }
@@ -3186,9 +3870,25 @@ function toggleCliFullsize() {
     let updateSpinnerTimer = null;
     let updateSpinnerPhase = 0;
     let isUpdateInProgress = false;
+    let updateFlowState = "idle";
+    let updateActionIdleText = "Update now";
+    let updateActionIdleDisplay = "none";
 
     let updateLogTimer = null;
     let lastUpdateLogLine = "";
+    let lastUpdateLogSnapshot = "";
+    let updateLogBaselineText = "";
+    let updateLogBaselineReady = false;
+    let _updateTimeoutId = null;
+    let maintenancePollTimer = null;
+    let maintenanceTimeoutTimer = null;
+    let maintenanceStartTimeoutTimer = null;
+    let maintenanceRequestSeen = false;
+    let maintenanceRequestToken = "";
+    let backupInventoryData = null;
+    let maintenanceConfirmationResolve = null;
+    let maintenanceConfirmationRequiredText = "";
+    let maintenanceConfirmationPreviousFocus = null;
 
     function setUpdateStatus(text, color) {
       const statusEl = document.getElementById("updateStatusText");
@@ -3197,10 +3897,99 @@ function toggleCliFullsize() {
       statusEl.style.color = color || "";
     }
 
+    function updateFlowLocksControls(state) {
+      return state === "checking" || state === "running" || state === "success" ||
+        state === "detached" || state === "timeout";
+    }
+
+    function setUpdateControlsLocked(locked) {
+      ["checkUpdateBtn", "versionChannelSelect", "releaseSelect", "customBranchInput",
+       "clearLogsBeforeUpdate", "versionRestoreTab"]
+        .forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.disabled = !!locked;
+        });
+    }
+
+    function rememberUpdateAction(buttonEl) {
+      if (!buttonEl) return;
+      updateActionIdleText = buttonEl.textContent || "Update now";
+      updateActionIdleDisplay = buttonEl.style.display || "inline-block";
+    }
+
+    function setUpdateFlowState(state) {
+      updateFlowState = state;
+      isUpdateInProgress = state === "checking" || state === "running";
+      setUpdateControlsLocked(updateFlowLocksControls(state));
+
+      const button = document.getElementById("runUpdateBtn");
+      const refreshButton = document.getElementById("refreshNowBtn");
+      if (refreshButton) refreshButton.style.display = state === "success" ? "inline-block" : "none";
+      if (!button) return;
+
+      button.classList.toggle("update-action--busy", state === "checking" || state === "running");
+      if (state === "checking") {
+        button.style.display = updateActionIdleDisplay === "none" ? "inline-block" : updateActionIdleDisplay;
+        button.textContent = "Checking...";
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+        button.removeAttribute("aria-label");
+      } else if (state === "running") {
+        button.style.display = updateActionIdleDisplay === "none" ? "inline-block" : updateActionIdleDisplay;
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+      } else if (state === "success") {
+        button.style.display = "none";
+        button.disabled = true;
+        button.removeAttribute("aria-busy");
+        button.removeAttribute("aria-label");
+      } else if (state === "detached" || state === "timeout") {
+        button.style.display = "inline-block";
+        button.textContent = "Update status unknown";
+        button.disabled = true;
+        button.removeAttribute("aria-busy");
+        button.removeAttribute("aria-label");
+      } else {
+        button.style.display = updateActionIdleDisplay;
+        button.textContent = updateActionIdleText;
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.removeAttribute("aria-label");
+      }
+    }
+
+    function renderUpdateButtonProgress(dots) {
+      const button = document.getElementById("runUpdateBtn");
+      if (!button || updateFlowState !== "running") return;
+
+      let content = button.querySelector(".update-action-busy__content");
+      if (!content) {
+        button.textContent = "";
+        content = document.createElement("span");
+        content.className = "update-action-busy__content";
+        const label = document.createElement("span");
+        label.textContent = "Updating";
+        const dotArea = document.createElement("span");
+        dotArea.className = "update-action-busy__dots";
+        dotArea.setAttribute("aria-hidden", "true");
+        content.appendChild(label);
+        content.appendChild(dotArea);
+        button.appendChild(content);
+      }
+      const dotArea = content.querySelector(".update-action-busy__dots");
+      if (dotArea) dotArea.textContent = dots;
+      button.setAttribute("aria-label", "Updating");
+    }
+
     function startUpdateSpinner() {
-      const patterns = [".", "..", "..."];
+      const patterns = ["", ".", "..", "..."];
       updateSpinnerPhase = 0;
-      setUpdateStatus("Updating" + patterns[updateSpinnerPhase]);
+      setUpdateStatus("Update in progress");
+
+      const renderButton = () => {
+        renderUpdateButtonProgress(patterns[updateSpinnerPhase]);
+      };
+      renderButton();
 
       if (updateSpinnerTimer) {
         clearInterval(updateSpinnerTimer);
@@ -3208,7 +3997,7 @@ function toggleCliFullsize() {
 
       updateSpinnerTimer = setInterval(() => {
         updateSpinnerPhase = (updateSpinnerPhase + 1) % patterns.length;
-        setUpdateStatus("Updating" + patterns[updateSpinnerPhase]);
+        renderButton();
       }, 400);
     }
 
@@ -3228,6 +4017,58 @@ function toggleCliFullsize() {
       sec.style.display = show ? "block" : "none";
     }
 
+    function showUpdateLogViewer(show) {
+      const viewer = document.getElementById("updateLogLine");
+      if (viewer) viewer.style.display = show ? "block" : "none";
+    }
+
+    function updateLogTextAfterBaseline(text) {
+      const current = String(text || "");
+      const baseline = String(updateLogBaselineText || "");
+      if (!baseline) return current;
+      if (current.startsWith(baseline)) return current.slice(baseline.length);
+
+      // Trimming may remove the beginning of the retained log while leaving
+      // its former last line. Use that line as a boundary when possible. If
+      // the update intentionally cleared/truncated the file, no boundary will
+      // remain and the entire current file belongs to this request.
+      const baselineLines = baseline.replace(/\r\n/g, "\n").split("\n");
+      let anchor = "";
+      for (let i = baselineLines.length - 1; i >= 0; i--) {
+        if (baselineLines[i]) {
+          anchor = baselineLines[i];
+          break;
+        }
+      }
+      if (anchor) {
+        const anchorIndex = current.lastIndexOf(anchor);
+        if (anchorIndex !== -1) {
+          return current.slice(anchorIndex + anchor.length).replace(/^\r?\n/, "");
+        }
+      }
+      return current;
+    }
+
+    async function captureUpdateLogBaseline() {
+      try {
+        const r = await fetch(PATHS.UPDATE_LOG + "?_=" + Date.now());
+        if (r.ok) {
+          updateLogBaselineText = await r.text();
+          lastUpdateLogSnapshot = updateLogBaselineText;
+          updateLogBaselineReady = true;
+          return;
+        }
+        // A missing log is a valid empty baseline.
+        if (r.status === 404) {
+          updateLogBaselineText = "";
+          lastUpdateLogSnapshot = "";
+          updateLogBaselineReady = true;
+        }
+      } catch (e) {
+        // The first successful poll will establish a safe fallback baseline.
+      }
+    }
+
     async function pollUpdateLogOnce() {
       const logLineEl = document.getElementById("updateLogLine");
       if (!logLineEl) return;
@@ -3242,14 +4083,26 @@ function toggleCliFullsize() {
         }
 
         const text = await r.text();
-        if (!text.trim()) {
+        if (!updateLogBaselineReady) {
+          updateLogBaselineText = text;
+          lastUpdateLogSnapshot = text;
+          updateLogBaselineReady = true;
+          return;
+        }
+        if (text === lastUpdateLogSnapshot) {
+          return;
+        }
+        lastUpdateLogSnapshot = text;
+
+        const currentRunText = updateLogTextAfterBaseline(text);
+        if (!currentRunText.trim()) {
           if (!lastUpdateLogLine) {
             logLineEl.textContent = "Waiting for update output...";
           }
           return;
         }
 
-        const lines = text.trim().split(/\r?\n/);
+        const lines = currentRunText.trim().split(/\r?\n/);
         const lastLine = lines[lines.length - 1] || "";
 
         if (!lastLine || lastLine === lastUpdateLogLine) {
@@ -3262,8 +4115,22 @@ function toggleCliFullsize() {
 
         if (lines.slice(-Math.min(5, lines.length)).some(line => /MerVLAN update completed successfully/i.test(line))) {
           logLineEl.classList.add("update-log-line--success");
-          isUpdateInProgress = false;
           stopUpdateSpinner("Update completed", "#7bd77b");
+          setUpdateFlowState("success");
+          stopUpdateLogPolling();
+          showUpdateLogViewer(false);
+          const completeMsg = document.getElementById("updateCompleteMessage");
+          if (completeMsg) {
+            const undoAvailable = lines.slice(-Math.min(20, lines.length)).some(line => /Undo Update is available until the router reboots/i.test(line));
+            completeMsg.textContent = undoAvailable
+              ? "Update complete — Undo Update is available from the Restore tab until reboot. Refresh your browser to load the new version."
+              : "Update complete — no temporary Undo Update shortcut is available. Refresh your browser to load the new version.";
+            completeMsg.style.display = "block";
+          }
+        } else if (lines.slice(-Math.min(10, lines.length)).some(line => /Update failed in stage:|update.*fail/i.test(line))) {
+          logLineEl.classList.add("update-log-line--error");
+          stopUpdateSpinner("Update failed", "#ff8a8a");
+          setUpdateFlowState("failed");
           stopUpdateLogPolling();
         }
       } catch (e) {
@@ -3271,7 +4138,7 @@ function toggleCliFullsize() {
       }
     }
 
-    function startUpdateLogPolling() {
+    async function startUpdateLogPolling() {
       const logLineEl = document.getElementById("updateLogLine");
       if (logLineEl) {
         logLineEl.textContent = "Waiting for update output...";
@@ -3279,19 +4146,45 @@ function toggleCliFullsize() {
       }
 
       lastUpdateLogLine = "";
+      lastUpdateLogSnapshot = "";
+      updateLogBaselineText = "";
+      updateLogBaselineReady = false;
       showUpdateLogSection(true);
-      pollUpdateLogOnce();
+      showUpdateLogViewer(true);
+
+      // Capture the retained log before submitting this update. Completion and
+      // failure detection then inspect only content written after this point.
+      await captureUpdateLogBaseline();
 
       if (updateLogTimer) {
         clearInterval(updateLogTimer);
       }
       updateLogTimer = setInterval(pollUpdateLogOnce, 1500);
+
+      // Safety timeout: stop spinner after 5 minutes with no success/failure
+      if (_updateTimeoutId) clearTimeout(_updateTimeoutId);
+      _updateTimeoutId = setTimeout(() => {
+        if (isUpdateInProgress) {
+          stopUpdateSpinner("Status unknown", "#ffaa6b");
+          setUpdateFlowState("timeout");
+          stopUpdateLogPolling();
+          const logLineEl2 = document.getElementById("updateLogLine");
+          if (logLineEl2) {
+            logLineEl2.textContent = "Live progress timed out \u2014 the update may still be running. Continue monitoring it from the INFO tab.";
+            logLineEl2.classList.add("update-log-line--error");
+          }
+        }
+      }, 300000);
     }
 
     function stopUpdateLogPolling() {
       if (updateLogTimer) {
         clearInterval(updateLogTimer);
         updateLogTimer = null;
+      }
+      if (_updateTimeoutId) {
+        clearTimeout(_updateTimeoutId);
+        _updateTimeoutId = null;
       }
     }
 
@@ -4138,20 +5031,29 @@ function queueServiceAction(actionScriptName, opts = {}) {
         lastLogText = "";
 
         const parentWin = window.parent;
+        let submitted;
         if (parentWin && typeof parentWin.MVM_trigger === "function") {
-            parentWin.MVM_trigger(actionScriptName, parentOpts);
+            submitted = parentWin.MVM_trigger(actionScriptName, parentOpts);
         } else if (parentWin && typeof parentWin.MVM_exec === "function") {
-            parentWin.MVM_exec(actionScriptName, null, parentOpts);
+            submitted = parentWin.MVM_exec(actionScriptName, null, parentOpts);
         } else {
             // Always log failures, even in quiet mode.
             appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
-            return;
+            startPolling();
+            return false;
+        }
+
+        if (submitted === false) {
+            appendCliText(`[${new Date().toLocaleString()}] Parent rejected or deduplicated ${description}.\n`, { scroll: 'force' });
+            startPolling();
+            return false;
         }
 
         if (typeof afterSubmit === "function") {
             try { afterSubmit(); } catch (err) { console.error(err); }
         }
         startPolling();
+        return true;
     };
 
     return withActionLock(actionScriptName, handler, cooldownMs);
@@ -4164,6 +5066,514 @@ function triggerAction(actionScriptName, button, description) {
         cooldownMs: 8000
     });
 }
+
+    // ======================================================================= //
+    // SERVICE SETTINGS MODAL                                                   //
+    // ======================================================================= //
+
+    // Snapshot of values when the modal was opened — used to diff on Apply
+    const SERVICE_SETTINGS_DEFINITIONS = Object.freeze([
+      {
+        key: 'ENABLE_STP', controlId: 'svcToggleSTP', hiddenControlId: 'stpToggle', kind: 'setting', defaultValue: '0',
+        readControl: el => el.checked ? '1' : '0', writeControl: (el, value) => { el.checked = value === '1'; }
+      },
+      {
+        key: 'DRY_RUN', controlId: 'svcToggleDryRun', hiddenControlId: 'dryRunToggle', kind: 'setting', defaultValue: 'yes',
+        readControl: el => el.checked ? 'yes' : 'no', writeControl: (el, value) => { el.checked = value === 'yes'; }
+      },
+      {
+        key: 'ENABLE_NATIVE_SSID', controlId: 'svcToggleENS', hiddenControlId: 'ensToggle', kind: 'setting', defaultValue: '0',
+        readControl: el => el.checked ? '1' : '0', writeControl: (el, value) => { el.checked = value === '1'; }
+      },
+      {
+        key: 'BOOT_ENABLED', controlId: 'svcToggleBoot', kind: 'action', ownership: 'action', defaultValue: '0',
+        readControl: el => el.checked ? '1' : '0', writeControl: (el, value) => { el.checked = value === '1'; },
+        action: {
+          order: 100,
+          resolveAction: value => value === '1' ? 'enableservice_vlanmgr' : 'disableservice_vlanmgr',
+          progress: value => value === '1' ? 'Enabling boot service…' : 'Disabling boot service…',
+          expectedResult: value => ({ BOOT_ENABLED: value }),
+          timeoutMs: 120000
+        }
+      },
+      {
+        key: 'PAUSE', controlId: 'svcTogglePause', kind: 'setting', defaultValue: 'off',
+        readControl: el => el.checked ? 'on' : 'off', writeControl: (el, value) => { el.checked = value === 'on'; }
+      },
+      {
+        key: 'EXPERIMENTAL', controlId: 'svcToggleExperimental', hiddenControlId: 'experimentalToggle', kind: 'setting', defaultValue: '0',
+        readControl: el => el.checked ? '1' : '0', writeControl: (el, value) => { el.checked = value === '1'; }
+      }
+    ]);
+
+    let _svcSnapshot = null;
+    let _svcTransactionActive = false;
+    // Last successful status check result — persists for the page session so
+    // reopening the modal still shows the previous check. Cleared on page reload.
+    let _svcLastStatusData = null;
+
+    function getServiceSettingValue(definition, source = CURRENT_SETTINGS_CACHE) {
+      const raw = source && source[definition.key];
+      return raw == null || raw === '' ? definition.defaultValue : String(raw);
+    }
+
+    function writeServiceSettingControl(definition, value) {
+      const control = document.getElementById(definition.controlId);
+      if (control) definition.writeControl(control, String(value));
+    }
+
+    function syncServiceSettingsControls(source = CURRENT_SETTINGS_CACHE) {
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        const value = getServiceSettingValue(definition, source);
+        writeServiceSettingControl(definition, value);
+        if (definition.hiddenControlId) {
+          const hidden = document.getElementById(definition.hiddenControlId);
+          if (hidden) hidden.value = value;
+        }
+      });
+    }
+
+    function readServiceSettingsControls() {
+      const values = {};
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        const control = document.getElementById(definition.controlId);
+        values[definition.key] = control ? String(definition.readControl(control)) : getServiceSettingValue(definition);
+      });
+      return values;
+    }
+
+    function captureServiceSettingsSnapshot(source = CURRENT_SETTINGS_CACHE) {
+      const snapshot = {};
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        snapshot[definition.key] = getServiceSettingValue(definition, source);
+      });
+      return snapshot;
+    }
+
+    function calculateServiceSettingsChanges(before, after) {
+      return SERVICE_SETTINGS_DEFINITIONS
+        .filter(definition => String(before[definition.key]) !== String(after[definition.key]))
+        .map(definition => ({ key: definition.key, previous: String(before[definition.key]), desired: String(after[definition.key]), definition }));
+    }
+
+    function validateServiceSettings(values) {
+      const errors = [];
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        if (typeof definition.validate !== 'function') return;
+        const result = definition.validate(values[definition.key], { values, definition });
+        if (result && result.ok === false) errors.push(result.message || `Invalid value for ${definition.key}`);
+      });
+      return errors;
+    }
+
+    function buildServiceSettingsTransaction(changes) {
+      const stages = [];
+      const settingChanges = changes.filter(change => change.definition.kind === 'setting');
+      if (settingChanges.length) stages.push({ type: 'settings-save', changes: settingChanges });
+      const pending = new Map(
+        changes.filter(change => change.definition.kind === 'action').map(change => [change.key, change])
+      );
+      while (pending.size) {
+        const ready = Array.from(pending.values()).filter(change => {
+          const dependencies = change.definition.action?.dependsOn || [];
+          return dependencies.every(key => !pending.has(key));
+        }).sort((a, b) => (a.definition.action?.order || 0) - (b.definition.action?.order || 0));
+        if (!ready.length) {
+          throw new Error('Service settings action dependencies contain a cycle.');
+        }
+        ready.forEach(change => {
+          stages.push({ type: 'verified-action', change });
+          pending.delete(change.key);
+        });
+      }
+      return stages;
+    }
+
+    function setServiceTransactionStatus(message, state = '') {
+      const el = document.getElementById('svcTransactionStatus');
+      if (!el) return;
+      el.textContent = message || '';
+      el.classList.remove('is-success', 'is-warning', 'is-error');
+      if (state) el.classList.add('is-' + state);
+    }
+
+    function setServiceSettingsBusy(busy) {
+      _svcTransactionActive = busy;
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        const control = document.getElementById(definition.controlId);
+        if (control) control.disabled = busy;
+      });
+      ['svcSettingsApplyBtn', 'svcSettingsCancelBtn', 'svcStatusRefreshBtn'].forEach(id => {
+        const control = document.getElementById(id);
+        if (control) control.disabled = busy;
+      });
+    }
+
+    function applySettingChangesToForm(changes) {
+      if (!CURRENT_SETTINGS_CACHE) CURRENT_SETTINGS_CACHE = {};
+      changes.forEach(change => {
+        CURRENT_SETTINGS_CACHE[change.key] = change.desired;
+        const hidden = change.definition.hiddenControlId ? document.getElementById(change.definition.hiddenControlId) : null;
+        if (hidden) hidden.value = change.desired;
+      });
+    }
+
+    function createActionRequestToken() {
+      let random = '';
+      try {
+        if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+          random = window.crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
+        }
+      } catch (_) {}
+      if (!random) random = Math.random().toString(36).slice(2);
+      // The token is hex-encoded into the ASUS service-event name. Keep it
+      // compact so the complete verified action remains below firmware field
+      // limits and the backend acknowledges the exact token being polled.
+      return `m${Date.now().toString(36)}${random.slice(0, 6)}`;
+    }
+
+    async function waitForVerifiedActionResult(requestToken, actionName, expectedResult, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 750));
+        try {
+          const response = await fetch(PATHS.ACTION_RESULT + '?_=' + Date.now(), {
+            cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
+          });
+          if (!response.ok) continue;
+          const result = await response.json();
+          if (result.request_token !== requestToken || result.action !== actionName) continue;
+          if (result.status === 'error') return { ok: false, status: 'error', message: result.message || 'Backend action failed.', result };
+          const actual = result.result || {};
+          const mismatch = Object.keys(expectedResult || {}).find(key => String(actual[key] ?? '') !== String(expectedResult[key] ?? ''));
+          if (mismatch) return { ok: false, status: 'error', message: `Action result did not confirm ${mismatch}.`, result };
+          return {
+            ok: result.status === 'ok', status: result.status,
+            message: result.message || (result.status === 'partial' ? 'Action completed with warnings.' : 'Action completed.'),
+            warnings: Array.isArray(result.warnings) ? result.warnings : [], result
+          };
+        } catch (_) {}
+      }
+      return { ok: false, status: 'error', message: 'Timed out waiting for router acknowledgement.' };
+    }
+
+    async function executeVerifiedServiceAction(change) {
+      const actionSpec = change.definition.action;
+      const actionName = actionSpec.resolveAction(change.desired, change);
+      const expectedResult = actionSpec.expectedResult ? actionSpec.expectedResult(change.desired, change) : {};
+      const requestToken = createActionRequestToken();
+      const parentWin = window.parent;
+      if (!parentWin || typeof parentWin.MVM_triggerVerified !== 'function') {
+        return { ok: false, status: 'error', message: 'Verified parent action handler is unavailable.' };
+      }
+      appendCliText(`\n[${new Date().toLocaleString()}] Queued verified action: ${actionName}\n`, { scroll: 'force' });
+      const submitted = parentWin.MVM_triggerVerified(actionName, requestToken, {}, {
+        loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
+      });
+      if (submitted === false) {
+        return { ok: false, status: 'error', message: 'The parent page rejected or deduplicated the action request.' };
+      }
+      return waitForVerifiedActionResult(requestToken, actionName, expectedResult, actionSpec.timeoutMs || 30000);
+    }
+
+    async function refreshSettingsCacheFromDisk() {
+      const response = await fetch(PATHS.SETTINGS + '?_=' + Date.now(), {
+        cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
+      });
+      if (!response.ok) throw new Error('Could not refresh settings after the transaction (HTTP ' + response.status + ').');
+      const data = await response.json();
+      if (isStructuredSettingsPayload(data)) {
+        CURRENT_SETTINGS_STRUCTURED = data;
+        CURRENT_SETTINGS_SHAPE = 'sectioned';
+        CURRENT_SETTINGS_CACHE = flattenStructuredSettingsPayload(data);
+      } else {
+        CURRENT_SETTINGS_STRUCTURED = null;
+        CURRENT_SETTINGS_SHAPE = 'flat';
+        CURRENT_SETTINGS_CACHE = data;
+      }
+      return CURRENT_SETTINGS_CACHE;
+    }
+
+    function updatePauseIndicator() {
+      const btn = document.getElementById('serviceSettingsBtn');
+      if (!btn) return;
+      const paused = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['PAUSE'] === 'on';
+      btn.classList.toggle('is-paused', paused);
+    }
+
+    function updateBootStatusLineFromCache() {
+      const statusLine = document.getElementById('svcBootStatusLine');
+      if (!statusLine) return;
+      const bootOn = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['BOOT_ENABLED'] === '1';
+      statusLine.textContent = 'Boot service: ' + (bootOn ? '\u25CF enabled' : '\u25CB disabled');
+      statusLine.style.color = bootOn ? '#4caf50' : '#aaa';
+    }
+
+    async function showServiceSettingsModal() {
+      const modal = document.getElementById('serviceSettingsModal');
+      if (!modal) return;
+
+      // Always do a fresh load so all toggles reflect the last saved state on disk.
+      // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
+      await loadSettings({ deferFill: true });
+
+      const cache = CURRENT_SETTINGS_CACHE || {};
+
+      // Keep hidden selects in sync with the fresh cache so the normal
+      // save pipeline (formToSettingsJSON) stays consistent.
+      syncServiceSettingsControls(cache);
+
+      // Populate modal toggles — all read from the fresh cache
+      // Snapshot initial state for dirty-diffing
+      _svcSnapshot = captureServiceSettingsSnapshot(cache);
+      setServiceSettingsBusy(false);
+      setServiceTransactionStatus('');
+
+      // Reset Apply button
+      const applyBtn = document.getElementById('svcSettingsApplyBtn');
+      if (applyBtn) applyBtn.disabled = true;
+
+      // Status line: only the persisted BOOT_ENABLED value — never stale.
+      // Press the ⟳ button in the modal to run a full status check (CLI log).
+      const statusLine = document.getElementById('svcBootStatusLine');
+      if (statusLine) {
+        const bootOn = cache['BOOT_ENABLED'] === '1';
+        statusLine.textContent = 'Boot service: ' + (bootOn ? '\u25CF enabled' : '\u25CB disabled');
+        statusLine.style.color = bootOn ? '#4caf50' : '#aaa';
+      }
+      // Restore the last status check result if one exists for this session,
+      // otherwise hide the panel (it's populated by pressing ⟳).
+      const detail = document.getElementById('svcStatusDetail');
+      if (detail) {
+        if (_svcLastStatusData) {
+          detail.innerHTML = renderServiceStatusHtml(_svcLastStatusData);
+          detail.style.display = '';
+        } else {
+          detail.style.display = 'none';
+          detail.innerHTML = '';
+        }
+      }
+
+      // Show modal — same pattern as all other modals
+      modal.style.display = 'block';
+      anchorModalToForm(modal);
+      scheduleHostIframeResize();
+
+      const overlay = document.getElementById('leftPanelOverlay');
+      if (overlay) {
+        overlay.classList.add('is-active');
+        overlay.style.display = 'block';
+        overlay.style.pointerEvents = 'auto';
+      }
+      const cliLatch = document.getElementById('cliLatch');
+      if (cliLatch) {
+        if (cliLatch.dataset.prevDisplay === undefined) {
+          cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
+        }
+        cliLatch.style.display = 'none';
+      }
+    }
+
+    function closeServiceSettingsModal() {
+      if (_svcTransactionActive) {
+        setServiceTransactionStatus('Wait for the current settings transaction to finish.', 'warning');
+        return;
+      }
+      const modal = document.getElementById('serviceSettingsModal');
+      if (modal) {
+        modal.style.display = 'none';
+        releaseModalCentering(modal);
+        releaseAnchoredModal(modal);
+      }
+      const overlay = document.getElementById('leftPanelOverlay');
+      if (overlay) {
+        const cliPanelEl = document.getElementById('cliPanel');
+        const keepOverlay = cliPanelEl && cliPanelEl.classList.contains('expanded');
+        if (!keepOverlay) {
+          overlay.classList.remove('is-active');
+          overlay.style.display = 'none';
+          overlay.style.pointerEvents = 'none';
+        }
+      }
+      const cliLatch = document.getElementById('cliLatch');
+      if (cliLatch) {
+        const previous = cliLatch.dataset.prevDisplay;
+        cliLatch.style.display = previous !== undefined ? previous : '';
+        if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
+      }
+      scheduleHostIframeResize();
+      _svcSnapshot = null;
+    }
+
+    function markSvcSettingsDirty() {
+      const applyBtn = document.getElementById('svcSettingsApplyBtn');
+      if (!applyBtn || _svcTransactionActive || !_svcSnapshot) return;
+      const changes = calculateServiceSettingsChanges(_svcSnapshot, readServiceSettingsControls());
+      applyBtn.disabled = changes.length === 0;
+      if (changes.length) setServiceTransactionStatus('');
+    }
+
+    async function applyServiceSettings() {
+      if (!_svcSnapshot || _svcTransactionActive) return;
+      const desiredValues = readServiceSettingsControls();
+      const validationErrors = validateServiceSettings(desiredValues);
+      if (validationErrors.length) {
+        setServiceTransactionStatus(validationErrors.join(' '), 'error');
+        return;
+      }
+
+      const changes = calculateServiceSettingsChanges(_svcSnapshot, desiredValues);
+      if (!changes.length) {
+        setServiceTransactionStatus('No settings changed.');
+        return;
+      }
+
+      let transaction;
+      try {
+        transaction = buildServiceSettingsTransaction(changes);
+      } catch (error) {
+        setServiceTransactionStatus(error.message || 'Could not build the settings transaction.', 'error');
+        return;
+      }
+      setServiceSettingsBusy(true);
+      stopPolling();
+      try {
+        for (let index = 0; index < transaction.length; index++) {
+          const stage = transaction[index];
+          const prefix = transaction.length > 1 ? `${index + 1}/${transaction.length} ` : '';
+          if (stage.type === 'settings-save') {
+            setServiceTransactionStatus(prefix + 'Saving settings…');
+            applySettingChangesToForm(stage.changes);
+            const saveResult = await uploadSettingsAndSave(null, {
+              clearForm: false,
+              reloadAfterSave: false,
+              restartPolling: false,
+              lockName: 'service-settings-save'
+            });
+            if (!saveResult || !saveResult.ok) {
+              throw new Error(saveResult?.error || 'Settings could not be confirmed on disk.');
+            }
+          } else if (stage.type === 'verified-action') {
+            const actionSpec = stage.change.definition.action;
+            setServiceTransactionStatus(prefix + actionSpec.progress(stage.change.desired, stage.change));
+            const actionResult = await executeVerifiedServiceAction(stage.change);
+            if (!actionResult.ok) {
+              const error = new Error(actionResult.message || 'Backend action failed.');
+              error.partial = actionResult.status === 'partial';
+              error.warnings = actionResult.warnings || [];
+              throw error;
+            }
+          }
+        }
+
+        setServiceTransactionStatus('Refreshing authoritative settings…');
+        await refreshSettingsCacheFromDisk();
+        _svcSnapshot = captureServiceSettingsSnapshot();
+        syncServiceSettingsControls();
+        updatePauseIndicator();
+        updateExperimentalVisibility();
+        updateBootStatusLineFromCache();
+        setServiceSettingsBusy(false);
+        markSvcSettingsDirty();
+        setServiceTransactionStatus('Settings Saved!', 'success');
+      } catch (error) {
+        try { await refreshSettingsCacheFromDisk(); } catch (_) {}
+        if (CURRENT_SETTINGS_CACHE) {
+          _svcSnapshot = captureServiceSettingsSnapshot();
+          syncServiceSettingsControls();
+        }
+        updatePauseIndicator();
+        updateExperimentalVisibility();
+        updateBootStatusLineFromCache();
+        const warningText = error.warnings && error.warnings.length ? ' ' + error.warnings.join(' ') : '';
+        setServiceTransactionStatus((error.message || 'Settings transaction failed.') + warningText, error.partial ? 'warning' : 'error');
+        setServiceSettingsBusy(false);
+        markSvcSettingsDirty();
+      } finally {
+        startPolling();
+      }
+    }
+
+    async function refreshServiceStatus(btn) {
+      const statusLine = document.getElementById('svcBootStatusLine');
+      const detail     = document.getElementById('svcStatusDetail');
+      if (statusLine) { statusLine.textContent = 'Boot service: checking…'; statusLine.style.color = '#aaa'; }
+      if (detail)     { detail.style.display = 'none'; detail.innerHTML = ''; }
+
+      // Snapshot the current ts before triggering so we can detect when the
+      // new file has been written (ts changed = fresh data).
+      let _prevTs = '';
+      try {
+        const _pr = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
+          { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
+        if (_pr.ok) { const _pd = await _pr.json(); _prevTs = _pd.ts || ''; }
+      } catch (_) {}
+
+      // Fire the check action — full output still goes to CLI log as before
+      triggerAction('checkservice_vlanmgr', btn, 'Service Status');
+
+      // Poll until the file has a new ts (max 20s, 1s interval)
+      const _deadline = Date.now() + 20000;
+      let data = null;
+      while (Date.now() < _deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        try {
+          const _r = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
+            { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
+          if (_r.ok) {
+            const _d = await _r.json();
+            if (_d.ts && _d.ts !== _prevTs) { data = _d; break; }
+          }
+        } catch (_) {}
+      }
+
+      if (data) {
+        if (statusLine && data.main) {
+          const bootOn = data.main.boot === 'enabled';
+          statusLine.textContent = 'Boot service: ' + (bootOn ? '\u25CF enabled' : '\u25CB disabled');
+          statusLine.style.color = bootOn ? '#4caf50' : '#aaa';
+        }
+        if (detail) {
+          _svcLastStatusData = data;
+          detail.innerHTML = renderServiceStatusHtml(data);
+          detail.style.display = '';
+        }
+      } else {
+        if (statusLine) {
+          statusLine.textContent = 'Boot service: \u2014  (see CLI log)';
+          statusLine.style.color = '#aaa';
+        }
+      }
+    }
+
+    function renderServiceStatusHtml(data) {
+      function dot(val, on) {
+        return '<span class="' + (on ? 'svc-dot-on' : 'svc-dot-off') + '" title="' + val + '">'
+          + (on ? '\u25CF' : '\u25CB') + '\u202f' + val + '</span>';
+      }
+      function unitRow(label, ip, m) {
+        const bootOn  = m.boot  === 'enabled';
+        const addonOn = m.addon === 'active' || m.addon === 'node-on' || m.addon === 'node-custom';
+        const cronOn  = m.cron  === 'present';
+        const macOn   = m.mac   && m.mac !== 'off';
+        return '<div class="svc-status-row">'
+          + '<span class="svc-unit-label">' + label + '</span>'
+          + '<span class="svc-unit-hw">'   + (m.hw || '?') + '</span>'
+          + (ip ? '<span class="svc-unit-ip">@' + ip + '</span>' : '')
+          + dot(m.boot,  bootOn)
+          + dot(m.addon, addonOn)
+          + dot(m.cron,  cronOn)
+          + '<span class="svc-unit-mac ' + (macOn ? 'svc-dot-on' : 'svc-dot-off') + '">mac ' + (m.mac || 'off') + '</span>'
+          + '</div>';
+      }
+      let html = data.ts
+        ? '<div class="svc-status-ts">Last checked: ' + data.ts + '</div>' : '';
+      if (data.main)  html += unitRow('Main', '', data.main);
+      if (data.nodes) data.nodes.forEach(function(n, i) {
+        html += unitRow('Node' + (i + 1), n.ip, n);
+      });
+      return html;
+    }
 
 async function handleApplyClick(button) {
     const hasNodes = await checkForConfiguredNodes();
@@ -4208,7 +5618,7 @@ async function checkForConfiguredNodes() {
 
 // Run VLAN Manager locally only
 async function runVlanManagerLocal() {
-  document.getElementById('vlanManagerModal').style.display = 'none';
+  closeVlanManagerModal();
   return queueServiceAction('apply_vlanmgr', {
     description: 'Run VLAN Manager (Local Only)',
     cooldownMs: 8000
@@ -4217,7 +5627,7 @@ async function runVlanManagerLocal() {
 
 // Run VLAN Manager with nodes
 async function runVlanManagerWithNodes() {
-  document.getElementById('vlanManagerModal').style.display = 'none';
+  closeVlanManagerModal();
   return queueServiceAction('executenodes_vlanmgr', {
     description: 'Run VLAN Manager + Nodes',
     cooldownMs: 8000
@@ -4226,7 +5636,7 @@ async function runVlanManagerWithNodes() {
 
 // Run VLAN Manager with nodes
 async function runVlanManagerOnlyNodes() {
-  document.getElementById('vlanManagerModal').style.display = 'none';
+  closeVlanManagerModal();
   return queueServiceAction('executenodesonly_vlanmgr', {
     description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
@@ -4234,7 +5644,7 @@ async function runVlanManagerOnlyNodes() {
 }
 
 async function runMacRefresh() {
-  document.getElementById('vlanManagerModal').style.display = 'none';
+  closeVlanManagerModal();
   return queueServiceAction('macrefresh_vlanmgr', {
     description: 'MAC Shield Refresh',
     cooldownMs: 3000,
@@ -4269,7 +5679,7 @@ async function runMacRefresh() {
 
       if (stpToggle) stpToggle.value = flat["ENABLE_STP"] || "0";
       if (dryRunToggle) dryRunToggle.value = flat["DRY_RUN"] || "yes";
-      if (experimentalToggle) experimentalToggle.checked = flat["EXPERIMENTAL"] === "1";
+      if (experimentalToggle) experimentalToggle.value = flat["EXPERIMENTAL"] === "1" ? "1" : "0";
       if (ensToggle) ensToggle.value = flat["ENABLE_NATIVE_SSID"] || "0";
 
       const stpStatus = document.getElementById("statusENABLE_STP");
@@ -4455,7 +5865,9 @@ async function runMacRefresh() {
       out["vlanmgr_ENABLE_STP"] = document.getElementById("stpToggle").value || "0";
       out["vlanmgr_DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
-      out["vlanmgr_EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
+      out["vlanmgr_EXPERIMENTAL"] = experimentalToggle ? (experimentalToggle.value === "1" ? "1" : "0") : "0";
+      out["vlanmgr_PAUSE"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["PAUSE"]) || "off";
+      out["vlanmgr_BOOT_ENABLED"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["BOOT_ENABLED"]) || "0";
       out["vlanmgr_ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
 
       // Hardware_Override and ClientMeta keys are sent via their own scoped
@@ -4543,14 +5955,17 @@ async function runMacRefresh() {
       }
       // Ensure tables are ready before filling (handles early Load clicks)
       ensureTablesReady();
+      updateLanPortLabels(CURRENT_LAN_TARGET);
       updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
       if (hwChanged) {
         updateLanNodeButtonStates();
         updateSSIDAssignCheckboxes();
         updateLanRowVisibility(CURRENT_LAN_TARGET);
+        updateLanPortLabels(CURRENT_LAN_TARGET);
         updateLanProductIdBadge(CURRENT_LAN_TARGET);
       }
       fillFormFromSettings(CURRENT_SETTINGS_CACHE);
+      updatePauseIndicator();
       appendCliText("Loaded settings.json into the form.\n",{scroll:'force'});
       if (hwChanged) {
         appendCliText("UI refreshed: hardware values changed.\n", { scroll: "force" });
@@ -4614,7 +6029,9 @@ async function runMacRefresh() {
       flat["ENABLE_STP"] = document.getElementById("stpToggle").value || "0";
       flat["DRY_RUN"] = document.getElementById("dryRunToggle").value || "yes";
       const experimentalToggle = document.getElementById("experimentalToggle");
-      flat["EXPERIMENTAL"] = experimentalToggle && experimentalToggle.checked ? "1" : "0";
+      flat["EXPERIMENTAL"] = experimentalToggle ? (experimentalToggle.value === "1" ? "1" : "0") : "0";
+      flat["PAUSE"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["PAUSE"]) || "off";
+      flat["BOOT_ENABLED"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["BOOT_ENABLED"]) || "0";
       flat["ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
 
       // Pull Hardware_Override flat keys from settings cache into flat object
@@ -4643,6 +6060,26 @@ async function runMacRefresh() {
 const MODAL_SAFE_MARGIN = 24;
 let activeCenteredModal = null;
 let anchoredModal = null;
+let anchoredModalResizeObserver = null;
+let anchoredModalResizeFrame = 0;
+
+function observeAnchoredModal(modal) {
+  if (!modal || typeof ResizeObserver !== 'function') return;
+  if (!anchoredModalResizeObserver) {
+    anchoredModalResizeObserver = new ResizeObserver(() => {
+      if (!anchoredModal || anchoredModal.style.display === 'none') return;
+      if (anchoredModalResizeFrame) cancelAnimationFrame(anchoredModalResizeFrame);
+      anchoredModalResizeFrame = requestAnimationFrame(() => {
+        anchoredModalResizeFrame = 0;
+        if (anchoredModal && anchoredModal.style.display !== 'none') {
+          anchorModalToForm(anchoredModal);
+        }
+      });
+    });
+  }
+  anchoredModalResizeObserver.disconnect();
+  anchoredModalResizeObserver.observe(modal);
+}
 
 function centerModalOverForm(modal) {
   if (!modal) return;
@@ -4692,7 +6129,9 @@ function anchorModalToForm(modal) {
   const form = document.querySelector('.form-box--main');
   if (!form) return;
 
+  const modalChanged = anchoredModal !== modal;
   anchoredModal = modal;
+  if (modalChanged) observeAnchoredModal(modal);
 
   requestAnimationFrame(() => {
     if (anchoredModal !== modal) return;
@@ -4701,7 +6140,25 @@ function anchorModalToForm(modal) {
     const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
     const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
 
-    const anchorOffset = modal.id === 'versionModal' ? 250 : 0;
+    let anchorOffset = 0;
+    if (modal.id === 'versionModal') {
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      const visibleTop = Math.max(0, formRect.top);
+      const visibleBottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;
+      const availableHeight = Math.max(0, visibleBottom - visibleTop);
+      if (availableHeight > 0) {
+        modal.style.maxHeight = `${Math.floor(availableHeight)}px`;
+      }
+      const modalHeight = Math.min(
+        modal.offsetHeight || modal.getBoundingClientRect().height || 0,
+        availableHeight || Number.MAX_SAFE_INTEGER
+      );
+      const balancedGap = availableHeight > modalHeight ? (availableHeight - modalHeight) / 2 : 0;
+      anchorOffset = Math.max(0, visibleTop - formRect.top + balancedGap);
+    } else if (modal.id === 'vlanManagerModal') {
+      const modalHeight = modal.offsetHeight || 0;
+      anchorOffset = Math.max(0, (formRect.height - modalHeight) / 2);
+    }
     modal.classList.add('modal--anchored');
     modal.style.left = `${scrollX + formRect.left + formRect.width / 2}px`;
     modal.style.top = `${scrollY + formRect.top + anchorOffset}px`;
@@ -4709,8 +6166,14 @@ function anchorModalToForm(modal) {
 }
 
 function releaseAnchoredModal(modal) {
-  if (anchoredModal === modal) {
+  const wasAnchored = anchoredModal === modal;
+  if (wasAnchored) {
     anchoredModal = null;
+    if (anchoredModalResizeObserver) anchoredModalResizeObserver.disconnect();
+    if (anchoredModalResizeFrame) {
+      cancelAnimationFrame(anchoredModalResizeFrame);
+      anchoredModalResizeFrame = 0;
+    }
   }
   if (!modal) return;
   modal.classList.remove('modal--anchored');
@@ -4718,6 +6181,24 @@ function releaseAnchoredModal(modal) {
   modal.style.top = '';
   modal.style.transform = '';
   modal.style.position = '';
+  modal.style.maxHeight = '';
+}
+
+function positionMaintenanceConfirmationOverlay() {
+  const overlay = document.getElementById('maintenanceConfirmOverlay');
+  const form = document.querySelector('.form-box--main');
+  if (!overlay || !form) return;
+  const formRect = form.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const left = Math.max(0, formRect.left);
+  const top = Math.max(0, formRect.top);
+  const right = viewportWidth ? Math.min(viewportWidth, formRect.right) : formRect.right;
+  const bottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;
+  overlay.style.left = `${left}px`;
+  overlay.style.top = `${top}px`;
+  overlay.style.width = `${Math.max(0, right - left)}px`;
+  overlay.style.height = `${Math.max(0, bottom - top)}px`;
 }
 
 window.addEventListener('resize', () => {
@@ -4727,11 +6208,22 @@ window.addEventListener('resize', () => {
   if (anchoredModal) {
     anchorModalToForm(anchoredModal);
   }
+  const confirmationOverlay = document.getElementById('maintenanceConfirmOverlay');
+  if (confirmationOverlay && confirmationOverlay.classList.contains('is-visible')) {
+    positionMaintenanceConfirmationOverlay();
+  }
 });
 
 window.addEventListener('scroll', () => {
   if (activeCenteredModal) {
     requestAnimationFrame(() => centerModalOverForm(activeCenteredModal));
+  }
+  if (anchoredModal) {
+    anchorModalToForm(anchoredModal);
+  }
+  const confirmationOverlay = document.getElementById('maintenanceConfirmOverlay');
+  if (confirmationOverlay && confirmationOverlay.classList.contains('is-visible')) {
+    requestAnimationFrame(positionMaintenanceConfirmationOverlay);
   }
 }, { passive: true });
 
@@ -4851,16 +6343,558 @@ function showVlanManagerModal() {
   }
 
   modal.style.display = 'block';
+  anchorModalToForm(modal);
+
+  const overlay = document.getElementById('leftPanelOverlay');
+  if (overlay) {
+    overlay.classList.add('is-active');
+    overlay.style.display = 'block';
+    overlay.style.pointerEvents = 'auto';
+  }
+  const cliLatch = document.getElementById('cliLatch');
+  if (cliLatch) {
+    if (cliLatch.dataset.prevDisplay === undefined) {
+      cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
+    }
+    cliLatch.style.display = 'none';
+  }
+
   // Ensure height alignment after modal changes layout
   setTimeout(adjustClientsPanelHeight, 50);
 }
 
+function closeVlanManagerModal() {
+  const modal = document.getElementById('vlanManagerModal');
+  if (modal) {
+    modal.style.display = 'none';
+    releaseAnchoredModal(modal);
+  }
+  const overlay = document.getElementById('leftPanelOverlay');
+  if (overlay) {
+    const cliPanelEl = document.getElementById('cliPanel');
+    const keepOverlay = cliPanelEl && cliPanelEl.classList.contains('expanded');
+    if (!keepOverlay) {
+      overlay.classList.remove('is-active');
+      overlay.style.display = 'none';
+      overlay.style.pointerEvents = 'none';
+    }
+  }
+  const cliLatch = document.getElementById('cliLatch');
+  if (cliLatch) {
+    const previous = cliLatch.dataset.prevDisplay;
+    cliLatch.style.display = previous !== undefined ? previous : '';
+    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
+  }
+}
+
+
+function makeMaintenanceRequestToken() {
+  return "mvm-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+}
+
+function validateMaintenanceConfirmationInput() {
+  const input = document.getElementById("maintenanceConfirmInput");
+  const accept = document.getElementById("maintenanceConfirmAcceptBtn");
+  if (!accept) return;
+  accept.disabled = !!maintenanceConfirmationRequiredText && (!input || input.value !== maintenanceConfirmationRequiredText);
+}
+
+function settleMaintenanceConfirmation(accepted) {
+  const overlay = document.getElementById("maintenanceConfirmOverlay");
+  const input = document.getElementById("maintenanceConfirmInput");
+  if (overlay) {
+    overlay.classList.remove("is-visible");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  if (input) input.value = "";
+  maintenanceConfirmationRequiredText = "";
+  const resolve = maintenanceConfirmationResolve;
+  maintenanceConfirmationResolve = null;
+  const previousFocus = maintenanceConfirmationPreviousFocus;
+  maintenanceConfirmationPreviousFocus = null;
+  if (previousFocus && typeof previousFocus.focus === "function") {
+    try { previousFocus.focus(); } catch (_) {}
+  }
+  if (resolve) resolve(!!accepted);
+}
+
+function handleMaintenanceConfirmationKey(event) {
+  if (!event) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    settleMaintenanceConfirmation(false);
+    return;
+  }
+  if (event.key === "Enter") {
+    const accept = document.getElementById("maintenanceConfirmAcceptBtn");
+    if (accept && !accept.disabled) {
+      event.preventDefault();
+      settleMaintenanceConfirmation(true);
+    }
+  }
+}
+
+function showMaintenanceConfirmation(options) {
+  options = options || {};
+  if (maintenanceConfirmationResolve) settleMaintenanceConfirmation(false);
+  const overlay = document.getElementById("maintenanceConfirmOverlay");
+  const title = document.getElementById("maintenanceConfirmTitle");
+  const message = document.getElementById("maintenanceConfirmMessage");
+  const inputWrap = document.getElementById("maintenanceConfirmInputWrap");
+  const inputLabel = document.getElementById("maintenanceConfirmInputLabel");
+  const input = document.getElementById("maintenanceConfirmInput");
+  const accept = document.getElementById("maintenanceConfirmAcceptBtn");
+  if (!overlay || !title || !message || !inputWrap || !inputLabel || !input || !accept) {
+    return Promise.resolve(false);
+  }
+  maintenanceConfirmationPreviousFocus = document.activeElement;
+  maintenanceConfirmationRequiredText = String(options.requiredText || "");
+  title.textContent = options.title || "Confirm action";
+  message.textContent = options.message || "Continue with this operation?";
+  accept.textContent = options.confirmLabel || "Continue";
+  accept.classList.toggle("update-btn--warn", !!options.danger);
+  input.value = "";
+  if (maintenanceConfirmationRequiredText) {
+    inputLabel.textContent = "Type " + maintenanceConfirmationRequiredText + " to continue:";
+    inputWrap.style.display = "block";
+  } else {
+    inputLabel.textContent = "";
+    inputWrap.style.display = "none";
+  }
+  validateMaintenanceConfirmationInput();
+  positionMaintenanceConfirmationOverlay();
+  overlay.classList.add("is-visible");
+  overlay.setAttribute("aria-hidden", "false");
+  return new Promise(resolve => {
+    maintenanceConfirmationResolve = resolve;
+    requestAnimationFrame(() => {
+      const focusTarget = maintenanceConfirmationRequiredText ? input : accept;
+      try { focusTarget.focus(); } catch (_) {}
+    });
+  });
+}
+
+function setMaintenanceStatus(message, state) {
+  const el = document.getElementById("maintenanceStatus");
+  if (!el) return;
+  const nextMessage = message || "";
+  const changed = el.textContent !== nextMessage;
+  el.textContent = nextMessage;
+  el.classList.remove("is-success", "is-warning", "is-error");
+  if (state) el.classList.add("is-" + state);
+  if (changed) {
+    const modal = document.getElementById("versionModal");
+    if (modal && modal.style.display !== "none") anchorModalToForm(modal);
+  }
+}
+
+function stopMaintenancePolling() {
+  if (maintenancePollTimer) {
+    clearInterval(maintenancePollTimer);
+    maintenancePollTimer = null;
+  }
+  if (maintenanceTimeoutTimer) {
+    clearTimeout(maintenanceTimeoutTimer);
+    maintenanceTimeoutTimer = null;
+  }
+  if (maintenanceStartTimeoutTimer) {
+    clearTimeout(maintenanceStartTimeoutTimer);
+    maintenanceStartTimeoutTimer = null;
+  }
+}
+
+function setMaintenanceBusy(busy) {
+  isUpdateInProgress = !!busy;
+  ["versionUpdateTab", "versionRestoreTab", "refreshBackupsBtn", "restoreSelectedBtn",
+   "deleteSelectedBackupBtn", "createManualBackupBtn", "deleteAllBackupsBtn", "manualBackupTag",
+   "undoRestoreBtn", "undoUpdateBtn", "clearLogsBeforeUpdate"]
+    .forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (busy) {
+        el.dataset.maintenanceDisabled = el.disabled ? "1" : "0";
+        el.disabled = true;
+      } else if (el.dataset.maintenanceDisabled === "0") {
+        el.disabled = false;
+        delete el.dataset.maintenanceDisabled;
+      } else {
+        delete el.dataset.maintenanceDisabled;
+      }
+    });
+  if (!busy) {
+    updateBackupActionState();
+    validateManualBackupTag();
+  }
+}
+
+function selectVersionModalTab(tab) {
+  if (isUpdateInProgress) return;
+  if (tab === "restore" && updateFlowLocksControls(updateFlowState)) return;
+  const restore = tab === "restore";
+  const updatePanel = document.getElementById("versionUpdatePanel");
+  const restorePanel = document.getElementById("versionRestorePanel");
+  const updateTab = document.getElementById("versionUpdateTab");
+  const restoreTab = document.getElementById("versionRestoreTab");
+  const actions = document.getElementById("updateModalActions");
+  if (updatePanel) updatePanel.style.display = restore ? "none" : "block";
+  if (restorePanel) restorePanel.style.display = restore ? "block" : "none";
+  if (actions) actions.style.display = restore ? "none" : "flex";
+  if (updateTab) {
+    updateTab.classList.toggle("is-active", !restore);
+    updateTab.setAttribute("aria-selected", restore ? "false" : "true");
+  }
+  if (restoreTab) {
+    restoreTab.classList.toggle("is-active", restore);
+    restoreTab.setAttribute("aria-selected", restore ? "true" : "false");
+  }
+  const versionModal = document.getElementById("versionModal");
+  if (versionModal) versionModal.classList.toggle("version-modal--restore", restore);
+  if (versionModal && versionModal.style.display !== "none") {
+    anchorModalToForm(versionModal);
+  }
+  if (restore && !backupInventoryData) refreshBackupInventory(document.getElementById("refreshBackupsBtn"));
+}
+
+function formatBackupSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+}
+
+function renderManagedStorage(storage) {
+  const heading = document.getElementById("managedStorageHeading");
+  const rows = document.getElementById("managedStorageRows");
+  if (!rows) return;
+  rows.textContent = "";
+
+  function appendRow(label, metric) {
+    const row = document.createElement("div");
+    row.className = "backup-storage-row";
+    row.textContent = label + ": " + formatBackupSize(metric && metric.used_bytes) +
+      " used · " + formatBackupSize(metric && metric.available_bytes) + " free";
+    rows.appendChild(row);
+  }
+
+  const managed = storage && storage.managed;
+  if (managed && managed.jffs) {
+    if (heading) heading.textContent = "MerVLAN storage use";
+    appendRow("JFFS", managed.jffs);
+    if (managed.ram && managed.ram.combined === true) {
+      appendRow("RAM", managed.ram);
+    } else {
+      appendRow("/tmp", managed.tmp || {});
+      appendRow("/www", managed.www || {});
+    }
+    return;
+  }
+
+  // Mixed-version fallback while an older backend is still publishing the
+  // original backup-only inventory shape.
+  if (heading) heading.textContent = "Backup storage use";
+  appendRow("Backup files (JFFS)", storage && storage.persistent || {});
+  appendRow("Undo files (/tmp)", storage && storage.temporary || {});
+}
+
+function selectedBackupId() {
+  const selected = document.querySelector('input[name="backupSelection"]:checked');
+  return selected ? selected.value : "";
+}
+
+function updateBackupActionState() {
+  const selected = !!selectedBackupId();
+  const restoreBtn = document.getElementById("restoreSelectedBtn");
+  const deleteBtn = document.getElementById("deleteSelectedBackupBtn");
+  if (restoreBtn && !isUpdateInProgress) restoreBtn.disabled = !selected;
+  if (deleteBtn && !isUpdateInProgress) deleteBtn.disabled = !selected;
+  const undo = backupInventoryData && backupInventoryData.undo ? backupInventoryData.undo : {};
+  const undoRestoreBtn = document.getElementById("undoRestoreBtn");
+  const undoUpdateBtn = document.getElementById("undoUpdateBtn");
+  if (undoRestoreBtn && !isUpdateInProgress) undoRestoreBtn.disabled = !(undo.restore && undo.restore.available === true);
+  if (undoUpdateBtn && !isUpdateInProgress) undoUpdateBtn.disabled = !(undo.update && undo.update.available === true);
+}
+
+function renderBackupInventory(data) {
+  backupInventoryData = data && typeof data === "object" ? data : { backups: [] };
+  const list = document.getElementById("backupInventoryList");
+  const count = document.getElementById("backupCountText");
+  if (count) {
+    count.textContent = "Automatic: " + (backupInventoryData.automatic_count || 0) + "/" + (backupInventoryData.automatic_limit || 3) +
+      "   Manual: " + (backupInventoryData.manual_count || 0) + "/" + (backupInventoryData.manual_limit || 3);
+  }
+  const storage = backupInventoryData.storage || {};
+  renderManagedStorage(storage);
+  const undo = backupInventoryData.undo || {};
+  const undoRestore = undo.restore || {};
+  const undoUpdate = undo.update || {};
+  const undoRestoreStatus = document.getElementById("undoRestoreStatus");
+  const undoUpdateStatus = document.getElementById("undoUpdateStatus");
+  if (undoRestoreStatus) {
+    undoRestoreStatus.classList.toggle("is-available", undoRestore.available === true);
+    undoRestoreStatus.textContent = undoRestore.available === true
+      ? "Undo Restore: " + String(undoRestore.version || "unknown") + " · " +
+        formatBackupSize(undoRestore.size_bytes) + " · expires on reboot"
+      : "No Undo Restore file detected.";
+    undoRestoreStatus.title = undoRestore.available === true
+      ? "Created " + String(undoRestore.created || "unknown") + "; temporary archive is lost on reboot."
+      : "";
+  }
+  if (undoUpdateStatus) {
+    undoUpdateStatus.classList.toggle("is-available", undoUpdate.available === true);
+    undoUpdateStatus.textContent = undoUpdate.available === true
+      ? "Undo Update: restores " + String(undoUpdate.version || "unknown") + " · expires on reboot"
+      : "No Undo Update shortcut detected.";
+    undoUpdateStatus.title = undoUpdate.available === true
+      ? "Uses " + String(undoUpdate.backup_id || "automatic backup") + "; shortcut is lost on reboot."
+      : "";
+  }
+  if (!list) return;
+  list.textContent = "";
+  const backups = Array.isArray(backupInventoryData.backups) ? backupInventoryData.backups.slice() : [];
+  backups.sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
+  if (!backups.length) {
+    const empty = document.createElement("div");
+    empty.className = "backup-empty";
+    empty.textContent = "No backups are available.";
+    list.appendChild(empty);
+  } else {
+    backups.forEach((backup, index) => {
+      const row = document.createElement("label");
+      row.className = "backup-inventory-row";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "backupSelection";
+      radio.value = String(backup.id || "");
+      radio.addEventListener("change", updateBackupActionState);
+      const main = document.createElement("div");
+      main.className = "backup-inventory-main";
+      const title = document.createElement("div");
+      title.className = "backup-inventory-title";
+      title.textContent = backup.tag ? String(backup.tag) : String(backup.id || "Backup " + (index + 1));
+      const meta = document.createElement("div");
+      meta.className = "backup-inventory-meta";
+      const type = document.createElement("span");
+      type.className = "backup-type-badge";
+      type.textContent = String(backup.type || "backup");
+      meta.appendChild(type);
+      meta.appendChild(document.createTextNode(" · " + String(backup.version || "unknown") + " · " +
+        String(backup.created || "unknown") + " · " + formatBackupSize(backup.size_bytes)));
+      main.appendChild(title);
+      main.appendChild(meta);
+      row.appendChild(radio);
+      row.appendChild(main);
+      list.appendChild(row);
+    });
+  }
+  updateBackupActionState();
+  validateManualBackupTag();
+  const versionModal = document.getElementById("versionModal");
+  if (versionModal && versionModal.style.display !== "none") {
+    anchorModalToForm(versionModal);
+  }
+}
+
+async function fetchBackupInventoryFile() {
+  const response = await fetch(PATHS.BACKUP_INVENTORY + "?_=" + Date.now(), { cache: "no-store" });
+  if (!response.ok) throw new Error("Backup inventory is not available.");
+  const data = await response.json();
+  renderBackupInventory(data);
+  return data;
+}
+
+function submitMaintenanceThroughParent(method, token, payload) {
+  const parentWin = window.parent;
+  if (!parentWin || typeof parentWin[method] !== "function") return false;
+  const opts = { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0, target: "hidden_frame" };
+  if (payload === null || typeof payload === "undefined") return parentWin[method](token, opts);
+  return parentWin[method](token, payload, opts);
+}
+
+function startMaintenanceOperation(options) {
+  stopMaintenancePolling();
+  const token = makeMaintenanceRequestToken();
+  maintenanceRequestToken = token;
+  maintenanceRequestSeen = false;
+  const submitted = submitMaintenanceThroughParent(options.parentMethod, token, options.payload);
+  if (submitted === false) {
+    setMaintenanceStatus("The router rejected the maintenance request.", "error");
+    return false;
+  }
+  setMaintenanceBusy(true);
+  setMaintenanceStatus(options.startMessage || "Request queued…");
+  startPolling();
+  const poll = async () => {
+    try {
+      const response = await fetch(PATHS.MAINTENANCE_RESULT + "?_=" + Date.now(), { cache: "no-store" });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (result.request_token !== maintenanceRequestToken) return;
+      if (!maintenanceRequestSeen) {
+        maintenanceRequestSeen = true;
+        if (maintenanceStartTimeoutTimer) {
+          clearTimeout(maintenanceStartTimeoutTimer);
+          maintenanceStartTimeoutTimer = null;
+        }
+      }
+      if (result.state === "running") {
+        setMaintenanceStatus(result.message || "Operation running…");
+        return;
+      }
+      stopMaintenancePolling();
+      setMaintenanceBusy(false);
+      if (result.state === "success" || result.state === "partial") {
+        setMaintenanceStatus(result.message || "Operation completed.", result.state === "partial" ? "warning" : "success");
+        if (options.operation === "restore" || options.operation === "undo-restore" || options.operation === "undo-update") {
+          try { await fetchBackupInventoryFile(); } catch (_) {}
+          const refreshBtn = document.getElementById("maintenanceRefreshBtn");
+          if (refreshBtn) refreshBtn.style.display = "inline-block";
+        } else {
+          try { await fetchBackupInventoryFile(); } catch (_) {}
+          if (options.operation === "create") {
+            const input = document.getElementById("manualBackupTag");
+            if (input) input.value = "";
+          }
+        }
+      } else if (result.state === "cancelled") {
+        setMaintenanceStatus(result.message || "Operation cancelled.", "warning");
+      } else if (result.state === "busy") {
+        setMaintenanceStatus(result.message || "Another maintenance operation is running.", "warning");
+      } else {
+        setMaintenanceStatus(result.message || "Maintenance operation failed.", "error");
+      }
+      const versionModal = document.getElementById("versionModal");
+      if (versionModal && versionModal.style.display !== "none") anchorModalToForm(versionModal);
+    } catch (_) {}
+  };
+  poll();
+  maintenancePollTimer = setInterval(poll, 900);
+  maintenanceStartTimeoutTimer = setTimeout(() => {
+    if (maintenanceRequestSeen) return;
+    stopMaintenancePolling();
+    setMaintenanceBusy(false);
+    setMaintenanceStatus("The router did not start this request. Refresh the backup list and try again.", "error");
+  }, 30000);
+  maintenanceTimeoutTimer = setTimeout(() => {
+    stopMaintenancePolling();
+    setMaintenanceBusy(false);
+    setMaintenanceStatus("Operation timed out in the UI. Check the CLI log before trying again.", "warning");
+  }, (options.operation === "restore" || options.operation === "undo-restore" || options.operation === "undo-update") ? 900000 : 300000);
+  return true;
+}
+
+function refreshBackupInventory() {
+  return startMaintenanceOperation({ parentMethod: "MVM_listBackups", payload: null, operation: "inventory", startMessage: "Checking backups…" });
+}
+
+function validateManualBackupTag() {
+  const input = document.getElementById("manualBackupTag");
+  const btn = document.getElementById("createManualBackupBtn");
+  if (!input || !btn || isUpdateInProgress) return;
+  const valid = /^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$/.test(input.value.trim());
+  const manualCount = backupInventoryData ? Number(backupInventoryData.manual_count || 0) : 0;
+  const manualLimit = backupInventoryData ? Number(backupInventoryData.manual_limit || 3) : 3;
+  btn.disabled = !valid || manualCount >= manualLimit;
+}
+
+async function createManualBackup() {
+  const input = document.getElementById("manualBackupTag");
+  const tag = input ? input.value.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$/.test(tag)) {
+    setMaintenanceStatus("Enter a valid backup tag first.", "error");
+    return;
+  }
+  if (backupInventoryData && Number(backupInventoryData.manual_count || 0) >= Number(backupInventoryData.manual_limit || 3)) {
+    setMaintenanceStatus("The manual backup limit has been reached. Delete one before creating another.", "warning");
+    return;
+  }
+  const confirmed = await showMaintenanceConfirmation({
+    title: "Create Manual Backup",
+    message: "Create a manual backup tagged \"" + tag + "\"?",
+    confirmLabel: "Create Backup"
+  });
+  if (!confirmed) return;
+  startMaintenanceOperation({ parentMethod: "MVM_createBackup", payload: tag, operation: "create", startMessage: "Creating manual backup…" });
+}
+
+async function restoreSelectedBackup() {
+  const id = selectedBackupId();
+  if (!id) return;
+  const confirmed = await showMaintenanceConfirmation({
+    title: "Restore Backup",
+    message: "Restore \"" + id + "\"?\n\nThis replaces the current MerVLAN installation and settings.",
+    confirmLabel: "Restore Backup",
+    danger: true
+  });
+  if (!confirmed) return;
+  startMaintenanceOperation({ parentMethod: "MVM_restoreBackup", payload: id, operation: "restore", startMessage: "Preparing restore…" });
+}
+
+async function deleteSelectedBackup() {
+  const id = selectedBackupId();
+  if (!id) return;
+  const confirmed = await showMaintenanceConfirmation({
+    title: "Delete Backup",
+    message: "Permanently delete \"" + id + "\"?\n\nThis cannot be undone.",
+    confirmLabel: "Delete Backup",
+    danger: true
+  });
+  if (!confirmed) return;
+  startMaintenanceOperation({ parentMethod: "MVM_deleteBackup", payload: id, operation: "delete", startMessage: "Deleting selected backup…" });
+}
+
+async function deleteAllBackups() {
+  const confirmed = await showMaintenanceConfirmation({
+    title: "Delete All Backups",
+    message: "This permanently deletes every persistent MerVLAN backup and clears Undo Update.\n\nThe temporary Undo Restore file in /tmp is retained. This cannot be undone.",
+    confirmLabel: "Delete All Backups",
+    requiredText: "DELETE ALL",
+    danger: true
+  });
+  if (!confirmed) return;
+  startMaintenanceOperation({ parentMethod: "MVM_deleteAllBackups", payload: null, operation: "delete-all", startMessage: "Deleting all backups…" });
+}
+
+async function undoLastRestore() {
+  const undo = backupInventoryData && backupInventoryData.undo && backupInventoryData.undo.restore;
+  if (!undo || undo.available !== true) {
+    setMaintenanceStatus("No temporary Undo Restore file is available.", "warning");
+    return;
+  }
+  const confirmed = await showMaintenanceConfirmation({
+    title: "Undo Last Restore",
+    message: "Restore the installation that was active before the last restore?\n\nThe temporary Undo Restore file is consumed after success.",
+    confirmLabel: "Undo Restore",
+    danger: true
+  });
+  if (!confirmed) return;
+  startMaintenanceOperation({ parentMethod: "MVM_undoRestore", payload: null, operation: "undo-restore", startMessage: "Preparing Undo Restore…" });
+}
+
+async function undoLastUpdate() {
+  const undo = backupInventoryData && backupInventoryData.undo && backupInventoryData.undo.update;
+  if (!undo || undo.available !== true) {
+    setMaintenanceStatus("No temporary Undo Update shortcut is available.", "warning");
+    return;
+  }
+  const confirmed = await showMaintenanceConfirmation({
+    title: "Undo Last Update",
+    message: "Restore the automatic backup from immediately before the last update?\n\nThe temporary Undo Update shortcut is consumed after success.",
+    confirmLabel: "Undo Update",
+    danger: true
+  });
+  if (!confirmed) return;
+  startMaintenanceOperation({ parentMethod: "MVM_undoUpdate", payload: null, operation: "undo-update", startMessage: "Preparing Undo Update…" });
+}
 
 function openVersionModal() {
   const modal = document.getElementById("versionModal");
   if (!modal) return;
+  const retainedUpdateFlowState = updateFlowState;
+  settleMaintenanceConfirmation(false);
+  modal.scrollTop = 0;
 
   const overlay = document.getElementById("leftPanelOverlay");
+  const cliLatch = document.getElementById("cliLatch");
   const current = getIndexHtmlVersion();
   const currentText = document.getElementById("currentVersionText");
   if (currentText) {
@@ -4870,10 +6904,40 @@ function openVersionModal() {
   isUpdateInProgress = false;
   stopUpdateSpinner("");
   stopUpdateLogPolling();
+  stopMaintenancePolling();
+  maintenanceRequestToken = "";
+  maintenanceRequestSeen = false;
+  backupInventoryData = null;
+  setMaintenanceStatus("");
+  const maintenanceRefreshBtn = document.getElementById("maintenanceRefreshBtn");
+  if (maintenanceRefreshBtn) maintenanceRefreshBtn.style.display = "none";
+  const backupList = document.getElementById("backupInventoryList");
+  if (backupList) backupList.innerHTML = '<div class="backup-empty">Select Check Backups to load restore points.</div>';
+  const backupCount = document.getElementById("backupCountText");
+  if (backupCount) backupCount.textContent = "Automatic: 0/3   Manual: 0/3";
+  const storageHeading = document.getElementById("managedStorageHeading");
+  if (storageHeading) storageHeading.textContent = "MerVLAN storage use";
+  const storageRows = document.getElementById("managedStorageRows");
+  if (storageRows) storageRows.innerHTML = '<div class="backup-storage-row">JFFS: checking…</div><div class="backup-storage-row">RAM: checking…</div>';
+  const undoRestoreStatus = document.getElementById("undoRestoreStatus");
+  if (undoRestoreStatus) {
+    undoRestoreStatus.textContent = "No Undo Restore file detected.";
+    undoRestoreStatus.classList.remove("is-available");
+  }
+  const undoUpdateStatus = document.getElementById("undoUpdateStatus");
+  if (undoUpdateStatus) {
+    undoUpdateStatus.textContent = "No Undo Update shortcut detected.";
+    undoUpdateStatus.classList.remove("is-available");
+  }
+  const manualTag = document.getElementById("manualBackupTag");
+  if (manualTag) manualTag.value = "";
+  setMaintenanceBusy(false);
+  selectVersionModalTab("update");
   showUpdateLogSection(false);
   const logLineEl = document.getElementById("updateLogLine");
   if (logLineEl) {
     logLineEl.textContent = "";
+    logLineEl.style.display = "block";
     logLineEl.classList.remove("update-log-line--success", "update-log-line--error");
   }
 
@@ -4884,16 +6948,78 @@ function openVersionModal() {
   if (detailsSection) detailsSection.style.display = "none";
   if (runUpdateBtn) {
     runUpdateBtn.style.display = "none";
+    runUpdateBtn.textContent = "Update now";
+    runUpdateBtn.disabled = false;
+    runUpdateBtn.classList.remove("update-action--busy");
+    runUpdateBtn.removeAttribute("aria-busy");
+    runUpdateBtn.classList.remove("update-btn--warn");
     runUpdateBtn.removeAttribute("data-channel");
     runUpdateBtn.removeAttribute("data-latest");
+    runUpdateBtn.removeAttribute("data-ref");
   }
+  updateActionIdleText = "Update now";
+  updateActionIdleDisplay = "none";
+
+  const releaseSelectSection = document.getElementById("releaseSelectSection");
+  if (releaseSelectSection) releaseSelectSection.style.display = "none";
+  const customBranchSection = document.getElementById("customBranchSection");
+  if (customBranchSection) customBranchSection.style.display = "none";
+  const customBranchInput = document.getElementById("customBranchInput");
+  if (customBranchInput) customBranchInput.value = "";
+  _customBranchCheckSequence += 1;
+  if (_customBranchCheckTimer) {
+    clearTimeout(_customBranchCheckTimer);
+    _customBranchCheckTimer = null;
+  }
+  const changelogToggleSection = document.getElementById("changelogToggleSection");
+  if (changelogToggleSection) changelogToggleSection.style.display = "none";
+  const changelogSection = document.getElementById("changelogSection");
+  if (changelogSection) changelogSection.style.display = "none";
+  const toggleChangelogBtn = document.getElementById("toggleChangelogBtn");
+  if (toggleChangelogBtn) toggleChangelogBtn.textContent = "Show Changelog";
+  const downgradeWarn = document.getElementById("downgradeWarning");
+  if (downgradeWarn) downgradeWarn.style.display = "none";
+  const exitWarning = document.getElementById("updateExitWarning");
+  if (exitWarning) exitWarning.style.display = "none";
+  const completeMsg = document.getElementById("updateCompleteMessage");
+  if (completeMsg) {
+    completeMsg.textContent = "Update complete — please refresh your browser to load the new version.";
+    completeMsg.style.display = "none";
+  }
+  const refreshNowBtn = document.getElementById("refreshNowBtn");
+  if (refreshNowBtn) refreshNowBtn.style.display = "none";
 
   const channelSelect = document.getElementById("versionChannelSelect");
   if (channelSelect) {
     channelSelect.value = "main";
   }
+  const clearLogsBeforeUpdate = document.getElementById("clearLogsBeforeUpdate");
+  if (clearLogsBeforeUpdate) clearLogsBeforeUpdate.checked = false;
+  updateChannelCapabilityHint("main");
 
   modal.style.display = "block";
+  if (retainedUpdateFlowState === "success") {
+    setUpdateFlowState("success");
+    setUpdateStatus("Update completed", "#7bd77b");
+    showUpdateLogSection(true);
+    showUpdateLogViewer(false);
+    if (completeMsg) {
+      completeMsg.textContent = "Update complete \u2014 refresh your browser to load the new version.";
+      completeMsg.style.display = "block";
+    }
+  } else if (retainedUpdateFlowState === "detached" || retainedUpdateFlowState === "timeout") {
+    setUpdateFlowState(retainedUpdateFlowState);
+    setUpdateStatus("Continue monitoring from INFO", "#ffaa6b");
+    showUpdateLogSection(true);
+    if (logLineEl) {
+      logLineEl.textContent = retainedUpdateFlowState === "timeout"
+        ? "Live progress timed out \u2014 the update may still be running. Continue monitoring it from the INFO tab."
+        : "Live progress was closed. The update continues in the background; monitor it from the INFO tab.";
+      logLineEl.classList.remove("update-log-line--success", "update-log-line--error");
+    }
+  } else {
+    setUpdateFlowState("idle");
+  }
   anchorModalToForm(modal);
 
   if (overlay) {
@@ -4901,25 +7027,58 @@ function openVersionModal() {
     overlay.style.display = "block";
     overlay.style.pointerEvents = "auto";
   }
+  if (cliLatch) {
+    if (cliLatch.dataset.prevDisplay === undefined) {
+      cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
+    }
+    cliLatch.style.display = "none";
+  }
 }
 
 function closeVersionModal() {
+  if (isUpdateInProgress) {
+    const exitWarning = document.getElementById("updateExitWarning");
+    const exitWarningText = document.getElementById("updateExitWarningText");
+    if (exitWarningText) {
+      exitWarningText.textContent = updateFlowState === "checking" || updateFlowState === "running"
+        ? "Update in progress. Exiting will not stop the update, but you will lose automated progress tracking in this window. Check the progress from the INFO tab and refresh the UI (F5) upon success."
+        : "A maintenance operation is in progress. Exiting will not stop it, but live progress in this window will be lost.";
+    }
+    if (exitWarning) {
+      exitWarning.style.display = "block";
+      return;
+    }
+  }
+  settleMaintenanceConfirmation(false);
+
   const modal = document.getElementById("versionModal");
   const overlay = document.getElementById("leftPanelOverlay");
+  const cliLatch = document.getElementById("cliLatch");
 
   if (modal) {
     modal.style.display = "none";
     releaseAnchoredModal(modal);
   }
   if (overlay) {
-    overlay.classList.remove("is-active");
-    overlay.style.display = "none";
-    overlay.style.pointerEvents = "none";
+    const cliPanel = document.getElementById("cliPanel");
+    const keepOverlay = cliPanel && cliPanel.classList.contains("expanded");
+    if (!keepOverlay) {
+      overlay.classList.remove("is-active");
+      overlay.style.display = "none";
+      overlay.style.pointerEvents = "none";
+    }
+  }
+  if (cliLatch) {
+    const previous = cliLatch.dataset.prevDisplay;
+    cliLatch.style.display = previous !== undefined ? previous : "";
+    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
   }
 
   isUpdateInProgress = false;
   stopUpdateSpinner("");
   stopUpdateLogPolling();
+  stopMaintenancePolling();
+  maintenanceRequestToken = "";
   showUpdateLogSection(false);
 }
 
@@ -5461,49 +7620,125 @@ async function refreshHwProfile() {
 async function checkForUpdates() {
   const statusEl = document.getElementById("updateStatusText");
   const detailsSection = document.getElementById("updateDetailsSection");
-  const latestVerEl = document.getElementById("latestVersionText");
   const comparisonEl = document.getElementById("updateComparisonText");
-  const channelLabel = document.getElementById("latestChannelLabel");
+  const downgradeWarn = document.getElementById("downgradeWarning");
   const runUpdateBtn = document.getElementById("runUpdateBtn");
   const channelSelect = document.getElementById("versionChannelSelect");
   const checkBtn = document.getElementById("checkUpdateBtn");
+  const releaseSelectSection = document.getElementById("releaseSelectSection");
+  const changelogToggleSection = document.getElementById("changelogToggleSection");
 
-  if (!statusEl || !detailsSection || !latestVerEl || !comparisonEl || !channelLabel || !runUpdateBtn || !channelSelect || !checkBtn) {
-    return;
-  }
+  if (!statusEl || !detailsSection || !comparisonEl || !runUpdateBtn || !channelSelect || !checkBtn) return;
 
-  const channel = channelSelect.value === "dev" ? "dev" : "main";
+  const channel = channelSelect.value || "main";
   const current = getIndexHtmlVersion() || "0.0";
 
   statusEl.textContent = "Checking...";
   detailsSection.style.display = "none";
   runUpdateBtn.style.display = "none";
+  if (releaseSelectSection) releaseSelectSection.style.display = "none";
+  if (changelogToggleSection) changelogToggleSection.style.display = "none";
+  hideChangelogDisplay();
   checkBtn.disabled = true;
 
   try {
-    const latest = await fetchLatestVersionFromChangelog(channel);
-    const cmp = compareVersions(latest, current);
+    if (channel === "custom") {
+      const customBranchSection = document.getElementById("customBranchSection");
+      const customBranchInput = document.getElementById("customBranchInput");
+      if (customBranchSection) customBranchSection.style.display = "block";
+      if (detailsSection) detailsSection.style.display = "block";
+      if (comparisonEl) comparisonEl.textContent = "Enter a branch name, then click Install branch.";
+      if (customBranchInput) customBranchInput.focus();
+      statusEl.textContent = "";
+    } else if (channel === "main") {
+      const releases = await fetchReleasesFromAPI();
+      if (!releases || releases.length === 0) throw new Error("No releases found");
 
-    latestVerEl.textContent = "v" + latest;
-    channelLabel.textContent = channel;
+      populateReleaseDropdown(releases);
+      if (releaseSelectSection) releaseSelectSection.style.display = "block";
+      if (changelogToggleSection) changelogToggleSection.style.display = "block";
 
-    if (cmp > 0) {
-      comparisonEl.textContent = `A newer version is available (${latest} > ${current}).`;
-      runUpdateBtn.style.display = "inline-block";
-      runUpdateBtn.dataset.channel = channel;
+      const newest = releases[0];
+      updateReleaseComparison(newest.tag, current, runUpdateBtn, comparisonEl, downgradeWarn, detailsSection);
+    } else if (channel === "main_direct") {
+      const latest = await fetchLatestVersionFromChangelog("main");
+      const currentIsDev = current.endsWith("-dev");
+      const cmp = compareVersions(latest, current);
+      runUpdateBtn.dataset.channel = "main_direct";
+      runUpdateBtn.dataset.ref = "main";
       runUpdateBtn.dataset.latest = latest;
-    } else if (cmp === 0) {
-      comparisonEl.textContent = `You are already on the latest version (${current}).`;
-      runUpdateBtn.style.display = "none";
+
+      if (cmp > 0) {
+        comparisonEl.textContent = `Update available: v${current} \u2192 ${latest}`;
+        runUpdateBtn.textContent = "Update now";
+        runUpdateBtn.classList.remove("update-btn--warn");
+        runUpdateBtn.style.display = "inline-block";
+        if (downgradeWarn) downgradeWarn.style.display = "none";
+      } else if (cmp === 0 && currentIsDev) {
+        comparisonEl.textContent = `${latest} \u2014 switching from dev to stable build.`;
+        runUpdateBtn.textContent = "Switch to Stable";
+        runUpdateBtn.classList.remove("update-btn--warn");
+        runUpdateBtn.style.display = "inline-block";
+        if (downgradeWarn) downgradeWarn.style.display = "none";
+      } else if (cmp < 0) {
+        comparisonEl.textContent = currentIsDev
+          ? `Your dev build (v${current}) is ahead of the latest stable (${latest}). You can still switch to stable.`
+          : `The latest stable (${latest}) is older than your current install (v${current}).`;
+        runUpdateBtn.textContent = currentIsDev ? "Switch to Stable" : "Install anyway";
+        runUpdateBtn.classList.add("update-btn--warn");
+        runUpdateBtn.style.display = "inline-block";
+        if (downgradeWarn) downgradeWarn.style.display = "block";
+      } else {
+        // cmp === 0 and the current install is already stable
+        comparisonEl.textContent = `You are on the latest stable release (v${latest}).`;
+        runUpdateBtn.style.display = "none";
+        if (downgradeWarn) downgradeWarn.style.display = "none";
+      }
+      detailsSection.style.display = "block";
+      if (changelogToggleSection) changelogToggleSection.style.display = "block";
     } else {
-      comparisonEl.textContent = `Local UI (${current}) is newer than changelog (${latest}).`;
-      runUpdateBtn.style.display = "none";
+      const latest = await fetchLatestVersionFromChangelog("dev");
+      const currentIsDev = current.endsWith("-dev");
+      const cmp = compareVersions(latest, current);
+      runUpdateBtn.dataset.channel = "dev";
+      runUpdateBtn.dataset.ref = "dev";
+      runUpdateBtn.dataset.latest = latest;
+
+      if (cmp > 0) {
+        comparisonEl.textContent = `A newer version is available on dev (${latest} > ${current}).`;
+        runUpdateBtn.textContent = "Update now";
+        runUpdateBtn.classList.remove("update-btn--warn");
+        runUpdateBtn.style.display = "inline-block";
+        if (downgradeWarn) downgradeWarn.style.display = "none";
+      } else if (cmp === 0 && !currentIsDev) {
+        comparisonEl.textContent = `${latest} \u2014 switching from stable to dev build.`;
+        runUpdateBtn.textContent = "Switch to Dev";
+        runUpdateBtn.classList.remove("update-btn--warn");
+        runUpdateBtn.style.display = "inline-block";
+        if (downgradeWarn) downgradeWarn.style.display = "none";
+      } else if (cmp === 0) {
+        comparisonEl.textContent = `You are already on the latest dev version (${current}).`;
+        runUpdateBtn.style.display = "none";
+        if (downgradeWarn) downgradeWarn.style.display = "none";
+      } else {
+        comparisonEl.textContent = `Your installed build (v${current}) is ahead of the dev channel (${latest}). You can still switch to dev.`;
+        runUpdateBtn.textContent = "Install anyway";
+        runUpdateBtn.classList.add("update-btn--warn");
+        runUpdateBtn.style.display = "inline-block";
+        if (downgradeWarn) downgradeWarn.style.display = "block";
+      }
+      detailsSection.style.display = "block";
+      if (changelogToggleSection) changelogToggleSection.style.display = "block";
     }
 
-    detailsSection.style.display = "block";
     statusEl.textContent = "";
   } catch (err) {
-    statusEl.textContent = "Error checking updates: " + err.message;
+    let errMsg = "Error: " + err.message;
+    if (channel === "main") {
+      errMsg += " \u2014 try \u201cStable (latest only)\u201d to install the newest version without version selection.";
+    }
+    statusEl.textContent = errMsg;
+    statusEl.style.color = "";
     detailsSection.style.display = "none";
     runUpdateBtn.style.display = "none";
   } finally {
@@ -5511,25 +7746,428 @@ async function checkForUpdates() {
   }
 }
 
-function runUpdateFromModal(buttonEl) {
+// ── releases.json helpers ────────────────────────────────────────────────────
+
+let _releasesData = [];
+const _changelogCache = new Map();
+let _customBranchCheckTimer = null;
+let _customBranchCheckSequence = 0;
+
+async function fetchReleasesFromAPI() {
+  const url = "https://api.github.com/repos/r80xcore/mervlan/releases?per_page=5";
+  const resp = await fetch(url, { headers: { "Accept": "application/vnd.github+json" } });
+  if (resp.status === 403) throw new Error("GitHub API rate limit reached \u2014 try again shortly.");
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  const data = await resp.json();
+  if (!Array.isArray(data)) throw new Error("Unexpected API response format");
+  return data.map(r => ({
+    tag: r.tag_name,
+    date: r.published_at ? r.published_at.slice(0, 10) : "",
+    changelog: r.body || ""
+  }));
+}
+
+async function fetchBranchChangelog(branch) {
+  const cacheKey = "cl_" + branch;
+  if (_changelogCache.has(cacheKey)) return _changelogCache.get(cacheKey);
+  const url = "https://raw.githubusercontent.com/r80xcore/mervlan/" + branch + "/changelog.txt?_=" + Date.now();
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  const text = await resp.text();
+  const endIdx = text.indexOf("END OF CURRENT CHANGELOG");
+  const content = endIdx >= 0 ? text.slice(0, endIdx).trimEnd() : text.trimEnd();
+  _changelogCache.set(cacheKey, content);
+  return content;
+}
+
+async function fetchDevChangelog() {
+  return fetchBranchChangelog("dev");
+}
+
+function populateReleaseDropdown(releases) {
+  _releasesData = releases;
+  const releaseSelect = document.getElementById("releaseSelect");
+  if (!releaseSelect) return;
+  releaseSelect.innerHTML = "";
+  releases.forEach(r => {
+    const opt = document.createElement("option");
+    opt.value = r.tag;
+    opt.textContent = r.tag + (r.date ? "  \u2014  " + r.date : "");
+    releaseSelect.appendChild(opt);
+  });
+}
+
+function updateReleaseComparison(tagName, current, runUpdateBtn, comparisonEl, downgradeWarn, detailsSection) {
+  const ver = normalizeVersionString(tagName);
+  const currentIsDev = (current || "").endsWith("-dev");
+  const cmp = compareVersions(ver, current);
+  const ref = "refs/tags/" + tagName;
+
+  if (cmp > 0) {
+    if (comparisonEl) comparisonEl.textContent = `Update available: v${current} \u2192 ${tagName}`;
+    if (downgradeWarn) downgradeWarn.style.display = "none";
+    if (runUpdateBtn) {
+      runUpdateBtn.textContent = "Update now";
+      runUpdateBtn.classList.remove("update-btn--warn");
+      runUpdateBtn.style.display = "inline-block";
+      runUpdateBtn.dataset.channel = "main";
+      runUpdateBtn.dataset.ref = ref;
+      runUpdateBtn.dataset.latest = ver;
+    }
+  } else if (cmp === 0 && currentIsDev) {
+    if (comparisonEl) comparisonEl.textContent = `${tagName} \u2014 switching from dev to stable build.`;
+    if (downgradeWarn) downgradeWarn.style.display = "none";
+    if (runUpdateBtn) {
+      runUpdateBtn.textContent = "Switch to Stable";
+      runUpdateBtn.classList.remove("update-btn--warn");
+      runUpdateBtn.style.display = "inline-block";
+      runUpdateBtn.dataset.channel = "main";
+      runUpdateBtn.dataset.ref = ref;
+      runUpdateBtn.dataset.latest = ver;
+    }
+  } else if (cmp === 0) {
+    if (comparisonEl) comparisonEl.textContent = `${tagName} is already installed.`;
+    if (downgradeWarn) downgradeWarn.style.display = "none";
+    if (runUpdateBtn) runUpdateBtn.style.display = "none";
+  } else {
+    if (comparisonEl) {
+      const stableTarget = _releasesData.length && _releasesData[0].tag === tagName
+        ? "latest stable"
+        : "selected stable release";
+      comparisonEl.textContent = currentIsDev
+        ? `Your dev build (v${current}) is ahead of the ${stableTarget} (${ver}). You can still switch to stable.`
+        : `${tagName} is older than your current install (v${current}).`;
+    }
+    if (downgradeWarn) downgradeWarn.style.display = "block";
+    if (runUpdateBtn) {
+      runUpdateBtn.textContent = currentIsDev ? "Switch to Stable" : "Install anyway";
+      runUpdateBtn.classList.add("update-btn--warn");
+      runUpdateBtn.style.display = "inline-block";
+      runUpdateBtn.dataset.channel = "main";
+      runUpdateBtn.dataset.ref = ref;
+      runUpdateBtn.dataset.latest = ver;
+    }
+  }
+
+  if (detailsSection) detailsSection.style.display = "block";
+}
+
+function onReleaseSelectChange() {
+  const current = getIndexHtmlVersion() || "0.0";
+  const releaseSelect = document.getElementById("releaseSelect");
+  if (!releaseSelect) return;
+  const selectedTag = releaseSelect.value;
+  const customBranchSection = document.getElementById("customBranchSection");
+  const customBranchInput = document.getElementById("customBranchInput");
+  const changelogToggleSection = document.getElementById("changelogToggleSection");
+  const runUpdateBtn = document.getElementById("runUpdateBtn");
+  const comparisonEl = document.getElementById("updateComparisonText");
+  const downgradeWarn = document.getElementById("downgradeWarning");
+  const detailsSection = document.getElementById("updateDetailsSection");
+
+  if (customBranchSection) customBranchSection.style.display = "none";
+  if (customBranchInput) customBranchInput.value = "";
+  if (changelogToggleSection) changelogToggleSection.style.display = "block";
+
+  updateReleaseComparison(selectedTag, current, runUpdateBtn, comparisonEl, downgradeWarn, detailsSection);
+  hideChangelogDisplay();
+  const toggleBtn = document.getElementById("toggleChangelogBtn");
+  if (toggleBtn) toggleBtn.textContent = "Show Changelog";
+}
+
+function onCustomBranchInput() {
+  const input = document.getElementById("customBranchInput");
+  const runUpdateBtn = document.getElementById("runUpdateBtn");
+  const comparisonEl = document.getElementById("updateComparisonText");
+  const downgradeWarn = document.getElementById("downgradeWarning");
+  if (!input || !runUpdateBtn) return;
+  const branch = input.value.trim();
+  const valid = branch.length > 0 &&
+    /^[a-zA-Z0-9][a-zA-Z0-9._\-\/]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(branch) &&
+    branch.indexOf("//") === -1 && branch.indexOf("..") === -1 && !branch.endsWith(".lock");
+
+  _customBranchCheckSequence += 1;
+  const checkSequence = _customBranchCheckSequence;
+  if (_customBranchCheckTimer) {
+    clearTimeout(_customBranchCheckTimer);
+    _customBranchCheckTimer = null;
+  }
+  if (downgradeWarn) downgradeWarn.style.display = "none";
+
+  if (valid) {
+    runUpdateBtn.textContent = "Install branch";
+    runUpdateBtn.classList.add("update-btn--warn");
+    runUpdateBtn.style.display = "inline-block";
+    runUpdateBtn.dataset.channel = "custom";
+    runUpdateBtn.dataset.ref = "refs/heads/" + branch;
+    runUpdateBtn.dataset.latest = branch;
+    if (comparisonEl) comparisonEl.textContent = "Checking branch version\u2026";
+
+    _customBranchCheckTimer = setTimeout(async () => {
+      try {
+        const targetVersion = await fetchLatestVersionFromChangelog(branch);
+        if (checkSequence !== _customBranchCheckSequence || input.value.trim() !== branch) return;
+        const current = getIndexHtmlVersion() || "0.0";
+        const cmp = compareVersions(targetVersion, current);
+        if (cmp < 0) {
+          if (comparisonEl) comparisonEl.textContent = `Custom branch ${branch} (${targetVersion}) is older than your current install (v${current}).`;
+          if (downgradeWarn) downgradeWarn.style.display = "block";
+        } else if (cmp > 0) {
+          if (comparisonEl) comparisonEl.textContent = `Custom branch ${branch} will update v${current} \u2192 ${targetVersion}.`;
+        } else if (comparisonEl) {
+          comparisonEl.textContent = `Custom branch ${branch} reports version ${targetVersion}.`;
+        }
+      } catch (_) {
+        if (checkSequence !== _customBranchCheckSequence || input.value.trim() !== branch) return;
+        if (comparisonEl) comparisonEl.textContent = `Custom branch ${branch} is ready to install. Its version could not be compared.`;
+      }
+    }, 400);
+  } else {
+    runUpdateBtn.style.display = "none";
+    if (comparisonEl) comparisonEl.textContent = branch ? "Enter a valid custom branch name." : "Enter a branch name, then click Install branch.";
+  }
+}
+
+function onChannelSelectChange() {
+  const channelSelectEl = document.getElementById("versionChannelSelect");
+  const selectedChannel = channelSelectEl ? channelSelectEl.value : "main";
+  updateChannelCapabilityHint(selectedChannel);
+  const detailsSection = document.getElementById("updateDetailsSection");
+  const releaseSelectSection = document.getElementById("releaseSelectSection");
+  const runUpdateBtn = document.getElementById("runUpdateBtn");
+  const changelogToggleSection = document.getElementById("changelogToggleSection");
+  const statusEl = document.getElementById("updateStatusText");
+  const downgradeWarn = document.getElementById("downgradeWarning");
+
+  if (detailsSection) detailsSection.style.display = "none";
+  if (releaseSelectSection) releaseSelectSection.style.display = "none";
+  if (runUpdateBtn) runUpdateBtn.style.display = "none";
+  if (runUpdateBtn) {
+    runUpdateBtn.removeAttribute("data-channel");
+    runUpdateBtn.removeAttribute("data-ref");
+    runUpdateBtn.removeAttribute("data-latest");
+  }
+  if (changelogToggleSection) changelogToggleSection.style.display = "none";
+  if (statusEl) { statusEl.textContent = ""; statusEl.style.color = ""; }
+  if (downgradeWarn) downgradeWarn.style.display = "none";
+  const customBranchSection = document.getElementById("customBranchSection");
+  if (customBranchSection) customBranchSection.style.display = "none";
+  const customBranchInput = document.getElementById("customBranchInput");
+  if (customBranchInput) customBranchInput.value = "";
+  _customBranchCheckSequence += 1;
+  if (_customBranchCheckTimer) {
+    clearTimeout(_customBranchCheckTimer);
+    _customBranchCheckTimer = null;
+  }
+  hideChangelogDisplay();
+  const toggleBtn = document.getElementById("toggleChangelogBtn");
+  if (toggleBtn) toggleBtn.textContent = "Show Changelog";
+
+  if (selectedChannel === "custom") {
+    if (customBranchSection) customBranchSection.style.display = "block";
+    if (detailsSection) detailsSection.style.display = "block";
+    const comparisonEl = document.getElementById("updateComparisonText");
+    if (comparisonEl) comparisonEl.textContent = "Enter a branch name, then click Install branch.";
+    if (customBranchInput) setTimeout(() => customBranchInput.focus(), 50);
+  }
+}
+
+function updateChannelCapabilityHint(channel) {
+  const hint = document.getElementById("channelCapabilityHint");
+  if (!hint) return;
+  switch (channel) {
+    case "main":
+      hint.innerHTML = "Select from recent releases. Supports upgrade and downgrade.<br>Uses GitHub API \u2014 subject to rate limits.";
+      break;
+    case "main_direct":
+      hint.innerHTML = "Updates to the latest stable branch head, including an older target with a downgrade warning.<br>No API \u2014 never rate limited.";
+      break;
+    case "dev":
+      hint.innerHTML = "Installs the dev branch head, including an older target with a downgrade warning. May be unstable.<br>No API \u2014 never rate limited.";
+      break;
+    case "custom":
+      hint.innerHTML = "Installs an explicitly named GitHub branch and compares its published version when available.<br>Development use only.";
+      break;
+    default:
+      hint.textContent = "";
+  }
+}
+
+function toggleChangelogDisplay() {
+  const section = document.getElementById("changelogSection");
+  const content = document.getElementById("changelogContent");
+  const btn = document.getElementById("toggleChangelogBtn");
+  if (!section || !content || !btn) return;
+
+  if (section.style.display !== "none") {
+    section.style.display = "none";
+    btn.textContent = "Show Changelog";
+    return;
+  }
+
+  const channelSelect = document.getElementById("versionChannelSelect");
+  const channelVal = channelSelect ? channelSelect.value : "main";
+
+  if (channelVal === "main") {
+    const releaseSelect = document.getElementById("releaseSelect");
+    if (!releaseSelect) return;
+    const selectedTag = releaseSelect.value;
+    const release = _releasesData.find(r => r.tag === selectedTag);
+    const text = (release && release.changelog) ? release.changelog : "(No changelog available for this release.)";
+    content.textContent = text;
+    section.style.display = "block";
+    btn.textContent = "Hide Changelog";
+  } else {
+    // dev or main_direct: fetch changelog.txt from the respective branch
+    const branchForChangelog = channelVal === "main_direct" ? "main" : "dev";
+    btn.textContent = "Loading...";
+    btn.disabled = true;
+    fetchBranchChangelog(branchForChangelog).then(text => {
+      content.textContent = text || "(No changelog available.)";
+      section.style.display = "block";
+      btn.textContent = "Hide Changelog";
+    }).catch(err => {
+      content.textContent = "Failed to load changelog: " + err.message;
+      section.style.display = "block";
+      btn.textContent = "Hide Changelog";
+    }).finally(() => {
+      btn.disabled = false;
+    });
+  }
+}
+
+function hideChangelogDisplay() {
+  const section = document.getElementById("changelogSection");
+  if (section) section.style.display = "none";
+}
+
+function dismissUpdateExitWarning() {
+  const w = document.getElementById("updateExitWarning");
+  if (w) w.style.display = "none";
+}
+
+function forceCloseVersionModal() {
+  dismissUpdateExitWarning();
+  if (updateFlowState === "checking" || updateFlowState === "running") {
+    stopUpdateSpinner();
+    stopUpdateLogPolling();
+    setUpdateFlowState("detached");
+  } else {
+    isUpdateInProgress = false;
+  }
+  closeVersionModal();
+}
+
+function submitRefUpdateThroughParent(parentWin, ref, logPolicy) {
+  logPolicy = logPolicy === "clear" ? "clear" : "keep";
+  const payload = { vlanmgr_update_ref: ref, vlanmgr_update_log_policy: logPolicy };
+  const opts = { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 };
+
+  // New parents encode the ref into the service-event action itself, avoiding
+  // custom_settings.txt timing/persistence entirely.
+  if (parentWin && typeof parentWin.MVM_updateRef === "function") {
+    return parentWin.MVM_updateRef(ref, logPolicy, opts);
+  }
+  // Compatibility fallback for older parent pages.
+  if (parentWin && typeof parentWin.MVM_exec === "function") {
+    return parentWin.MVM_exec("updatedev_vlanmgr", payload, opts);
+  }
+  if (parentWin && typeof parentWin.MVM_updateRelease === "function") {
+    return parentWin.MVM_updateRelease(ref, opts);
+  }
+  return false;
+}
+
+async function runUpdateFromModal(buttonEl) {
   if (!buttonEl) return;
 
-  const channel = buttonEl.dataset.channel === "dev" ? "dev" : "main";
-  const latest = buttonEl.dataset.latest || "";
-  const actionName = channel === "dev" ? "updatedev_vlanmgr" : "update_vlanmgr";
-  const desc = channel === "dev"
-    ? `Update MerVLAN (development channel${latest ? " → v" + latest : ""})`
-    : `Update MerVLAN (stable channel${latest ? " → v" + latest : ""})`;
+  const selectedChannelEl = document.getElementById("versionChannelSelect");
+  const selectedChannel = selectedChannelEl ? selectedChannelEl.value : "";
+  let channel = buttonEl.dataset.channel;
+  let ref = buttonEl.dataset.ref || "";
+  let latest = buttonEl.dataset.latest || "";
+  const clearLogsEl = document.getElementById("clearLogsBeforeUpdate");
+  const logPolicy = clearLogsEl && clearLogsEl.checked ? "clear" : "keep";
 
-  isUpdateInProgress = true;
-  startUpdateSpinner();
-  startUpdateLogPolling();
+  // Custom targets are derived from the live controls at click time. Never
+  // trust release metadata that may remain on the shared button.
+  if (selectedChannel === "custom") {
+    const branchInput = document.getElementById("customBranchInput");
+    const branch = branchInput ? branchInput.value.trim() : "";
+    const valid = branch.length > 0 &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._\-\/]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(branch) &&
+      branch.indexOf("//") === -1 && branch.indexOf("..") === -1 && !branch.endsWith(".lock");
+    if (!valid) {
+      const statusEl = document.getElementById("updateStatusText");
+      if (statusEl) { statusEl.textContent = "Enter a valid custom branch name."; statusEl.style.color = "#ff8a8a"; }
+      return;
+    }
+    channel = "custom";
+    latest = branch;
+    ref = "refs/heads/" + branch;
+  }
 
-  queueServiceAction(actionName, {
-    button: buttonEl,
-    description: desc,
-    cooldownMs: 10000
-  });
+  // Normalize every channel to an explicit ref so the target and log policy
+  // travel in one encoded service action and cannot be reordered.
+  if (channel === "dev" || channel === "main_direct") {
+    ref = channel === "dev" ? "refs/heads/dev" : "refs/heads/main";
+  }
+
+  rememberUpdateAction(buttonEl);
+
+  // Custom branch: verify the branch exists on GitHub before triggering
+  if (channel === "custom") {
+    setUpdateFlowState("checking");
+    const statusEl = document.getElementById("updateStatusText");
+    if (statusEl) { statusEl.textContent = "Checking branch..."; statusEl.style.color = ""; }
+    try {
+      const checkUrl = "https://raw.githubusercontent.com/r80xcore/mervlan/" + latest + "/changelog.txt?_=" + Date.now();
+      const r = await fetch(checkUrl, { method: "HEAD" });
+      if (!r.ok) {
+        if (statusEl) { statusEl.textContent = "Branch \"" + latest + "\" not found on GitHub."; statusEl.style.color = "#ff8a8a"; }
+        setUpdateFlowState("failed");
+        return;
+      }
+    } catch (e) {
+      // Network error: proceed and let the update script report the failure
+    }
+    const statusEl2 = document.getElementById("updateStatusText");
+    if (statusEl2) { statusEl2.textContent = ""; statusEl2.style.color = ""; }
+  }
+
+  const descBase = (channel === "custom" && latest)
+    ? `MerVLAN install from branch: ${latest}`
+    : `MerVLAN update to ${ref || "selected release"}`;
+  const desc = descBase + (logPolicy === "clear" ? " (clear existing logs first)" : " (keep existing logs)");
+
+  if (updateFlowState !== "detached") {
+    setUpdateFlowState("running");
+    startUpdateSpinner();
+    await startUpdateLogPolling();
+    if (updateFlowState === "detached") stopUpdateLogPolling();
+  }
+  appendCliText(`\n[${new Date().toLocaleString()}] Queued action: ${desc}\n`, { scroll: 'force' });
+
+  const parentWin = window.parent;
+  if (parentWin && (typeof parentWin.MVM_updateRef === "function" || typeof parentWin.MVM_exec === "function" || typeof parentWin.MVM_updateRelease === "function")) {
+    const submitted = submitRefUpdateThroughParent(parentWin, ref, logPolicy);
+    // Older MVM_exec implementations returned undefined after a successful
+    // submit. Only an explicit false is a rejection.
+    if (submitted === false) {
+      appendCliText(`[${new Date().toLocaleString()}] Parent rejected or deduplicated ${desc}.\n`, { scroll: 'force' });
+      stopUpdateSpinner("Error");
+      setUpdateFlowState("failed");
+      stopUpdateLogPolling();
+      return;
+    }
+  } else {
+    appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for update.\n`, { scroll: 'force' });
+    stopUpdateSpinner("Error");
+    setUpdateFlowState("failed");
+    stopUpdateLogPolling();
+    return;
+  }
+  startPolling();
 }
 
 
@@ -5576,7 +8214,7 @@ function isManagedNodeKey(k) {
 
 function extractManagedKeys(flat) {
   const out = {};
-  const staticRe = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
+  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
   Object.keys(flat || {}).forEach(k => {
     if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
   });
@@ -5603,7 +8241,7 @@ function extractManagedKeysForScope(flat, scope) {
   }
 
   // "normal": all managed keys except OVERRIDE_* and ClientMeta
-  const normalStaticRe = /^(ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(all).forEach(k => {
     if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
     let m;
@@ -5712,91 +8350,93 @@ async function waitForSettingsToMatch(expectedManaged, opts = {}) {
 
 // ════════════════════════════════════════════════════════════════════════════
 
-async function uploadSettingsAndSave(btn) {
-  return withActionLock("save", async () => {
+async function uploadSettingsAndSave(btn, options = {}) {
+  const {
+    clearForm: shouldClearForm = true,
+    reloadAfterSave = true,
+    restartPolling = true,
+    lockName = 'save',
+    timeoutMs = 25000,
+    intervalMs = 700
+  } = options;
+
+  const result = await withActionLock(lockName, async () => {
     stopPolling();
     const triggerBtn = btn instanceof HTMLElement ? btn : document.querySelector('button[onclick*="uploadSettingsAndSave"]');
-    if (triggerBtn) {
-      disableBtnTemporarily(triggerBtn, 5000);
-    }
+    if (triggerBtn) disableBtnTemporarily(triggerBtn, 5000);
 
     try {
-      const newJsonStr = formToSettingsJSON();
       let newObj;
       try {
-        newObj = JSON.parse(newJsonStr);
-      } catch (e) {
-        appendCliText("Save error: form produced invalid JSON\n", {scroll: 'force'});
-        return;
+        newObj = JSON.parse(formToSettingsJSON());
+      } catch (_) {
+        const error = 'Form produced invalid JSON.';
+        appendCliText('Save error: ' + error + '\n', { scroll: 'force' });
+        return { ok: false, changed: false, error };
       }
 
       let oldObj = null;
       try {
-        const response = await fetch(PATHS.SETTINGS + "?_=" + Date.now());
-        if (response.ok) {
-          const currentSettings = await response.text();
-          oldObj = JSON.parse(currentSettings);
-        }
-      } catch (e) {
-        // ignore - treat as changed
-      }
+        oldObj = await fetchSettingsObjNoStore();
+      } catch (_) {}
 
       if (oldObj && deepEqualObjects(oldObj, newObj)) {
-        appendCliText("Settings unchanged - no need to save.\n", {scroll: 'force'});
-        return;
+        appendCliText('Settings unchanged - no need to save.\n', { scroll: 'force' });
+        return { ok: true, changed: false };
       }
 
       const merlinPayload = buildNormalSettingsPayloadForMerlin();
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
-        appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, {scroll: 'force'});
-        return;
+        const error = `Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).`;
+        appendCliText('Error: ' + error + '\n', { scroll: 'force' });
+        return { ok: false, changed: false, error };
       }
 
-      appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, {scroll: 'force'});
-
-      // Compute expected managed keys for verification polling
-      const expectedFlat = normalizeToFlatSettings(newObj);
-      const expectedManaged = extractManagedKeysForScope(expectedFlat, "normal");
-
-      if (window.parent && typeof window.parent.MVM_save === "function") {
-        window.parent.MVM_save(merlinPayload);
-
-        // Clear form at 0.5s to show we're doing something
-        setTimeout(() => {
-          appendCliText("Clearing form fields...\n", {scroll: 'force'});
-          clearFields();
-        }, 500);
-
-        // Start polling at 3s - wait until settings.json actually matches
-        setTimeout(async () => {
-          appendCliText("Waiting for settings to persist...\n", { scroll: "force" });
-
-          // Wait until the router actually wrote the new settings.json
-          const ok = await waitForSettingsToMatch(expectedManaged, {
-            timeoutMs: 25000,
-            intervalMs: 700,
-            scope: "normal"
-          });
-
-          appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-          await loadSettings();
-
-          appendCliText(
-            ok ? "Save verification complete.\n"
-               : "Save verification: settings.json did not match yet (may still be writing). Loaded latest available.\n",
-            { scroll: "force" }
-          );
-        }, 3000);
-
-      } else {
-        appendCliText("Save error: parent page handler not available.\n", {scroll: 'force'});
-        return;
+      const parentWin = window.parent;
+      if (!parentWin || typeof parentWin.MVM_save !== 'function') {
+        const error = 'Parent page save handler is unavailable.';
+        appendCliText('Save error: ' + error + '\n', { scroll: 'force' });
+        return { ok: false, changed: false, error };
       }
-    } catch (err) {
-      appendCliText("Save error: " + err + "\n", {scroll: 'force'});
+
+      const expectedManaged = extractManagedKeysForScope(normalizeToFlatSettings(newObj), 'normal');
+      appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, { scroll: 'force' });
+      parentWin.MVM_save(merlinPayload);
+
+      if (shouldClearForm) {
+        appendCliText('Clearing form fields...\n', { scroll: 'force' });
+        clearFields();
+      }
+
+      appendCliText('Waiting for settings to persist...\n', { scroll: 'force' });
+      const ok = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs,
+        intervalMs,
+        scope: 'normal'
+      });
+
+      if (reloadAfterSave) {
+        appendCliText('Reloading settings from disk...\n', { scroll: 'force' });
+        await loadSettings();
+      }
+
+      if (!ok) {
+        const error = 'Settings did not match the requested values before the save timeout.';
+        appendCliText('Save verification failed: ' + error + '\n', { scroll: 'force' });
+        return { ok: false, changed: true, error };
+      }
+
+      appendCliText('Save verification complete.\n', { scroll: 'force' });
+      return { ok: true, changed: true };
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      appendCliText('Save error: ' + message + '\n', { scroll: 'force' });
+      return { ok: false, changed: false, error: message };
     }
   }, 8000);
+  if (restartPolling) startPolling();
+  return result;
 }
 </script>
 

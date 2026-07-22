@@ -757,38 +757,46 @@ remove_nodes_full_install() {
     done
 }
 
-# Ensure cron job is removed before continuing cleanup
-if [ -x "$BOOT_SCRIPT" ]; then
-    logger -t "$LOGTAG" "Pre-uninstall: disabling cron job"
-    if ! sh "$BOOT_SCRIPT" crondisable >/dev/null 2>&1; then
-        logger -t "$LOGTAG" "WARNING: mervlan_boot.sh crondisable failed pre-uninstall"
+# Reinstall is an internal public/runtime reprovisioning mode.  Its caller owns
+# the explicit old-template teardown and target-template reconciliation.  Keep
+# normal/full uninstall behavior untouched, but do not introduce a second
+# hidden service or node teardown while merely rebuilding /www.
+if [ "$ACTION" != "reinstall" ]; then
+    # Ensure cron job is removed before continuing cleanup
+    if [ -x "$BOOT_SCRIPT" ]; then
+        logger -t "$LOGTAG" "Pre-uninstall: disabling cron job"
+        if ! sh "$BOOT_SCRIPT" crondisable >/dev/null 2>&1; then
+            logger -t "$LOGTAG" "WARNING: mervlan_boot.sh crondisable failed pre-uninstall"
+        fi
+    else
+        logger -t "$LOGTAG" "WARNING: mervlan_boot.sh missing; cannot disable cron job"
     fi
-else
-    logger -t "$LOGTAG" "WARNING: mervlan_boot.sh missing; cannot disable cron job"
-fi
 
 # ============================================================================ #
 # PRE-UNINSTALL HOOK DISABLE — Stop MerVLAN services before file removal      #
 # ============================================================================ #
 
 # Disable router and node hooks first so MerVLAN stops executing during cleanup
-if has_configured_nodes && ssh_keys_effectively_installed; then
-    # Only attempt teardown when the boot helper script is available
-    if [ -x "$BOOT_SCRIPT" ]; then
-        logger -t "$LOGTAG" "Pre-uninstall: disabling hooks locally and on nodes"
-        if ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
-            logger -t "$LOGTAG" "WARNING: mervlan_boot.sh disable failed pre-uninstall"
-        fi
-        if ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then
-            logger -t "$LOGTAG" "WARNING: mervlan_boot.sh nodedisable failed pre-uninstall"
+    if has_configured_nodes && ssh_keys_effectively_installed; then
+        # Only attempt teardown when the boot helper script is available
+        if [ -x "$BOOT_SCRIPT" ]; then
+            logger -t "$LOGTAG" "Pre-uninstall: disabling hooks locally and on nodes"
+            if ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+                logger -t "$LOGTAG" "WARNING: mervlan_boot.sh disable failed pre-uninstall"
+            fi
+            if ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then
+                logger -t "$LOGTAG" "WARNING: mervlan_boot.sh nodedisable failed pre-uninstall"
+            fi
+        else
+            # Warn when teardown is impossible because the helper script is missing
+            logger -t "$LOGTAG" "WARNING: mervlan_boot.sh missing; cannot pre-disable hooks"
         fi
     else
-        # Warn when teardown is impossible because the helper script is missing
-        logger -t "$LOGTAG" "WARNING: mervlan_boot.sh missing; cannot pre-disable hooks"
+        # No remote cleanup needed when nodes are absent or SSH keys were not set up
+        logger -t "$LOGTAG" "Pre-uninstall: no eligible nodes detected or SSH keys not installed"
     fi
 else
-    # No remote cleanup needed when nodes are absent or SSH keys were not set up
-    logger -t "$LOGTAG" "Pre-uninstall: no eligible nodes detected or SSH keys not installed"
+    logger -t "$LOGTAG" "Reinstall mode: preserving service, node, and cron state during public cleanup"
 fi
 
 # ============================================================================ #
@@ -854,43 +862,54 @@ fi
 rm -rf /www/user/mervlan 2>/dev/null
 rm -rf /www/user/merlin_vlan_manager 2>/dev/null
 
-# Remove service-event and addon hooks via setupdisable
-# Run setupdisable to unregister service-event handlers and node sync scripts
-if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-    echo "[uninstall] Removing service-event hooks"
-    # Log outcome of setupdisable while skipping node sync for performance
-    if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
-        echo "[uninstall] Service-event hooks removed"
-    else
-        echo "[uninstall] WARNING: setupdisable failed" >&2
-    fi
-    
-    # Handle node cleanup if nodes are configured
-    if has_configured_nodes; then
-        node_count=$(list_configured_nodes | wc -w)
-        echo "[uninstall] Removing hooks from $node_count configured node(s)"
-        if sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1; then
-            echo "[uninstall] Node hooks removed successfully"
+# Remove service-event and addon hooks via setupdisable for real uninstalls.
+# Reinstall only rebuilds public/runtime publication; its caller owns hooks.
+if [ "$ACTION" != "reinstall" ]; then
+    if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
+        echo "[uninstall] Removing service-event hooks"
+        # Log outcome of setupdisable while skipping node sync for performance
+        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
+            echo "[uninstall] Service-event hooks removed"
         else
-            echo "[uninstall] WARNING: Some node cleanup operations may have failed" >&2
+            echo "[uninstall] WARNING: setupdisable failed" >&2
         fi
+
+        # Handle node cleanup if nodes are configured
+        if has_configured_nodes; then
+            node_count=$(list_configured_nodes | wc -w)
+            echo "[uninstall] Removing hooks from $node_count configured node(s)"
+            if sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1; then
+                echo "[uninstall] Node hooks removed successfully"
+            else
+                echo "[uninstall] WARNING: Some node cleanup operations may have failed" >&2
+            fi
+        fi
+    else
+        echo "[uninstall] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
     fi
 else
-    echo "[uninstall] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
+    echo "[uninstall] Reinstall cleanup complete; service hooks retained for caller reconciliation"
 fi
 
 ########################################
 # 5. Mark addon disabled / cleanup settings
 ########################################
-am_settings_set mervlan_state "disabled"
-am_settings_set mervlan_page ""
-am_settings_set mervlan_version ""
-am_settings_set merlin_vlan_manager_state "disabled"
-am_settings_set merlin_vlan_manager_page ""
-am_settings_set merlin_vlan_manager_version ""
+if [ "$ACTION" != "reinstall" ]; then
+    am_settings_set mervlan_state "disabled"
+    am_settings_set mervlan_page ""
+    am_settings_set mervlan_version ""
+    am_settings_set merlin_vlan_manager_state "disabled"
+    am_settings_set merlin_vlan_manager_page ""
+    am_settings_set merlin_vlan_manager_version ""
+fi
 
-logger -t "$LOGTAG" "$ADDON uninstalled"
-echo "[uninstall] MerVLAN uninstalled successfully"
+if [ "$ACTION" = "reinstall" ]; then
+    logger -t "$LOGTAG" "$ADDON public/runtime publication removed for reinstall"
+    echo "[uninstall] MerVLAN public/runtime publication removed for reinstall"
+else
+    logger -t "$LOGTAG" "$ADDON uninstalled"
+    echo "[uninstall] MerVLAN uninstalled successfully"
+fi
 
 # When ACTION=full, remove addon directories for a clean slate reinstall later
 if [ "$ACTION" = "full" ]; then

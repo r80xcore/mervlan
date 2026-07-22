@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.52"                     #
+#               - File: save_settings.sh || version="0.53"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -790,7 +790,11 @@ fi
 if [ -n "${PUBLIC_MERV_BASE}" ]; then
     # Attempt to create the public settings directory for web access
     if mkdir -p "${PUBLIC_SETTINGS_DIR}" 2>/dev/null; then
-        # Copy JSON to public path where iframe can fetch it via HTTP
+        # PUBLIC_SETTINGS_FILE is a symlink to SETTINGS_FILE (created by install.sh).
+        # cp follows symlinks on the destination, so this write goes to the same
+        # JFFS file already updated in step 3. It is a harmless idempotent sync
+        # that also handles the fallback case where the symlink was replaced by a
+        # regular file (e.g. by a cp from an older install.sh version).
         cp "${TMP_JSON}" "${PUBLIC_SETTINGS_FILE}"
         # Set world-readable permissions so the web UI can access it
         chmod 644 "${PUBLIC_SETTINGS_FILE}"

@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#            - File: mervlan_boot_wrap.sh || version="0.46"                    #
+#            - File: mervlan_boot_wrap.sh || version="0.47"                    #
 # ============================================================================ #
 # - Purpose:    Boot-time wrapper that gates install/manager/cron execution.   #
 #               All ordering and flag logic lives here — core scripts are      #
@@ -239,6 +239,24 @@ _mode_install() {
 # MODE: manager                                                                #
 # ============================================================================ #
 _mode_manager() {
+  # ======================================================================== #
+  # PAUSE CLEAR — A reboot is always a clean slate. Clear any stale PAUSE   #
+  # flag left from the previous session before the manager runs.            #
+  # ======================================================================== #
+  if type json_set_flag >/dev/null 2>&1 && [ -s "${SETTINGS_FILE:-$MERV_BASE/settings/settings.json}" ]; then
+    _ms_sf="${SETTINGS_FILE:-$MERV_BASE/settings/settings.json}"
+    case "$(json_get_flag PAUSE off "$_ms_sf" 2>/dev/null)" in
+      on|1|yes)
+        json_set_flag PAUSE off "$_ms_sf" 2>/dev/null && \
+          info -c boot "Cleared stale PAUSE flag (session ended by reboot)" || \
+          warn -c boot "Could not clear PAUSE flag — continuing"
+        # Mirror to public web path so the UI reads the cleared state
+        [ -s "${PUBLIC_SETTINGS_FILE:-}" ] && \
+          json_set_flag PAUSE off "$PUBLIC_SETTINGS_FILE" 2>/dev/null || true
+        ;;
+    esac
+  fi
+
   if ! _flag_exists; then
     info -c boot "Flag not found — running install.sh first (best-effort)"
     if "$MERV_BASE/install.sh" >> "$LOG_chan_boot" 2>&1; then

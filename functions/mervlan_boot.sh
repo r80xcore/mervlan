@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.58"                     #
+#                - File: mervlan_boot.sh || version="0.59"                     #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -22,7 +22,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED LIB_ACTION_ACK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
@@ -31,6 +31,9 @@ fi
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
+  [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh"
+fi
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
@@ -40,6 +43,58 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
+ACTION_REQUEST_TOKEN="$2"
+
+boot_action_name() {
+  case "$ACTION" in
+    enable) printf '%s' 'enableservice_vlanmgr' ;;
+    disable) printf '%s' 'disableservice_vlanmgr' ;;
+    *) printf '%s' "$ACTION" ;;
+  esac
+}
+
+boot_action_ack_error() {
+  type action_ack_error >/dev/null 2>&1 || return 0
+  _ba_error_result="$3"
+  [ -n "$_ba_error_result" ] || _ba_error_result='{}'
+  action_ack_error "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_error_result" "$1" '[]' "$2" || :
+}
+
+boot_action_ack_complete() {
+  _ba_status="$1"
+  _ba_boot="$2"
+  _ba_message="$3"
+  _ba_warnings="${4:-[]}"
+  _ba_result="{\"BOOT_ENABLED\":\"${_ba_boot}\"}"
+  case "$_ba_status" in
+    partial)
+      type action_ack_partial >/dev/null 2>&1 && \
+        action_ack_partial "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_result" "$_ba_message" "$_ba_warnings" || :
+      ;;
+    *)
+      type action_ack_ok >/dev/null 2>&1 && \
+        action_ack_ok "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_result" "$_ba_message" "$_ba_warnings" || :
+      ;;
+  esac
+}
+
+persist_boot_enabled_state() {
+  _pbes_value="$1"
+  json_set_flag "BOOT_ENABLED" "$_pbes_value" "$SETTINGS_FILE" >/dev/null 2>&1 || return 1
+
+  # Current installs expose SETTINGS_FILE through a public symlink. Preserve
+  # compatibility with older installs where the public path is a regular copy,
+  # otherwise the Settings modal keeps reading a stale BOOT_ENABLED value.
+  if [ -f "${PUBLIC_SETTINGS_FILE:-}" ] && [ ! -L "$PUBLIC_SETTINGS_FILE" ] && \
+     ! cmp -s "$SETTINGS_FILE" "$PUBLIC_SETTINGS_FILE" 2>/dev/null; then
+    if cp "$SETTINGS_FILE" "$PUBLIC_SETTINGS_FILE" 2>/dev/null; then
+      chmod 644 "$PUBLIC_SETTINGS_FILE" 2>/dev/null || :
+    else
+      warn -c vlan,cli "Failed to refresh the public settings copy after changing BOOT_ENABLED"
+    fi
+  fi
+  return 0
+}
 # Marker format and lock helper
 MARKER_PREFIX="### >>> MERVLAN START:"
 MARKER_SUFFIX="### <<< MERVLAN END:"
@@ -446,8 +501,10 @@ EOF
 
   if [ "$overall_success" = "true" ]; then
     info -c cli,vlan "✓ All nodes processed successfully for '$cmd'"
+    return 0
   else
     warn -c cli,vlan "⚠️  Some nodes failed for '$cmd'"
+    return 1
   fi
 }
 
@@ -544,19 +601,33 @@ case "$ACTION" in
   # enable — Boot MerVLAN at router startup; enable mervlan.asp auto-load       #
   # =========================================================================== #
   enable)
+    _boot_partial=0
+    _boot_warnings='[]'
     # Ensure /jffs/scripts directory exists for system startup scripts
-    mkdir -p "$SCRIPTS_DIR"
+    mkdir -p "$SCRIPTS_DIR" || {
+      boot_action_ack_error "Failed to create scripts directory" "SCRIPTS_DIR_CREATE_FAILED"
+      exit 1
+    }
 
     # Inject services-start code to auto-load mervlan.asp at system boot
-    inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install services-start"; exit 1; }
+    inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || {
+      error -c vlan,cli "Failed to install services-start"
+      boot_action_ack_error "Failed to install services-start" "SERVICES_START_INSTALL_FAILED"
+      exit 1
+    }
     info -c vlan,cli "Installed services-start with MERV_BASE=$MERV_BASE (service-event managed at setup)"
 
     # Persist boot enabled state to settings.json
-    if ! json_set_flag "BOOT_ENABLED" "1" "$SETTINGS_FILE" >/dev/null 2>&1; then
+    if ! persist_boot_enabled_state "1"; then
       warn -c vlan,cli "Failed to persist BOOT_ENABLED=1"
+      _boot_partial=1
+      _boot_warnings='["BOOT_ENABLED could not be persisted"]'
     fi
     # Enable cron job for periodic VLAN health checks (main + nodes)
-    enable_cron_now
+    if ! enable_cron_now; then
+      _boot_partial=1
+      _boot_warnings='["One or more secondary enable operations failed"]'
+    fi
 
     # Arm MERV_MAC secondary shield from best available db (JFFS checkpoint or active)
     type ebt_mac_shield_init_and_apply >/dev/null 2>&1 && {
@@ -565,26 +636,45 @@ case "$ACTION" in
     }
 
     # Propagate enable action to all configured nodes via SSH
-    handle_nodes_via_ssh "enable"
+    if ! handle_nodes_via_ssh "enable"; then
+      _boot_partial=1
+      _boot_warnings='["Boot enable succeeded locally; one or more nodes could not be reached"]'
+    fi
+    if [ "$_boot_partial" = "1" ]; then
+      boot_action_ack_complete partial 1 "Boot service enabled with warnings" "$_boot_warnings"
+    else
+      boot_action_ack_complete ok 1 "Boot service enabled"
+    fi
     ;;
 
   # =============================================================================== #
   # disable — Disable boot; remove services-start injection but keep service-event  #
   # =============================================================================== #
   disable)
+    _boot_partial=0
+    _boot_warnings='[]'
     # Remove injected services-start code (idempotent; no-op if not found)
     if [ -f "$SERVICES_START" ]; then
-      remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || warn -c vlan,cli "Failed to remove injected services-start content"
+      if ! remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START"; then
+        error -c vlan,cli "Failed to remove injected services-start content"
+        boot_action_ack_error "Failed to remove services-start content" "SERVICES_START_REMOVE_FAILED"
+        exit 1
+      fi
     fi
     # Persist boot disabled state to settings.json
-    if ! json_set_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE" >/dev/null 2>&1; then
+    if ! persist_boot_enabled_state "0"; then
       warn -c vlan,cli "Failed to persist BOOT_ENABLED=0"
+      _boot_partial=1
+      _boot_warnings='["BOOT_ENABLED could not be persisted"]'
     fi
 
     info -c vlan,cli "Removed services-start injection (service-event unchanged)"
 
     # Disable cron job (main + nodes)
-    disable_cron_now
+    if ! disable_cron_now; then
+      _boot_partial=1
+      _boot_warnings='["One or more secondary disable operations failed"]'
+    fi
 
     # Tear down MERV_MAC secondary shield (db files retained for re-enable)
     type ebt_mac_shield_teardown >/dev/null 2>&1 && {
@@ -593,7 +683,15 @@ case "$ACTION" in
     }
 
     # Propagate disable action to all configured nodes via SSH
-    handle_nodes_via_ssh "disable"
+    if ! handle_nodes_via_ssh "disable"; then
+      _boot_partial=1
+      _boot_warnings='["Boot disable succeeded locally; one or more nodes could not be reached"]'
+    fi
+    if [ "$_boot_partial" = "1" ]; then
+      boot_action_ack_complete partial 0 "Boot service disabled with warnings" "$_boot_warnings"
+    else
+      boot_action_ack_complete ok 0 "Boot service disabled"
+    fi
     ;;
 
   # ========================================================================== #
@@ -699,15 +797,18 @@ case "$ACTION" in
         warn -c vlan,cli "service-event-handler missing at $SERVICE_EVENT_HANDLER"
       fi
 
-      # Install node service-event wrapper (shared template)
+      # Install the configured-node baseline from the currently active target
+      # templates.  BOOT_ENABLED remains owned by the later enable/disable
+      # action; nodeenable only establishes service-event and addon mounting.
       inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
+      inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install node addon boot entry"; exit 1; }
       chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || \
         warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"
       if [ -n "$BOOT_SCRIPT" ]; then
         chmod 755 "$BOOT_SCRIPT" 2>/dev/null || warn -c vlan,cli "Could not chmod 755 $BOOT_SCRIPT"
       fi
 
-      info -c vlan,cli "Installed node service-event wrapper with shared handler (MERV_BASE=$MERV_BASE)"
+      info -c vlan,cli "Installed node service-event and addon boot templates (MERV_BASE=$MERV_BASE)"
       exit 0
     fi
 
@@ -756,10 +857,14 @@ case "$ACTION" in
       else
         info -c vlan,cli "service-event not present on node; nothing to disable"
       fi
-      # Remove addon boot entry from services-start if present
+      # Remove both node-owned services-start blocks.  disable normally removes
+      # the active manager block first, but nodedisable is deliberately complete
+      # and idempotent when called on its own during recovery/uninstall.
       if [ -f "$SERVICES_START" ]; then
         remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" \
           || warn -c vlan,cli "Failed to remove services-start block"
+        remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" \
+          || warn -c vlan,cli "Failed to remove addon boot block"
       fi
       # Tear down MERV_QT quarantine chain on this node
       if type ebtables >/dev/null 2>&1; then
@@ -913,6 +1018,48 @@ case "$ACTION" in
       info -c vlan,cli "<--- Main Unit --->"
       info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
     fi
+
+    # ── Write service_status.json for the Settings modal ──────────────────
+    # Lives in /tmp (tmpfs) so it never persists across reboots.
+    # Populated only when the user presses the refresh button in the modal.
+    _sj_dir="${PUBLIC_MERV_BASE:-/www/user/mervlan}/tmp/results"
+    mkdir -p "$_sj_dir" 2>/dev/null || :
+    _sj_ts="$(date '+%H:%M:%S' 2>/dev/null)"
+    # Minimal inline JSON string escaping (backslash then quote)
+    _json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+    # Build the nodes array inside a captured subshell so _sep stays local
+    _sj_nodes="$(
+      printf '%s\n' "$NODE_STATUS_OUTPUT" | sed 's/^[[:space:]]*//; /^$/d' | {
+        _sep=""
+        while IFS= read -r _e; do
+          _nip="${_e%%:*}"; _nr="${_e#*:}"
+          [ -n "$_nip" ] || continue
+          _nh="Unknown"; _nb="?"; _na="?"; _nev="?"; _nc="?"; _nm="off"
+          for _kv in $_nr; do
+            case "$_kv" in
+              hw=*)         _nh="${_kv#hw=}" ;;
+              boot=*)       _nb="${_kv#boot=}" ;;
+              addon=*)      _na="${_kv#addon=}" ;;
+              event=*)      _nev="${_kv#event=}" ;;
+              cron=*)       _nc="${_kv#cron=}" ;;
+              mac_shield=*) _nm="${_kv#mac_shield=}" ;;
+            esac
+          done
+          case "$_nb" in 1) _nb="enabled";; 0) _nb="disabled";; esac
+          printf '%s{"ip":"%s","hw":"%s","boot":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"}' \
+            "$_sep" "$_nip" "$(_json_str "$_nh")" "$_nb" "$_na" "$_nev" "$_nc" "$_nm"
+          _sep=","
+        done
+      }
+    )"
+
+    printf '{"ts":"%s","main":{"hw":"%s","boot":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"},"nodes":[%s]}\n' \
+      "$_sj_ts" "$(_json_str "$hw_label")" \
+      "$boot_state" "$addon_state" "$event_state" "$cron_state" "$mac_shield_state" \
+      "$_sj_nodes" \
+      > "${_sj_dir}/service_status.json" 2>/dev/null
+    chmod 644 "${_sj_dir}/service_status.json" 2>/dev/null || :
     ;;
 
   # ========================================================================== #

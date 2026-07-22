@@ -2,6 +2,7 @@
   "General": {
     "_description": "Global addon flags and behavior toggles",
     "BOOT_ENABLED": "0",
+    "PAUSE": "off",
     "DRY_RUN": "yes",
     "ENABLE_STP": "0",
     "ENABLE_NATIVE_SSID": "0",
@@ -315,6 +316,7 @@
     "GUEST_SLOTS": "0",
     "ETH_PORTS": [],
     "LAN_PORT_LABELS": [],
+    "LAN_PORT_LABEL_OVERRIDES": "",
     "WAN_IF": "",
     "MAX_ETH_PORTS": "0",
     "MAX_ETH_PORTS_NODE1": "0",
@@ -326,7 +328,17 @@
     "MAX_ETH_PORTS_NODE7": "0",
     "MAX_ETH_PORTS_NODE8": "0",
     "MAX_ETH_PORTS_NODE9": "0",
-    "MAX_ETH_PORTS_NODE10": "0"
+    "MAX_ETH_PORTS_NODE10": "0",
+    "LAN_PORT_LABEL_OVERRIDES_NODE1": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE2": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE3": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE4": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE5": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE6": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE7": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE8": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE9": "",
+    "LAN_PORT_LABEL_OVERRIDES_NODE10": ""
   },
 
   "Hardware_Override": {

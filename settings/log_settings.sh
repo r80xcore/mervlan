@@ -46,6 +46,13 @@ fi
 # ========================================================== Log trim settings #
 # Maximum lines to keep per log file (set to 0 to disable trimming)
 : "${LOG_MAX_LINES:=2000}"
+# Maximum bytes to keep per log file (set to 0 to disable byte trimming).
+# Both limits apply; the newest complete lines within the tighter limit win.
+: "${LOG_MAX_BYTES:=1048576}"
+# Periodic maintenance interval.  The existing health cron calls the cheap due
+# gate every tick, but trimming runs at most once per interval.
+: "${LOG_MAINT_INTERVAL:=86400}"
+: "${LOG_MAINT_LOCK_STALE:=300}"
 
 # ======================================================= Log channel settings #
 # Default command names
@@ -129,31 +136,137 @@ _log_for_each_channel() {
 }
 
 # ========================= Log trimming / rotation =========================== #
-# Trims a single log file to LOG_MAX_LINES (keeps the newest lines).
+# Trims a single log file to LOG_MAX_LINES/LOG_MAX_BYTES (newest complete lines).
 # Usage: _log_trim_file "/path/to/logfile"
 _log_trim_file() {
     _ltf_file="$1"
     [ -z "$_ltf_file" ] && return 0
     [ -f "$_ltf_file" ] || return 0
-    [ "${LOG_MAX_LINES:-0}" -gt 0 ] 2>/dev/null || return 0
 
-    _ltf_count=$(wc -l < "$_ltf_file" 2>/dev/null) || return 0
-    _ltf_count=${_ltf_count##* }  # strip leading spaces from wc output
-    [ "$_ltf_count" -le "$LOG_MAX_LINES" ] && return 0
+    _ltf_lines="${LOG_MAX_LINES:-0}"
+    _ltf_bytes="${LOG_MAX_BYTES:-0}"
+    case "$_ltf_lines" in ''|*[!0-9]*) _ltf_lines=0 ;; esac
+    case "$_ltf_bytes" in ''|*[!0-9]*) _ltf_bytes=0 ;; esac
+    [ "$_ltf_lines" -gt 0 ] 2>/dev/null || [ "$_ltf_bytes" -gt 0 ] 2>/dev/null || return 0
 
-    # Keep last LOG_MAX_LINES lines
-    tail -n "$LOG_MAX_LINES" "$_ltf_file" > "$_ltf_file.tmp" 2>/dev/null && \
-        mv "$_ltf_file.tmp" "$_ltf_file" 2>/dev/null || \
-        rm -f "$_ltf_file.tmp" 2>/dev/null
+    _ltf_count=$(wc -l < "$_ltf_file" 2>/dev/null | tr -d '[:space:]')
+    _ltf_size=$(wc -c < "$_ltf_file" 2>/dev/null | tr -d '[:space:]')
+    case "$_ltf_count" in ''|*[!0-9]*) _ltf_count=0 ;; esac
+    case "$_ltf_size" in ''|*[!0-9]*) _ltf_size=0 ;; esac
+    _ltf_over=0
+    [ "$_ltf_lines" -gt 0 ] 2>/dev/null && [ "$_ltf_count" -gt "$_ltf_lines" ] 2>/dev/null && _ltf_over=1
+    [ "$_ltf_bytes" -gt 0 ] 2>/dev/null && [ "$_ltf_size" -gt "$_ltf_bytes" ] 2>/dev/null && _ltf_over=1
+    [ "$_ltf_over" = "1" ] || return 0
+
+    _ltf_tmp="${_ltf_file}.trim.$$"
+    _ltf_byte_tmp="${_ltf_file}.bytes.$$"
+    rm -f "$_ltf_tmp" "$_ltf_byte_tmp" 2>/dev/null || :
+    if [ "$_ltf_lines" -gt 0 ] 2>/dev/null; then
+        tail -n "$_ltf_lines" "$_ltf_file" > "$_ltf_tmp" 2>/dev/null || { rm -f "$_ltf_tmp"; return 1; }
+    else
+        cp "$_ltf_file" "$_ltf_tmp" 2>/dev/null || return 1
+    fi
+
+    _ltf_trimmed_size=$(wc -c < "$_ltf_tmp" 2>/dev/null | tr -d '[:space:]')
+    case "$_ltf_trimmed_size" in ''|*[!0-9]*) _ltf_trimmed_size=0 ;; esac
+    if [ "$_ltf_bytes" -gt 0 ] 2>/dev/null && [ "$_ltf_trimmed_size" -gt "$_ltf_bytes" ] 2>/dev/null; then
+        if ! tail -c "$_ltf_bytes" "$_ltf_tmp" > "$_ltf_byte_tmp" 2>/dev/null; then
+            rm -f "$_ltf_tmp" "$_ltf_byte_tmp" 2>/dev/null || :
+            return 1
+        fi
+        # The byte window normally begins in the middle of a line.  Discard
+        # that fragment so the retained log always starts with a complete line.
+        sed '1d' "$_ltf_byte_tmp" > "$_ltf_tmp" 2>/dev/null || {
+            rm -f "$_ltf_tmp" "$_ltf_byte_tmp" 2>/dev/null || :
+            return 1
+        }
+    fi
+    rm -f "$_ltf_byte_tmp" 2>/dev/null || :
+    if mv -f "$_ltf_tmp" "$_ltf_file" 2>/dev/null; then
+        chmod 644 "$_ltf_file" 2>/dev/null || :
+        return 0
+    fi
+    rm -f "$_ltf_tmp" 2>/dev/null || :
+    return 1
 }
 
-# Trim all known log channels. Call on boot or periodically.
-# Usage: log_trim_all
-log_trim_all() {
-    for _lta_ch in cli vlan; do
-        _lta_f=$(_log_path_for_channel "$_lta_ch")
-        _log_trim_file "$_lta_f"
+# Internal best-effort maintenance lock.  It prevents cron, boot, and a manual
+# maintenance action from replacing the same log concurrently.
+_log_maintenance_lock_acquire() {
+    _lmla_lock="$LOGROOT/.maintenance.lock"
+    mkdir -p "$LOGROOT" 2>/dev/null || return 1
+    if mkdir "$_lmla_lock" 2>/dev/null; then
+        date +%s > "$_lmla_lock/created" 2>/dev/null || :
+        return 0
+    fi
+    _lmla_now=$(date +%s 2>/dev/null || printf '0')
+    _lmla_created=$(cat "$_lmla_lock/created" 2>/dev/null || printf '0')
+    case "$_lmla_now" in ''|*[!0-9]*) _lmla_now=0 ;; esac
+    case "$_lmla_created" in ''|*[!0-9]*) _lmla_created=0 ;; esac
+    _lmla_age=$((_lmla_now - _lmla_created))
+    [ "$_lmla_age" -ge "${LOG_MAINT_LOCK_STALE:-300}" ] 2>/dev/null || return 1
+    rm -rf "$_lmla_lock" 2>/dev/null || return 1
+    mkdir "$_lmla_lock" 2>/dev/null || return 1
+    printf '%s\n' "$_lmla_now" > "$_lmla_lock/created" 2>/dev/null || :
+    return 0
+}
+
+_log_maintenance_lock_release() {
+    _lmlr_lock="$LOGROOT/.maintenance.lock"
+    rm -f "$_lmlr_lock/created" 2>/dev/null || :
+    rmdir "$_lmlr_lock" 2>/dev/null || :
+}
+
+# Trim every managed log file, including boot/custom channels, and record the
+# successful maintenance time.  This function is intentionally silent.
+log_maintain_all() {
+    _log_maintenance_lock_acquire || return 0
+    _lma_failed=0
+    for _lma_file in "$LOGROOT"/*.log; do
+        [ -f "$_lma_file" ] || continue
+        _log_trim_file "$_lma_file" || _lma_failed=1
     done
+    if [ "$_lma_failed" = "0" ]; then
+        date +%s > "$LOGROOT/.last_maintenance" 2>/dev/null || :
+    fi
+    _log_maintenance_lock_release
+    [ "$_lma_failed" = "0" ]
+}
+
+# Compatibility name retained for existing callers.
+log_trim_all() {
+    log_maintain_all
+}
+
+# Cheap once-per-interval gate suitable for a five-minute health cron.
+log_maintenance_due() {
+    _lmd_now=$(date +%s 2>/dev/null || printf '0')
+    _lmd_last=$(cat "$LOGROOT/.last_maintenance" 2>/dev/null || printf '0')
+    _lmd_interval="${LOG_MAINT_INTERVAL:-86400}"
+    case "$_lmd_now" in ''|*[!0-9]*) return 0 ;; esac
+    case "$_lmd_last" in ''|*[!0-9]*) _lmd_last=0 ;; esac
+    case "$_lmd_interval" in ''|*[!0-9]*) _lmd_interval=86400 ;; esac
+    _lmd_age=$((_lmd_now - _lmd_last))
+    if [ "$_lmd_age" -lt 0 ] 2>/dev/null || [ "$_lmd_age" -ge "$_lmd_interval" ] 2>/dev/null; then
+        log_maintain_all
+    fi
+}
+
+# Truncate managed logs in place so public symlinks remain valid.  The caller
+# writes the first post-clear audit entry after this returns.
+log_clear_all() {
+    _log_maintenance_lock_acquire || return 1
+    _lca_failed=0
+    for _lca_file in "$LOGROOT"/*.log; do
+        [ -f "$_lca_file" ] || continue
+        : > "$_lca_file" 2>/dev/null || _lca_failed=1
+        chmod 644 "$_lca_file" 2>/dev/null || :
+    done
+    if [ "$_lca_failed" = "0" ]; then
+        date +%s > "$LOGROOT/.last_maintenance" 2>/dev/null || :
+    fi
+    _log_maintenance_lock_release
+    [ "$_lca_failed" = "0" ]
 }
 
 # --------------------------- public API impls --------------------------------

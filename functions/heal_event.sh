@@ -1050,6 +1050,10 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # Central helper owns trimming policy; the five-minute health cron only runs
+  # its cheap due gate.  Actual maintenance occurs at most once per 24 hours.
+  type log_maintenance_due >/dev/null 2>&1 && log_maintenance_due
+
   # Fix A: one-shot shield restore at cron entry.
   # Re-links MERV_QT/MERV_MAC FORWARD/INPUT jump rules if firmware's rc flushed
   # them during a restart_wireless that our event handler missed or fired late.

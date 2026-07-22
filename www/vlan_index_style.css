@@ -117,18 +117,22 @@ body {
 /* ================== VLAN Manager Layout Overrides ================== */
 :root {
         --btn-height: 25px;
-        --form-pane-width: 5px;
+        /* Design tuning: change this one value to resize the outer rails. */
+        --outer-rail-size:5px;
+        --form-pane-content-width:539px;
         --form-pane-width-trim: 10px;
+        --form-pane-width:calc(var(--form-pane-content-width) + var(--form-pane-width-trim) + var(--outer-rail-size));
         --form-pane-effective-width: max(0px, calc(var(--form-pane-width, 560px) - var(--form-pane-width-trim, 0px)));
         --cli-width: var(--form-pane-effective-width);
         --controls-button-height: 28px;
         --controls-button-min-width: 104px;
         --controls-button-padding-x: 10px;
         --panel-stack-gap: 2px;
-        --table-col-width-vlan: 110px;
-        --table-col-width-status: 80px;
-        --table-col-width-name: 238px;
-        --table-col-width-id: 93px;
+        --table-col-width-vlan: 90px;
+        --table-col-width-status: 62px;
+        --table-col-width-name: 270px;
+        --table-col-width-id: 117px;
+        --ssid-assign-extension:127px;
 }
 
 body {
@@ -151,7 +155,7 @@ body {
 }
 
 .form-box {
-        --form-box-pad-right:14px;
+        --form-box-pad-right:var(--outer-rail-size, 5px);
         box-sizing:border-box;
         width:var(--form-pane-effective-width, var(--form-pane-width, 560px));
         max-width:none;
@@ -173,7 +177,7 @@ body {
         content:"";
         position:absolute;
         top:0; right:-0px; bottom:0;
-        width:var(--form-box-pad-right, 14px);
+        width:var(--form-box-pad-right, 5px);
         background:#2F3A3E;            /* match your current form bg */
         pointer-events:none;
         z-index:4;                      /* higher than the latch, lower than overlays */
@@ -240,6 +244,86 @@ body {
         margin-bottom:var(--panel-stack-gap, 2px);
 }
 
+#ssidTable,
+#lanTable {
+        width:100%;
+        table-layout:fixed;
+}
+
+.ssid-table-stage {
+        position:relative;
+        z-index:10;
+        width:100%;
+        overflow:visible;
+        margin-bottom:var(--panel-stack-gap, 2px);
+        box-sizing:border-box;
+}
+
+#ssidTable {
+        position:relative;
+        margin-bottom:0;
+}
+
+#ssidTable.is-assign-view {
+        width:calc(100% + var(--ssid-assign-extension));
+        max-width:none;
+}
+
+.form-box--main.ssid-assign-view .cli-latch {
+        transform:translateX(var(--ssid-assign-extension));
+        transition:background-color 0.2s ease,
+                   color 0.2s ease,
+                   transform 0.2s ease,
+                   box-shadow 0.2s ease;
+}
+
+.form-box--main .cli-container.collapsed {
+        z-index:-1;
+}
+
+.ssid-table-stage::after {
+        content:"";
+        position:absolute;
+        top:0;
+        right:calc(0px - var(--form-box-pad-right));
+        bottom:0;
+        width:var(--form-box-pad-right);
+        box-sizing:border-box;
+        background:#2F3A3E;
+        border-top-right-radius:6px;
+        border-bottom-right-radius:6px;
+        pointer-events:none;
+        z-index:11;
+}
+
+.form-box--main.ssid-assign-view .ssid-table-stage::after {
+        right:calc(0px - var(--ssid-assign-extension) - var(--form-box-pad-right));
+        border-bottom-right-radius:0;
+}
+
+.form-box--main.ssid-assign-view .ssid-table-stage::before {
+        content:"";
+        position:absolute;
+        left:calc(100% + var(--form-box-pad-right));
+        right:calc(0px - var(--ssid-assign-extension) - var(--form-box-pad-right));
+        bottom:calc(0px - var(--form-box-pad-right));
+        height:var(--form-box-pad-right);
+        box-sizing:border-box;
+        background:#2F3A3E;
+        border-bottom-right-radius:6px;
+        pointer-events:none;
+        z-index:11;
+}
+
+.form-box--main::after,
+.form-box--main .form-box::after {
+        content:none;
+}
+
+.form-box.form-box--experimental {
+        border:0;
+}
+
 .vlan-table {
         width:auto;
         max-width:100%;
@@ -254,12 +338,32 @@ body {
         width: var(--table-col-width-name);
 }
 
+#lanTable th:first-child,
+#lanTable td:first-child {
+        width:var(--table-col-width-name);
+}
+
 .lan-header-wrap {
         display:flex;
         align-items:center;
-        justify-content:space-between;
-        gap:8px;
+        justify-content:flex-start;
+        position:relative;
         width:100%;
+        min-height:34px;
+        box-sizing:border-box;
+        padding-right:146px;
+}
+
+.lan-header-identity {
+        display:flex;
+        flex-direction:column;
+        align-items:flex-start;
+        justify-content:center;
+        width:100%;
+        min-width:0;
+        max-width:100%;
+        overflow:hidden;
+        line-height:14px;
 }
 
 .lan-node-toggle {
@@ -267,6 +371,12 @@ body {
         grid-template-columns: 34px repeat(5, 20px);
         gap:2px;
         align-items:center;
+        position:absolute;
+        right:0;
+        top:50%;
+        transform:translateY(-50%);
+        grid-auto-rows:16px;
+        height:34px;
 }
 
 .lan-node-btn {
@@ -287,6 +397,8 @@ body {
 .lan-node-toggle .lan-node-btn {
         min-width:0;
         width:100%;
+        height:16px;
+        box-sizing:border-box;
         padding:2px 0;
         font-size:10px;
         border-radius:3px;
@@ -324,22 +436,52 @@ body {
         color:#777;
 }
 
-/* PRODUCTID badge in first LAN port row */
+/* Two-line device identity badge for the Ethernet table */
 .lan-product-id-badge {
-        position:absolute;
-        left:4px;
-        top:50%;
-        transform:translateY(-50%);
+        display:inline-flex;
+        flex-direction:column;
+        align-items:center;
+        justify-content:center;
+        width:max-content;
+        height:34px;
+        min-width:0;
+        max-width:100%;
+        box-sizing:border-box;
         background:#1F2D35;
         border:1px solid #569AC7;
         color:#fff;
-        font-size:10px;
+        font-size:9px;
         font-weight:600;
         letter-spacing:0.02em;
-        padding:2px 6px;
+        line-height:11px;
+        padding:5px;
         border-radius:3px;
         text-transform:uppercase;
         white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+}
+
+.lan-product-id-model,
+.lan-product-id-type {
+        display:block;
+        width:auto;
+        min-width:0;
+        max-width:100%;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+}
+
+.lan-product-id-model {
+        color:#fff;
+}
+
+.lan-product-id-type {
+        color:#c9d7df;
+        font-size:8px;
+        font-weight:500;
+        letter-spacing:0.08em;
 }
 
 /* Fourth header (Status) in SSID table - right-align the header text */
@@ -358,6 +500,28 @@ body {
 #lanTable th:nth-child(2),
 #lanTable td:nth-child(2) {
         width: var(--table-col-width-id);
+}
+
+#lanTable th:nth-child(2),
+#lanTable td:nth-child(2) {
+        width:var(--table-col-width-id);
+}
+
+#ssidTable th:nth-child(3),
+#ssidTable td:nth-child(3) {
+        width:var(--table-col-width-vlan);
+}
+
+#ssidTable th:nth-child(4),
+#ssidTable td:nth-child(4) {
+        width:var(--table-col-width-status);
+}
+
+#ssidTable th,
+#ssidTable td,
+#lanTable th,
+#lanTable td {
+        box-sizing:border-box;
 }
 
 /* Third column (Status) */
@@ -921,7 +1085,7 @@ body {
         justify-content:center;
         color:#569AC7;
         box-shadow:0 2px 6px rgba(0,0,0,0.35);
-        transition:background-color 0.2s ease, color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+        transition:background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
         cursor:pointer;
         z-index:-1;
 }
@@ -1442,6 +1606,10 @@ body {
         max-width:500px;
 }
 
+#vlanManagerModal {
+        max-width:320px;
+}
+
 .modal--anchored {
         position:absolute;
         transform:translate(-50%, 0);
@@ -1585,6 +1753,7 @@ body {
         display:flex;
         flex-direction:column;
         gap:16px;
+        align-items:center;
 }
 
 .vlan-options .button_gen {
@@ -1593,9 +1762,11 @@ body {
         align-items:center;
         justify-content:center;
         gap:4px;
-        padding:14px 12px;
-        min-height:60px;
+        padding:15px 15px;
+        min-height:50px;
         font-size:14px;
+        width:100%;
+        max-width:250px;
 }
 
 .vlan-option__title {
@@ -1604,7 +1775,7 @@ body {
 }
 
 .vlan-option__subtitle {
-        font-size:12px;
+        font-size:11px;
         color:#D0DBE0;
 }
 

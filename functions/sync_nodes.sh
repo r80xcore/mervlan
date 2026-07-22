@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.61"                      #
+#               - File: sync_nodes.sh || version="0.63"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -87,6 +87,7 @@ dbg_var DRY_RUN DRY_RUN_FORCED DEBUG DEBUG_FORCED DEBUG_JSON
 
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+REMOTE_MERV_BASE="$MERV_BASE"
 dbg_var SSH_NODE_USER SSH_NODE_PORT
 
 # Remove any per-node sync metadata breadcrumbs left by copy_file_to_node.
@@ -114,6 +115,14 @@ SYNC_LOCK="$LOCKDIR/sync_nodes.lock"
 SYNC_LOCK_ACQUIRED=0
 if [ "$DRY_RUN" != "yes" ] && type merv_lock_acquire >/dev/null 2>&1; then
     mkdir -p "$LOCKDIR" 2>/dev/null || :
+    if [ "${MERV_MAINTENANCE_SYNC:-0}" != "1" ] && type merv_lock_state >/dev/null 2>&1; then
+        case "$(merv_lock_state "$LOCKDIR/mervlan_maintenance.lock" 1800)" in
+            active|unknown_recent)
+                warn -c cli,vlan "Sync: update, backup, or restore maintenance is active — skipping this run"
+                exit 1
+                ;;
+        esac
+    fi
     if type merv_lock_state >/dev/null 2>&1; then
         case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
             active|unknown_recent)
@@ -146,6 +155,7 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_action_ack.sh
 settings/lib_radio.sh
 settings/mac_shield_snapshot.sh
 settings/lib_br0_guard.sh
@@ -183,6 +193,7 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_action_ack.sh
 settings/lib_radio.sh
 settings/mac_shield_snapshot.sh
 settings/lib_br0_guard.sh
@@ -478,7 +489,7 @@ create_remote_dirs_for_file() {
     
     # If file is in a subdirectory, create that directory on remote
     if [ "$dir_path" != "." ]; then
-        remote_dir="$MERV_BASE/$dir_path"
+        remote_dir="$REMOTE_MERV_BASE/$dir_path"
         dbg_log "Ensuring remote directory exists"
         dbg_var node_ip remote_dir
         if [ "$DRY_RUN" = "yes" ]; then
@@ -501,7 +512,7 @@ copy_file_to_node() {
     node_ip="$1"
     file="$2"
     node_id="${3:-?}"
-    remote_path="$MERV_BASE/$file"
+    remote_path="$REMOTE_MERV_BASE/$file"
     
     # First create the necessary directory structure
     if ! create_remote_dirs_for_file "$node_ip" "$file" "$node_id"; then
@@ -649,7 +660,7 @@ copy_batch_to_node() {
     # extracts under the same base. Subdirectories are pre-created in the main
     # loop's mkdir so extraction never fails on a missing path.
     if (cd "$MERV_BASE" && tar -cf - $batch_files 2>/dev/null) | \
-        _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cd '$MERV_BASE' && tar -xf - 2>/dev/null"; then
+        _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cd '$REMOTE_MERV_BASE' && tar -xf - 2>/dev/null"; then
         info -c cli,vlan "✓ Batch copy successful to NODE${node_id} ($node_ip)"
         return 0
     else
@@ -690,7 +701,7 @@ verify_batch_on_node() {
     fi
 
     if [ -n "$_vbn_local_fp" ]; then
-        _vbn_remote_fp=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE' && if type md5sum >/dev/null 2>&1; then md5sum $batch_files 2>/dev/null; elif type md5 >/dev/null 2>&1; then md5 -r $batch_files 2>/dev/null; fi | sort -k2 | md5sum 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -cd 'a-fA-F0-9')
+        _vbn_remote_fp=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$REMOTE_MERV_BASE' && if type md5sum >/dev/null 2>&1; then md5sum $batch_files 2>/dev/null; elif type md5 >/dev/null 2>&1; then md5 -r $batch_files 2>/dev/null; fi | sort -k2 | md5sum 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -cd 'a-fA-F0-9')
         if [ -n "$_vbn_remote_fp" ] && [ "$_vbn_local_fp" = "$_vbn_remote_fp" ]; then
             info -c cli,vlan "✓ Batch verified on NODE${node_id} ($node_ip) (md5 fingerprint ok)"
             return 0
@@ -702,7 +713,7 @@ verify_batch_on_node() {
 
     # Fallback: total byte count (wc -c prints a 'total' line for multiple files).
     _vbn_local_total=$(cd "$MERV_BASE" && wc -c $batch_files 2>/dev/null | tail -1 | tr -cd '0-9')
-    _vbn_remote_total=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE' && wc -c $batch_files 2>/dev/null | tail -1 | awk '{print \$1}'" 2>/dev/null | tr -cd '0-9')
+    _vbn_remote_total=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$REMOTE_MERV_BASE' && wc -c $batch_files 2>/dev/null | tail -1 | awk '{print \$1}'" 2>/dev/null | tr -cd '0-9')
     if [ -n "$_vbn_local_total" ] && [ "$_vbn_local_total" = "$_vbn_remote_total" ] && [ "$_vbn_local_total" -gt 0 ] 2>/dev/null; then
         info -c cli,vlan "✓ Batch verified on NODE${node_id} ($node_ip) (total size ok: ${_vbn_local_total} bytes)"
         return 0
@@ -731,10 +742,10 @@ batch_set_remote_permissions() {
     fi
 
     for _bsp_f in $FILES_TO_COPY_CHMOD; do
-        _bsp_c755="$_bsp_c755 '$MERV_BASE/$_bsp_f'"
+        _bsp_c755="$_bsp_c755 '$REMOTE_MERV_BASE/$_bsp_f'"
     done
     for _bsp_f in $FILES_TO_COPY_CHMOD_644; do
-        _bsp_c644="$_bsp_c644 '$MERV_BASE/$_bsp_f'"
+        _bsp_c644="$_bsp_c644 '$REMOTE_MERV_BASE/$_bsp_f'"
     done
 
     if merv_ssh_exec "$node_id" "$node_ip" "chmod 755 $_bsp_c755 2>/dev/null; chmod 644 $_bsp_c644 2>/dev/null; echo 'chmod_done'" 2>/dev/null | grep -q "chmod_done"; then
@@ -750,7 +761,7 @@ verify_file_on_node() {
     node_ip="$1"
     file="$2"
     node_id="${3:-?}"
-    remote_file="$MERV_BASE/$file"
+    remote_file="$REMOTE_MERV_BASE/$file"
 
     # Check if file exists and has content
     exists_check=$(merv_ssh_exec "$node_id" "$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null)
@@ -823,7 +834,7 @@ set_remote_permissions() {
     node_ip="$1"
     file="$2"
     node_id="${3:-?}"
-    remote_file="$MERV_BASE/$file"
+    remote_file="$REMOTE_MERV_BASE/$file"
 
     dbg_log "Applying chmod 755 on node"
     dbg_var node_ip remote_file
@@ -848,7 +859,7 @@ set_remote_permissions_644() {
     node_ip="$1"
     file="$2"
     node_id="${3:-?}"
-    remote_file="$MERV_BASE/$file"
+    remote_file="$REMOTE_MERV_BASE/$file"
 
     dbg_log "Applying chmod 644 on node"
     dbg_var node_ip remote_file
@@ -873,16 +884,16 @@ set_node_flag_remote() {
     node_ip="$1"
     node_id="$2"
     remote_cmd="
-        SETTINGS_FILE='$MERV_BASE/settings/settings.json';
+        SETTINGS_FILE='$REMOTE_MERV_BASE/settings/settings.json';
         if [ ! -f \"\$SETTINGS_FILE\" ]; then
             echo 'settings-missing' >&2
             exit 1
         fi
-        if [ ! -f '$MERV_BASE/settings/lib_json.sh' ]; then
+        if [ ! -f '$REMOTE_MERV_BASE/settings/lib_json.sh' ]; then
             echo 'lib-json-missing' >&2
             exit 1
         fi
-        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null || {
+        . '$REMOTE_MERV_BASE/settings/lib_json.sh' 2>/dev/null || {
             echo 'lib-json-load-failed' >&2
             exit 1
         }
@@ -923,7 +934,7 @@ debug_remote_files() {
     stage="$2"  # optional: before | after
     node_id="${3:-?}"
     info -c cli "Debugging files on NODE${node_id} ($node_ip)${stage:+ ($stage)}..."
-    listing=$(merv_ssh_exec "$node_id" "$node_ip" "if [ -d \"$MERV_BASE\" ]; then ls -laR \"$MERV_BASE\" 2>/dev/null || echo 'No files yet (ls failed)'; else echo 'Directory not found: $MERV_BASE'; fi" 2>/dev/null)
+    listing=$(merv_ssh_exec "$node_id" "$node_ip" "if [ -d \"$REMOTE_MERV_BASE\" ]; then ls -laR \"$REMOTE_MERV_BASE\" 2>/dev/null || echo 'No files yet (ls failed)'; else echo 'Directory not found: $REMOTE_MERV_BASE'; fi" 2>/dev/null)
     if [ -n "$listing" ]; then
         echo "$listing" | while IFS= read -r line; do
             [ -n "$line" ] && info -c vlan "$line"
@@ -948,6 +959,8 @@ pull_node_hardware() {
     _pnh_output=""
     _pnh_productid=""
     _pnh_maxeth=""
+    _pnh_label_overrides=""
+    _pnh_has_label_overrides=0
 
     if [ "$DRY_RUN" = "yes" ]; then
         info -c cli,vlan "[DRY-RUN] Would run hw_probe and pull hardware values from NODE${_pnh_id} ($_pnh_ip)"
@@ -964,6 +977,7 @@ pull_node_hardware() {
         . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
         printf 'PRODUCTID=%s\n' \"\$(json_get_section_value Hardware PRODUCTID '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
         printf 'MAX_ETH_PORTS=%s\n' \"\$(json_get_section_value Hardware MAX_ETH_PORTS '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
+        printf 'LAN_PORT_LABEL_OVERRIDES=%s\n' \"\$(json_get_section_value Hardware LAN_PORT_LABEL_OVERRIDES '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
     " 2>/dev/null)
 
     if printf '%s' "$_pnh_output" | grep -q 'HWPROBE_FAILED'; then
@@ -973,6 +987,10 @@ pull_node_hardware() {
 
     _pnh_productid=$(printf '%s' "$_pnh_output" | sed -n 's/^PRODUCTID=//p' | tr -d '\r\n')
     _pnh_maxeth=$(printf '%s' "$_pnh_output" | sed -n 's/^MAX_ETH_PORTS=//p' | tr -d '\r\n')
+    if printf '%s\n' "$_pnh_output" | grep -q '^LAN_PORT_LABEL_OVERRIDES='; then
+        _pnh_has_label_overrides=1
+        _pnh_label_overrides=$(printf '%s\n' "$_pnh_output" | sed -n 's/^LAN_PORT_LABEL_OVERRIDES=//p' | tr -d '\r\n')
+    fi
 
     # Validate we got something
     if [ -z "$_pnh_productid" ] && [ -z "$_pnh_maxeth" ]; then
@@ -997,7 +1015,77 @@ pull_node_hardware() {
         fi
     fi
 
+    # Empty is meaningful: clear stale labels when a node changes profile or
+    # uses a manual hardware map.
+    if [ "$_pnh_has_label_overrides" = "1" ]; then
+        if json_set_section_value "Hardware" "LAN_PORT_LABEL_OVERRIDES_NODE${_pnh_id}" "$_pnh_label_overrides" "$SETTINGS_FILE"; then
+            info -c cli,vlan "LAN_PORT_LABEL_OVERRIDES_NODE${_pnh_id}=${_pnh_label_overrides:-<empty>}"
+        else
+            warn -c cli,vlan "Failed to write LAN_PORT_LABEL_OVERRIDES_NODE${_pnh_id}"
+        fi
+    else
+        warn -c cli,vlan "NODE${_pnh_id} did not return LAN label metadata"
+    fi
+
     return 0
+}
+
+cleanup_remote_stage() {
+    _crs_ip="$1"
+    _crs_id="$2"
+    _crs_stage="$3"
+    _crs_old="$4"
+    case "$_crs_stage" in /jffs/addons/mervlan_backups/.mervlan.new.*) ;; *) return 1 ;; esac
+    case "$_crs_old" in /jffs/addons/mervlan_backups/.mervlan.old.*) ;; *) return 1 ;; esac
+    # Remove only the unactivated new tree. A surviving old tree means rollback
+    # did not finish and must remain available for manual recovery.
+    merv_ssh_exec "$_crs_id" "$_crs_ip" "rm -rf '$_crs_stage'" >/dev/null 2>&1
+}
+
+activate_staged_node() {
+    _asn_ip="$1"
+    _asn_id="$2"
+    _asn_stage="$3"
+    _asn_old="$4"
+    case "$_asn_stage" in /jffs/addons/mervlan_backups/.mervlan.new.*) ;; *) return 1 ;; esac
+    case "$_asn_old" in /jffs/addons/mervlan_backups/.mervlan.old.*) ;; *) return 1 ;; esac
+
+    _asn_cmd="
+        active='$MERV_BASE'; stage='$_asn_stage'; old='$_asn_old';
+        test -f \"\$stage/settings/settings.json\" || exit 21;
+        test -x \"\$stage/functions/mervlan_boot.sh\" || exit 22;
+        rm -rf \"\$old\" 2>/dev/null || exit 23;
+        had_old=0;
+        if [ -d \"\$active\" ]; then mv \"\$active\" \"\$old\" || exit 24; had_old=1; fi;
+        if [ \"\$had_old\" = 1 ] && [ -d \"\$old/tmp\" ]; then
+            mkdir -p \"\$stage/tmp\" 2>/dev/null || :;
+            cp -p \"\$old\"/tmp/*.db \"\$stage/tmp/\" 2>/dev/null || :;
+        fi;
+        if ! mv \"\$stage\" \"\$active\"; then
+            [ \"\$had_old\" = 1 ] && mv \"\$old\" \"\$active\" 2>/dev/null || :;
+            exit 25;
+        fi;
+        if cd \"\$active/functions\" && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local >/dev/null 2>&1; then
+            report=\$(MERV_NODE_CONTEXT=1 ./mervlan_boot.sh report 2>/dev/null | tail -1);
+            if echo \"\$report\" | grep -q 'addon=node-on' && echo \"\$report\" | grep -q 'event=active'; then
+                rm -rf \"\$old\" 2>/dev/null || :; echo STAGED_NODE_OK; exit 0;
+            fi;
+        fi;
+        rm -rf \"\$stage\" 2>/dev/null || :;
+        mv \"\$active\" \"\$stage\" 2>/dev/null || exit 26;
+        if [ \"\$had_old\" = 1 ]; then
+            if mv \"\$old\" \"\$active\" 2>/dev/null; then
+                cd \"\$active/functions\" 2>/dev/null && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local >/dev/null 2>&1 || :;
+                rm -rf \"\$stage\" 2>/dev/null || :;
+                exit 26;
+            fi;
+            exit 27;
+        fi;
+        mv \"\$stage\" \"\$active\" 2>/dev/null || :;
+        exit 26
+    "
+    _asn_result=$(merv_ssh_exec "$_asn_id" "$_asn_ip" "$_asn_cmd" 2>/dev/null)
+    echo "$_asn_result" | grep -q STAGED_NODE_OK
 }
 
 # ========================================================================== #
@@ -1047,11 +1135,14 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
         overall_success=false
         continue
     fi
+
+    REMOTE_MERV_BASE="/jffs/addons/mervlan_backups/.mervlan.new.$$"
+    REMOTE_MERV_OLD="/jffs/addons/mervlan_backups/.mervlan.old.$$"
     
     # Create base remote directories (addon path + runtime folders + the addon
     # subdirs that tar will extract into — pre-creating them means batch extract
     # never fails on a missing path, and we drop the per-file dir-creation SSH).
-    remote_mkdir_cmd="mkdir -p '$MERV_BASE' '$MERV_BASE/settings' '$MERV_BASE/functions' '$MERV_BASE/templates' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
+    remote_mkdir_cmd="mkdir -p '/jffs/addons/mervlan_backups'; if [ -f '$MERV_BASE/settings/settings.json' ] && [ -x '$MERV_BASE/functions/mervlan_boot.sh' ]; then for d in /jffs/addons/mervlan_backups/.mervlan.new.* /jffs/addons/mervlan_backups/.mervlan.old.*; do [ -d \"\$d\" ] && rm -rf \"\$d\"; done; else for d in /jffs/addons/mervlan_backups/.mervlan.new.* /jffs/addons/mervlan_backups/.mervlan.old.*; do [ -d \"\$d\" ] && exit 70; done; fi; mkdir -p '$REMOTE_MERV_BASE/settings' '$REMOTE_MERV_BASE/functions' '$REMOTE_MERV_BASE/templates' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
     dbg_log "Ensuring base directories on node"
     dbg_var node_ip remote_mkdir_cmd
     if [ "$DRY_RUN" = "yes" ]; then
@@ -1143,36 +1234,28 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
 
             # Mark remote device as MerVLAN node via IS_NODE flag
             if ! set_node_flag_remote "$node_ip" "$node_id"; then
+                cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
                 overall_success=false
                 continue
             fi
 
-            if [ "$DRY_RUN" = "yes" ]; then
-                info -c cli,vlan "[DRY-RUN] Skipping nodeenable execution on NODE${node_id} ($node_ip)"
+            if activate_staged_node "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD"; then
+                info -c cli,vlan "✓ Staged activation verified on NODE${node_id} ($node_ip)"
+                report_line=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+                [ -n "$report_line" ] && info -c cli,vlan "NODE${node_id} ($node_ip) report: $report_line"
                 pull_node_hardware "$node_ip" "$node_id"
             else
-                if merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local" >/dev/null 2>&1; then
-                    info -c cli,vlan "✓ nodeenable applied on NODE${node_id} ($node_ip)"
-                    report_line=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
-                    if [ -n "$report_line" ]; then
-                        info -c cli,vlan "NODE${node_id} ($node_ip) report: $report_line"
-                        echo "$report_line" | grep -q 'event=active' || warn -c cli,vlan "⚠️ event not active on NODE${node_id} ($node_ip)"
-                    else
-                        warn -c cli,vlan "⚠️ no report output from NODE${node_id} ($node_ip) after nodeenable"
-                    fi
-
-                    # Probe node hardware and pull PRODUCTID/MAX_ETH_PORTS to main settings
-                    pull_node_hardware "$node_ip" "$node_id"
-                else
-                    merv_ssh_skip_log "$node_id" "$node_ip" "nodeenable"
-                    overall_success=false
-                fi
+                merv_ssh_skip_log "$node_id" "$node_ip" "staged activation"
+                cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
+                overall_success=false
             fi
         else
             error -c cli,vlan "✗ File verification failed for NODE${node_id} ($node_ip)"
+            cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
             overall_success=false
         fi
     else
+        cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
         overall_success=false
     fi
     
