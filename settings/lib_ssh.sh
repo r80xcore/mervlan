@@ -521,9 +521,28 @@ _merv_timeout_run() {
     timeout "$seconds" "$@"
     return $?
   fi
-  # Fallback: no timeout command. Run as-is (not ideal, but avoids breaking)
-  "$@"
-  return $?
+  # ASUS builds without the timeout applet still need a real deadline. Run the
+  # command in the background and let a short-lived watchdog terminate it.
+  # Return 124 for either watchdog signal, matching common timeout semantics.
+  exec 9<&0
+  "$@" <&9 &
+  _mtr_pid=$!
+  exec 9<&-
+  (
+    sleep "$seconds"
+    kill -TERM "$_mtr_pid" 2>/dev/null || exit 0
+    sleep 1
+    kill -KILL "$_mtr_pid" 2>/dev/null || :
+  ) &
+  _mtr_watchdog=$!
+  wait "$_mtr_pid"
+  _mtr_rc=$?
+  kill "$_mtr_watchdog" 2>/dev/null || :
+  wait "$_mtr_watchdog" 2>/dev/null || :
+  case "$_mtr_rc" in
+    137|143) return 124 ;;
+    *) return "$_mtr_rc" ;;
+  esac
 }
 
 merv_ssh_precheck() {

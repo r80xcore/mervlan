@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.59"                     #
+#                - File: mervlan_boot.sh || version="0.60"                     #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -44,6 +44,16 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
 ACTION_REQUEST_TOKEN="$2"
+
+# Status/report is also a safe reconciliation entry point for owners left by a
+# killed manager. Mutating boot work reaches the same reconciliation through
+# the manager before it acquires its own lease.
+case "$ACTION" in
+  status|report)
+    type merv_dhcp_hold_reconcile >/dev/null 2>&1 && \
+      merv_dhcp_hold_reconcile status-start >/dev/null 2>&1 || :
+    ;;
+esac
 
 boot_action_name() {
   case "$ACTION" in
@@ -547,7 +557,7 @@ EOF
 check_mac_shield_state() {
   mac_shield_state="off"
   if type ebtables >/dev/null 2>&1; then
-    _ms_rules=$(ebtables -t filter -L MERV_MAC 2>/dev/null | grep -c "^-s " 2>/dev/null || echo 0)
+    _ms_rules=$(ebtables -t filter -L MERV_MAC 2>/dev/null | grep -c "^-s " 2>/dev/null || :)
     if [ "${_ms_rules:-0}" -gt 0 ]; then
       mac_shield_state="on(${_ms_rules})"
     fi
@@ -954,7 +964,7 @@ case "$ACTION" in
     fi
 
     # Local hardware label (main router) and node flag
-    local hw_label
+    hw_label=""
     hw_label="$(json_get_flag "PRODUCTID" "Unknown" "$HW_SETTINGS_FILE" 2>/dev/null)"
     if is_node; then
       is_node_state=yes
@@ -1017,6 +1027,20 @@ case "$ACTION" in
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
       info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
+    fi
+
+    if type merv_dhcp_hold_status >/dev/null 2>&1; then
+      info -c vlan,cli "<--- DHCP Hold State --->"
+      merv_dhcp_hold_status 2>&1 | while IFS= read -r _dhcp_status_line; do
+        [ -n "$_dhcp_status_line" ] && info -c vlan,cli "$_dhcp_status_line"
+      done
+    fi
+    if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+      info -c vlan,cli "<--- Observation State --->"
+      "$MERV_BASE/functions/post_apply_worker.sh" status 2>&1 |
+        while IFS= read -r _observation_status_line; do
+          [ -n "$_observation_status_line" ] && info -c vlan,cli "$_observation_status_line"
+        done
     fi
 
     # ── Write service_status.json for the Settings modal ──────────────────

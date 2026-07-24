@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_client_meta.sh || version="0.11"                    #
+#               - File: mac_client_meta.sh || version="0.12"                    #
 # ============================================================================ #
 # Purpose: Materialize the two client-metadata databases from settings.json and
 #   re-enforce them, then refresh the client inventory so the UI reflects the
@@ -177,16 +177,24 @@ if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ]; then
 fi
 
 # ------------------------------------------------ Refresh client inventory ----
-# Rebuild the merged client JSON so the UI immediately reflects the new names
-# and override/locked badges. Foreground so the freshly-written timestamp
-# satisfies the UI's freshness poll. Best-effort.
+# Release the metadata writer lock before entering the observation coordinator:
+# global ordering is observation lock before operation-specific locks.
+if [ "$META_LOCK_ACQUIRED" -eq 1 ]; then
+  merv_lock_release "$META_LOCK" 2>/dev/null || :
+  META_LOCK_ACQUIRED=0
+fi
+
+# Rebuild through the one generation coordinator. Foreground execution ensures
+# the freshly-published JSON satisfies the UI freshness poll.
 _collect=skip
-if [ -x "$MERV_BASE/functions/collect_clients.sh" ]; then
-  if sh "$MERV_BASE/functions/collect_clients.sh" >/dev/null 2>&1; then
+if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+  if MERV_OBS_NO_AUTOSTART=1 "$MERV_BASE/functions/post_apply_worker.sh" \
+       request collect >/dev/null 2>&1 &&
+     "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
     _collect=ok
   else
     _collect=failed
-    warn -c cli,vlan "Client Metadata: client inventory refresh failed"
+    warn -c cli,vlan "Client Metadata: coordinated refresh failed; generation remains pending"
   fi
 fi
 

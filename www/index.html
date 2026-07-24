@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.24-dev" -->
+  <!-- index.html version="0.53.25-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -1402,6 +1402,7 @@
           flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
           flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
           flat.ENABLE_NATIVE_SSID = stringOrDefault(general.ENABLE_NATIVE_SSID, "0");
+          flat.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(general.HTML_CLIENT_REFRESH_MINUTES, "5");
 
           const nodes = ensurePlainObject(data.Nodes);
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1575,7 +1576,8 @@
               DRY_RUN: "yes",
               ENABLE_STP: "0",
               EXPERIMENTAL: "0",
-              ENABLE_NATIVE_SSID: "0"
+              ENABLE_NATIVE_SSID: "0",
+              HTML_CLIENT_REFRESH_MINUTES: "5"
             },
             SSH: {
               _description: "SSH settings for main router and nodes",
@@ -1623,6 +1625,10 @@
           general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
           general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
           general.ENABLE_NATIVE_SSID = stringOrDefault(flat.ENABLE_NATIVE_SSID, general.ENABLE_NATIVE_SSID ?? "0");
+          general.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(
+            flat.HTML_CLIENT_REFRESH_MINUTES,
+            general.HTML_CLIENT_REFRESH_MINUTES ?? "5"
+          );
 
           const nodes = target.Nodes = ensurePlainObject(target.Nodes);
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -4749,10 +4755,23 @@ function renderClientsOverview(data){
     return;
   }
   
-  // Helper to get friendly node name with alias
-  function getNodeDisplayName(routerValue) {
+  // Render a stable, human-useful client source identity. Node slot/IP are the
+  // identity; ProductID is descriptive because multiple nodes may share it.
+  function getNodeDisplayName(node) {
+    const routerValue = String(node && node.router || '').trim();
+    const reportedIp = String(node && node.ip || '').trim();
     if(!routerValue) return 'Node';
-    if(routerValue === 'Main Router') return 'Main Router';
+    const formatName = (name, productId, ip) => {
+      const product = String(productId || '').trim();
+      const address = String(ip || '').trim();
+      if(product && address) return `${name}, ${product} (${address})`;
+      if(product) return `${name}, ${product}`;
+      if(address) return `${name} (${address})`;
+      return name;
+    };
+    if(routerValue === 'Main Router') {
+      return formatName('Main Router', HW_SETTINGS.PRODUCTID, reportedIp);
+    }
     
     // Check if this router IP matches any configured node
     const settings = typeof CURRENT_SETTINGS_CACHE === 'object' ? CURRENT_SETTINGS_CACHE : {};
@@ -4760,11 +4779,11 @@ function renderClientsOverview(data){
       const nodeIp = settings['NODE' + i] || '';
       if(nodeIp && nodeIp !== 'none' && nodeIp === routerValue) {
         const alias = settings['NODE' + i + '_ALIAS'] || ('Node ' + i);
-        return `${alias} (${routerValue})`;
+        return formatName(alias, HW_SETTINGS['PRODUCTID_NODE' + i], nodeIp);
       }
     }
     // If no match found, just return the router value (IP or hostname)
-    return routerValue;
+    return formatName(routerValue, '', reportedIp);
   }
   
   // Helper to format interface badges
@@ -4799,7 +4818,7 @@ function renderClientsOverview(data){
   
   let html = '';
   data.nodes.forEach(node=>{
-    const displayName = getNodeDisplayName(node.router);
+    const displayName = getNodeDisplayName(node);
     const right = node.error ? `<span class=\"err\">${node.error}</span>` : `<span class=\"node-meta\">${formatDate(node.generated)}</span>`;
     html += `<div class=\"client-node\">`+
             `  <h3><span>${displayName}</span>${right}</h3>`;
@@ -4894,16 +4913,29 @@ function hasConfiguredVlans(){
   return false;
 }
 
-// Per-tab 5-minute cooldown so the auto-refresh runs at most once per session
-// window. Using sessionStorage means each tab is independent and the cooldown
-// resets naturally when the tab closes.
-const CLIENTS_AUTO_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+// Per-tab cooldown so auto-refresh runs at most once per session window.
+// The value is configured in General.HTML_CLIENT_REFRESH_MINUTES. sessionStorage
+// keeps tabs independent and resets naturally when the tab closes.
+const CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES = 5;
+const CLIENTS_AUTO_REFRESH_MINUTES_MIN = 1;
+const CLIENTS_AUTO_REFRESH_MINUTES_MAX = 1440;
 const CLIENTS_AUTO_REFRESH_KEY = 'mervlan_clients_auto_refresh_last';
+
+function clientAutoRefreshCooldownMs(){
+  const raw = String((CURRENT_SETTINGS_CACHE || {}).HTML_CLIENT_REFRESH_MINUTES ?? '').trim();
+  if(!/^\d+$/.test(raw)) return CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES * 60 * 1000;
+  const minutes = Number(raw);
+  if(!Number.isInteger(minutes) || minutes < CLIENTS_AUTO_REFRESH_MINUTES_MIN ||
+     minutes > CLIENTS_AUTO_REFRESH_MINUTES_MAX){
+    return CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES * 60 * 1000;
+  }
+  return minutes * 60 * 1000;
+}
 
 function canAutoRefreshClients(){
   try {
     const last = Number(sessionStorage.getItem(CLIENTS_AUTO_REFRESH_KEY) || 0);
-    return !last || Date.now() - last > CLIENTS_AUTO_REFRESH_COOLDOWN_MS;
+    return !last || Date.now() - last > clientAutoRefreshCooldownMs();
   } catch(_){ return false; }
 }
 
@@ -8214,7 +8246,7 @@ function isManagedNodeKey(k) {
 
 function extractManagedKeys(flat) {
   const out = {};
-  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
+  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
   Object.keys(flat || {}).forEach(k => {
     if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
   });
@@ -8241,7 +8273,7 @@ function extractManagedKeysForScope(flat, scope) {
   }
 
   // "normal": all managed keys except OVERRIDE_* and ClientMeta
-  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(all).forEach(k => {
     if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
     let m;

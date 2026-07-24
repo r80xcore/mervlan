@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.63"                      #
+#               - File: sync_nodes.sh || version="0.64"                      #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -162,6 +162,9 @@ settings/lib_br0_guard.sh
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
+functions/mervlan_selftest.sh
+functions/mervlan_live_test_guard.sh
+functions/post_apply_worker.sh
 functions/collect_local_clients.sh 
 functions/heal_event.sh  
 functions/service-event-handler.sh
@@ -176,6 +179,9 @@ FILES_TO_COPY_CHMOD="
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
+functions/mervlan_selftest.sh
+functions/mervlan_live_test_guard.sh
+functions/post_apply_worker.sh
 functions/collect_local_clients.sh
 functions/heal_event.sh
 functions/service-event-handler.sh

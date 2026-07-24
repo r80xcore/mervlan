@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: var_settings.sh || version="0.52"                     #
+#                - File: var_settings.sh || version="0.53"                     #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -88,6 +88,24 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 : "${MERV_QT_CHAIN:=MERV_QT}"                 # L2 quarantine chain (VLAN VAPs in br0)
 : "${MERV_DHCP_HOLD_CHAIN:=MERV_DHCP_HOLD}"   # critical-section DHCP kill switch
 
+# DHCP-hold protocol foundation. Production state has one fixed root. Tests may
+# override it only when MERV_DHCP_HOLD_TEST_MODE=1 and the replacement resolves
+# beneath /tmp/mervlan_tmp/selftest.<run-id>; lib_mervqt.sh validates that
+# boundary before performing any state mutation.
+: "${MERV_DHCP_HOLD_STATE_ROOT:=$LOCKDIR/dhcp_hold}"
+: "${MERV_DHCP_HOLD_LEGACY_MARKER:=$LOCKDIR/merv_dhcp_hold.active}"
+: "${MERV_DHCP_HOLD_TEST_MODE:=0}"
+: "${MERV_DHCP_HOLD_TEST_ROOT:=}"
+: "${MERV_DHCP_HOLD_EBTABLES:=}"
+: "${MERV_DHCP_HOLD_PROC_ROOT:=/proc}"
+: "${MERV_DHCP_HOLD_FAULT_POINT:=}"
+
+# Live-test guard state is intentionally outside the SSH session. ASUSWRT's
+# persistent `cru` scheduler invokes the guard until it is explicitly disarmed
+# or its deadline fires.
+: "${MERV_LIVE_TEST_GUARD_ROOT:=$TMPDIR/live_test_guard}"
+: "${MERV_LIVE_TEST_GUARD_CRON_NAME:=MerVLANLiveTestGuard}"
+
 # Stale-lock reclaim threshold for mervlan_manager.lock. A crashed/killed
 # manager leaves its lock directory behind; without age-based reclaim every
 # subsequent heal and MERV_MAC recovery would skip forever. 420s (7 min) is
@@ -124,11 +142,17 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 : "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:=120}"
 
 # Maximum lifetime of the boot-time DHCP shield watchdog spawned by
-# mervlan_boot_wrap.sh shield. Hard ceiling — when this elapses the shield
-# tears down even if the manager never cleared its marker. Start conservative
-# (120s) so a failed boot apply doesn't keep DHCP blocked for 10 minutes while
-# debugging; raise once the boot path is proven stable.
-: "${MERV_BOOT_SHIELD_MAX_SEC:=120}"
+# mervlan_boot_wrap.sh shield. Real cold-boot qualification measured about
+# 242s from watchdog start through verified manager completion on ASUS
+# firmware, so 360s leaves practical boot-storm margin. Token-owned watchdogs
+# remain fail-closed at this ceiling if no verified successor completes.
+: "${MERV_BOOT_SHIELD_MAX_SEC:=480}"
+: "${MERV_BOOT_SHIELD_READY_SEC:=10}"
+: "${MERV_HEAL_HANDOFF_ACK_SEC:=10}"
+: "${MERV_DHCP_SETTLE_STABLE_SEC:=3}"
+: "${MERV_DHCP_SETTLE_MAX_SEC:=60}"
+: "${MERV_DHCP_SETTLE_BOOT_MAX_SEC:=150}"
+: "${MERV_DHCP_SETTLE_TICK_CMD:=sleep 1}"
 
 # Scripts & Configs
 readonly BOOT_SCRIPT="$FUNCDIR/mervlan_boot.sh"

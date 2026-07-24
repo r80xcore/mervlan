@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: execute_nodes.sh || version="0.54"                    #
+#                - File: execute_nodes.sh || version="0.55"                    #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -787,18 +787,21 @@ else
     rm -f "$_verify_node_tmp" 2>/dev/null || :
     
     # ============================================================================ #
-    # PHASE 4: Run collect_clients.sh after all nodes verified                   #
+    # PHASE 4: Publish one cluster observation after all nodes verified          #
     # ============================================================================ #
-    if [ "$MODE" != "nodesonly" ] && [ -x "$FUNCDIR/collect_clients.sh" ]; then
+    if [ "$MODE" != "nodesonly" ] && [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
         info -c cli,vlan "--- Phase 4: Collecting clients ---"
-        info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
-        sleep 5
-        info -c cli,vlan "Refreshing VLAN client list via collect_clients.sh"
-        if "$FUNCDIR/collect_clients.sh"; then
+        if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+            merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null || :
+            EXEC_NODES_LOCK_ACQUIRED=0
+        fi
+        if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
+             request snapshot collect >/dev/null 2>&1 &&
+           "$FUNCDIR/post_apply_worker.sh" run; then
             info -c cli,vlan "✓ VLAN client list refresh completed"
         else
             rc=$?
-            warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
+            warn -c cli,vlan "✗ Post-apply observation failed (rc=$rc); generation remains pending"
         fi
     fi
 fi

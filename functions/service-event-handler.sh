@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.62"                  #
+#          - File: service-event-handler.sh || version="0.63"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -584,7 +584,7 @@ case "${TYPE}_${EVENT}" in
     ;;
   collectclients_vlanmgr)
     # Collect client list from router and nodes (triggered by refresh request)
-    dispatch_if_executable "/jffs/addons/mervlan/functions/collect_clients.sh"
+    dispatch_if_executable "/jffs/addons/mervlan/functions/post_apply_worker.sh" request collect
     ;;
   clearclilog_vlanmgr)
     # Clear CLI output log file (triggered by Clear button in UI)

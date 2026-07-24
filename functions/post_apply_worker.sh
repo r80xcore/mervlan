@@ -1,0 +1,348 @@
+#!/bin/sh
+# ============================================================================
+# - File: post_apply_worker.sh || version="0.1"
+# - Purpose: Serialize and coalesce post-apply MAC snapshots/client collection.
+# ============================================================================
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
+   { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_MERVQT_LOADED
+  unset LIB_SSID_FILTER_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
+fi
+[ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
+[ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
+[ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
+[ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
+
+# A detached observation worker starts without the manager's exported hardware
+# profile. Bootstrap the same bounded slot count and node assignment here so a
+# fresh process cannot misread MAX_SSIDS=0 and publish an empty snapshot.
+if [ -z "${MAX_SSIDS:-}" ]; then
+  MAX_SSIDS=$(json_get_int MAX_SSIDS 0 "$HW_SETTINGS_FILE")
+  [ "$MAX_SSIDS" -gt 0 ] 2>/dev/null ||
+    MAX_SSIDS=$(json_get_section_value Hardware MAX_SSIDS "$HW_SETTINGS_FILE")
+fi
+MAX_SSIDS=$(merv_cap_ssids "${MAX_SSIDS:-0}" "$HW_SETTINGS_FILE")
+if [ -z "${MERV_NODE_ID:-}" ]; then
+  MERV_NODE_ID=$(json_get_flag NODE_ID "" "$SETTINGS_FILE")
+  [ -n "$MERV_NODE_ID" ] ||
+    MERV_NODE_ID=$(json_get_section_value General NODE_ID "$SETTINGS_FILE")
+fi
+ssid_filter_init "${MERV_NODE_ID:-none}"
+export MAX_SSIDS MERV_NODE_ID
+
+OBS_ACTION="${1:-status}"
+OBS_ROOT="${MERV_OBSERVATION_ROOT:-$LOCKDIR/observation}"
+OBS_STATE="$OBS_ROOT/request.state"
+OBS_WORKER_LOCK="$OBS_ROOT/worker.lock"
+OBS_REQUEST_LOCK="$OBS_ROOT/request.lock"
+OBS_FAULTS="$OBS_ROOT/faults"
+OBS_CONFIG_LOCKDIR="${MERV_OBSERVATION_CONFIG_LOCKDIR:-$LOCKDIR}"
+
+obs_log() {
+  _ol_level="$1"; shift
+  if type "$_ol_level" >/dev/null 2>&1; then
+    "$_ol_level" -c cli,vlan "Observation: $*"
+  else
+    printf 'Observation %s: %s\n' "$_ol_level" "$*" >&2
+  fi
+}
+
+obs_root_valid() {
+  if [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = 1 ]; then
+    merv_dhcp_hold_test_root_valid || return 1
+    case "$OBS_ROOT" in "$MERV_DHCP_HOLD_TEST_ROOT"/*) return 0 ;; *) return 1 ;; esac
+  fi
+  [ "$OBS_ROOT" = "${LOCKDIR:-/tmp/mervlan_tmp/locks}/observation" ]
+}
+
+obs_init() {
+  obs_root_valid || return 1
+  mkdir -p "$OBS_ROOT" "$OBS_FAULTS" 2>/dev/null || return 2
+  # A missing state file reads as four zeroes. The first request publishes it
+  # while holding request.lock, avoiding an initialization-vs-request race.
+  return 0
+}
+
+obs_read_number() {
+  _orn_key="$1"
+  _orn_value=$(sed -n "s/^${_orn_key}=//p" "$OBS_STATE" 2>/dev/null | tail -n 1)
+  case "$_orn_value" in ''|*[!0-9]*) printf '0\n' ;; *) printf '%s\n' "$_orn_value" ;; esac
+}
+
+obs_state_load() {
+  OBS_SR=$(obs_read_number snapshot_requested_generation)
+  OBS_SC=$(obs_read_number snapshot_completed_generation)
+  OBS_CR=$(obs_read_number collection_requested_generation)
+  OBS_CC=$(obs_read_number collection_completed_generation)
+}
+
+obs_state_write() {
+  _osw_sr="$1"; _osw_sc="$2"; _osw_cr="$3"; _osw_cc="$4"
+  _osw_tmp="$OBS_ROOT/.request.state.tmp.$$.$(_merv_dhcp_nonce)"
+  {
+    printf 'snapshot_requested_generation=%s\n' "$_osw_sr"
+    printf 'snapshot_completed_generation=%s\n' "$_osw_sc"
+    printf 'collection_requested_generation=%s\n' "$_osw_cr"
+    printf 'collection_completed_generation=%s\n' "$_osw_cc"
+  } > "$_osw_tmp" 2>/dev/null &&
+    mv "$_osw_tmp" "$OBS_STATE" 2>/dev/null || {
+      rm -f "$_osw_tmp" 2>/dev/null || :
+      return 2
+    }
+}
+
+obs_lock_acquire() {
+  _ola_lock="$1" _ola_wait="${2:-0}" _ola_try=0
+  # Worker ownership is process identity, not simulated DHCP state. Keep this
+  # on real procfs unless a dedicated observation-test override is supplied.
+  _ola_proc="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
+  while :; do
+    if mkdir "$_ola_lock" 2>/dev/null; then
+      _ola_start=$(merv_proc_start_time "$$" "$_ola_proc" 2>/dev/null || printf '0')
+      _ola_nonce=$(_merv_dhcp_nonce)
+      printf '%s\n' "$$" > "$_ola_lock/pid" &&
+        printf '%s\n' "$_ola_start" > "$_ola_lock/proc_start_time" &&
+        printf '%s\n' "$_ola_nonce" > "$_ola_lock/owner_nonce" &&
+      printf '%s\n' "$(date +%s 2>/dev/null || printf '0')" > "$_ola_lock/created_epoch" || {
+        rm -f "$_ola_lock/pid" "$_ola_lock/proc_start_time" \
+          "$_ola_lock/owner_nonce" "$_ola_lock/created_epoch" 2>/dev/null || :
+        rmdir "$_ola_lock" 2>/dev/null || :
+        return 2
+      }
+      OBS_LOCK_NONCE="$_ola_nonce"
+      return 0
+    fi
+    _ola_pid=$(cat "$_ola_lock/pid" 2>/dev/null || printf '')
+    _ola_start=$(cat "$_ola_lock/proc_start_time" 2>/dev/null || printf '')
+    if ! merv_process_identity_matches "$_ola_pid" "$_ola_start" "$_ola_proc" 2>/dev/null; then
+      mv "$_ola_lock" "${_ola_lock}.stale.$(date +%s 2>/dev/null || printf 0).$$.$_ola_try" 2>/dev/null || :
+      _ola_try=$((_ola_try + 1))
+      [ "$_ola_try" -lt 8 ] || return 2
+      continue
+    fi
+    [ "$_ola_try" -lt "$_ola_wait" ] || return 1
+    sleep 1
+    _ola_try=$((_ola_try + 1))
+  done
+}
+
+obs_lock_release() {
+  _olr_lock="$1" _olr_nonce="$2"
+  [ "$(cat "$_olr_lock/owner_nonce" 2>/dev/null)" = "$_olr_nonce" ] || return 2
+  rm -f "$_olr_lock/pid" "$_olr_lock/proc_start_time" "$_olr_lock/owner_nonce" \
+    "$_olr_lock/created_epoch" 2>/dev/null || return 2
+  rmdir "$_olr_lock" 2>/dev/null
+}
+
+obs_config_observable() {
+  for _oco_lock in "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock" "$OBS_CONFIG_LOCKDIR/vlan_event.lock"; do
+    if type merv_lock_state >/dev/null 2>&1; then
+      case "$(merv_lock_state "$_oco_lock")" in active|unknown_recent) return 1 ;; esac
+    elif [ -d "$_oco_lock" ]; then
+      return 1
+    fi
+  done
+  for _oco_owner in "$MERV_DHCP_HOLD_STATE_ROOT/owners/"*; do
+    [ -d "$_oco_owner" ] && [ -f "$_oco_owner/ready" ] || continue
+    case "$(cat "$_oco_owner/phase" 2>/dev/null)" in mutating|handoff_wait) return 1 ;; esac
+  done
+  return 0
+}
+
+obs_record_fault() {
+  _orf_kind="$1" _orf_generation="$2"
+  _orf_file="$OBS_FAULTS/${_orf_kind}-${_orf_generation}-$(date +%s 2>/dev/null || printf 0)-$$"
+  {
+    printf 'operation=%s\n' "$_orf_kind"
+    printf 'generation=%s\n' "$_orf_generation"
+    printf 'epoch=%s\n' "$(date +%s 2>/dev/null || printf 0)"
+  } > "$_orf_file" 2>/dev/null || :
+}
+
+obs_snapshot_run() {
+  if [ -n "${MERV_OBS_SNAPSHOT_CMD:-}" ]; then
+    "$MERV_OBS_SNAPSHOT_CMD"
+    return $?
+  fi
+  type merv_mac_snapshot >/dev/null 2>&1 || return 1
+  if [ "${OBS_SNAPSHOT_RESET_CURRENT:-0}" = 1 ]; then
+    MERV_MAC_SNAPSHOT_RESET=1
+    MERV_MAC_SNAPSHOT_ALLOW_EMPTY=1
+    MERV_MAC_SNAPSHOT_FORCE_RELOAD=1
+    export MERV_MAC_SNAPSHOT_RESET MERV_MAC_SNAPSHOT_ALLOW_EMPTY MERV_MAC_SNAPSHOT_FORCE_RELOAD
+  fi
+  merv_mac_snapshot || return $?
+  case "${MERV_MAC_LAST_STATUS:-}" in changed|reloaded|unchanged|empty) return 0 ;; *) return 1 ;; esac
+}
+
+obs_collection_run() {
+  if [ -n "${MERV_OBS_COLLECTION_CMD:-}" ]; then
+    "$MERV_OBS_COLLECTION_CMD"
+    return $?
+  fi
+  # Nodes publish their local observation artifact; only the main router owns
+  # the cluster-wide merge and public client JSON.
+  if type merv_mac_is_main >/dev/null 2>&1 && ! merv_mac_is_main; then
+    [ -x "$MERV_BASE/functions/collect_local_clients.sh" ] || return 1
+    # The main router provides the configured node IP when it asks a node for
+    # an inventory generation. Preserve that stable identity in the artifact
+    # rather than falling back to the node's mutable shell hostname/OOMID.
+    if [ -n "${MERV_OBS_CLIENT_ROUTER:-}" ]; then
+      "$MERV_BASE/functions/collect_local_clients.sh" "" \
+        "$MERV_OBS_CLIENT_ROUTER" "$MERV_OBS_CLIENT_ROUTER"
+      return $?
+    fi
+    "$MERV_BASE/functions/collect_local_clients.sh"
+    return $?
+  fi
+  [ -x "$MERV_BASE/functions/collect_clients.sh" ] || return 1
+  "$MERV_BASE/functions/collect_clients.sh"
+}
+
+obs_complete_generation() {
+  _ocg_kind="$1" _ocg_generation="$2"
+  obs_lock_acquire "$OBS_REQUEST_LOCK" 5 || return 2
+  _ocg_nonce="$OBS_LOCK_NONCE"
+  obs_state_load
+  case "$_ocg_kind" in
+    snapshot)
+      [ "$OBS_SC" -ge "$_ocg_generation" ] || OBS_SC="$_ocg_generation"
+      _ocg_reset=$(cat "$OBS_ROOT/snapshot.reset.generation" 2>/dev/null || printf '0')
+      case "$_ocg_reset" in ''|*[!0-9]*) _ocg_reset=0 ;; esac
+      [ "$_ocg_reset" -gt "$OBS_SC" ] || rm -f "$OBS_ROOT/snapshot.reset.generation" 2>/dev/null || :
+      ;;
+    collection)
+      [ "$OBS_CC" -ge "$_ocg_generation" ] || OBS_CC="$_ocg_generation"
+      ;;
+  esac
+  obs_state_write "$OBS_SR" "$OBS_SC" "$OBS_CR" "$OBS_CC"
+  _ocg_rc=$?
+  obs_lock_release "$OBS_REQUEST_LOCK" "$_ocg_nonce" || return 2
+  return "$_ocg_rc"
+}
+
+obs_request() {
+  shift
+  [ "$#" -gt 0 ] || return 1
+  obs_lock_acquire "$OBS_REQUEST_LOCK" 5 || return 2
+  _or_nonce="$OBS_LOCK_NONCE"
+  obs_state_load
+  for _or_kind in "$@"; do
+    case "$_or_kind" in
+      snapshot) OBS_SR=$((OBS_SR + 1)) ;;
+      snapshot-reset)
+        OBS_SR=$((OBS_SR + 1))
+        printf '%s\n' "$OBS_SR" > "$OBS_ROOT/.snapshot.reset.tmp.$$" &&
+          mv "$OBS_ROOT/.snapshot.reset.tmp.$$" "$OBS_ROOT/snapshot.reset.generation" || {
+            obs_lock_release "$OBS_REQUEST_LOCK" "$_or_nonce" || :
+            return 2
+          }
+        ;;
+      collect|collection) OBS_CR=$((OBS_CR + 1)) ;;
+      *) obs_lock_release "$OBS_REQUEST_LOCK" "$_or_nonce" || :; return 1 ;;
+    esac
+  done
+  obs_state_write "$OBS_SR" "$OBS_SC" "$OBS_CR" "$OBS_CC"
+  _or_rc=$?
+  obs_lock_release "$OBS_REQUEST_LOCK" "$_or_nonce" || return 2
+  [ "$_or_rc" -eq 0 ] || return "$_or_rc"
+  printf 'snapshot_requested=%s collection_requested=%s\n' "$OBS_SR" "$OBS_CR"
+  if [ "${MERV_OBS_NO_AUTOSTART:-0}" != 1 ]; then
+    # Requests often arrive before the manager releases its mutation lock.
+    # A one-shot worker correctly deferred in that state, but nothing retried
+    # it afterward and the generation remained pending until another event.
+    # The bounded wait path preserves coalescing and retries after the lock is
+    # released without keeping the requesting manager blocked.
+    "$0" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}" </dev/null >/dev/null 2>&1 &
+  fi
+}
+
+obs_run() {
+  obs_lock_acquire "$OBS_WORKER_LOCK" 0 || return 0
+  _ow_nonce="$OBS_LOCK_NONCE"
+  trap 'obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" 2>/dev/null || :' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  while :; do
+    obs_state_load
+    [ "$OBS_SC" -lt "$OBS_SR" ] || [ "$OBS_CC" -lt "$OBS_CR" ] || break
+    if ! obs_config_observable; then
+      obs_log info "configuration mutation active; generations remain pending"
+      return 75
+    fi
+    if [ "$OBS_SC" -lt "$OBS_SR" ]; then
+      _ow_generation="$OBS_SR"
+      _ow_reset=$(cat "$OBS_ROOT/snapshot.reset.generation" 2>/dev/null || printf '0')
+      case "$_ow_reset" in ''|*[!0-9]*) _ow_reset=0 ;; esac
+      # Any reset request newer than the last completed snapshot upgrades the
+      # coalesced target generation to reset mode.
+      if [ "$_ow_reset" -gt "$OBS_SC" ]; then
+        OBS_SNAPSHOT_RESET_CURRENT=1
+      else
+        OBS_SNAPSHOT_RESET_CURRENT=0
+      fi
+      export OBS_SNAPSHOT_RESET_CURRENT
+      if obs_snapshot_run; then
+        obs_complete_generation snapshot "$_ow_generation" || return 2
+      else
+        obs_record_fault snapshot "$_ow_generation"
+        return 1
+      fi
+      continue
+    fi
+    if [ "$OBS_CC" -lt "$OBS_CR" ]; then
+      _ow_generation="$OBS_CR"
+      if obs_collection_run; then
+        obs_complete_generation collection "$_ow_generation" || return 2
+      else
+        obs_record_fault collection "$_ow_generation"
+        return 1
+      fi
+    fi
+  done
+  return 0
+}
+
+obs_run_wait() {
+  _orw_max="${1:-120}"
+  _orw_elapsed=0
+  case "$_orw_max" in ''|*[!0-9]*) return 2 ;; esac
+  obs_state_load
+  _orw_snapshot_target="$OBS_SR"
+  _orw_collection_target="$OBS_CR"
+  while [ "$_orw_elapsed" -le "$_orw_max" ]; do
+    "$0" run
+    _orw_rc=$?
+    case "$_orw_rc" in 0|75) ;; *) return "$_orw_rc" ;; esac
+    obs_state_load
+    if [ "$OBS_SC" -ge "$_orw_snapshot_target" ] &&
+       [ "$OBS_CC" -ge "$_orw_collection_target" ]; then
+      return 0
+    fi
+    [ "$_orw_elapsed" -lt "$_orw_max" ] || break
+    sleep 1
+    _orw_elapsed=$((_orw_elapsed + 1))
+  done
+  return 75
+}
+
+obs_status() {
+  obs_state_load
+  printf 'snapshot requested=%s completed=%s pending=%s\n' \
+    "$OBS_SR" "$OBS_SC" "$((OBS_SR - OBS_SC))"
+  printf 'collection requested=%s completed=%s pending=%s\n' \
+    "$OBS_CR" "$OBS_CC" "$((OBS_CR - OBS_CC))"
+  if [ -d "$OBS_WORKER_LOCK" ]; then printf 'worker=active\n'; else printf 'worker=idle\n'; fi
+}
+
+obs_init || exit $?
+case "$OBS_ACTION" in
+  request) obs_request "$@" ;;
+  run) obs_run ;;
+  run-wait) obs_run_wait "${2:-120}" ;;
+  status) obs_status ;;
+  *) printf 'Usage: %s request snapshot|collect [...] | run | run-wait [seconds] | status\n' "$0" >&2; exit 2 ;;
+esac

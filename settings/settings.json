@@ -7,6 +7,7 @@
     "ENABLE_STP": "0",
     "ENABLE_NATIVE_SSID": "0",
     "EXPERIMENTAL": "0",
+    "HTML_CLIENT_REFRESH_MINUTES": "5",
     "IS_NODE": "0",
     "NODE_ID": "none",
     "BACKUP_1": ["none", "none", "none"],

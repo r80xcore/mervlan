@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.63"                   #
+#                - File: update_mervlan.sh || version="0.64"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -401,6 +401,7 @@ functions/service-event-handler.sh
 functions/mervlan_backup.sh
 functions/sync_nodes.sh
 functions/collect_clients.sh
+functions/post_apply_worker.sh
 functions/collect_local_clients.sh
 functions/dropbear_sshkey_gen.sh
 functions/execute_nodes.sh

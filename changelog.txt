@@ -1,3 +1,30 @@
+mervlan v0.53.25-dev
+
+Security: DHCP-hold owner leases and boot watchdog hardening
+- Replaced the shared DHCP marker lifecycle with token-specific owner leases. Every boot watchdog, manager, and heal run now has its own identity, mutation phase, and explicit successor handoff instead of relying on one shared file that competing processes could clear or recreate at the wrong time.
+  This closes the boot/restart race where a VLAN client could briefly reach br0 and request a native DHCP lease while ASUS firmware is rebuilding bridges and ebtables rules.
+- Boot and recovery now stay fail-closed: a timed-out, killed, or orphaned owner records an exact failure and pending recovery state rather than silently releasing DHCP protection. PID and `/proc` start-time validation prevent a reused PID from being trusted as the original owner.
+- Exact DHCP rule reconciliation verifies one chain, one DROP rule, and one jump from both FORWARD and INPUT. Already-correct watchdog ticks are now read-only, avoiding the transient rule gap caused by repeatedly rebuilding an exact rule set.
+- Added consecutive stable-state verification before a manager may complete its handoff and remove protection. MAC Shield and quarantine rules are restored alongside DHCP protection during guarded recovery.
+- Thank you to @inventor7777 - PR #38 for identifying the boot issue that prompted this hardening work.
+
+New: Coordinated post-apply observation
+- Added a generation-based post-apply worker that serializes MAC snapshots and client collection, defers safely while configuration is mutating, coalesces duplicate requests, and resumes pending work after a worker interruption.
+- Fresh worker processes now load the JSON, hardware-profile, and node-identity context they need, so client observation follows the same SSID assignment rules as the manager.
+- Client JSON publication is atomic: the previous readable result is retained if a refresh or rename cannot complete.
+
+Improved: Boot and observation resilience
+- Boot watchdog handoffs now use a configurable 360-second ceiling with exact completion acknowledgement. Curated nodes mark their own runtime ready without invoking the main-router-only installer path.
+- NVRAM SSID inventory and node SSH observation calls are bounded, so a slow firmware command or unavailable node cannot leave a worker stuck indefinitely.
+- Successful client collection now uses concise routine logs: `Refreshing client list started` and `Refreshing client list complete`; warnings and errors remain detailed.
+
+Maintenance: Validation and controlled recovery tooling
+- Added isolated fake-ebtables/state-machine regression coverage for owner leases, exact rules, handoffs, watchdogs, worker coalescing, PID reuse, crash recovery, and atomic publication.
+- Added a live-test guard and focused live-test support for controlled recovery testing without leaving a router or node in an unsafe intermediate state.
+- Live qualification covered repeated Apply, wireless restart, warm reboot, and cold boot cycles on the node, plus a guarded main-router boot validation with exact-rule and bridge-placement observation.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.24-dev
 
 New: Standalone emergency recovery
