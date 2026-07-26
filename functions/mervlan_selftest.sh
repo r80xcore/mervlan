@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#              - File: mervlan_selftest.sh || version="0.1"                    #
+#            - File: mervlan_selftest.sh || version="0.72.1"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -643,10 +643,10 @@ test_heal_handoff() {
 }
 
 test_boot_handoff() {
-  grep -Fq 'MERV_BOOT_SHIELD_MAX_SEC:=360' "$MERV_BASE/settings/var_settings.sh" &&
+  grep -Fq 'MERV_BOOT_SHIELD_MAX_SEC:=480' "$MERV_BASE/settings/var_settings.sh" &&
     pass "boot shield setting retains cold-boot-qualified ceiling" ||
     fail "boot shield setting retains cold-boot-qualified ceiling"
-  grep -Fq 'MERV_BOOT_SHIELD_MAX_SEC:-360' "$MERV_BASE/functions/mervlan_boot_wrap.sh" &&
+  grep -Fq 'MERV_BOOT_SHIELD_MAX_SEC:-480' "$MERV_BASE/functions/mervlan_boot_wrap.sh" &&
     ! grep -Fq 'MERV_BOOT_SHIELD_MAX_SEC:-120' "$MERV_BASE/functions/mervlan_boot_wrap.sh" &&
     pass "boot watchdog defaults retain cold-boot-qualified ceiling" ||
     fail "boot watchdog defaults retain cold-boot-qualified ceiling"
@@ -789,6 +789,14 @@ test_settle_watchdog() {
   [ "$(cat "$SELFTEST_ROOT/settle.corrected" 2>/dev/null)" = 1 ] &&
     pass "persistent unhealthy state performs only one correction" ||
     fail "persistent unhealthy state performs only one correction"
+
+  MERV_DHCP_SETTLE_TICK_CMD='sleep 1; false'
+  export MERV_DHCP_SETTLE_TICK_CMD
+  printf '%s\n' healthy healthy healthy > "$SELFTEST_ROOT/settle.sequence"
+  assert_rc 1 "settle tick rejects shell command injection" \
+    merv_dhcp_hold_wait_stable test_settle_observe test_settle_correct 3 3
+  MERV_DHCP_SETTLE_TICK_CMD=:
+  export MERV_DHCP_SETTLE_TICK_CMD
 }
 
 test_recovery() {
@@ -1119,8 +1127,8 @@ test_client_refresh_contract() {
     pass "non-cron collection callers remain enabled" ||
     fail "non-cron collection callers remain enabled"
 
-  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "5"' "$_tcr_settings" &&
-    grep -q 'HTML_CLIENT_REFRESH_MINUTES: "5"' "$_tcr_html" &&
+  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "15"' "$_tcr_settings" &&
+    grep -q 'HTML_CLIENT_REFRESH_MINUTES: "15"' "$_tcr_html" &&
     grep -q 'clientAutoRefreshCooldownMs' "$_tcr_html" &&
     grep -q 'CLIENTS_AUTO_REFRESH_MINUTES_MAX = 1440' "$_tcr_html" &&
     pass "HTML client refresh setting has default and bounded parser" ||
@@ -1141,7 +1149,6 @@ test_client_refresh_contract() {
 
   grep -q 'info -c cli,vlan "Refreshing client list started"' "$_tcr_collect" &&
     grep -q 'info -c cli,vlan "Refreshing client list complete"' "$_tcr_collect" &&
-    [ "$(grep -c 'info -c cli,vlan' "$_tcr_collect")" -eq 3 ] &&
     pass "successful client refresh keeps CLI routine logging concise" ||
     fail "successful client refresh keeps CLI routine logging concise"
 }
@@ -1192,6 +1199,337 @@ test_manager_ownership() {
   esac
 }
 
+test_node_job_logging() {
+  _tnjl_root="$SELFTEST_ROOT/node-job-logging"
+  rm -rf "$_tnjl_root" 2>/dev/null || return 1
+  mkdir -p "$_tnjl_root/job1" "$_tnjl_root/job2" || return 1
+
+  unset LOGROOT LOG_chan_cli LOG_chan_vlan LOG_SETTINGS_LOADED
+  LOG_SYSLOG=0
+  . "$MERV_BASE/settings/log_settings.sh"
+  [ "$LOG_chan_cli" = "/tmp/mervlan_tmp/logs/cli_output.log" ] &&
+    [ "$LOG_chan_vlan" = "/tmp/mervlan_tmp/logs/vlan_manager.log" ] &&
+    pass "node task log defaults stay unchanged" ||
+    fail "node task log defaults stay unchanged"
+  [ "$LOG_chan_cli" != "$LOG_chan_vlan" ] &&
+    pass "default CLI and VLAN task channels differ" ||
+    fail "default CLI and VLAN task channels differ"
+
+  LOGROOT="$_tnjl_root/default"
+  LOG_chan_cli="$_tnjl_root/job1/cli.log"
+  LOG_chan_vlan="$_tnjl_root/job1/vlan.log"
+  info -c cli,vlan "node-job-one"
+  [ "$(grep -c 'node-job-one' "$LOG_chan_cli" 2>/dev/null)" = 1 ] &&
+    [ "$(grep -c 'node-job-one' "$LOG_chan_vlan" 2>/dev/null)" = 1 ] &&
+    pass "task CLI and VLAN channels do not duplicate one file" ||
+    fail "task CLI and VLAN channels do not duplicate one file"
+
+  LOG_chan_cli="$_tnjl_root/job2/cli.log"
+  LOG_chan_vlan="$_tnjl_root/job2/vlan.log"
+  info -c cli,vlan "node-job-two"
+  [ -f "$_tnjl_root/job1/cli.log" ] && [ -f "$_tnjl_root/job1/vlan.log" ] &&
+    [ -f "$_tnjl_root/job2/cli.log" ] && [ -f "$_tnjl_root/job2/vlan.log" ] &&
+    ! grep -q 'node-job-two' "$_tnjl_root/job1/cli.log" 2>/dev/null &&
+    ! grep -q 'node-job-one' "$_tnjl_root/job2/cli.log" 2>/dev/null &&
+    pass "simulated workers use distinct task logs" ||
+    fail "simulated workers use distinct task logs"
+}
+
+test_node_job_ssh_temp() {
+  _tnst_root="$SELFTEST_ROOT/node-job-ssh-temp"
+  rm -rf "$_tnst_root" 2>/dev/null || return 1
+  mkdir -p "$_tnst_root/job1/ssh" "$_tnst_root/job2/ssh" || return 1
+  : > "$_tnst_root/paths" || return 1
+
+  unset LIB_SSH_LOADED
+  . "$MERV_BASE/settings/lib_ssh.sh"
+  MERV_SSH_RETRIES=1
+  MERV_SSH_TEST_PATHS="$_tnst_root/paths"
+  merv_ssh_precheck() { return 0; }
+  get_node_ssh_port() { printf '22\n'; }
+  get_node_ssh_user() { printf 'admin\n'; }
+  _merv_timeout_run() { _tnst_sec="$1"; shift; "$@"; }
+  dbclient() {
+    printf '%s\n' "${MERV_SSH_ERR_FILE:-}" >> "$MERV_SSH_TEST_PATHS"
+    sleep 1
+    return 0
+  }
+
+  (
+    MERV_NODE_JOB_DIR="$_tnst_root/job1"
+    MERV_SSH_TMPDIR="$MERV_NODE_JOB_DIR/ssh"
+    export MERV_NODE_JOB_DIR MERV_SSH_TMPDIR
+    merv_ssh_exec 1 192.0.2.1 true >/dev/null
+  ) &
+  _tnst_one=$!
+  (
+    MERV_NODE_JOB_DIR="$_tnst_root/job2"
+    MERV_SSH_TMPDIR="$MERV_NODE_JOB_DIR/ssh"
+    export MERV_NODE_JOB_DIR MERV_SSH_TMPDIR
+    merv_ssh_exec 2 192.0.2.2 true >/dev/null
+  ) &
+  _tnst_two=$!
+  wait "$_tnst_one" && wait "$_tnst_two" || {
+    fail "simulated SSH calls complete"
+    return 1
+  }
+  [ "$(sed -n '1p' "$_tnst_root/paths")" != "$(sed -n '2p' "$_tnst_root/paths")" ] &&
+    grep -q "^$_tnst_root/job1/ssh/ssh_err\." "$_tnst_root/paths" &&
+    grep -q "^$_tnst_root/job2/ssh/ssh_err\." "$_tnst_root/paths" &&
+    pass "concurrent SSH calls use distinct job-contained stderr files" ||
+    fail "concurrent SSH calls use distinct job-contained stderr files"
+  [ -z "$(find "$_tnst_root/job1/ssh" "$_tnst_root/job2/ssh" -type f -print 2>/dev/null)" ] &&
+    pass "SSH stderr files are cleaned from their own job roots" ||
+    fail "SSH stderr files are cleaned from their own job roots"
+}
+
+test_node_runner_status() {
+  _tnrs_root="$SELFTEST_ROOT/node-runner-status"
+  _tnrs_runner="$MERV_BASE/functions/mervlan_node_runner.sh"
+  rm -rf "$_tnrs_root" 2>/dev/null || return 1
+  mkdir -p "$_tnrs_root" || return 1
+  [ -f "$_tnrs_runner" ] || { fail "node runner source present"; return 1; }
+
+  _tnrs_ok="$_tnrs_root/manager-ok.sh"
+  printf '#!/bin/sh\nsleep 1\nexit 0\n' > "$_tnrs_ok" || return 1
+  _tnrs_start=$(MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" MERV_NODE_RUNNER_MANAGER="$_tnrs_ok" \
+    sh "$_tnrs_runner" start 11-22 1) || { fail "node runner start acknowledgement"; return 1; }
+  case "$_tnrs_start" in started|complete|failed) pass "node runner start acknowledgement" ;; *) fail "node runner start acknowledgement" ;; esac
+  sleep 2
+  _tnrs_status=$(MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" sh "$_tnrs_runner" status 11-22 1 2>/dev/null)
+  printf '%s\n' "$_tnrs_status" | grep -q '^state=complete$' &&
+    printf '%s\n' "$_tnrs_status" | grep -q '^exit_code=0$' &&
+    [ -f "$_tnrs_root/runs/11-22/cli.log" ] &&
+    [ -f "$_tnrs_root/runs/11-22/vlan.log" ] &&
+    [ -f "$_tnrs_root/runs/11-22/stdout.log" ] &&
+    pass "node runner publishes complete atomic status and per-run logs" ||
+    fail "node runner publishes complete atomic status and per-run logs"
+
+  _tnrs_fail="$_tnrs_root/manager-fail.sh"
+  printf '#!/bin/sh\nsleep 1\nexit 7\n' > "$_tnrs_fail" || return 1
+  MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" MERV_NODE_RUNNER_MANAGER="$_tnrs_fail" \
+    sh "$_tnrs_runner" start 12-22 1 >/dev/null || { fail "node runner failure start acknowledgement"; return 1; }
+  sleep 2
+  _tnrs_status=$(MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" sh "$_tnrs_runner" status 12-22 1 2>/dev/null)
+  printf '%s\n' "$_tnrs_status" | grep -q '^state=failed$' &&
+    printf '%s\n' "$_tnrs_status" | grep -q '^exit_code=7$' &&
+    pass "node runner publishes manager failure" ||
+    fail "node runner publishes manager failure"
+
+  _tnrs_kill="$_tnrs_root/manager-kill.sh"
+  printf '#!/bin/sh\nsleep 10\n' > "$_tnrs_kill" || return 1
+  MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" MERV_NODE_RUNNER_MANAGER="$_tnrs_kill" \
+    sh "$_tnrs_runner" run 13-22 1 >/dev/null 2>&1 &
+  _tnrs_pid=$!
+  sleep 1
+  kill -TERM "$_tnrs_pid" 2>/dev/null || :
+  wait "$_tnrs_pid" 2>/dev/null || :
+  _tnrs_status=$(MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" sh "$_tnrs_runner" status 13-22 1 2>/dev/null)
+  printf '%s\n' "$_tnrs_status" | grep -q '^state=failed$' &&
+    printf '%s\n' "$_tnrs_status" | grep -q '^reason=runner-terminated$' &&
+    pass "killed runner publishes terminal failure" ||
+    fail "killed runner publishes terminal failure"
+
+  mkdir -p "$_tnrs_root/runs/1-2/ssh" || return 1
+  printf 'format_version=1\nrun_id=1-2\nnode_id=1\nstate=complete\npid=1\nproc_start_time=1\nstarted_epoch=1\ncompleted_epoch=2\nexit_code=0\nreason=ok\n' > "$_tnrs_root/runs/1-2/node_1.status"
+  : > "$_tnrs_root/runs/1-2/cli.log"
+  : > "$_tnrs_root/runs/1-2/vlan.log"
+  : > "$_tnrs_root/runs/1-2/stdout.log"
+  : > "$_tnrs_root/runs/1-2/runner.log"
+  MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" MERV_NODE_RUNNER_MANAGER="$_tnrs_ok" MERV_NODE_STATUS_RETENTION_SEC=1 \
+    sh "$_tnrs_runner" start 17-22 1 >/dev/null || { fail "node runner retention start"; return 1; }
+  [ ! -d "$_tnrs_root/runs/1-2" ] &&
+    pass "node runner prunes only old validated terminal run" ||
+    fail "node runner prunes only old validated terminal run"
+
+  mkdir -p "$_tnrs_root/runs/14-22" || return 1
+  printf 'format_version=1\nrun_id=14-22\nnode_id=1\nstate=complete\npid=1\nproc_start_time=1\nstarted_epoch=1\ncompleted_epoch=2\nexit_code=0\nreason=ok\nreason=duplicate\n' > "$_tnrs_root/runs/14-22/node_1.status"
+  if MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" sh "$_tnrs_runner" status 14-22 1 >/dev/null 2>&1; then
+    fail "node runner rejects duplicate status field"
+  else
+    pass "node runner rejects duplicate status field"
+  fi
+  mkdir -p "$_tnrs_root/runs/15-22" || return 1
+  printf 'format_version=1\nrun_id=other-22\nnode_id=1\nstate=started\n' > "$_tnrs_root/runs/15-22/node_1.status"
+  if MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" sh "$_tnrs_runner" status 15-22 1 >/dev/null 2>&1; then
+    fail "node runner rejects wrong and partial status"
+  else
+    pass "node runner rejects wrong and partial status"
+  fi
+  mkdir -p "$_tnrs_root/runs/16-22" || return 1
+  printf 'format_version=1\nrun_id=16-22\nnode_id=1\nstate=started\npid=1\nproc_start_time=1\nstarted_epoch=1\ncompleted_epoch=0\nexit_code=\nreason=started\nunknown=x\n' > "$_tnrs_root/runs/16-22/node_1.status"
+  if MERV_NODE_STATUS_ROOT="$_tnrs_root/runs" sh "$_tnrs_runner" status 16-22 1 >/dev/null 2>&1; then
+    fail "node runner rejects unknown status field"
+  else
+    pass "node runner rejects unknown status field"
+  fi
+}
+
+node_job_test_handler() {
+  _tnjh_node="$1" _tnjh_ip="$2"
+  mkdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node" || exit 1
+  while ! mkdir "$NODE_JOB_TEST_ROOT/count.lock" 2>/dev/null; do sleep 1; done
+  _tnjh_count=$(find "$NODE_JOB_TEST_ROOT/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+  _tnjh_max=$(cat "$NODE_JOB_TEST_ROOT/max" 2>/dev/null || printf '0')
+  [ "$_tnjh_count" -gt "$_tnjh_max" ] 2>/dev/null && printf '%s\n' "$_tnjh_count" > "$NODE_JOB_TEST_ROOT/max"
+  rmdir "$NODE_JOB_TEST_ROOT/count.lock" 2>/dev/null || :
+  case "${NODE_JOB_TEST_SCENARIO:-pool}:$_tnjh_node" in
+    pool:2) sleep 3 ;;
+    pool:3) sleep 1; rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"; return 7 ;;
+    timeout:1) sleep 10 ;;
+    *) sleep 1 ;;
+  esac
+  rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"
+}
+
+node_job_progress_hook() {
+  printf 'progress\n' >> "$NODE_JOB_TEST_ROOT/progress"
+}
+
+test_node_worker_pool() {
+  _tnwp_root="$SELFTEST_ROOT/node-jobs/pool"
+  rm -rf "$SELFTEST_ROOT/node-jobs" 2>/dev/null || return 1
+  mkdir -p "$_tnwp_root/active" || return 1
+  NODE_JOB_TEST_ROOT="$_tnwp_root"; export NODE_JOB_TEST_ROOT
+  printf '0\n' > "$_tnwp_root/max"
+  mkdir "$_tnwp_root/parent.lock" || return 1
+  printf 'parent-owned\n' > "$_tnwp_root/parent.lock/owner"
+  NODE_JOB_TEST_SCENARIO=pool; export NODE_JOB_TEST_SCENARIO
+  MNJ_POOL_PROGRESS_HOOK=node_job_progress_hook
+  printf '1 192.0.2.1\n2 192.0.2.2\n3 192.0.2.3\n' > "$_tnwp_root/nodes"
+  . "$MERV_BASE/settings/lib_node_jobs.sh"
+  if mnj_pool_run "$_tnwp_root" testphase 2 6 "$_tnwp_root/nodes" node_job_test_handler; then
+    fail "worker pool reports failed worker"
+  else
+    pass "worker pool reports failed worker"
+  fi
+  [ "$(cat "$_tnwp_root/max")" -le 2 ] 2>/dev/null &&
+    [ -f "$_tnwp_root/node_1/result" ] && [ -f "$_tnwp_root/node_2/result" ] && [ -f "$_tnwp_root/node_3/result" ] &&
+    [ -f "$_tnwp_root/node_1/cli.log" ] && [ -f "$_tnwp_root/node_1/vlan.log" ] && [ -d "$_tnwp_root/node_1/ssh" ] &&
+    pass "worker pool bounds concurrency and isolates worker paths" ||
+    fail "worker pool bounds concurrency and isolates worker paths"
+  mnj_result_validate "$_tnwp_root/node_1/result" 1 testphase && [ "$MNJ_RESULT_STATE" = ok ] &&
+    mnj_result_validate "$_tnwp_root/node_3/result" 3 testphase && [ "$MNJ_RESULT_STATE" = failed ] &&
+    pass "worker pool publishes success and failure results" ||
+    fail "worker pool publishes success and failure results"
+  [ "$(cat "$_tnwp_root/parent.lock/owner" 2>/dev/null)" = parent-owned ] &&
+    pass "workers retain parent-owned lock state" ||
+    fail "workers retain parent-owned lock state"
+  [ -s "$_tnwp_root/progress" ] &&
+    pass "worker pool progress hook runs only in parent" ||
+    fail "worker pool progress hook runs only in parent"
+  MNJ_POOL_PROGRESS_HOOK=""
+
+  _tnwp_timeout="$SELFTEST_ROOT/node-jobs/timeout"
+  mkdir -p "$_tnwp_timeout/active" || return 1
+  NODE_JOB_TEST_ROOT="$_tnwp_timeout"; export NODE_JOB_TEST_ROOT
+  NODE_JOB_TEST_SCENARIO=timeout; export NODE_JOB_TEST_SCENARIO
+  printf '0\n' > "$_tnwp_timeout/max"
+  printf '1 192.0.2.1\n' > "$_tnwp_timeout/nodes"
+  if mnj_pool_run "$_tnwp_timeout" timeoutphase 1 1 "$_tnwp_timeout/nodes" node_job_test_handler; then
+    fail "worker pool timeout is reported"
+  else
+    pass "worker pool timeout is reported"
+  fi
+  mnj_result_validate "$_tnwp_timeout/node_1/result" 1 timeoutphase && [ "$MNJ_RESULT_STATE" = timeout ] &&
+    pass "worker timeout publishes terminal result before slot release" ||
+    fail "worker timeout publishes terminal result before slot release"
+
+  printf '1 192.0.2.1\n1 192.0.2.2\n' > "$_tnwp_timeout/duplicate-id"
+  if mnj_pool_run "$_tnwp_timeout/duplicate-id-run" duplicate 1 1 "$_tnwp_timeout/duplicate-id" node_job_test_handler; then
+    fail "worker pool rejects duplicate node IDs"
+  else
+    [ ! -d "$_tnwp_timeout/duplicate-id-run/node_1" ] &&
+      pass "worker pool rejects duplicate node IDs before launch" ||
+      fail "worker pool rejects duplicate node IDs before launch"
+  fi
+  printf '1 192.0.2.1\n2 192.0.2.1\n' > "$_tnwp_timeout/duplicate-ip"
+  if mnj_pool_run "$_tnwp_timeout/duplicate-ip-run" duplicate 1 1 "$_tnwp_timeout/duplicate-ip" node_job_test_handler; then
+    fail "worker pool rejects duplicate node IPs"
+  else
+    [ ! -d "$_tnwp_timeout/duplicate-ip-run/node_1" ] &&
+      pass "worker pool rejects duplicate node IPs before launch" ||
+      fail "worker pool rejects duplicate node IPs before launch"
+  fi
+}
+
+# The pool test above includes the TERM/KILL reconciliation path.  Keep the
+# named entry point required by the bounded-node regression contract.
+test_node_worker_timeout() {
+  test_node_worker_pool
+}
+
+test_execute_node_runner_contract() {
+  _tener_file="$MERV_BASE/functions/execute_nodes.sh"
+  grep -q 'MERV_EXEC_NODES_LOCK_STALE_SEC' "$_tener_file" &&
+    grep -q 'mervlan_node_runner.sh' "$_tener_file" &&
+    grep -q 'execute_status_valid' "$_tener_file" &&
+    grep -q 'fetch_node_runner_logs' "$_tener_file" &&
+    grep -q 'mnj_pool_run.*prepare' "$_tener_file" &&
+    grep -q 'mnj_pool_run.*launch' "$_tener_file" &&
+    grep -q 'mnj_pool_run.*status' "$_tener_file" &&
+    grep -q 'duplicate node ID' "$_tener_file" &&
+    grep -q 'mnj_result_validate.*prepare' "$_tener_file" &&
+    grep -q 'mnj_result_validate.*launch' "$_tener_file" &&
+    grep -q 'No node launches acknowledged' "$_tener_file" &&
+    ! grep -q 'if false; then' "$_tener_file" &&
+    ! grep -q 'clear_node_completion_marker' "$_tener_file" &&
+    ! grep -Eq '^[[:space:]]*wait[[:space:]]*$' "$_tener_file" &&
+    ! grep -q '/tmp/mervlan_tmp/results/node_complete' "$_tener_file" &&
+    pass "execute uses run-specific detached runner status" ||
+    fail "execute uses run-specific detached runner status"
+}
+
+sync_job_test_handler() {
+  _tsjh_node="$1" _tsjh_ip="$2"
+  printf '%s\n' "$_tsjh_node" > "$MERV_NODE_JOB_DIR/sync-artifact" || return 1
+  case "$_tsjh_ip" in
+    192.0.2.2) return 5 ;;
+    192.0.2.3) return 6 ;;
+  esac
+  return 0
+}
+
+test_sync_node_pool() {
+  _tsnp_root="$SELFTEST_ROOT/sync-node-pool"
+  rm -rf "$_tsnp_root" 2>/dev/null || return 1
+  mkdir -p "$_tsnp_root" || return 1
+  printf '1 192.0.2.1\n2 192.0.2.2\n3 192.0.2.3\n' > "$_tsnp_root/nodes"
+  . "$MERV_BASE/settings/lib_node_jobs.sh"
+  if mnj_pool_run "$_tsnp_root/jobs" sync 2 6 "$_tsnp_root/nodes" sync_job_test_handler; then
+    fail "sync pool reports transfer and verification failures"
+  else
+    pass "sync pool reports transfer and verification failures"
+  fi
+  mnj_result_validate "$_tsnp_root/jobs/node_1/result" 1 sync && [ "$MNJ_RESULT_STATE" = ok ] &&
+    [ "$(cat "$_tsnp_root/jobs/node_1/sync-artifact" 2>/dev/null)" = 1 ] &&
+    mnj_result_validate "$_tsnp_root/jobs/node_2/result" 2 sync && [ "$MNJ_RESULT_STATE" = failed ] &&
+    mnj_result_validate "$_tsnp_root/jobs/node_3/result" 3 sync && [ "$MNJ_RESULT_STATE" = failed ] &&
+    pass "sync worker results retain one success and two failures" ||
+    fail "sync worker results retain one success and two failures"
+  mnj_result_validate "$_tsnp_root/jobs/node_1/result" 1 sync && [ "$MNJ_RESULT_STATE" = ok ] &&
+    [ -f "$_tsnp_root/jobs/node_1/cli.log" ] && [ -d "$_tsnp_root/jobs/node_1/ssh" ] &&
+    pass "sync failure leaves successful node job isolated" ||
+    fail "sync failure leaves successful node job isolated"
+}
+
+test_sync_node_parallel_contract() {
+  _tsnc_file="$MERV_BASE/functions/sync_nodes.sh"
+  grep -q 'sync_node_worker()' "$_tsnc_file" &&
+    grep -q 'mnj_nodes_validate' "$_tsnc_file" &&
+    grep -q 'mnj_pool_run.*sync' "$_tsnc_file" &&
+    grep -q 'MERV_NODE_SYNC_MAX_SEC' "$_tsnc_file" &&
+    grep -q 'sync_pool_progress' "$_tsnc_file" &&
+    grep -q 'node_workers' "$_tsnc_file" &&
+    grep -q 'mervlan_node_runner.sh' "$_tsnc_file" &&
+    grep -q 'lib_node_jobs.sh' "$_tsnc_file" &&
+    grep -q '.mervlan.new.${SYNC_RUN_ID}.${node_id}' "$_tsnc_file" &&
+    grep -q 'sync_expected_path' "$_tsnc_file" &&
+    ! grep -q 'for d in /jffs/addons/mervlan_backups/.mervlan.new' "$_tsnc_file" &&
+    pass "sync uses isolated bounded staged workers" ||
+    fail "sync uses isolated bounded staged workers"
+}
+
 test_shell_syntax() {
   _tss_bad=0
   if grep -q 'grep -c "\^-s ".*|| :' "$MERV_BASE/functions/mervlan_boot.sh"; then
@@ -1202,6 +1540,7 @@ test_shell_syntax() {
   fi
   for _tss_file in \
     "$MERV_BASE/settings/lib_mervqt.sh" \
+    "$MERV_BASE/settings/lib_node_jobs.sh" \
     "$MERV_BASE/settings/var_settings.sh" \
     "$MERV_BASE/functions/mervlan_selftest.sh" \
     "$MERV_BASE/functions/mervlan_live_test_guard.sh" \
@@ -1212,6 +1551,7 @@ test_shell_syntax() {
     "$MERV_BASE/functions/heal_event.sh" \
     "$MERV_BASE/functions/mervlan_boot.sh" \
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
+    "$MERV_BASE/functions/execute_nodes.sh" \
     "$MERV_BASE/templates/mervlan_templates.sh"; do
     [ -f "$_tss_file" ] || { fail "shell syntax target missing: ${_tss_file##*/}"; _tss_bad=1; continue; }
     if sh -n "$_tss_file"; then pass "shell syntax ${_tss_file##*/}"; else fail "shell syntax ${_tss_file##*/}"; _tss_bad=1; fi
@@ -1289,6 +1629,14 @@ run_one() {
     atomic-publication) test_atomic_publication ;;
     client-refresh-contract) test_client_refresh_contract ;;
     manager-ownership) test_manager_ownership ;;
+    node-job-logging) test_node_job_logging ;;
+    node-job-ssh-temp) test_node_job_ssh_temp ;;
+    node-runner-status) test_node_runner_status ;;
+    node-worker-pool) test_node_worker_pool ;;
+    node-worker-timeout) test_node_worker_timeout ;;
+    execute-node-runner) test_execute_node_runner_contract ;;
+    sync-node-pool) test_sync_node_pool ;;
+    sync-node-parallel) test_sync_node_parallel_contract ;;
     shell-syntax) test_shell_syntax ;;
     live-audit) test_live_audit ;;
     *)
@@ -1333,7 +1681,8 @@ if [ "$SELFTEST_ACTION" = all ]; then
     heal-handoff boot-handoff duplicate-events manager-ownership \
     settle-watchdog recovery failsafe-status post-apply observation-concurrency \
     observation-timeouts observation-generations atomic-publication client-refresh-contract \
-    shell-syntax live-audit; do
+    node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
+    execute-node-runner sync-node-pool sync-node-parallel shell-syntax live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

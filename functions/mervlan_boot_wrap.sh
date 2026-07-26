@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#            - File: mervlan_boot_wrap.sh || version="0.48"                    #
+#          - File: mervlan_boot_wrap.sh || version="0.72.2"                  #
 # ============================================================================ #
 # - Purpose:    Boot-time wrapper that gates install/manager/cron execution.   #
 #               All ordering and flag logic lives here — core scripts are      #
@@ -91,7 +91,7 @@ _is_node_runtime() {
 #     boot can never leave the gate open.                                      #
 #   - Exits as soon as $LOCKDIR/merv_boot_shield.active is removed (manager  #
 #     mode does this immediately after the manager run returns).              #
-#   - Hard ceiling: MERV_BOOT_SHIELD_MAX_SEC (default 360s) — even if no one  #
+#   - Hard ceiling: MERV_BOOT_SHIELD_MAX_SEC (default 480s) — even if no one  #
 #     ever clears the marker, the hold tears down so DHCP comes back.         #
 #   - On teardown, releases the DHCP hold ONLY if the manager/heal-owned     #
 #     marker ($LOCKDIR/merv_dhcp_hold.active) is also absent. This prevents   #
@@ -102,7 +102,7 @@ _mode_shield_legacy() {
   local _shield_marker="$LOCKDIR/merv_boot_shield.active"
   local _shield_pidf="$LOCKDIR/merv_boot_shield.pid"
   local _hold_marker="$LOCKDIR/merv_dhcp_hold.active"
-  local _max="${MERV_BOOT_SHIELD_MAX_SEC:-360}"
+  local _max="${MERV_BOOT_SHIELD_MAX_SEC:-480}"
   local _oldpid
 
   case "$_max" in ''|*[!0-9]*) _max=360 ;; esac
@@ -224,8 +224,8 @@ _mode_shield_legacy() {
 # subshell) so its lease identity is bound to its own PID and /proc start time.
 _mode_shield_watchdog() {
   local _shield_marker="$2" _ready_file="$3" _context_file="$4" _max="$5"
-  local _pid_file="$6" _run_id _handoff_id _token _elapsed=0 _verification
-  case "$_max" in ''|*[!0-9]*) _max=360 ;; esac
+  local _pid_file="$6" _pid_start_file="${6}.start" _run_id _handoff_id _token _elapsed=0 _verification
+  case "$_max" in ''|*[!0-9]*) _max=480 ;; esac
   _run_id="boot-$(date +%s 2>/dev/null || echo 0)-$$"
   if ! merv_dhcp_hold_acquire boot-watchdog "$_run_id"; then
     warn -c boot,vlan "Shield: watchdog could not acquire boot lease"
@@ -272,17 +272,18 @@ _mode_shield_watchdog() {
     merv_dhcp_hold_abandon "$_token" boot-handoff-incomplete >/dev/null 2>&1 || :
     _token=""
   fi
-  rm -f "$_shield_marker" "$_ready_file" "$_context_file" "$_pid_file" 2>/dev/null || :
+  rm -f "$_shield_marker" "$_ready_file" "$_context_file" "$_pid_file" "$_pid_start_file" 2>/dev/null || :
   return 0
 }
 
 _mode_shield() {
   local _shield_marker="$LOCKDIR/merv_boot_shield.active"
   local _shield_pidf="$LOCKDIR/merv_boot_shield.pid"
+  local _shield_pid_startf="${_shield_pidf}.start"
   local _shield_ready="$LOCKDIR/merv_boot_shield.ready"
   local _shield_context="$LOCKDIR/merv_boot_shield.handoff"
-  local _max="${MERV_BOOT_SHIELD_MAX_SEC:-360}" _oldpid _wait=0
-  case "$_max" in ''|*[!0-9]*) _max=360 ;; esac
+  local _max="${MERV_BOOT_SHIELD_MAX_SEC:-480}" _oldpid _oldstart _shield_pid _shield_start _ready_pid _ready_start _wait=0
+  case "$_max" in ''|*[!0-9]*) _max=480 ;; esac
 
   [ "${DRY_RUN:-no}" != yes ] || return 0
   type ebtables >/dev/null 2>&1 || return 0
@@ -293,24 +294,43 @@ _mode_shield() {
 
   if [ -f "$_shield_pidf" ]; then
     _oldpid=$(cat "$_shield_pidf" 2>/dev/null || printf '')
+    _oldstart=$(cat "$_shield_pid_startf" 2>/dev/null || printf '')
     case "$_oldpid" in ''|*[!0-9]*) _oldpid="" ;; esac
-    [ -z "$_oldpid" ] || ! kill -0 "$_oldpid" 2>/dev/null || {
+    case "$_oldstart" in ''|*[!0-9]*) _oldstart="" ;; esac
+    if [ -n "$_oldpid" ] && [ -n "$_oldstart" ] &&
+       merv_process_identity_matches "$_oldpid" "$_oldstart"; then
       info -c boot,vlan "Shield: token watchdog already active (pid=$_oldpid)"
       return 0
-    }
+    fi
+    rm -f "$_shield_pidf" "$_shield_pid_startf" 2>/dev/null || :
   fi
   rm -f "$_shield_pidf" "$_shield_ready" "$_shield_context" 2>/dev/null || :
   date +%s > "$_shield_marker" 2>/dev/null || return 1
   "$0" shield-watchdog "$_shield_marker" "$_shield_ready" "$_shield_context" "$_max" "$_shield_pidf" \
     </dev/null >/dev/null 2>&1 &
-  printf '%s\n' "$!" > "$_shield_pidf" 2>/dev/null || return 1
+  _shield_pid=$!
+  _shield_start=$(merv_proc_start_time "$_shield_pid" 2>/dev/null || printf '')
+  case "$_shield_start" in ''|*[!0-9]*)
+    kill -TERM "$_shield_pid" 2>/dev/null || :
+    rm -f "$_shield_marker" "$_shield_pidf" "$_shield_pid_startf" 2>/dev/null || :
+    return 1
+    ;;
+  esac
+  if ! printf '%s\n' "$_shield_pid" > "$_shield_pidf" 2>/dev/null ||
+     ! printf '%s\n' "$_shield_start" > "$_shield_pid_startf" 2>/dev/null; then
+    kill -TERM "$_shield_pid" 2>/dev/null || :
+    rm -f "$_shield_marker" "$_shield_pidf" "$_shield_pid_startf" 2>/dev/null || :
+    return 1
+  fi
 
   while [ "$_wait" -lt "${MERV_BOOT_SHIELD_READY_SEC:-10}" ]; do
     if [ -s "$_shield_ready" ] && [ -s "$_shield_context" ]; then
       info -c boot,vlan "Shield: token watchdog ready (pid=$(cat "$_shield_ready" 2>/dev/null))"
       return 0
     fi
-    kill -0 "$(cat "$_shield_pidf" 2>/dev/null)" 2>/dev/null || break
+    _ready_pid=$(cat "$_shield_pidf" 2>/dev/null || printf '')
+    _ready_start=$(cat "$_shield_pid_startf" 2>/dev/null || printf '')
+    merv_process_identity_matches "$_ready_pid" "$_ready_start" || break
     sleep 1
     _wait=$((_wait + 1))
   done

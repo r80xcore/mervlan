@@ -118,10 +118,43 @@ function showLoadingSafe(secHint) {
  * @param {string} actionScriptName - backend script (e.g., "sync_vlanmgr")
  * @param {?object} settingsObjOrNull - JSON payload for amng_custom
  * @param {?object} opts - { loading?: boolean, waitSec?: number, target?: string,
- *                           skipRefresh?: boolean }
+ *                           skipRefresh?: boolean, progressToken?: string }
  */
 function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   opts = opts || {};
+
+  // Progress tokens travel through the same Merlin custom-settings transport
+  // as existing vlanmgr_* request data. They are validated here, before any
+  // backend action is submitted, and are never accepted from rawAmng because
+  // raw payloads are used by compatibility/update paths.
+  var progressToken = (typeof opts.progressToken === "string") ? opts.progressToken : "";
+  if (progressToken) {
+    if (!/^[A-Za-z0-9._-]{1,96}$/.test(progressToken) || typeof opts.rawAmng === "string") {
+      if (window.console && typeof console.warn === "function") {
+        console.warn("[MVM] rejected invalid or incompatible progress token");
+      }
+      return false;
+    }
+    var progressPayload = {};
+    if (settingsObjOrNull && typeof settingsObjOrNull === "object" && !Array.isArray(settingsObjOrNull)) {
+      Object.keys(settingsObjOrNull).forEach(function(key) {
+        progressPayload[key] = settingsObjOrNull[key];
+      });
+    }
+    progressPayload.vlanmgr_progress_token = progressToken;
+    settingsObjOrNull = progressPayload;
+
+    // Encode the token in the action event as the authoritative transport.
+    // This avoids depending on custom_settings.txt write timing or a stale
+    // previous value. The payload field remains a compatibility breadcrumb.
+    if (typeof MVM_ALLOWED_ACTIONS !== "undefined" && MVM_ALLOWED_ACTIONS.has(actionScriptName)) {
+      var progressTokenHex = "";
+      for (var pti = 0; pti < progressToken.length; pti++) {
+        progressTokenHex += ("0" + progressToken.charCodeAt(pti).toString(16)).slice(-2);
+      }
+      actionScriptName = actionScriptName + "_pgt_" + progressTokenHex;
+    }
+  }
 
   var isEncodedUpdateRef = /^updateref_vlanmgr_(?:[kc]_)?[ht]_[0-9a-f]+$/.test(actionScriptName);
   var isMaintenanceAction = /^(backupinventory_vlanmgr|deleteallbackups_vlanmgr|undorestore_vlanmgr|undoupdate_vlanmgr)_[0-9a-f]+$/.test(actionScriptName) ||
@@ -129,7 +162,9 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     /^(deletebackup_vlanmgr|restorebackup_vlanmgr)_[0-9a-f]+_[am]\.[A-Za-z0-9._-]+$/.test(actionScriptName);
   var verifiedActionMatch = /^(.+)_vrt_([0-9a-f]+)$/.exec(actionScriptName);
   var isVerifiedAction = !!(verifiedActionMatch && MVM_ALLOWED_ACTIONS.has(verifiedActionMatch[1]));
-  if (!MVM_ALLOWED_ACTIONS.has(actionScriptName) && !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction) {
+  var progressActionMatch = /^(.+)_pgt_([0-9a-f]+)$/.exec(actionScriptName);
+  var isProgressAction = !!(progressActionMatch && MVM_ALLOWED_ACTIONS.has(progressActionMatch[1]));
+  if (!MVM_ALLOWED_ACTIONS.has(actionScriptName) && !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction) {
     if (window.console && typeof console.warn === "function") {
       console.warn("[MVM] blocked disallowed action", actionScriptName);
     }
@@ -237,6 +272,21 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     // If minLoadingMs > 0, the setTimeout above will handle hiding
   }
 
+  function notifyProgressFrameComplete() {
+    if (!progressToken) return;
+    try {
+      var progressFrame = document.getElementById("vlan_iframe");
+      if (progressFrame && progressFrame.contentWindow) {
+        progressFrame.contentWindow.postMessage({
+          source: "mervlan",
+          type: "mervlan-action-complete",
+          token: progressToken,
+          action: actionScriptName
+        }, "*");
+      }
+    } catch (e) {}
+  }
+
   // Keep overlay hidden if we opted out of loading feedback
   var targetFrameId = skipRefresh ? "mvm_sandbox_iframe" : (document.form.target || "hidden_frame");
   var tf = document.getElementById(targetFrameId);
@@ -248,6 +298,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
         tf.detachEvent("onload", oneShot);
       }
       hideLoadingIfNoMinTime();
+      notifyProgressFrameComplete();
       if (skipRefresh) {
         if (typeof orig.refresh_self !== "undefined") {
           window.refreshpage = orig.refresh_self;
@@ -380,7 +431,16 @@ const MVM_NO_REFRESH = new Set([
 const MVM_NO_LOADING = new Set([
   // Actions that should NOT show the loading overlay:
   // "checkservice_vlanmgr",
-  // "collectclients_vlanmgr",
+  // The client refresh owns a MerVLAN panel, so suppress ASUS's overlay.
+  "collectclients_vlanmgr",
+  // MerVLAN owns the long-running progress panel for these actions.
+  "apply_vlanmgr",
+  "executenodes_vlanmgr",
+  "executenodesonly_vlanmgr",
+  "sync_vlanmgr",
+  "macclientmeta_vlanmgr",
+  "macrefresh_vlanmgr",
+  "genkey_vlanmgr",
   "clearclilog_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr",
@@ -442,6 +502,7 @@ function mvmOptsFor(actionName, overrideOpts) {
     if ("minLoadingMs" in overrideOpts) opts.minLoadingMs = overrideOpts.minLoadingMs;
     if ("target" in overrideOpts)      opts.target = overrideOpts.target;
     if ("rawAmng" in overrideOpts)     opts.rawAmng = overrideOpts.rawAmng;
+    if ("progressToken" in overrideOpts) opts.progressToken = overrideOpts.progressToken;
   }
   return opts;
 }

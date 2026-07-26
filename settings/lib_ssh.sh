@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_ssh.sh || version="0.50"                          #
+#              - File: lib_ssh.sh || version="0.72.0"                       #
 # ============================================================================ #
 # - Purpose:    Define shared SSH related functions                            #
 # ============================================================================ #
@@ -498,6 +498,7 @@ ssh_keys_effectively_installed() {
 # Last failure reason/details (for callers to log consistently)
 MERV_SSH_LAST_REASON=""
 MERV_SSH_LAST_DETAIL=""
+MERV_SSH_TMP_SEQ=0
 
 _merv_log_info() { merv_has info && info -c cli,vlan "$*" || echo "[INFO] $*"; }
 _merv_log_warn() { merv_has warn && warn -c cli,vlan "$*" || echo "[WARN] $*"; }
@@ -513,6 +514,120 @@ _merv_ping_ok() {
   ping -c 1 -W "$MERV_SSH_PING_TIMEOUT" "$1" >/dev/null 2>&1
 }
 
+# Resolve an SSH stderr root.  Workers must explicitly provide both their job
+# root and a descendant ssh directory; callers outside a worker keep the
+# historical /tmp fallback.  Do not accept traversal or a sibling job path.
+_merv_ssh_tmp_root() {
+  MERV_SSH_TMP_ROOT=""
+  if [ -z "${MERV_SSH_TMPDIR:-}" ]; then
+    MERV_SSH_TMP_ROOT="/tmp"
+    return 0
+  fi
+  case "${MERV_NODE_JOB_DIR:-}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$MERV_NODE_JOB_DIR" in
+    *..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  case "$MERV_SSH_TMPDIR" in
+    "$MERV_NODE_JOB_DIR"/ssh|"$MERV_NODE_JOB_DIR"/ssh/*) ;;
+    *) return 1 ;;
+  esac
+  case "$MERV_SSH_TMPDIR" in
+    *..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  [ -d "$MERV_NODE_JOB_DIR" ] || return 1
+  mkdir -p "$MERV_SSH_TMPDIR" 2>/dev/null || return 1
+  MERV_SSH_TMP_ROOT="$MERV_SSH_TMPDIR"
+  return 0
+}
+
+# Allocate one private stderr directory for this SSH attempt.  mkdir is the
+# exclusion point; the sequence supplements $$ because BusyBox subshells can
+# share a shell PID.  The caller removes only this exact directory.
+_merv_ssh_tmp_acquire() {
+  _msta_root="$1"
+  case "${MERV_SSH_TMP_SEQ:-}" in ''|*[!0-9]*) MERV_SSH_TMP_SEQ=0 ;; esac
+  _msta_try=0
+  while [ "$_msta_try" -lt 100 ]; do
+    MERV_SSH_TMP_SEQ=$((MERV_SSH_TMP_SEQ + 1))
+    MERV_SSH_ERR_DIR="$_msta_root/ssh_err.$$.${MERV_SSH_TMP_SEQ}"
+    if mkdir "$MERV_SSH_ERR_DIR" 2>/dev/null; then
+      MERV_SSH_ERR_FILE="$MERV_SSH_ERR_DIR/stderr"
+      : > "$MERV_SSH_ERR_FILE" 2>/dev/null || {
+        rmdir "$MERV_SSH_ERR_DIR" 2>/dev/null || :
+        return 1
+      }
+      return 0
+    fi
+    _msta_try=$((_msta_try + 1))
+  done
+  return 1
+}
+
+_merv_ssh_tmp_release() {
+  case "${MERV_SSH_ERR_DIR:-}" in
+    "${MERV_SSH_TMP_ROOT:-}"/ssh_err.[0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rm -f "${MERV_SSH_ERR_FILE:-}" 2>/dev/null || :
+  rmdir "$MERV_SSH_ERR_DIR" 2>/dev/null || return 1
+  MERV_SSH_ERR_FILE=""
+  MERV_SSH_ERR_DIR=""
+  return 0
+}
+
+# BusyBox on the lab router has no timeout/setsid applets.  Collect the
+# descendants of a timed command from /proc so the fallback can terminate the
+# command tree without killing unrelated processes.
+_merv_timeout_collect_tree() {
+  _mtct_root="$1"
+  case "$_mtct_root" in ''|*[!0-9]*) return 1 ;; esac
+  MERV_TIMEOUT_TREE_PIDS=" $_mtct_root "
+  _mtct_pass=0
+  # One or two passes are sufficient on the router's normal shell->client
+  # process shape. More passes make the watchdog itself miss the deadline on
+  # low-powered BusyBox systems because /proc scans are comparatively costly.
+  while [ "$_mtct_pass" -lt 2 ]; do
+    _mtct_added=0
+    for _mtct_stat in /proc/[0-9]*/stat; do
+      _mtct_pid=${_mtct_stat#/proc/}
+      _mtct_pid=${_mtct_pid%/stat}
+      case "$_mtct_pid" in ''|*[!0-9]*) continue ;; esac
+      case "$MERV_TIMEOUT_TREE_PIDS" in *" $_mtct_pid "*) continue ;; esac
+      _mtct_line=$(cat "$_mtct_stat" 2>/dev/null) || continue
+      case "$_mtct_line" in *") "*) _mtct_tail=${_mtct_line##*) } ;; *) continue ;; esac
+      _mtct_state=${_mtct_tail%% *}
+      _mtct_rest=${_mtct_tail#* }
+      _mtct_ppid=${_mtct_rest%% *}
+      case "$MERV_TIMEOUT_TREE_PIDS" in
+        *" $_mtct_ppid "*)
+          MERV_TIMEOUT_TREE_PIDS="${MERV_TIMEOUT_TREE_PIDS}${_mtct_pid} "
+          _mtct_added=1
+          ;;
+      esac
+    done
+    [ "$_mtct_added" -eq 1 ] || break
+    _mtct_pass=$((_mtct_pass + 1))
+  done
+  return 0
+}
+
+_merv_timeout_signal_tree() {
+  _mtst_signal="$1"
+  _mtst_root=""
+  for _mtst_pid in $MERV_TIMEOUT_TREE_PIDS; do
+    case "$_mtst_pid" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$_mtst_root" ]; then
+      _mtst_root="$_mtst_pid"
+      continue
+    fi
+    kill "$_mtst_signal" "$_mtst_pid" 2>/dev/null || :
+  done
+  [ -n "$_mtst_root" ] && kill "$_mtst_signal" "$_mtst_root" 2>/dev/null || :
+}
+
 _merv_timeout_run() {
   # Run command with a hard timeout if possible.
   # Prefer BusyBox 'timeout' when available.
@@ -525,25 +640,76 @@ _merv_timeout_run() {
   # command in the background and let a short-lived watchdog terminate it.
   # Return 124 for either watchdog signal, matching common timeout semantics.
   exec 9<&0
-  "$@" <&9 &
+  _mtr_root="${MERV_SSH_TMPDIR:-${TMPDIR:-/tmp/mervlan_tmp}}"
+  case "$_mtr_root" in
+    /*) ;;
+    *) _mtr_root="/tmp" ;;
+  esac
+  case "$_mtr_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mtr_root="/tmp" ;;
+  esac
+  mkdir -p "$_mtr_root" 2>/dev/null || _mtr_root="/tmp"
+  _mtr_try=0
+  while :; do
+    _mtr_dir="$_mtr_root/timeout_out.$$.${_mtr_try}"
+    mkdir "$_mtr_dir" 2>/dev/null && break
+    _mtr_try=$((_mtr_try + 1))
+    [ "$_mtr_try" -lt 100 ] || return 125
+  done
+  _mtr_out="$_mtr_dir/stdout"
+  _mtr_err="$_mtr_dir/stderr"
+  : > "$_mtr_out" 2>/dev/null || { rmdir "$_mtr_dir" 2>/dev/null || :; return 125; }
+  : > "$_mtr_err" 2>/dev/null || { rm -f "$_mtr_out"; rmdir "$_mtr_dir" 2>/dev/null || :; return 125; }
+  "$@" <&9 >"$_mtr_out" 2>"$_mtr_err" &
   _mtr_pid=$!
   exec 9<&-
   (
     sleep "$seconds"
-    kill -TERM "$_mtr_pid" 2>/dev/null || exit 0
-    sleep 1
-    kill -KILL "$_mtr_pid" 2>/dev/null || :
-  ) &
+    _merv_timeout_collect_tree "$_mtr_pid" || :
+    _merv_timeout_signal_tree -TERM
+    # The command has already exceeded its deadline; do not add another
+    # full BusyBox sleep interval before force-cleaning its descendants.
+    _merv_timeout_signal_tree -KILL
+  ) >/dev/null 2>&1 &
   _mtr_watchdog=$!
   wait "$_mtr_pid"
   _mtr_rc=$?
   kill "$_mtr_watchdog" 2>/dev/null || :
   wait "$_mtr_watchdog" 2>/dev/null || :
+  cat "$_mtr_out" 2>/dev/null || :
+  cat "$_mtr_err" >&2 || :
+  rm -f "$_mtr_out" 2>/dev/null || :
+  rm -f "$_mtr_err" 2>/dev/null || :
+  rmdir "$_mtr_dir" 2>/dev/null || :
   case "$_mtr_rc" in
     137|143) return 124 ;;
     *) return "$_mtr_rc" ;;
   esac
 }
+
+# Dropbear's dbclient tries to create $HOME/.ssh even with -y.  Service and
+# CGI launchers may provide HOME=/ (or another read-only location), which
+# creates a noisy warning on every direct client invocation.  Use one owned,
+# volatile client home for all runtime dbclient calls without changing keys or
+# host-key acceptance policy.
+merv_ssh_prepare_client_home() {
+  _mssh_home="${MERV_SSH_HOME:-${TMPDIR:-/tmp/mervlan_tmp}/dbclient_home}"
+  case "$_mssh_home" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$_mssh_home" in
+    *[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  mkdir -p "$_mssh_home/.ssh" 2>/dev/null || return 1
+  HOME="$_mssh_home"
+  export HOME
+  MERV_SSH_HOME="$_mssh_home"
+  export MERV_SSH_HOME
+  return 0
+}
+
+merv_ssh_prepare_client_home || :
 
 merv_ssh_precheck() {
   # merv_ssh_precheck <node_num> <node_ip>
@@ -616,8 +782,9 @@ merv_ssh_exec() {
   # Precheck once before retry loop; if unreachable, still retry (3 total) because LAN can be flaky
   _attempt=1
   while [ "$_attempt" -le "$MERV_SSH_RETRIES" ]; do
-    if ! merv_ssh_precheck "$_node_num" "$_node_ip"; then
-      _rc=$?
+    merv_ssh_precheck "$_node_num" "$_node_ip"
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
       # If invalid ip or keys missing → do not retry (it won't improve)
       if [ "$_rc" -eq 2 ] || [ "$_rc" -eq 3 ]; then
         return "$_rc"
@@ -637,9 +804,14 @@ merv_ssh_exec() {
     [ -n "$_port" ] || _port="22"
     [ -n "$_user" ] || _user="admin"
 
-    # Capture stderr for reason parsing
-    _tmp="/tmp/merv_ssh_err.$$"
-    : >"$_tmp" 2>/dev/null || _tmp=""
+    # Capture stderr in an invocation-private file.  Worker callers supply a
+    # validated job-contained root; shared callers retain /tmp compatibility.
+    if ! _merv_ssh_tmp_root || ! _merv_ssh_tmp_acquire "$MERV_SSH_TMP_ROOT"; then
+      MERV_SSH_LAST_REASON="invalid-ssh-tmpdir"
+      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} cannot allocate isolated SSH stderr path"
+      return 5
+    fi
+    _tmp="$MERV_SSH_ERR_FILE"
 
     # Hard-timeout dbclient
     _out=$(
@@ -651,8 +823,12 @@ merv_ssh_exec() {
     )
     _rc=$?
     _err=""
-    [ -n "$_tmp" ] && _err="$(cat "$_tmp" 2>/dev/null)"
-    [ -n "$_tmp" ] && rm -f "$_tmp" 2>/dev/null || :
+    _err=$(cat "$_tmp" 2>/dev/null)
+    _merv_ssh_tmp_release || {
+      MERV_SSH_LAST_REASON="ssh-tmp-cleanup-failed"
+      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} isolated SSH stderr cleanup failed"
+      return 5
+    }
 
     if [ "$_rc" -eq 0 ]; then
       MERV_SSH_LAST_REASON=""

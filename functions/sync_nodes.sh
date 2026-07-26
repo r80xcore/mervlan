@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: sync_nodes.sh || version="0.64"                      #
+#             - File: sync_nodes.sh || version="0.72.1"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -28,6 +28,18 @@ fi
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh"
+# Progress publication is optional. A missing or unusable status path must
+# never change the synchronization result. Keep no-op fallbacks so an older
+# installation missing the new helper can still run synchronization normally.
+merv_action_progress_init() { :; }
+merv_action_progress_phase() { :; }
+merv_action_progress_update() { :; }
+merv_action_progress_complete() { :; }
+merv_action_progress_fail() { :; }
+if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
+    . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+fi
 # =========================================== End of MerVLAN environment setup #
 
 # Default no-op debug helpers; overridden if lib_debug.sh is loaded
@@ -90,10 +102,28 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 REMOTE_MERV_BASE="$MERV_BASE"
 dbg_var SSH_NODE_USER SSH_NODE_PORT
 
+SYNC_PROGRESS_TOTAL=0
+SYNC_PROGRESS_TERMINAL=0
+SYNC_PROGRESS_HEARTBEAT_LAST=0
+SYNC_PROGRESS_HEARTBEAT_SEC="${MERV_PROGRESS_HEARTBEAT_SEC:-5}"
+case "$SYNC_PROGRESS_HEARTBEAT_SEC" in
+    ''|*[!0-9]*|0) SYNC_PROGRESS_HEARTBEAT_SEC=5 ;;
+esac
+SYNC_PROGRESS_STARTED_EPOCH="$(date +%s 2>/dev/null || printf 0)"
+case "$SYNC_PROGRESS_STARTED_EPOCH" in
+    ''|*[!0-9]*) SYNC_PROGRESS_STARTED_EPOCH=0 ;;
+esac
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "sync_vlanmgr" "Sync Nodes" \
+    "Preparing synchronization..."
+
 # Remove any per-node sync metadata breadcrumbs left by copy_file_to_node.
 # Fires on every exit path (normal, error, signal) so no stale files survive
 # across runs even if verification was skipped or the script was interrupted.
 _cleanup_sync_tmp() {
+    if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
+       [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
+        merv_action_progress_fail "Synchronization stopped before completion"
+    fi
     rm -f "$TMPDIR"/merv_sync_expected_* 2>/dev/null || :
     [ "${SYNC_LOCK_ACQUIRED:-0}" -eq 1 ] && merv_lock_release "$SYNC_LOCK" 2>/dev/null
 }
@@ -155,13 +185,17 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_node_jobs.sh
 settings/lib_action_ack.sh
 settings/lib_radio.sh
+settings/lib_progress.sh
+settings/lib_action_progress.sh
 settings/mac_shield_snapshot.sh
 settings/lib_br0_guard.sh
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
+functions/mervlan_node_runner.sh
 functions/mervlan_selftest.sh
 functions/mervlan_live_test_guard.sh
 functions/post_apply_worker.sh
@@ -179,6 +213,7 @@ FILES_TO_COPY_CHMOD="
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
+functions/mervlan_node_runner.sh
 functions/mervlan_selftest.sh
 functions/mervlan_live_test_guard.sh
 functions/post_apply_worker.sh
@@ -199,8 +234,11 @@ settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
 settings/lib_stp.sh
 settings/lib_mervqt.sh
+settings/lib_node_jobs.sh
 settings/lib_action_ack.sh
 settings/lib_radio.sh
+settings/lib_progress.sh
+settings/lib_action_progress.sh
 settings/mac_shield_snapshot.sh
 settings/lib_br0_guard.sh
 templates/mervlan_templates.sh
@@ -234,12 +272,26 @@ run_cmd() {
     "$@" 2>/dev/null
 }
 
+sync_job_tmp_path() {
+    _sjt_name="$1"
+    case "${MERV_NODE_JOB_DIR:-}" in
+        "$TMPDIR/node_jobs"/*) printf '%s/%s\n' "$MERV_NODE_JOB_DIR" "$_sjt_name" ;;
+        *) printf '%s/%s\n' "$TMPDIR" "$_sjt_name" ;;
+    esac
+}
+
+sync_expected_path() {
+    sync_job_tmp_path "merv_sync_expected_$1"
+}
+
 # ========================================================================== #
 # PRE-FLIGHT VALIDATION — Ensure local configuration and SSH keys are ready  #
 # ========================================================================== #
 
 info -c cli,vlan "=== VLAN Manager File Synchronization ==="
 info -c cli,vlan ""
+
+merv_action_progress_phase validate "Validating settings and SSH prerequisites..."
 
 if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "[DRY-RUN] Simulation mode active; no remote changes will be applied"
@@ -290,17 +342,19 @@ info -c cli,vlan "✓ SSH key verification passed"
 # NODE DISCOVERY — Extract and validate node IP addresses from settings      #
 # ========================================================================== #
 
-# get_node_ips — Pull NODE1..NODE10 entries, filter placeholders/invalid IPs
+# get_node_ips - Pull NODE1..NODE10 entries, filter placeholders/invalid IPs
 get_node_ips() {
     merv_node_list
 }
 
+merv_action_progress_phase discover "Discovering configured nodes..."
 NODE_IPS=$(get_node_ips)
 dbg_log "Discovered node IPs"
 dbg_var NODE_IPS
 
 if [ -z "$NODE_IPS" ]; then
     warn -c cli,vlan "No nodes configured in settings.json"
+    merv_action_progress_complete "No configured nodes; nothing to synchronize"
     exit 0
 fi
 
@@ -536,7 +590,7 @@ copy_file_to_node() {
     # Special handling for settings.json: inject node-aware trunk config
     # Nodes need TRUNK1 enabled so the backhaul port carries tagged VLAN traffic.
     if [ "$file" = "settings/settings.json" ]; then
-        _cfn_tmp="$TMPDIR/settings_trunk_reset_sync_node${node_id}.$$"
+        _cfn_tmp=$(sync_job_tmp_path "settings_trunk_reset_sync_node${node_id}")
         cp "$MERV_BASE/$file" "$_cfn_tmp" 2>/dev/null || {
             error -c cli,vlan "✗ Failed to create temp file for trunk config"
             rm -f "$_cfn_tmp" 2>/dev/null
@@ -614,7 +668,7 @@ copy_file_to_node() {
                 _cfn_exp_md5=$(md5 -r "$_cfn_tmp" 2>/dev/null | awk '{print $1}')
             fi
             printf '%s\n%s\n' "$_cfn_exp_size" "$_cfn_exp_md5" \
-                > "$TMPDIR/merv_sync_expected_${node_id}" 2>/dev/null || true
+                > "$(sync_expected_path "$node_id")" 2>/dev/null || true
             info -c cli,vlan "✓ Copied $file (trunk-safe) to NODE${node_id} ($node_ip):$remote_path"
             rm -f "$_cfn_tmp" 2>/dev/null
             return 0
@@ -666,7 +720,7 @@ copy_batch_to_node() {
     # extracts under the same base. Subdirectories are pre-created in the main
     # loop's mkdir so extraction never fails on a missing path.
     if (cd "$MERV_BASE" && tar -cf - $batch_files 2>/dev/null) | \
-        _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cd '$REMOTE_MERV_BASE' && tar -xf - 2>/dev/null"; then
+        _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$(get_node_ssh_port)" -y -i "$SSH_KEY" "$(get_node_ssh_user)@$node_ip" "cd '$REMOTE_MERV_BASE' && tar -xf - 2>/dev/null" 2>/dev/null; then
         info -c cli,vlan "✓ Batch copy successful to NODE${node_id} ($node_ip)"
         return 0
     else
@@ -786,7 +840,7 @@ verify_file_on_node() {
         # comparing against the unmodified local original would always mismatch.
         _vfn_exp_md5=""
         if [ "$file" = "settings/settings.json" ]; then
-            _vfn_breadcrumb="$TMPDIR/merv_sync_expected_${node_id}"
+            _vfn_breadcrumb=$(sync_expected_path "$node_id")
             if [ -f "$_vfn_breadcrumb" ]; then
                 _vfn_exp_size=$(sed -n '1p' "$_vfn_breadcrumb" | tr -cd '0-9')
                 _vfn_exp_md5=$(sed -n '2p' "$_vfn_breadcrumb" | tr -cd 'a-fA-F0-9')
@@ -1098,24 +1152,9 @@ activate_staged_node() {
 # MAIN SYNCHRONIZATION LOOP — Iterate nodes and orchestrate copy workflow    #
 # ========================================================================== #
 
-info -c cli,vlan "Starting file synchronization..."
-overall_success=true
-
-_sync_node_tmp="$TMPDIR/sync_node_ips.$$"
-printf '%s\n' "$NODE_IPS" > "$_sync_node_tmp"
-
-_sync_node_count=$(wc -l < "$_sync_node_tmp" 2>/dev/null | tr -cd '0-9')
-[ -n "$_sync_node_count" ] || _sync_node_count=0
-_sync_node_idx=1
-
-while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
-    _sync_node_line=$(sed -n "${_sync_node_idx}p" "$_sync_node_tmp" 2>/dev/null)
-    _sync_node_idx=$((_sync_node_idx + 1))
-    [ -n "$_sync_node_line" ] || continue
-    set -- $_sync_node_line
+sync_node_worker() {
     node_id="$1"
     node_ip="$2"
-    [ -n "$node_id" ] || continue
     info -c cli,vlan "Processing node: NODE${node_id} ($node_ip)"
     dbg_log "Beginning node synchronization"
     dbg_var node_ip DRY_RUN
@@ -1123,32 +1162,29 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
     # Test connectivity
     if ! ping -c 1 -W 2 "$node_ip" >/dev/null 2>&1; then
         error -c cli,vlan "✗ NODE${node_id} ($node_ip) is not reachable via ping"
-        overall_success=false
-        continue
+        return 1
     fi
     
     # Test SSH connection
     if ! test_ssh_connection "$node_ip" "$node_id"; then
         merv_ssh_skip_log "$node_id" "$node_ip" "SSH connection test"
-        overall_success=false
-        continue
+        return 1
     fi
     
     info -c cli,vlan "✓ SSH connection successful to NODE${node_id} ($node_ip)"
 
     # Ensure JFFS and scripts are enabled before proceeding
     if ! ensure_jffs_ready "$node_ip" "$node_id"; then
-        overall_success=false
-        continue
+        return 1
     fi
 
-    REMOTE_MERV_BASE="/jffs/addons/mervlan_backups/.mervlan.new.$$"
-    REMOTE_MERV_OLD="/jffs/addons/mervlan_backups/.mervlan.old.$$"
+    REMOTE_MERV_BASE="/jffs/addons/mervlan_backups/.mervlan.new.${SYNC_RUN_ID}.${node_id}"
+    REMOTE_MERV_OLD="/jffs/addons/mervlan_backups/.mervlan.old.${SYNC_RUN_ID}.${node_id}"
     
     # Create base remote directories (addon path + runtime folders + the addon
     # subdirs that tar will extract into — pre-creating them means batch extract
     # never fails on a missing path, and we drop the per-file dir-creation SSH).
-    remote_mkdir_cmd="mkdir -p '/jffs/addons/mervlan_backups'; if [ -f '$MERV_BASE/settings/settings.json' ] && [ -x '$MERV_BASE/functions/mervlan_boot.sh' ]; then for d in /jffs/addons/mervlan_backups/.mervlan.new.* /jffs/addons/mervlan_backups/.mervlan.old.*; do [ -d \"\$d\" ] && rm -rf \"\$d\"; done; else for d in /jffs/addons/mervlan_backups/.mervlan.new.* /jffs/addons/mervlan_backups/.mervlan.old.*; do [ -d \"\$d\" ] && exit 70; done; fi; mkdir -p '$REMOTE_MERV_BASE/settings' '$REMOTE_MERV_BASE/functions' '$REMOTE_MERV_BASE/templates' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
+    remote_mkdir_cmd="mkdir -p '/jffs/addons/mervlan_backups'; rm -rf '$REMOTE_MERV_BASE' '$REMOTE_MERV_OLD' 2>/dev/null || exit 70; mkdir -p '$REMOTE_MERV_BASE/settings' '$REMOTE_MERV_BASE/functions' '$REMOTE_MERV_BASE/templates' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
     dbg_log "Ensuring base directories on node"
     dbg_var node_ip remote_mkdir_cmd
     if [ "$DRY_RUN" = "yes" ]; then
@@ -1156,8 +1192,7 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
     else
         if ! merv_ssh_exec "$node_id" "$node_ip" "$remote_mkdir_cmd" >/dev/null 2>&1; then
             merv_ssh_skip_log "$node_id" "$node_ip" "create required directories"
-            overall_success=false
-            continue
+            return 1
         fi
         info -c cli,vlan "✓ Ensured remote directories on NODE${node_id} ($node_ip)"
     fi
@@ -1213,7 +1248,7 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
         info -c cli,vlan "[DRY-RUN] Simulated synchronization complete for NODE${node_id} ($node_ip)"
         info -c cli,vlan "--- Completed node: NODE${node_id} ($node_ip) ---"
         echo ""
-        continue
+        return 0
     fi
 
     # Verify files were copied
@@ -1241,8 +1276,7 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
             # Mark remote device as MerVLAN node via IS_NODE flag
             if ! set_node_flag_remote "$node_ip" "$node_id"; then
                 cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
-                overall_success=false
-                continue
+                return 1
             fi
 
             if activate_staged_node "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD"; then
@@ -1253,22 +1287,409 @@ while [ "$_sync_node_idx" -le "$_sync_node_count" ]; do
             else
                 merv_ssh_skip_log "$node_id" "$node_ip" "staged activation"
                 cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
-                overall_success=false
+                return 1
             fi
         else
             error -c cli,vlan "✗ File verification failed for NODE${node_id} ($node_ip)"
             cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
-            overall_success=false
+            return 1
         fi
     else
         cleanup_remote_stage "$node_ip" "$node_id" "$REMOTE_MERV_BASE" "$REMOTE_MERV_OLD" || :
-        overall_success=false
+        return 1
     fi
     
     info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
     echo ""
-done
-rm -f "$_sync_node_tmp" 2>/dev/null || :
+    return 0
+}
+
+# Publish only copies of selected worker logs for the WebUI.  The public tree
+# never exposes worker metadata, SSH temp files, status results, or process
+# identity files.  This function is called by the parent progress hook only.
+sync_copy_worker_log_for_view() {
+    _scwv_source="$1"
+    _scwv_dest="$2"
+    [ -f "$_scwv_source" ] || return 0
+    _scwv_tmp="$_scwv_dest.new.$$"
+    cp "$_scwv_source" "$_scwv_tmp" 2>/dev/null || { rm -f "$_scwv_tmp"; return 1; }
+    chmod 644 "$_scwv_tmp" 2>/dev/null || { rm -f "$_scwv_tmp"; return 1; }
+    mv "$_scwv_tmp" "$_scwv_dest" 2>/dev/null || { rm -f "$_scwv_tmp"; return 1; }
+}
+
+sync_publish_worker_log_view() {
+    _spwv_root="$1"
+    _spwv_phase="$2"
+    [ "$_spwv_phase" = sync ] || return 0
+    _spwv_job="${_spwv_root##*/}"
+    mnj_safe_token "$_spwv_job" || return 1
+    _spwv_view_root="$TMPDIR/logs/node_workers"
+    _spwv_job_view="$_spwv_view_root/$_spwv_job"
+    mkdir -p "$_spwv_job_view" 2>/dev/null || return 1
+    chmod 755 "$_spwv_view_root" "$_spwv_job_view" 2>/dev/null || return 1
+    _spwv_json="$_spwv_view_root/.index.$$.new"
+    umask 077
+    printf '%s' '{"format_version":1,"jobs":[' > "$_spwv_json" || return 1
+    _spwv_first=1
+    while IFS=' ' read -r _spwv_node _spwv_ip _spwv_extra || [ -n "$_spwv_node" ]; do
+        [ -z "$_spwv_extra" ] || continue
+        merv_is_valid_node_id "$_spwv_node" || { rm -f "$_spwv_json"; return 1; }
+        _spwv_node_dir="$_spwv_root/node_$_spwv_node"
+        _spwv_view_node="$_spwv_job_view/node_$_spwv_node"
+        mkdir -p "$_spwv_view_node" 2>/dev/null || { rm -f "$_spwv_json"; return 1; }
+        chmod 755 "$_spwv_view_node" 2>/dev/null || { rm -f "$_spwv_json"; return 1; }
+        sync_copy_worker_log_for_view "$_spwv_node_dir/cli.log" "$_spwv_view_node/cli.json" || { rm -f "$_spwv_json"; return 1; }
+        sync_copy_worker_log_for_view "$_spwv_node_dir/vlan.log" "$_spwv_view_node/vlan.json" || { rm -f "$_spwv_json"; return 1; }
+        sync_copy_worker_log_for_view "$_spwv_node_dir/stdout.log" "$_spwv_view_node/stdout.json" || { rm -f "$_spwv_json"; return 1; }
+        _spwv_state=running
+        if mnj_result_validate "$_spwv_node_dir/result" "$_spwv_node" sync; then
+            _spwv_state="$MNJ_RESULT_STATE"
+        fi
+        [ "$_spwv_first" -eq 1 ] || printf '%s' ',' >> "$_spwv_json"
+        printf '%s' "{\"job\":\"$_spwv_job\",\"phase\":\"sync\",\"node_id\":\"$_spwv_node\",\"state\":\"$_spwv_state\",\"cli\":\"$_spwv_job/node_$_spwv_node/cli.json\",\"vlan\":\"$_spwv_job/node_$_spwv_node/vlan.json\",\"stdout\":\"$_spwv_job/node_$_spwv_node/stdout.json\"}" >> "$_spwv_json" || { rm -f "$_spwv_json"; return 1; }
+        _spwv_first=0
+    done < "$_sync_nodes_file"
+    printf '%s\n' ']}' >> "$_spwv_json" || { rm -f "$_spwv_json"; return 1; }
+    chmod 644 "$_spwv_json" 2>/dev/null || { rm -f "$_spwv_json"; return 1; }
+    mv "$_spwv_json" "$_spwv_view_root/index.json" 2>/dev/null || { rm -f "$_spwv_json"; return 1; }
+}
+
+# Keep the WebUI worker-log projection bounded without touching live or
+# unvalidated worker state.  A run becomes eligible for rotation only after
+# the parent has validated every node result and atomically written .run_state.
+sync_worker_log_archive() {
+    _swla_state="$1"
+    _swla_current="$2"
+    _swla_root="$TMPDIR/logs/node_workers"
+    [ -d "$_swla_root" ] || return 0
+    case "$_swla_state" in ok|failed|timeout) ;; *) return 1 ;; esac
+    mnj_safe_token "$_swla_current" || return 1
+    _swla_now=$(date +%s 2>/dev/null || printf 0)
+    case "$_swla_now" in ''|*[!0-9]*) return 1 ;; esac
+    _swla_marker="$_swla_root/$_swla_current/.run_state"
+    [ -d "$_swla_root/$_swla_current" ] || return 1
+    _swla_marker_tmp="$_swla_marker.new.$$"
+    printf 'state=%s\ncompleted_epoch=%s\n' "$_swla_state" "$_swla_now" > "$_swla_marker_tmp" || return 1
+    chmod 600 "$_swla_marker_tmp" 2>/dev/null || :
+    mv "$_swla_marker_tmp" "$_swla_marker" || { rm -f "$_swla_marker_tmp"; return 1; }
+
+    # Migrate pre-rotation projections only when their matching private job
+    # still contains a validated terminal result for every published node.
+    # Missing private state, malformed results, and partial runs remain
+    # untouched as required for safe diagnosis.
+    for _swla_legacy_dir in "$_swla_root"/sync.*; do
+        [ -d "$_swla_legacy_dir" ] || continue
+        _swla_legacy_job=${_swla_legacy_dir##*/}
+        case "$_swla_legacy_job" in sync.[0-9]*-[0-9]*) ;; *) continue ;; esac
+        [ ! -f "$_swla_legacy_dir/.run_state" ] || continue
+        _swla_private="$TMPDIR/node_jobs/$_swla_legacy_job"
+        [ -d "$_swla_private" ] || continue
+        _swla_legacy_nodes=0; _swla_legacy_valid=1; _swla_legacy_failed=0
+        for _swla_legacy_node_dir in "$_swla_legacy_dir"/node_*; do
+            [ -d "$_swla_legacy_node_dir" ] || continue
+            _swla_legacy_node=${_swla_legacy_node_dir##*/node_}
+            merv_is_valid_node_id "$_swla_legacy_node" || { _swla_legacy_valid=0; continue; }
+            _swla_legacy_nodes=$((_swla_legacy_nodes + 1))
+            if ! mnj_result_validate "$_swla_private/node_$_swla_legacy_node/result" "$_swla_legacy_node" sync; then
+                _swla_legacy_valid=0
+            elif [ "$MNJ_RESULT_STATE" != ok ]; then
+                _swla_legacy_failed=1
+            fi
+        done
+        [ "$_swla_legacy_nodes" -gt 0 ] && [ "$_swla_legacy_valid" -eq 1 ] || continue
+        _swla_legacy_state=ok
+        [ "$_swla_legacy_failed" -eq 1 ] && _swla_legacy_state=failed
+        _swla_legacy_marker="$_swla_legacy_dir/.run_state"
+        _swla_legacy_tmp="$_swla_legacy_marker.new.$$"
+        printf 'state=%s\ncompleted_epoch=%s\n' "$_swla_legacy_state" "$_swla_now" > "$_swla_legacy_tmp" || continue
+        chmod 600 "$_swla_legacy_tmp" 2>/dev/null || :
+        mv "$_swla_legacy_tmp" "$_swla_legacy_marker" || { rm -f "$_swla_legacy_tmp"; continue; }
+        rm -rf "$_swla_private" 2>/dev/null || :
+    done
+
+    _swla_list="$_swla_root/.runs.$$"
+    _swla_json="$_swla_root/.index.$$.new"
+    : > "$_swla_list" || return 1
+    for _swla_dir in "$_swla_root"/sync.*; do
+        [ -d "$_swla_dir" ] || continue
+        _swla_job=${_swla_dir##*/}
+        case "$_swla_job" in sync.[0-9]*-[0-9]*) ;; *) continue ;; esac
+        case "$_swla_job" in *..*|*[!A-Za-z0-9._-]*) continue ;; esac
+        printf '%s\n' "$_swla_job" >> "$_swla_list"
+    done
+    sort -r "$_swla_list" > "$_swla_list.sorted" 2>/dev/null || {
+        rm -f "$_swla_list"; return 1
+    }
+    printf '%s' '{"format_version":1,"jobs":[' > "$_swla_json" || return 1
+    _swla_first=1; _swla_kept=0; _swla_seen_terminal=0
+    while IFS= read -r _swla_job || [ -n "$_swla_job" ]; do
+        _swla_job_dir="$_swla_root/$_swla_job"
+        _swla_state_file="$_swla_job_dir/.run_state"
+        _swla_run_state=""
+        _swla_terminal=0
+        if [ -f "$_swla_state_file" ]; then
+            _swla_run_state=$(sed -n 's/^state=//p' "$_swla_state_file" | sed -n '1p')
+        fi
+        case "$_swla_run_state" in ok|failed|timeout)
+            _swla_terminal=1
+            ;;
+          *)
+            # Only the current run may be shown as live. Unknown/old live
+            # state is retained on disk but excluded from the public index.
+            [ "$_swla_job" = "$_swla_current" ] || continue
+            _swla_run_state=running; _swla_terminal=0
+            ;;
+        esac
+        if [ "$_swla_terminal" -eq 1 ]; then
+            _swla_seen_terminal=$((_swla_seen_terminal + 1))
+            [ "$_swla_seen_terminal" -le 3 ] || {
+                # This directory is a validated terminal projection and is
+                # safe to remove after its newer three peers are indexed.
+                rm -rf "$_swla_job_dir" 2>/dev/null || :
+                continue
+            }
+        fi
+        for _swla_node_dir in "$_swla_job_dir"/node_*; do
+            [ -d "$_swla_node_dir" ] || continue
+            _swla_node=${_swla_node_dir##*/node_}
+            merv_is_valid_node_id "$_swla_node" || continue
+            _swla_cli="$_swla_job/node_$_swla_node/cli.json"
+            _swla_vlan="$_swla_job/node_$_swla_node/vlan.json"
+            _swla_stdout="$_swla_job/node_$_swla_node/stdout.json"
+            [ -f "$_swla_node_dir/cli.json" ] || continue
+            [ -f "$_swla_node_dir/vlan.json" ] || continue
+            [ -f "$_swla_node_dir/stdout.json" ] || continue
+            [ "$_swla_first" -eq 1 ] || printf '%s' ',' >> "$_swla_json"
+            printf '%s' "{\"job\":\"$_swla_job\",\"phase\":\"sync\",\"node_id\":\"$_swla_node\",\"state\":\"$_swla_run_state\",\"cli\":\"$_swla_cli\",\"vlan\":\"$_swla_vlan\",\"stdout\":\"$_swla_stdout\"}" >> "$_swla_json" || return 1
+            _swla_first=0
+        done
+        _swla_kept=$((_swla_kept + 1))
+    done < "$_swla_list.sorted"
+    printf '%s\n' ']}' >> "$_swla_json" || return 1
+    chmod 644 "$_swla_json" 2>/dev/null || :
+    mv "$_swla_json" "$_swla_root/index.json" || return 1
+    rm -f "$_swla_list" "$_swla_list.sorted"
+    return 0
+}
+
+sync_prune_private_worker_jobs() {
+    _sppw_current="$1"
+    _sppw_root="$TMPDIR/node_jobs"
+    [ -d "$_sppw_root" ] || return 0
+    _sppw_list="$_sppw_root/.sync_runs.$$"
+    for _sppw_dir in "$_sppw_root"/sync.*; do
+        [ -d "$_sppw_dir" ] || continue
+        _sppw_job=${_sppw_dir##*/}
+        case "$_sppw_job" in sync.[0-9]*-[0-9]*) ;; *) continue ;; esac
+        case "$_sppw_job" in *..*|*[!A-Za-z0-9._-]*) continue ;; esac
+        [ "$_sppw_job" = "$_sppw_current" ] && continue
+        printf '%s\n' "$_sppw_job" >> "$_sppw_list"
+    done
+    [ -f "$_sppw_list" ] || return 0
+    sort -r "$_sppw_list" > "$_sppw_list.sorted" 2>/dev/null || {
+        rm -f "$_sppw_list"; return 1
+    }
+    _sppw_kept=0
+    while IFS= read -r _sppw_job || [ -n "$_sppw_job" ]; do
+        _sppw_dir="$_sppw_root/$_sppw_job"
+        _sppw_valid=1; _sppw_nodes=0
+        for _sppw_node_dir in "$_sppw_dir"/node_*; do
+            [ -d "$_sppw_node_dir" ] || continue
+            _sppw_node=${_sppw_node_dir##*/node_}
+            merv_is_valid_node_id "$_sppw_node" || { _sppw_valid=0; continue; }
+            _sppw_nodes=$((_sppw_nodes + 1))
+            mnj_result_validate "$_sppw_node_dir/result" "$_sppw_node" sync || _sppw_valid=0
+        done
+        [ "$_sppw_nodes" -gt 0 ] && [ "$_sppw_valid" -eq 1 ] || continue
+        _sppw_kept=$((_sppw_kept + 1))
+        [ "$_sppw_kept" -le 3 ] || rm -rf "$_sppw_dir" 2>/dev/null || :
+    done < "$_sppw_list.sorted"
+    rm -f "$_sppw_list" "$_sppw_list.sorted"
+    return 0
+}
+
+# Relay newly appended worker CLI lines to the detailed VLAN log.  The CLI
+# remains concise, while this preserves live sync visibility without allowing
+# worker processes to write either shared log directly.
+sync_relay_worker_progress() {
+    _srwp_root="$1"
+    _srwp_phase="$2"
+    [ "$_srwp_phase" = sync ] || return 0
+    while IFS=' ' read -r _srwp_node _srwp_ip _srwp_extra || [ -n "$_srwp_node" ]; do
+        [ -z "$_srwp_extra" ] || continue
+        _srwp_log="$_srwp_root/node_$_srwp_node/cli.log"
+        _srwp_cursor="$_srwp_root/.vlan_cursor.node_$_srwp_node"
+        [ -f "$_srwp_log" ] || continue
+        _srwp_seen=$(cat "$_srwp_cursor" 2>/dev/null || printf 0)
+        case "$_srwp_seen" in ''|*[!0-9]*) _srwp_seen=0 ;; esac
+        _srwp_total=$(wc -l < "$_srwp_log" 2>/dev/null | tr -d ' ')
+        case "$_srwp_total" in ''|*[!0-9]*) continue ;; esac
+        [ "$_srwp_total" -gt "$_srwp_seen" ] 2>/dev/null || continue
+        _srwp_start=$((_srwp_seen + 1))
+        sed -n "${_srwp_start},${_srwp_total}p" "$_srwp_log" | while IFS= read -r _srwp_line || [ -n "$_srwp_line" ]; do
+            [ -n "$_srwp_line" ] && info -c vlan "Sync NODE$_srwp_node: $_srwp_line"
+        done
+        _srwp_tmp="$_srwp_cursor.new.$$"
+        printf '%s\n' "$_srwp_total" > "$_srwp_tmp" && mv "$_srwp_tmp" "$_srwp_cursor" || rm -f "$_srwp_tmp"
+    done < "$_sync_nodes_file"
+}
+
+sync_pool_progress() {
+    sync_publish_worker_log_view "$1" "$2" || warn -c vlan "Sync: unable to publish worker-log view"
+    sync_relay_worker_progress "$1" "$2" || warn -c vlan "Sync: unable to relay worker progress"
+    sync_progress_pool_update "$1"
+}
+
+info -c cli,vlan "Starting file synchronization..."
+overall_success=true
+SYNC_RUN_ID="$(date +%s 2>/dev/null || printf 0)-$$"
+_sync_nodes_file="$TMPDIR/sync_nodes.$SYNC_RUN_ID"
+printf '%s\n' "$NODE_IPS" > "$_sync_nodes_file"
+if ! mnj_nodes_validate "$_sync_nodes_file"; then
+    error -c cli,vlan "Sync: invalid or duplicate node ID/IP entry"
+    merv_action_progress_fail "Configured node list is invalid or contains duplicates"
+    exit 1
+fi
+SYNC_PROGRESS_TOTAL=$(wc -l < "$_sync_nodes_file" 2>/dev/null | tr -d ' ')
+case "$SYNC_PROGRESS_TOTAL" in ''|*[!0-9]*) SYNC_PROGRESS_TOTAL=0 ;; esac
+if [ "$SYNC_PROGRESS_TOTAL" -gt 0 ] 2>/dev/null; then
+    if [ "$DRY_RUN" = "yes" ]; then
+        merv_action_progress_update sync 0 "$SYNC_PROGRESS_TOTAL" 15 \
+            "Dry-run: ready to simulate synchronization of $SYNC_PROGRESS_TOTAL node(s)"
+    else
+        merv_action_progress_update sync 0 "$SYNC_PROGRESS_TOTAL" 15 \
+            "Ready to synchronize $SYNC_PROGRESS_TOTAL configured node(s)"
+    fi
+fi
+_sync_jobs_root="$TMPDIR/node_jobs/sync.$SYNC_RUN_ID"
+
+sync_progress_pool_update() {
+    [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] || return 0
+    [ "$SYNC_PROGRESS_TOTAL" -gt 0 ] 2>/dev/null || return 0
+    _sppu_completed=0
+    _sppu_failed=0
+    _sppu_last_node=""
+    _sppu_last_state=""
+    _sppu_active_count=0
+    _sppu_active_nodes=""
+    while IFS=' ' read -r _sppu_node _sppu_ip _sppu_extra || [ -n "$_sppu_node" ]; do
+        [ -z "$_sppu_extra" ] || continue
+        if mnj_result_validate "$1/node_$_sppu_node/result" "$_sppu_node" sync; then
+            case "$MNJ_RESULT_STATE" in
+                ok) _sppu_completed=$((_sppu_completed + 1)); _sppu_last_node="$_sppu_node"; _sppu_last_state=ok ;;
+                failed|timeout) _sppu_failed=$((_sppu_failed + 1)); _sppu_last_node="$_sppu_node"; _sppu_last_state=failed ;;
+            esac
+        elif [ -d "$1/node_$_sppu_node" ]; then
+            _sppu_active_count=$((_sppu_active_count + 1))
+            if [ "$_sppu_active_count" -le 3 ]; then
+                if [ -n "$_sppu_active_nodes" ]; then
+                    _sppu_active_nodes="$_sppu_active_nodes,"
+                fi
+                _sppu_active_nodes="$_sppu_active_nodes NODE$_sppu_node"
+            fi
+        fi
+    done < "$_sync_nodes_file"
+    _sppu_terminal=$((_sppu_completed + _sppu_failed))
+    _sppu_now=$(date +%s 2>/dev/null || printf 0)
+    case "$_sppu_now" in
+        ''|*[!0-9]*) _sppu_now=0 ;;
+    esac
+    _sppu_heartbeat_due=0
+    if [ "$SYNC_PROGRESS_HEARTBEAT_LAST" -eq 0 ] ||
+       [ "$_sppu_now" -ge $((SYNC_PROGRESS_HEARTBEAT_LAST + SYNC_PROGRESS_HEARTBEAT_SEC)) ] 2>/dev/null; then
+        _sppu_heartbeat_due=1
+    fi
+    if [ "$_sppu_terminal" -gt "$SYNC_PROGRESS_TERMINAL" ] 2>/dev/null ||
+       [ "$_sppu_heartbeat_due" -eq 1 ]; then
+        _sppu_percent=$((15 + (65 * _sppu_terminal / SYNC_PROGRESS_TOTAL)))
+        [ "$_sppu_percent" -le 80 ] 2>/dev/null || _sppu_percent=80
+        _sppu_elapsed=0
+        if [ "$_sppu_now" -ge "$SYNC_PROGRESS_STARTED_EPOCH" ] 2>/dev/null; then
+            _sppu_elapsed=$((_sppu_now - SYNC_PROGRESS_STARTED_EPOCH))
+        fi
+        if [ "$_sppu_terminal" -gt "$SYNC_PROGRESS_TERMINAL" ] 2>/dev/null &&
+           [ -n "$_sppu_last_node" ]; then
+            if [ "$_sppu_last_state" != ok ]; then
+                _sppu_message="NODE$_sppu_last_node reported a failure; $_sppu_terminal of $SYNC_PROGRESS_TOTAL nodes finished"
+            else
+                _sppu_message="NODE$_sppu_last_node complete; $_sppu_terminal of $SYNC_PROGRESS_TOTAL nodes finished"
+            fi
+        elif [ "$_sppu_active_count" -gt 0 ] 2>/dev/null; then
+            if [ "$_sppu_active_count" -gt 3 ] 2>/dev/null; then
+                _sppu_active_nodes="$_sppu_active_nodes and $((_sppu_active_count - 3)) more"
+            fi
+            _sppu_message="Still working on$_sppu_active_nodes; $_sppu_terminal of $SYNC_PROGRESS_TOTAL nodes finished (${_sppu_elapsed}s)"
+        else
+            _sppu_message="Synchronizing nodes; $_sppu_terminal of $SYNC_PROGRESS_TOTAL nodes finished (${_sppu_elapsed}s)"
+        fi
+        [ "$DRY_RUN" = "yes" ] && _sppu_message="Dry-run: $_sppu_message"
+        merv_action_progress_update sync "$_sppu_terminal" "$SYNC_PROGRESS_TOTAL" \
+            "$_sppu_percent" "$_sppu_message"
+        SYNC_PROGRESS_TERMINAL="$_sppu_terminal"
+        [ "$_sppu_now" -gt 0 ] 2>/dev/null && SYNC_PROGRESS_HEARTBEAT_LAST="$_sppu_now"
+    fi
+}
+
+merv_action_progress_update sync 0 "$SYNC_PROGRESS_TOTAL" 15 \
+    "Synchronizing configured nodes..."
+while IFS=' ' read -r node_id node_ip _sync_extra || [ -n "$node_id" ]; do
+    [ -z "$_sync_extra" ] || continue
+    info -c cli "Sync NODE${node_id} ($node_ip): queued; detailed progress is in the VLAN log"
+done < "$_sync_nodes_file"
+MNJ_POOL_PROGRESS_HOOK=sync_pool_progress
+if ! mnj_pool_run "$_sync_jobs_root" sync "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_SYNC_MAX_SEC:-720}" "$_sync_nodes_file" sync_node_worker; then
+    overall_success=false
+fi
+MNJ_POOL_PROGRESS_HOOK=""
+sync_pool_progress "$_sync_jobs_root" sync || :
+merv_action_progress_update verify 0 "$SYNC_PROGRESS_TOTAL" 80 \
+    "Verifying synchronized node results..."
+SYNC_PROGRESS_VERIFIED=0
+while IFS=' ' read -r node_id node_ip _sync_extra || [ -n "$node_id" ]; do
+    [ -z "$_sync_extra" ] || continue
+    if mnj_result_validate "$_sync_jobs_root/node_$node_id/result" "$node_id" sync; then
+        SYNC_PROGRESS_VERIFIED=$((SYNC_PROGRESS_VERIFIED + 1))
+        _sync_verify_percent=$((80 + (15 * SYNC_PROGRESS_VERIFIED / SYNC_PROGRESS_TOTAL)))
+        [ "$_sync_verify_percent" -le 95 ] 2>/dev/null || _sync_verify_percent=95
+        if [ "$MNJ_RESULT_STATE" = ok ]; then
+            info -c cli,vlan "Sync NODE${node_id} ($node_ip): complete"
+            merv_action_progress_update verify "$SYNC_PROGRESS_VERIFIED" "$SYNC_PROGRESS_TOTAL" \
+                "$_sync_verify_percent" "Verified NODE${node_id} successfully"
+        else
+            overall_success=false
+            warn -c cli,vlan "Sync NODE${node_id} ($node_ip): failed; detailed worker logs retained in the timestamped worker-log archive"
+            merv_action_progress_update verify "$SYNC_PROGRESS_VERIFIED" "$SYNC_PROGRESS_TOTAL" \
+                "$_sync_verify_percent" "Verification failed for NODE${node_id}"
+        fi
+    else
+        overall_success=false
+        warn -c cli,vlan "Sync NODE${node_id} ($node_ip): failed; detailed worker logs retained in the timestamped worker-log archive"
+        merv_action_progress_update verify "$SYNC_PROGRESS_VERIFIED" "$SYNC_PROGRESS_TOTAL" 80 \
+            "Verification result missing for NODE${node_id}"
+    fi
+done < "$_sync_nodes_file"
+
+# Finalize the public archive only after every node has a validated terminal
+# result. If a result is missing or malformed, leave the private job intact
+# for diagnosis and do not mark it eligible for rotation.
+sync_publish_worker_log_view "$_sync_jobs_root" sync || :
+if [ "$SYNC_PROGRESS_TOTAL" -gt 0 ] 2>/dev/null &&
+   [ "$SYNC_PROGRESS_VERIFIED" -eq "$SYNC_PROGRESS_TOTAL" ] 2>/dev/null; then
+    if [ "$overall_success" = "true" ]; then
+        _sync_archive_state=ok
+    else
+        _sync_archive_state=failed
+    fi
+    if sync_worker_log_archive "$_sync_archive_state" "sync.$SYNC_RUN_ID"; then
+        # The public projection is now the retained diagnostic copy. Remove
+        # only this validated, terminal private job tree.
+        rm -rf "$_sync_jobs_root" 2>/dev/null || :
+    else
+        warn -c vlan "Sync: worker-log archive rotation failed; private logs retained"
+    fi
+fi
+sync_prune_private_worker_jobs "sync.$SYNC_RUN_ID" ||
+    warn -c vlan "Sync: private worker-log retention cleanup failed"
 # Global nodeenable sweep removed; handled per-node in loop above
 
 # ========================================================================== #
@@ -1276,6 +1697,8 @@ rm -f "$_sync_node_tmp" 2>/dev/null || :
 # ========================================================================== #
 
 info -c cli,vlan "=== Synchronization Complete ==="
+merv_action_progress_update cleanup "$SYNC_PROGRESS_TOTAL" "$SYNC_PROGRESS_TOTAL" 95 \
+    "Finalizing synchronization..."
 
 if [ "$overall_success" = "true" ]; then
     if [ "$DRY_RUN" = "yes" ]; then
@@ -1285,6 +1708,11 @@ if [ "$overall_success" = "true" ]; then
         info -c cli,vlan "Files copied: $FILES_TO_COPY"
         info -c cli,vlan "Files made executable: $FILES_TO_COPY_CHMOD"
     fi
+    if [ "$DRY_RUN" = "yes" ]; then
+        merv_action_progress_complete "Dry-run synchronization simulation complete"
+    else
+        merv_action_progress_complete "Synchronization complete"
+    fi
     exit 0
 else
     if [ "$DRY_RUN" = "yes" ]; then
@@ -1293,5 +1721,6 @@ else
         warn -c cli,vlan "⚠️  PARTIAL SUCCESS: Some files may not have been synchronized"
         info -c cli,vlan "Check the log at $CLI_LOG for details"
     fi
+    merv_action_progress_fail "Synchronization failed; see the VLAN log for details"
     exit 1
 fi

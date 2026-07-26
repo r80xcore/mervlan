@@ -86,6 +86,26 @@ BG_PIDS=""
 # the stale window. Best-effort — if the lib is absent we proceed unguarded.
 COLLECT_LOCK="$LOCKDIR/client_collect.lock"
 COLLECT_LOCK_ACQUIRED=0
+
+# An apply already requests its own post-apply collection. Do not let a page
+# load or manual refresh start a second collection while configuration is
+# mutating. post_apply_worker.sh retries pending generations after the manager
+# releases these locks, so this is safe for apply-owned collection too.
+if type merv_lock_state >/dev/null 2>&1; then
+  case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
+    active|unknown_recent)
+      info -c cli,vlan "Client collection skipped while VLAN apply is active"
+      exit 75
+      ;;
+  esac
+  case "$(merv_lock_state "$LOCKDIR/execute_nodes.lock")" in
+    active|unknown_recent)
+      info -c cli,vlan "Client collection skipped while node apply is active"
+      exit 75
+      ;;
+  esac
+fi
+
 if type merv_lock_acquire >/dev/null 2>&1; then
   mkdir -p "$LOCKDIR" 2>/dev/null || :
   if merv_lock_acquire "$COLLECT_LOCK" "${COLLECT_STALE_SEC:-300}" 0 "client_collect"; then

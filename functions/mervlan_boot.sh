@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: mervlan_boot.sh || version="0.60"                     #
+#              - File: mervlan_boot.sh || version="0.72.0"                  #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -343,9 +343,9 @@ copy_inject() {
   else
     mkdir -p "$LOCKDIR" 2>/dev/null || :
     if ! (
-      flock -x 200 || exit 1
+      flock -x 9 || exit 1
       inject_block
-    ) 200>"$LOCKDIR/$(basename "$dest").lock"; then
+    ) 9>"$LOCKDIR/$(basename "$dest").lock"; then
       rm -f "$block_file" "$tmp_new" 2>/dev/null || :
       return 1
     fi
@@ -412,9 +412,9 @@ remove_inject() {
   else
     mkdir -p "$LOCKDIR" 2>/dev/null || :
     if ! (
-      flock -x 200 || exit 1
+      flock -x 9 || exit 1
       remove_block
-    ) 200>"$LOCKDIR/$(basename "$dest").lock"; then
+    ) 9>"$LOCKDIR/$(basename "$dest").lock"; then
       rm -f "$tmp_new" 2>/dev/null || :
       return 1
     fi

@@ -1210,6 +1210,12 @@ body {
         flex-shrink:0;
 }
 
+.clients-refresh-btn--blocked,
+.clients-refresh-btn:disabled {
+        opacity:0.45 !important;
+        cursor:not-allowed;
+}
+
 /* Footer bar pinned to the bottom of the clients panel via flex layout. */
 .clients-footer {
         display:flex;
@@ -1665,6 +1671,215 @@ body {
         justify-content:center;
         align-items:center;
         gap:12px;
+}
+
+/* ========================================================================== */
+/* MerVLAN-owned action loading UI                                             */
+/* ========================================================================== */
+.mervlan-loading-backdrop {
+        display:none;
+        position:absolute;
+        inset:0;
+        z-index:1200;
+        align-items:center;
+        justify-content:center;
+        padding:16px;
+        box-sizing:border-box;
+        background:rgba(0,0,0,.58);
+}
+
+.mervlan-loading-backdrop.is-open {
+        display:flex;
+}
+
+.mervlan-loading-panel {
+        width:min(400px, calc(100% - 32px));
+        box-sizing:border-box;
+        padding:16px 19px;
+        color:#fff;
+        background:#2F3A3E;
+        border:1px solid #569AC7;
+        border-radius:0 6px 6px 6px;
+        box-shadow:0 12px 38px rgba(0,0,0,.42);
+}
+
+.mervlan-loading-heading {
+        margin:0;
+        color:#fff;
+        font-size:18px;
+        font-weight:bold;
+}
+
+.mervlan-loading-action {
+        margin-top:5px;
+        color:#569AC7;
+        font-size:15px;
+        font-weight:bold;
+}
+
+.mervlan-loading-phase {
+        min-height:2.8em;
+        margin-top:11px;
+        color:#ddd;
+        font-size:13px;
+        line-height:1.45;
+}
+
+.mervlan-loading-progress-row {
+        display:flex;
+        align-items:center;
+        gap:8px;
+        margin-top:4px;
+}
+
+.mervlan-loading-progress {
+        position:relative;
+        flex:1 1 auto;
+        height:12px;
+        overflow:hidden;
+        background:#1f292d;
+        border:1px solid #4d595d;
+        border-radius:8px;
+}
+
+.mervlan-loading-progress-fill {
+        width:0;
+        height:100%;
+        background:#569AC7;
+        border-radius:inherit;
+        transition:width .25s ease;
+}
+
+.mervlan-loading-progress.is-indeterminate .mervlan-loading-progress-fill {
+        width:36%;
+        animation:mervlan-loading-slide 1.25s ease-in-out infinite;
+}
+
+@keyframes mervlan-loading-slide {
+        0% { transform:translateX(-120%); }
+        50% { transform:translateX(170%); }
+        100% { transform:translateX(320%); }
+}
+
+.mervlan-loading-percent {
+        min-width:42px;
+        color:#fff;
+        font-size:13px;
+        font-variant-numeric:tabular-nums;
+        text-align:right;
+}
+
+.mervlan-loading-notice {
+        display:none;
+        margin-top:10px;
+        padding:8px 10px;
+        color:#ffd38a;
+        font-size:12px;
+        line-height:1.45;
+        background:rgba(255,180,50,.08);
+        border:1px solid rgba(255,180,50,.28);
+        border-radius:4px;
+}
+
+.mervlan-loading-notice.is-visible {
+        display:block;
+}
+
+.mervlan-loading-error {
+        display:none;
+        margin-top:10px;
+        padding:8px 10px;
+        color:#ffb0b0;
+        font-size:12px;
+        line-height:1.45;
+        background:rgba(192,57,43,.12);
+        border:1px solid rgba(255,138,138,.35);
+        border-radius:4px;
+}
+
+.mervlan-loading-error.is-visible {
+        display:block;
+}
+
+.mervlan-loading-actions {
+        display:flex;
+        justify-content:center;
+        gap:8px;
+        margin-top:14px;
+}
+
+.mervlan-loading-mini {
+        display:none;
+        align-items:center;
+        gap:7px;
+        min-width:0;
+        width:100%;
+        max-width:none;
+        padding:2px 8px;
+        overflow:hidden;
+        color:#d8edf8;
+        background:rgba(108,186,245,.12);
+        border:1px solid rgba(108,186,245,.42);
+        border-radius:4px;
+        cursor:pointer;
+        font-size:.82rem;
+        line-height:1.6;
+        white-space:nowrap;
+}
+
+.mervlan-loading-mini.is-visible {
+        display:flex;
+        margin-left:0;
+}
+
+.mervlan-loading-slot {
+        display:flex;
+        align-items:center;
+        flex:1 1 auto;
+        min-width:0;
+}
+
+.mervlan-loading-mini__dot {
+        width:7px;
+        height:7px;
+        flex:0 0 auto;
+        background:#6cbaf5;
+        border-radius:50%;
+        animation:mervlan-loading-pulse 1.2s ease-in-out infinite;
+}
+
+.mervlan-loading-mini__text {
+        overflow:hidden;
+        text-overflow:ellipsis;
+}
+
+.form-box--experimental.experimental-row--loading #advancedOverrideBtn {
+        margin-left:0;
+}
+
+@keyframes mervlan-loading-pulse {
+        0%,100% { opacity:.35; }
+        50% { opacity:1; }
+}
+
+@media (prefers-reduced-motion:reduce) {
+        .mervlan-loading-progress-fill,
+        .mervlan-loading-mini__dot {
+                animation:none;
+        }
+}
+
+@media (max-width:560px) {
+        .mervlan-loading-backdrop {
+                padding:8px;
+        }
+        .mervlan-loading-panel {
+                width:calc(100% - 16px);
+                padding:13px;
+        }
+        .mervlan-loading-mini {
+                max-width:none;
+        }
 }
 
 .ssh-key-wrapper {

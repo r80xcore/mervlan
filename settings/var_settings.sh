@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: var_settings.sh || version="0.53"                     #
+#              - File: var_settings.sh || version="0.72.0"                  #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -129,6 +129,24 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 # recovering from crashes quickly.
 : "${MERV_SYNC_LOCK_STALE_SEC:=60}"
 : "${MERV_MAC_REFRESH_LOCK_STALE_SEC:=60}"
+
+# Bounded node-operation controls.  Node workers accept only one or two SSH
+# operations at once; malformed settings are normalized by lib_node_jobs.sh.
+: "${MERV_NODE_PARALLELISM:=2}"
+: "${MERV_NODE_PREPARE_MAX_SEC:=180}"
+: "${MERV_NODE_SYNC_MAX_SEC:=720}"
+: "${MERV_NODE_COMPLETION_MAX_SEC:=600}"
+: "${MERV_NODE_MARKER_POLL_SEC:=5}"
+: "${MERV_EXEC_NODES_LOCK_STALE_SEC:=900}"
+: "${MERV_NODE_STATUS_RETENTION_SEC:=86400}"
+: "${MERV_NODE_STATUS_ROOT:=$RESULTDIR/node_runs}"
+
+# MerVLAN web loading progress is transient task state. It is deliberately
+# separate from persistent settings.json and is published to the UI by the
+# installer through the public tmp/progress symlink.
+: "${MERV_PROGRESS_ROOT:=$TMPDIR/progress}"
+: "${MERV_PROGRESS_RETENTION_SEC:=3600}"
+: "${MERV_PROGRESS_STALE_SEC:=900}"
 
 # Stale-lock reclaim threshold for the unified mac_snapshot.lock. This single
 # lock serializes every MAC snapshot path — the cron tick (heal_event.sh), the

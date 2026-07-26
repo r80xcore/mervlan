@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.53"                      #
+#                  - File: lib_mervqt.sh || version="0.54"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -1864,6 +1864,20 @@ merv_dhcp_hold_reconcile() {
   return "$_mdhr_rc"
 }
 
+merv_dhcp_hold_settle_tick() {
+  case "${1:-}" in
+    :) return 0 ;;
+    sleep) sleep 1 ;;
+    "sleep 1") sleep 1 ;;
+    sleep\ [0-9]*)
+      _mdst_seconds=${1#sleep }
+      case "$_mdst_seconds" in ''|*[!0-9]*) return 1 ;; esac
+      sleep "$_mdst_seconds"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 merv_dhcp_hold_wait_stable() {
   local _mdws_observe="$1" _mdws_correct="${2:-:}"
   local _mdws_need="${3:-${MERV_DHCP_SETTLE_STABLE_SEC:-3}}"
@@ -1872,6 +1886,7 @@ merv_dhcp_hold_wait_stable() {
   local _mdws_pass=1 _mdws_elapsed _mdws_stable _mdws_state _mdws_last
   type "$_mdws_observe" >/dev/null 2>&1 || return 1
   type "$_mdws_correct" >/dev/null 2>&1 || return 1
+  merv_dhcp_hold_settle_tick "$_mdws_tick" || return 1
   case "$_mdws_need:$_mdws_max" in *[!0-9:]*) return 1 ;; esac
   [ "$_mdws_need" -gt 0 ] && [ "$_mdws_max" -gt 0 ] || return 1
 
@@ -1895,7 +1910,7 @@ merv_dhcp_hold_wait_stable() {
           ;;
       esac
       _mdws_last="$_mdws_state"
-      eval "$_mdws_tick"
+      merv_dhcp_hold_settle_tick "$_mdws_tick" || return 5
       _mdws_elapsed=$((_mdws_elapsed + 1))
     done
     case "$_mdws_last" in

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.68"                     #
+#                  - File: heal_event.sh || version="0.69"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -598,7 +598,12 @@ wait_for_rc_quiet() {
 
     current_tick=$((current_tick + 1))
     if [ "$current_tick" -ge "$max_ticks" ]; then
-      warn -c vlan "wait_for_rc_quiet: timeout reached; continuing"
+      if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
+         rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
+        warn -c vlan "wait_for_rc_quiet: timeout reached while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout reached with rc idle; continuing to stable verification"
       return 0
     fi
 
@@ -1314,7 +1319,12 @@ if should_heal_event "$EVENT"; then
       [ "$_pw_ticks" -ge "$_pw_max" ] && \
         info -c vlan "Heal: pre-entry timeout (5s) — proceeding to rc wait"
       info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
-      wait_for_rc_quiet 6 120
+      if ! wait_for_rc_quiet 6 120; then
+        warn -c vlan "Heal: rc remained active after wireless settle timeout; retaining DHCP protection"
+        merv_dhcp_hold_mark_mutating "$HEAL_DHCP_TOKEN" rc-active-timeout >/dev/null 2>&1 || :
+        HEAL_EXIT_REASON="rc-active-timeout"
+        exit 1
+      fi
 
       # rc/wlconf is now quiet enough to stop fighting firmware.
       # Bridge surgery is allowed after wait_for_rc_quiet returns.
@@ -1329,7 +1339,12 @@ if should_heal_event "$EVENT"; then
       # If rc is already quiet, a single read is sufficient — no polling overhead.
       if rc_queue_has 'restart_wireless' || rc_proc_busy 'restart_wireless|wlconf'; then
         info -c vlan "Heal: non-wireless event but wireless rc active — waiting for rc quiet (max 30s)"
-        wait_for_rc_quiet 6 30
+        if ! wait_for_rc_quiet 6 30; then
+          warn -c vlan "Heal: rc remained active after settle timeout; retaining DHCP protection"
+          merv_dhcp_hold_mark_mutating "$HEAL_DHCP_TOKEN" rc-active-timeout >/dev/null 2>&1 || :
+          HEAL_EXIT_REASON="rc-active-timeout"
+          exit 1
+        fi
       elif type ebtables >/dev/null 2>&1; then
         _evt_rules=$(ebtables -t filter -L 2>/dev/null)
         restore_merv_qt_shield "$_evt_rules"

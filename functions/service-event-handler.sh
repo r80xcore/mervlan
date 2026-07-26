@@ -123,6 +123,12 @@ get_action_request_token() {
     tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-'
 }
 
+get_progress_request_token() {
+  grep '^vlanmgr_progress_token=' "$CUSTOM_SETTINGS_FILE" 2>/dev/null | \
+    tail -n1 | cut -d'=' -f2- | \
+    tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-'
+}
+
 decode_hex_ascii() {
   _dha_hex="$1"
   case "$_dha_hex" in ''|*[!0-9a-f]*) return 1 ;; esac
@@ -146,6 +152,18 @@ get_verified_action_token() {
   _vat_clean=$(printf '%s' "$_vat_token" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-')
   [ -n "$_vat_token" ] && [ "$_vat_clean" = "$_vat_token" ] || return 1
   printf '%s\n' "$_vat_token"
+}
+
+get_progress_action_token() {
+  _pat_action="${1:-}"
+  case "$_pat_action" in
+    *_pgt_*) _pat_hex="${_pat_action#*_pgt_}" ;;
+    *) return 1 ;;
+  esac
+  _pat_token=$(decode_hex_ascii "$_pat_hex") || return 1
+  _pat_clean=$(printf '%s' "$_pat_token" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-')
+  [ -n "$_pat_token" ] && [ "$_pat_clean" = "$_pat_token" ] || return 1
+  printf '%s\n' "$_pat_token"
 }
 
 decode_update_ref_action() {
@@ -270,8 +288,8 @@ fi
 
 APP_EVENT=0
 case "${TYPE}_${EVENT}" in
-  save_vlanmgr|apply_vlanmgr|sync_vlanmgr|executenodes_vlanmgr|\
-  executenodesonly_vlanmgr|genkey_vlanmgr|enableservice_vlanmgr|\
+  save_vlanmgr|apply_vlanmgr|apply_vlanmgr_pgt_*|sync_vlanmgr|sync_vlanmgr_pgt_*|executenodes_vlanmgr|executenodes_vlanmgr_pgt_*|\
+  executenodesonly_vlanmgr|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr|genkey_vlanmgr_pgt_*|enableservice_vlanmgr|\
   disableservice_vlanmgr|enableservice_vlanmgr_vrt_*|disableservice_vlanmgr_vrt_*|checkservice_vlanmgr|collectclients_vlanmgr|\
   clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr|updaterelease_vlanmgr|updateref_vlanmgr_*|\
   backupinventory_vlanmgr_*|manualbackup_vlanmgr_*|deletebackup_vlanmgr_*|deleteallbackups_vlanmgr_*|restorebackup_vlanmgr_*|\
@@ -399,6 +417,22 @@ _se_reclaim_lock_dir() {
 dispatch_if_executable() {
   local SCRIPT_PATH="$1"
   shift
+
+  # Only explicitly progress-enabled actions receive a progress token. This
+  # prevents a stale custom-settings value from leaking into unrelated actions.
+  MERV_PROGRESS_TOKEN=""
+  case "${RAW:-}" in
+    sync_vlanmgr|apply_vlanmgr)
+      MERV_PROGRESS_TOKEN="$(get_progress_request_token)"
+      ;;
+    sync_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*)
+      MERV_PROGRESS_TOKEN="$(get_progress_action_token "${RAW:-}")"
+      ;;
+  esac
+  case "$MERV_PROGRESS_TOKEN" in
+    ''|*[!A-Za-z0-9._-]*) MERV_PROGRESS_TOKEN="" ;;
+  esac
+  export MERV_PROGRESS_TOKEN
 
   # Initialize lock and timestamp tracking variables
   # key: unique identifier for this event (action name or script name)
@@ -536,20 +570,42 @@ case "${TYPE}_${EVENT}" in
     # Apply configured VLAN settings to system (triggered by "Apply" button)
     dispatch_if_executable "/jffs/addons/mervlan/functions/mervlan_manager.sh"
     ;;
+  apply_vlanmgr_pgt_*)
+    # Progress-token variant; the dispatch helper decodes and exports the
+    # token before mervlan_manager.sh is launched.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mervlan_manager.sh"
+    ;;
   sync_vlanmgr)
     # Sync VLAN configuration to remote nodes (triggered manually)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/sync_nodes.sh"
+    ;;
+  sync_vlanmgr_pgt_*)
+    # Progress-token variant; the dispatch helper decodes and exports the
+    # token before sync_nodes.sh is launched.
     dispatch_if_executable "/jffs/addons/mervlan/functions/sync_nodes.sh"
     ;;
   executenodes_vlanmgr)
     # Execute VLAN Manager workflow on configured nodes (runs execute_nodes.sh)
     dispatch_if_executable "/jffs/addons/mervlan/functions/execute_nodes.sh"
     ;;
+  executenodes_vlanmgr_pgt_*)
+    # Progress-token variant; execute_nodes.sh owns the aggregate status.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/execute_nodes.sh"
+    ;;
   executenodesonly_vlanmgr)
     # Execute VLAN Manager workflow on configured nodes (runs execute_nodes.sh)
     dispatch_if_executable "/jffs/addons/mervlan/functions/execute_nodes.sh" nodesonly
     ;;
+  executenodesonly_vlanmgr_pgt_*)
+    # Progress-token variant; execute_nodes.sh owns the aggregate status.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/execute_nodes.sh" nodesonly
+    ;;
   genkey_vlanmgr)
     # Generate SSH keys for node communication (triggered during setup)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/dropbear_sshkey_gen.sh"
+    ;;
+  genkey_vlanmgr_pgt_*)
+    # Progress-token variant; the key generator owns the status lifecycle.
     dispatch_if_executable "/jffs/addons/mervlan/functions/dropbear_sshkey_gen.sh"
     ;;
   enableservice_vlanmgr)
