@@ -11,6 +11,20 @@ Improved: Client refresh coordination
 - Backend lock protection prevents redundant client collection during router or node applies; apply-owned post-apply collection remains deferred and safe.
 - The ASUS loading overlay is suppressed for the MerVLAN-owned client refresh panel, and the loading policy/helper files are included in installer packaging.
 
+Improved: Consistent Apply completion
+- Local-only, Nodes-only, and Router + Nodes Apply now finish with one coordinated client-inventory refresh.
+- Apply loading screens remain active through that refresh and show the clear “Refreshing client inventory...” phase.
+- Refresh completion is generation-aware and bounded, with visible failure handling and no duplicate collection scheduling.
+
+Improved: Reliable action completion
+- APMO now waits for settings persistence and verified hardware-probe completion instead of relying on fixed delays.
+- Long-running actions keep their controls locked until confirmed completion or failure, reducing duplicate submissions and stale UI state.
+
+Improved: Failure reporting and diagnostics
+- Apply, MAC Shield, metadata, maintenance, and service-status failures now remain visible in the loading screen and logs.
+- Polling is serialized and bounded, with clearer timeout, partial-result, and backend-unavailable reporting.
+- Logs avoid exposing full user-provided client names or other unnecessary sensitive details.
+
 Fixed: Loading-screen WebUI coordination
 - Loading overlays are scoped to the MerVLAN addon pane, hide and restore the INFO latch correctly, and remain above the SSH key modal when an SSH operation starts.
 - The loading notice is consistent between the fetched JSON policy and the HTML fallback, so the intended message is shown even before the policy file finishes loading.

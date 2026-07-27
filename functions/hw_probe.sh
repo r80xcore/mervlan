@@ -30,7 +30,29 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
+[ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
 # =========================================== End of MerVLAN environment setup #
+
+# APMO may pass a verified request token as the first argument. The normal
+# tokenless probe remains compatible with boot and legacy callers.
+ACTION_REQUEST_TOKEN="${1:-}"
+HW_PROBE_ACTION="hwprobe_vlanmgr"
+
+hw_probe_ack_exit() {
+    _hp_rc=$?
+    trap - EXIT
+    if [ -n "$ACTION_REQUEST_TOKEN" ] && type action_ack_ok >/dev/null 2>&1; then
+        if [ "$_hp_rc" -eq 0 ]; then
+            action_ack_ok "$ACTION_REQUEST_TOKEN" "$HW_PROBE_ACTION" '{}' \
+                "Hardware profile refresh complete" '[]' || :
+        else
+            action_ack_error "$ACTION_REQUEST_TOKEN" "$HW_PROBE_ACTION" '{}' \
+                "Hardware profile refresh failed" '[]' "HW_PROBE_FAILED" || :
+        fi
+    fi
+    exit "$_hp_rc"
+}
+trap 'hw_probe_ack_exit' EXIT
 
 # ============================================================================ #
 #                      HARDWARE DETECTION & PROBING                            #

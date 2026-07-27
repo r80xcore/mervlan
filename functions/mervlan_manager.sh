@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.1"                #
+#             - File: mervlan_manager.sh || version="0.72.2"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -2387,10 +2387,22 @@ main() {
   elif [ "$SKIP_COLLECT" = "yes" ]; then
     info -c cli,vlan "Parallel mode; cluster observation will follow node verification"
   elif [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
-    "$FUNCDIR/post_apply_worker.sh" request snapshot collect >/dev/null 2>&1 || \
-      warn -c cli,vlan "Post-apply observation request failed"
+    merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
+    info -c cli,vlan "Refreshing client inventory after apply..."
+    if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
+         request snapshot collect >/dev/null 2>&1 &&
+       "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
+      info -c cli,vlan "✓ VLAN client list refresh completed"
+    else
+      _manager_observation_rc=$?
+      warn -c cli,vlan "✗ Post-apply observation failed (rc=$_manager_observation_rc); generation remains pending"
+      MANAGER_EXIT_REASON="post-apply-observation-failed"
+      return 1
+    fi
   else
-    info -c cli,vlan "post_apply_worker.sh not available; skipping observation request"
+    warn -c cli,vlan "Post-apply observation unavailable; client inventory was not refreshed"
+    MANAGER_EXIT_REASON="post-apply-observation-unavailable"
+    return 1
   fi
 }
 

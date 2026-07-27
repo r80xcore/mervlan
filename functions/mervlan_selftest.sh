@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.1"                #
+#            - File: mervlan_selftest.sh || version="0.72.2"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -1530,6 +1530,189 @@ test_sync_node_parallel_contract() {
     fail "sync uses isolated bounded staged workers"
 }
 
+test_apmo_completion_contract() {
+  _tapm_ui="$MERV_BASE/www/index.html"
+  _tapm_handler="$MERV_BASE/functions/service-event-handler.sh"
+  _tapm_probe="$MERV_BASE/functions/hw_probe.sh"
+  _tapm_ok=1
+
+  if grep -q 'async function runVerifiedHardwareProbe' "$_tapm_ui" &&
+     grep -q 'waitForSettingsToMatch(expectedManaged' "$_tapm_ui" &&
+     grep -q 'MVM_triggerVerified("hwprobe_vlanmgr"' "$_tapm_ui" &&
+     ! grep -q 'setTimeout.*8500' "$_tapm_ui" &&
+     ! grep -q 'setTimeout.*16000' "$_tapm_ui"; then
+    pass "APMO waits for persistence and verified HW probe completion"
+  else
+    fail "APMO waits for persistence and verified HW probe completion"
+    _tapm_ok=0
+  fi
+
+  if grep -q 'hwprobe_vlanmgr_vrt_\*' "$_tapm_handler" &&
+     grep -q 'hw_probe.sh" "\$_action_token"' "$_tapm_handler"; then
+    pass "service handler dispatches correlated HW probe requests"
+  else
+    fail "service handler dispatches correlated HW probe requests"
+    _tapm_ok=0
+  fi
+
+  if grep -q 'ACTION_REQUEST_TOKEN=' "$_tapm_probe" &&
+     grep -q 'action_ack_ok' "$_tapm_probe" &&
+     grep -q 'action_ack_error' "$_tapm_probe"; then
+    pass "HW probe publishes correlated terminal acknowledgements"
+  else
+    fail "HW probe publishes correlated terminal acknowledgements"
+    _tapm_ok=0
+  fi
+
+  return "$_tapm_ok"
+}
+
+test_action_lifecycle_contract() {
+  _talc_ui="$MERV_BASE/www/index.html"
+  _talc_parent="$MERV_BASE/mervlan.asp"
+  _talc_ok=1
+
+  if grep -q 'function holdActionButton' "$_talc_ui" &&
+     grep -q 'function releaseActionLock' "$_talc_ui" &&
+     grep -q 'holdUntilReleased' "$_talc_ui" &&
+     grep -q 'async function handleApplyClick' "$_talc_ui" &&
+     grep -q 'return await triggerAction' "$_talc_ui" &&
+     grep -q 'runVlanManagerLocal(this)' "$_talc_ui" &&
+     grep -q 'runVlanManagerWithNodes(this)' "$_talc_ui" &&
+     grep -q 'runVlanManagerOnlyNodes(this)' "$_talc_ui"; then
+    pass "UI actions use completion-based locks and modal button ownership"
+  else
+    fail "UI actions use completion-based locks and modal button ownership"
+    _talc_ok=0
+  fi
+
+  if grep -q 'function mvmAcquireRefreshGuard' "$_talc_parent" &&
+     grep -q 'function mvmReleaseRefreshGuard' "$_talc_parent" &&
+     grep -q '_mvmRefreshGuard.count' "$_talc_parent" &&
+     ! grep -q 'var orig = {' "$_talc_parent"; then
+    pass "parent refresh suppression uses shared ownership"
+  else
+    fail "parent refresh suppression uses shared ownership"
+    _talc_ok=0
+  fi
+
+  return "$_talc_ok"
+}
+
+test_failure_propagation_contract() {
+  _tfpc_ui="$MERV_BASE/www/index.html"
+  _tfpc_handler="$MERV_BASE/functions/service-event-handler.sh"
+  _tfpc_refresh="$MERV_BASE/functions/mac_refresh.sh"
+  _tfpc_meta="$MERV_BASE/functions/mac_client_meta.sh"
+  _tfpc_ok=1
+
+  if grep -q 'isCancelled: () => loadingTask && !loadingTask.isRunning()' "$_tfpc_ui" &&
+     grep -q 'isRunning: () => !!active' "$_tfpc_ui" &&
+     grep -q 'passProgressToken: true' "$_tfpc_ui" &&
+     grep -q 'maintenancePollErrors' "$_tfpc_ui" &&
+     grep -q 'Service status polling is temporarily unavailable' "$_tfpc_ui"; then
+    pass "UI stops dependent polls on backend failure and logs repeated status errors"
+  else
+    fail "UI stops dependent polls on backend failure and logs repeated status errors"
+    _tfpc_ok=0
+  fi
+
+  if grep -q 'macrefresh_vlanmgr_pgt_\*' "$_tfpc_handler" &&
+     grep -q 'macclientmeta_vlanmgr_pgt_\*' "$_tfpc_handler" &&
+     grep -q 'dispatch_if_executable.*mac_refresh.sh' "$_tfpc_handler" &&
+     grep -q 'dispatch_if_executable.*mac_client_meta.sh' "$_tfpc_handler"; then
+    pass "service handler accepts progress-token MAC actions"
+  else
+    fail "service handler accepts progress-token MAC actions"
+    _tfpc_ok=0
+  fi
+
+  if grep -q 'merv_action_progress_init' "$_tfpc_refresh" &&
+     grep -q 'merv_action_progress_fail' "$_tfpc_refresh" &&
+     grep -q 'merv_action_progress_complete' "$_tfpc_refresh" &&
+     grep -q 'merv_action_progress_init' "$_tfpc_meta" &&
+     grep -q 'exit 2' "$_tfpc_meta" &&
+     grep -q '_meta_partial=1' "$_tfpc_meta" &&
+     grep -q 'Client metadata applied with warnings' "$_tfpc_meta" &&
+     ! grep -q '_name_pairs\|name entries:' "$_tfpc_meta"; then
+    pass "MAC refresh and metadata actions publish terminal failure states"
+  else
+    fail "MAC refresh and metadata actions publish terminal failure states"
+    _tfpc_ok=0
+  fi
+
+  return "$_tfpc_ok"
+}
+
+test_logging_polling_contract() {
+  _tlpc_ui="$MERV_BASE/www/index.html"
+  _tlpc_ok=1
+
+  if grep -q 'cliPollInFlight' "$_tlpc_ui" &&
+     grep -q 'updateLogPollInFlight' "$_tlpc_ui" &&
+     grep -q 'maintenancePollInFlight' "$_tlpc_ui" &&
+     grep -q 'CLI log polling is temporarily unavailable' "$_tlpc_ui" &&
+     grep -q 'Update output is temporarily unavailable; retrying' "$_tlpc_ui" &&
+     grep -q 'Client inventory polling is temporarily unavailable' "$_tlpc_ui"; then
+    pass "UI log and status pollers serialize requests and expose transient failures"
+  else
+    fail "UI log and status pollers serialize requests and expose transient failures"
+    _tlpc_ok=0
+  fi
+
+  if grep -q 'const followUp = afterSubmit(loadingTask)' "$_tlpc_ui" &&
+     grep -q 'The action follow-up failed' "$_tlpc_ui" &&
+     grep -q 'releaseActionLock(actionScriptName)' "$_tlpc_ui" &&
+     grep -q "const actionSubmitted = await triggerAction('checkservice_vlanmgr'" "$_tlpc_ui"; then
+    pass "action follow-up failures release state and service status awaits submission"
+  else
+    fail "action follow-up failures release state and service status awaits submission"
+    _tlpc_ok=0
+  fi
+
+  return "$_tlpc_ok"
+}
+
+test_apply_observation_contract() {
+  _tao_exec="$MERV_BASE/functions/execute_nodes.sh"
+  _tao_manager="$MERV_BASE/functions/mervlan_manager.sh"
+  _tao_ok=1
+  _tao_phase=$(sed -n '/# PHASE 4:/,/^fi$/p' "$_tao_exec" 2>/dev/null)
+
+  if printf '%s\n' "$_tao_phase" | grep -Fq 'if [ -x "$FUNCDIR/post_apply_worker.sh" ]; then' &&
+     ! printf '%s\n' "$_tao_phase" | grep -Fq 'MODE" != "nodesonly"' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq 'request snapshot collect' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq '"$FUNCDIR/post_apply_worker.sh" run-wait' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq 'overall_success=false'; then
+    pass "all node-runner Apply modes use one final client refresh phase"
+  else
+    fail "all node-runner Apply modes use one final client refresh phase"
+    _tao_ok=0
+  fi
+
+  if grep -Fq 'sh "$local_script" --no-collect' "$_tao_exec" &&
+     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" &&
+     grep -Fq '"$FUNCDIR/post_apply_worker.sh" run-wait' "$_tao_manager"; then
+    pass "local and no-node combined Apply paths avoid duplicate collection"
+  else
+    fail "local and no-node combined Apply paths avoid duplicate collection"
+    _tao_ok=0
+  fi
+
+  if grep -Fq 'Refreshing client inventory...' "$_tao_exec" &&
+     grep -Fq 'merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."' "$_tao_manager" &&
+     ! grep -Fq 'Collecting final cluster information' "$_tao_exec" &&
+     grep -Fq 'post-apply-observation-failed' "$_tao_manager" &&
+     grep -Fq 'post-apply-observation-unavailable' "$_tao_manager"; then
+    pass "client refresh progress wording and failure paths are explicit"
+  else
+    fail "client refresh progress wording and failure paths are explicit"
+    _tao_ok=0
+  fi
+
+  return "$_tao_ok"
+}
+
 test_shell_syntax() {
   _tss_bad=0
   if grep -q 'grep -c "\^-s ".*|| :' "$MERV_BASE/functions/mervlan_boot.sh"; then
@@ -1566,7 +1749,7 @@ test_shell_syntax() {
   else
     pass "shell syntax sync_nodes.sh skipped on node-only installation"
   fi
-  for _tss_optional in collect_clients.sh collect_local_clients.sh mac_client_meta.sh execute_nodes.sh update_mervlan.sh; do
+  for _tss_optional in collect_clients.sh collect_local_clients.sh mac_client_meta.sh mac_refresh.sh execute_nodes.sh update_mervlan.sh hw_probe.sh; do
     if [ -f "$MERV_BASE/functions/$_tss_optional" ]; then
       if sh -n "$MERV_BASE/functions/$_tss_optional"; then
         pass "shell syntax $_tss_optional"
@@ -1637,6 +1820,11 @@ run_one() {
     execute-node-runner) test_execute_node_runner_contract ;;
     sync-node-pool) test_sync_node_pool ;;
     sync-node-parallel) test_sync_node_parallel_contract ;;
+    apmo-completion) test_apmo_completion_contract ;;
+    action-lifecycle) test_action_lifecycle_contract ;;
+    failure-propagation) test_failure_propagation_contract ;;
+    logging-polling) test_logging_polling_contract ;;
+    apply-observation) test_apply_observation_contract ;;
     shell-syntax) test_shell_syntax ;;
     live-audit) test_live_audit ;;
     *)
@@ -1682,7 +1870,7 @@ if [ "$SELFTEST_ACTION" = all ]; then
     settle-watchdog recovery failsafe-status post-apply observation-concurrency \
     observation-timeouts observation-generations atomic-publication client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel shell-syntax live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle failure-propagation logging-polling apply-observation shell-syntax live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

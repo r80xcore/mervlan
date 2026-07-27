@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: execute_nodes.sh || version="0.72.0"                  #
+#              - File: execute_nodes.sh || version="0.72.2"                  #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -823,8 +823,9 @@ if [ -z "$READY_NODES" ]; then
         info -c cli,vlan "Executing VLAN manager on main router (no nodes)..."
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
-            # No nodes, so run with collect_clients included
-            MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
+            # Keep collection in the shared final phase below so a no-node
+            # combined run cannot publish the client inventory twice.
+            MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
         fi
     fi
 else
@@ -934,23 +935,27 @@ else
     fi
     
     # ============================================================================ #
-    # PHASE 4: Publish one cluster observation after all nodes verified          #
+    # PHASE 4: Publish one cluster observation after all work is verified       #
     # ============================================================================ #
-    if [ "$MODE" != "nodesonly" ] && [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
-        merv_action_progress_update complete 1 1 98 "Collecting final cluster information..."
-        info -c cli,vlan "--- Phase 4: Collecting clients ---"
+    if [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
+        merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
+        info -c cli,vlan "--- Phase 4: Refreshing client inventory ---"
         if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
             merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null || :
             EXEC_NODES_LOCK_ACQUIRED=0
         fi
         if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
              request snapshot collect >/dev/null 2>&1 &&
-           "$FUNCDIR/post_apply_worker.sh" run; then
+           "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
             info -c cli,vlan "✓ VLAN client list refresh completed"
         else
-            rc=$?
-            warn -c cli,vlan "✗ Post-apply observation failed (rc=$rc); generation remains pending"
+            _exec_observation_rc=$?
+            overall_success=false
+            warn -c cli,vlan "✗ Post-apply observation failed (rc=$_exec_observation_rc); generation remains pending"
         fi
+    else
+        overall_success=false
+        warn -c cli,vlan "✗ Post-apply observation unavailable; client inventory was not refreshed"
     fi
 fi
 

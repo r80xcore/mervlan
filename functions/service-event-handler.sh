@@ -294,8 +294,8 @@ case "${TYPE}_${EVENT}" in
   clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr|updaterelease_vlanmgr|updateref_vlanmgr_*|\
   backupinventory_vlanmgr_*|manualbackup_vlanmgr_*|deletebackup_vlanmgr_*|deleteallbackups_vlanmgr_*|restorebackup_vlanmgr_*|\
   undorestore_vlanmgr_*|undoupdate_vlanmgr_*|\
-  hwprobe_vlanmgr|macrefresh_vlanmgr|\
-  macclientmeta_vlanmgr)
+  hwprobe_vlanmgr|hwprobe_vlanmgr_vrt_*|macrefresh_vlanmgr|macrefresh_vlanmgr_pgt_*|\
+  macclientmeta_vlanmgr|macclientmeta_vlanmgr_pgt_*)
     APP_EVENT=1
     ;;
 esac
@@ -425,7 +425,7 @@ dispatch_if_executable() {
     sync_vlanmgr|apply_vlanmgr)
       MERV_PROGRESS_TOKEN="$(get_progress_request_token)"
       ;;
-    sync_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*)
+    sync_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*|macrefresh_vlanmgr_pgt_*|macclientmeta_vlanmgr_pgt_*)
       MERV_PROGRESS_TOKEN="$(get_progress_action_token "${RAW:-}")"
       ;;
   esac
@@ -753,12 +753,29 @@ case "${TYPE}_${EVENT}" in
     # Re-run hardware probe to refresh the Hardware profile in settings.json
     dispatch_if_executable "/jffs/addons/mervlan/functions/hw_probe.sh"
     ;;
+  hwprobe_vlanmgr_vrt_*)
+    _action_token="$(get_verified_action_token "${TYPE}_${EVENT}" hwprobe_vlanmgr)"
+    if [ -n "$_action_token" ]; then
+      # Correlated APMO requests receive an explicit action acknowledgement.
+      dispatch_if_executable "/jffs/addons/mervlan/functions/hw_probe.sh" "$_action_token"
+    else
+      logger -t "VLANMgr" "handler: rejected HW probe with invalid verification token"
+    fi
+    ;;
   macrefresh_vlanmgr)
     # Clear and rebuild the MERV_MAC per-client shield db from a fresh snapshot
     dispatch_if_executable "/jffs/addons/mervlan/functions/mac_refresh.sh"
     ;;
+  macrefresh_vlanmgr_pgt_*)
+    # Progress-token variant; mac_refresh.sh owns terminal action status.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mac_refresh.sh"
+    ;;
   macclientmeta_vlanmgr)
     # Materialize MAC override + client name DBs, re-enforce shield, refresh inventory
+    dispatch_if_executable "/jffs/addons/mervlan/functions/mac_client_meta.sh"
+    ;;
+  macclientmeta_vlanmgr_pgt_*)
+    # Progress-token variant; mac_client_meta.sh owns terminal action status.
     dispatch_if_executable "/jffs/addons/mervlan/functions/mac_client_meta.sh"
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)

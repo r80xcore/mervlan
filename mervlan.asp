@@ -46,6 +46,55 @@ function initial(){
 </script>
 <script type="text/javascript">
 var _mvmLast = { name: null, t: 0 };
+var _mvmRefreshGuard = {
+  count: 0,
+  refresh_self: undefined,
+  redirect_self: undefined,
+  refresh_parent: undefined,
+  redirect_parent: undefined
+};
+
+function _mvmRestoreFunction(target, key, value) {
+  if (!target) return;
+  try {
+    if (typeof value !== "undefined") target[key] = value;
+    else delete target[key];
+  } catch (e) {
+    try { target[key] = value; } catch (e2) {}
+  }
+}
+
+function mvmAcquireRefreshGuard() {
+  if (_mvmRefreshGuard.count === 0) {
+    _mvmRefreshGuard.refresh_self = (typeof window.refreshpage !== "undefined") ? window.refreshpage : undefined;
+    _mvmRefreshGuard.redirect_self = (typeof window.redirect_page !== "undefined") ? window.redirect_page : undefined;
+    _mvmRefreshGuard.refresh_parent = (window.parent && window.parent !== window && typeof window.parent.refreshpage !== "undefined") ? window.parent.refreshpage : undefined;
+    _mvmRefreshGuard.redirect_parent = (window.parent && window.parent !== window && typeof window.parent.redirect_page !== "undefined") ? window.parent.redirect_page : undefined;
+  }
+  _mvmRefreshGuard.count++;
+  window.refreshpage = function() {};
+  window.redirect_page = function() {};
+  if (window.parent && window.parent !== window) {
+    try { window.parent.refreshpage = function() {}; } catch (e) {}
+    try { window.parent.redirect_page = function() {}; } catch (e2) {}
+  }
+}
+
+function mvmReleaseRefreshGuard() {
+  if (_mvmRefreshGuard.count <= 0) return;
+  _mvmRefreshGuard.count--;
+  if (_mvmRefreshGuard.count !== 0) return;
+  _mvmRestoreFunction(window, "refreshpage", _mvmRefreshGuard.refresh_self);
+  _mvmRestoreFunction(window, "redirect_page", _mvmRefreshGuard.redirect_self);
+  if (window.parent && window.parent !== window) {
+    try { _mvmRestoreFunction(window.parent, "refreshpage", _mvmRefreshGuard.refresh_parent); } catch (e) {}
+    try { _mvmRestoreFunction(window.parent, "redirect_page", _mvmRefreshGuard.redirect_parent); } catch (e2) {}
+  }
+  _mvmRefreshGuard.refresh_self = undefined;
+  _mvmRefreshGuard.redirect_self = undefined;
+  _mvmRefreshGuard.refresh_parent = undefined;
+  _mvmRefreshGuard.redirect_parent = undefined;
+}
 
 // === Loading overlay guard: block early hides until minimum time passes ===
 (function() {
@@ -213,13 +262,6 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   // Note: we no longer zero out action_wait when skipRefresh is true
   // This allows the loading overlay to show while still preventing page refresh
 
-  var orig = {
-    refresh_self: (typeof window.refreshpage !== "undefined") ? window.refreshpage : undefined,
-    redirect_self: (typeof window.redirect_page !== "undefined") ? window.redirect_page : undefined,
-    refresh_parent: (window.parent && window.parent !== window && typeof window.parent.refreshpage !== "undefined") ? window.parent.refreshpage : undefined,
-    redirect_parent: (window.parent && window.parent !== window && typeof window.parent.redirect_page !== "undefined") ? window.parent.redirect_page : undefined
-  };
-
   if (skipRefresh) {
     try {
       if (document.form.next_page) {
@@ -227,13 +269,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
       }
     } catch (e) {}
 
-    window.refreshpage = function() {};
-    window.redirect_page = function() {};
-
-    if (window.parent && window.parent !== window) {
-      try { window.parent.refreshpage = function() {}; } catch (e) {}
-      try { window.parent.redirect_page = function() {}; } catch (e2) {}
-    }
+    mvmAcquireRefreshGuard();
   }
 
   if (skipRefresh) {
@@ -300,35 +336,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
       hideLoadingIfNoMinTime();
       notifyProgressFrameComplete();
       if (skipRefresh) {
-        if (typeof orig.refresh_self !== "undefined") {
-          window.refreshpage = orig.refresh_self;
-        } else {
-          try { delete window.refreshpage; } catch (e) { window.refreshpage = undefined; }
-        }
-
-        if (typeof orig.redirect_self !== "undefined") {
-          window.redirect_page = orig.redirect_self;
-        } else {
-          try { delete window.redirect_page; } catch (e2) { window.redirect_page = undefined; }
-        }
-
-        if (window.parent && window.parent !== window) {
-          try {
-            if (typeof orig.refresh_parent !== "undefined") {
-              window.parent.refreshpage = orig.refresh_parent;
-            } else {
-              window.parent.refreshpage = undefined;
-            }
-          } catch (e3) {}
-
-          try {
-            if (typeof orig.redirect_parent !== "undefined") {
-              window.parent.redirect_page = orig.redirect_parent;
-            } else {
-              window.parent.redirect_page = undefined;
-            }
-          } catch (e4) {}
-        }
+        mvmReleaseRefreshGuard();
         mvmRemoveSandboxFrame();
       } else if (!wantLoading) {
         hideLoadingSafe();
@@ -340,35 +348,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
       tf.attachEvent("onload", oneShot);
     }
   } else if (skipRefresh) {
-    if (typeof orig.refresh_self !== "undefined") {
-      window.refreshpage = orig.refresh_self;
-    } else {
-      try { delete window.refreshpage; } catch (e) { window.refreshpage = undefined; }
-    }
-
-    if (typeof orig.redirect_self !== "undefined") {
-      window.redirect_page = orig.redirect_self;
-    } else {
-      try { delete window.redirect_page; } catch (e2) { window.redirect_page = undefined; }
-    }
-
-    if (window.parent && window.parent !== window) {
-      try {
-        if (typeof orig.refresh_parent !== "undefined") {
-          window.parent.refreshpage = orig.refresh_parent;
-        } else {
-          window.parent.refreshpage = undefined;
-        }
-      } catch (e3) {}
-
-      try {
-        if (typeof orig.redirect_parent !== "undefined") {
-          window.parent.redirect_page = orig.redirect_parent;
-        } else {
-          window.parent.redirect_page = undefined;
-        }
-      } catch (e4) {}
-    }
+    mvmReleaseRefreshGuard();
     mvmRemoveSandboxFrame();
   }
 

@@ -737,17 +737,17 @@
     <div class="modal__body">
       <p class="modal__intro">Choose how to run the VLAN Manager:</p>
       <div class="modal__section vlan-options">
-        <button type="button" class="button_gen" onclick="runVlanManagerLocal()">
+        <button type="button" class="button_gen" onclick="runVlanManagerLocal(this)">
           <div class="vlan-option__title">Local Router Only</div>
           <div class="vlan-option__subtitle">Apply to this router only</div>
         </button>
 
-        <button type="button" class="button_gen" onclick="runVlanManagerWithNodes()">
+        <button type="button" class="button_gen" onclick="runVlanManagerWithNodes(this)">
           <div class="vlan-option__title">Router + Nodes</div>
           <div class="vlan-option__subtitle">Apply to this router and all nodes</div>
         </button>
 
-        <button type="button" class="button_gen" onclick="runVlanManagerOnlyNodes()">
+        <button type="button" class="button_gen" onclick="runVlanManagerOnlyNodes(this)">
           <div class="vlan-option__title">Nodes Only</div>
           <div class="vlan-option__subtitle">Apply to configured nodes onl</div>
         </button>
@@ -3923,6 +3923,9 @@ function toggleCliFullsize() {
     let pollingTimeout = null;
     let pollTimer = null;
     let lastLogText = '';
+    let cliPollInFlight = false;
+    let cliPollErrors = 0;
+    let clientFetchErrors = 0;
 
     // === Version/update modal live status ===
     let updateSpinnerTimer = null;
@@ -3933,12 +3936,14 @@ function toggleCliFullsize() {
     let updateActionIdleDisplay = "none";
 
     let updateLogTimer = null;
+    let updateLogPollInFlight = false;
     let lastUpdateLogLine = "";
     let lastUpdateLogSnapshot = "";
     let updateLogBaselineText = "";
     let updateLogBaselineReady = false;
     let _updateTimeoutId = null;
     let maintenancePollTimer = null;
+    let maintenancePollInFlight = false;
     let maintenanceTimeoutTimer = null;
     let maintenanceStartTimeoutTimer = null;
     let maintenanceRequestSeen = false;
@@ -4130,6 +4135,8 @@ function toggleCliFullsize() {
     async function pollUpdateLogOnce() {
       const logLineEl = document.getElementById("updateLogLine");
       if (!logLineEl) return;
+      if (updateLogPollInFlight) return;
+      updateLogPollInFlight = true;
 
       try {
         const r = await fetch(PATHS.UPDATE_LOG + "?_=" + Date.now());
@@ -4192,7 +4199,11 @@ function toggleCliFullsize() {
           stopUpdateLogPolling();
         }
       } catch (e) {
-        // optional: ignore errors
+        if (!lastUpdateLogLine) {
+          logLineEl.textContent = "Update output is temporarily unavailable; retrying...";
+        }
+      } finally {
+        updateLogPollInFlight = false;
       }
     }
 
@@ -4321,11 +4332,23 @@ function toggleCliFullsize() {
         }
 
   function pollOnce(){
-        if(currentView !== 'normal') return Promise.resolve(); // Only poll in normal view
+        if(currentView !== 'normal' || cliPollInFlight) return Promise.resolve(); // Only one CLI read at a time
+        cliPollInFlight = true;
         
         return fetch(PATHS.CLI_LOG+"?_="+Date.now())
             .then(r=> {
-                if(!r.ok) return ''; // If log doesn't exist yet, return empty
+                if(!r.ok) {
+                  if (r.status === 404) {
+                    cliPollErrors = 0;
+                  } else {
+                    cliPollErrors++;
+                    if (cliPollErrors === 3) {
+                      appendCliText('CLI log polling is temporarily unavailable (HTTP ' + r.status + '). Retrying...\n', { scroll: 'force' });
+                    }
+                  }
+                  return ''; // If log doesn't exist yet, return empty
+                }
+                cliPollErrors = 0;
                 return r.text();
             })
             .then(t=>{
@@ -4350,7 +4373,13 @@ function toggleCliFullsize() {
         }
         lastLogText = t;
             })
-            .catch(()=>{});
+            .catch(error=>{
+              cliPollErrors++;
+              if (cliPollErrors === 3) {
+                appendCliText('CLI log polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+              }
+            })
+            .then(()=>{ cliPollInFlight = false; }, ()=>{ cliPollInFlight = false; });
     }
 
   function startPolling(){ 
@@ -4399,8 +4428,16 @@ async function fetchClientsJSON(){
   try{
     const r = await fetch(PATHS.CLIENTS_JSON + "?_=" + Date.now(), { cache:"no-store" });
     if(!r.ok) throw new Error("HTTP "+r.status);
-    return await r.json();
-  }catch(_){ return null; }
+    const data = await r.json();
+    clientFetchErrors = 0;
+    return data;
+  }catch(error){
+    clientFetchErrors++;
+    if (clientFetchErrors === 3) {
+      appendCliText('Client inventory polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+    }
+    return null;
+  }
 }
 
 /* ===== Client metadata (MAC shield override + display names) ===== */
@@ -4675,10 +4712,21 @@ function pollForFreshClientData(sinceMs, opts){
 
   CLIENTS_REFRESH_TIMER = setInterval(async () => {
     // Ignore ticks from a superseded poll.
-    if (seq !== CLIENTS_REFRESH_SEQ) { clearInterval(CLIENTS_REFRESH_TIMER); return; }
+    if (seq !== CLIENTS_REFRESH_SEQ) return;
+    if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
+      clearInterval(CLIENTS_REFRESH_TIMER);
+      CLIENTS_REFRESH_TIMER = null;
+      return;
+    }
 
     ticks++;
     const data = await fetchClientsJSON();
+    if (seq !== CLIENTS_REFRESH_SEQ) return;
+    if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
+      clearInterval(CLIENTS_REFRESH_TIMER);
+      CLIENTS_REFRESH_TIMER = null;
+      return;
+    }
     if (data) {
       // Primary freshness signal: run_id changed (backend wrote a new file).
       const runIdChanged = prevRunId
@@ -4811,9 +4859,11 @@ async function saveClientMeta(btn){
   const prevGenForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
   let metaSubmitted = false;
   if (window.parent && typeof window.parent.MVM_macClientMeta === 'function'){
-    // This action is frontend-owned: the loading task stays open until the
-    // fresh client inventory is observed, so the backend needs no token.
-    metaSubmitted = window.parent.MVM_macClientMeta();
+    // The frontend still waits for fresh inventory, while the backend progress
+    // token can fail the task early if DB materialization or collection fails.
+    metaSubmitted = window.parent.MVM_macClientMeta({
+      progressToken: metadataLoadingTask ? metadataLoadingTask.token : ''
+    });
   } else if (window.parent && typeof window.parent.MVM_trigger === 'function') {
     metaSubmitted = window.parent.MVM_trigger('macclientmeta_vlanmgr');
   }
@@ -4826,6 +4876,7 @@ async function saveClientMeta(btn){
   pollForFreshClientData(metaStartTime, {
     previousRunId: prevRunIdForMeta,
     previousGenerated: prevGenForMeta,
+    isCancelled: () => metadataLoadingTask && !metadataLoadingTask.isRunning(),
     doneMsg: 'Client metadata applied.',
     timeoutMsg: 'Client metadata apply is taking longer than expected; showing latest available.',
     onFresh: () => {
@@ -5117,7 +5168,7 @@ async function startClientsOnPageLoad(){
     description: 'Auto-refresh VLAN clients',
     cooldownMs: 8000,
     loadingOptions: { progressBacked: true },
-    passProgressToken: false,
+    passProgressToken: true,
     quiet: true,
     afterSubmit: (loadingTask) => {
       if (loadingTask) loadingTask.phase('Collecting VLAN clients...', 25);
@@ -5176,21 +5227,50 @@ async function refreshClients(btn){
 
 /* ===== Per-action lock + optional button disable ===== */
 const actionLocks = new Map();
+const actionButtons = new Map();
 
-function withActionLock(name, fn, cooldownMs = 8000) {
-    const now = Date.now();
-    const last = actionLocks.get(name) || 0;
-    if (now - last < cooldownMs) {
+function releaseActionLock(name) {
+    if (!name) return;
+    actionLocks.delete(name);
+    const button = actionButtons.get(name);
+    if (button) {
+        button.disabled = false;
+        button.style.opacity = "";
+        if (button.dataset.mervlanAction === name) delete button.dataset.mervlanAction;
+        actionButtons.delete(name);
+    }
+}
+
+function holdActionButton(name, button) {
+    if (!name || !button) return;
+    button.disabled = true;
+    button.style.opacity = 0.6;
+    button.dataset.mervlanAction = name;
+    actionButtons.set(name, button);
+}
+
+function withActionLock(name, fn, cooldownMs = 8000, holdUntilReleased = false) {
+    if (actionLocks.has(name)) {
         appendCliText(`[Action skipped] ${name} - too recent\n`, { scroll: 'force' });
         return Promise.resolve();
     }
-    actionLocks.set(name, now);
-    const release = () => setTimeout(() => actionLocks.delete(name), cooldownMs);
+    const lockStarted = Date.now();
+    actionLocks.set(name, lockStarted);
+    const release = () => setTimeout(() => {
+        if (actionLocks.get(name) === lockStarted) actionLocks.delete(name);
+    }, cooldownMs);
     try {
         const p = Promise.resolve(fn());
+        if (holdUntilReleased) {
+            return p.catch(error => {
+                if (actionLocks.get(name) === lockStarted) releaseActionLock(name);
+                throw error;
+            });
+        }
         return p.finally(release);
     } catch (e) {
-        release();
+        if (holdUntilReleased) releaseActionLock(name);
+        else release();
         throw e;
     }
 }
@@ -5449,6 +5529,7 @@ const MerVLANLoading = (() => {
   function complete(message) {
     if (!active || active.state === 'complete') return;
     active.state = 'complete';
+    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
     clearTimers();
     setMessage(message, 'Complete');
     setProgress(100, 'determinate');
@@ -5459,6 +5540,7 @@ const MerVLANLoading = (() => {
   function fail(message) {
     if (!active) return;
     active.state = 'failed';
+    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
     clearTimers();
     const error = el('mervlanLoadingError');
     const closeButton = el('mervlanLoadingCloseBtn');
@@ -5519,7 +5601,8 @@ const MerVLANLoading = (() => {
       action: actionName,
       phase: (message, percent) => updateTask(token, message, percent),
       complete: message => completeTask(token, message),
-      fail: message => failTask(token, message)
+      fail: message => failTask(token, message),
+      isRunning: () => !!active && active.token === token && active.state === 'running'
     };
   }
 
@@ -5600,7 +5683,7 @@ function queueServiceAction(actionScriptName, opts = {}) {
 
     const handler = async () => {
         stopPolling();
-        disableBtnTemporarily(button, cooldownMs);
+        if (button) holdActionButton(actionScriptName, button);
 
         let loadingTask = null;
         let actionParentOpts = parentOpts;
@@ -5628,6 +5711,7 @@ function queueServiceAction(actionScriptName, opts = {}) {
             // Always log failures, even in quiet mode.
             appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
             if (loadingTask) loadingTask.fail('The action could not be submitted.');
+            releaseActionLock(actionScriptName);
             startPolling();
             return false;
         }
@@ -5635,18 +5719,34 @@ function queueServiceAction(actionScriptName, opts = {}) {
         if (submitted === false) {
             appendCliText(`[${new Date().toLocaleString()}] Parent rejected or deduplicated ${description}.\n`, { scroll: 'force' });
             if (loadingTask) loadingTask.fail('The action was rejected or is already running.');
+            releaseActionLock(actionScriptName);
             startPolling();
             return false;
         }
 
         if (typeof afterSubmit === "function") {
-            try { afterSubmit(loadingTask); } catch (err) { console.error(err); }
+            try {
+                const followUp = afterSubmit(loadingTask);
+                if (followUp && typeof followUp.then === "function") await followUp;
+            } catch (err) {
+                console.error(err);
+                appendCliText(`[${new Date().toLocaleString()}] ${description} follow-up failed: ${err.message || err}.\n`, { scroll: 'force' });
+                if (loadingTask) loadingTask.fail('The action follow-up failed.');
+                releaseActionLock(actionScriptName);
+                startPolling();
+                return false;
+            }
         }
         startPolling();
+        if (!loadingTask) {
+            // Actions without a MerVLAN loading policy have no terminal UI
+            // callback; retain the historical cooldown as their fallback.
+            setTimeout(() => releaseActionLock(actionScriptName), cooldownMs);
+        }
         return true;
     };
 
-    return withActionLock(actionScriptName, handler, cooldownMs);
+    return withActionLock(actionScriptName, handler, cooldownMs, true);
 }
 
 function triggerAction(actionScriptName, button, description) {
@@ -6093,14 +6193,26 @@ function triggerAction(actionScriptName, button, description) {
       // Snapshot the current ts before triggering so we can detect when the
       // new file has been written (ts changed = fresh data).
       let _prevTs = '';
+      let _statusReadErrors = 0;
       try {
         const _pr = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
           { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
         if (_pr.ok) { const _pd = await _pr.json(); _prevTs = _pd.ts || ''; }
-      } catch (_) {}
+      } catch (error) {
+        _statusReadErrors++;
+        appendCliText('Service status baseline read failed: ' + error.message + '\n', { scroll: 'force' });
+      }
 
       // Fire the check action — full output still goes to CLI log as before
-      triggerAction('checkservice_vlanmgr', btn, 'Service Status');
+      const actionSubmitted = await triggerAction('checkservice_vlanmgr', btn, 'Service Status');
+      if (actionSubmitted === false) {
+        if (statusLine) {
+          statusLine.textContent = 'Boot service: request rejected (see CLI log)';
+          statusLine.style.color = '#ffaa6b';
+        }
+        appendCliText('Service status request could not be started.\n', { scroll: 'force' });
+        return;
+      }
 
       // Poll until the file has a new ts (max 20s, 1s interval)
       const _deadline = Date.now() + 20000;
@@ -6110,11 +6222,22 @@ function triggerAction(actionScriptName, button, description) {
         try {
           const _r = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
             { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
-          if (_r.ok) {
+          if (!_r.ok) {
+            _statusReadErrors++;
+            if (_statusReadErrors === 3) {
+              appendCliText('Service status polling is temporarily unavailable (HTTP ' + _r.status + '). Retrying...\n', { scroll: 'force' });
+            }
+          } else {
             const _d = await _r.json();
+            _statusReadErrors = 0;
             if (_d.ts && _d.ts !== _prevTs) { data = _d; break; }
           }
-        } catch (_) {}
+        } catch (error) {
+          _statusReadErrors++;
+          if (_statusReadErrors === 3) {
+            appendCliText('Service status polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+          }
+        }
       }
 
       if (data) {
@@ -6166,12 +6289,29 @@ function triggerAction(actionScriptName, button, description) {
     }
 
 async function handleApplyClick(button) {
-    const hasNodes = await checkForConfiguredNodes();
-    if (hasNodes) {
-        showVlanManagerModal();
-        return;
+    if (button && button.disabled) return false;
+    if (button) {
+      button.disabled = true;
+      button.style.opacity = 0.6;
     }
-    triggerAction('apply_vlanmgr', button, 'Apply VLAN');
+    try {
+      const hasNodes = await checkForConfiguredNodes();
+      if (hasNodes) {
+          showVlanManagerModal();
+          return true;
+      }
+      return await triggerAction('apply_vlanmgr', button, 'Apply VLAN');
+    } finally {
+      // queueServiceAction marks a submitted button as action-owned and keeps
+      // it disabled until terminal progress. A preflight-only/modal path is
+      // released immediately after the node check finishes.
+      if (!button || button.dataset.mervlanAction !== 'apply_vlanmgr') {
+        if (button) {
+          button.disabled = false;
+          button.style.opacity = '';
+        }
+      }
+    }
 }
 
 // Check if any nodes are configured in settings.json
@@ -6207,27 +6347,30 @@ async function checkForConfiguredNodes() {
 }
 
 // Run VLAN Manager locally only
-async function runVlanManagerLocal() {
+async function runVlanManagerLocal(button) {
   closeVlanManagerModal();
   return queueServiceAction('apply_vlanmgr', {
+    button,
     description: 'Run VLAN Manager (Local Only)',
     cooldownMs: 8000
   });
 }
 
 // Run VLAN Manager with nodes
-async function runVlanManagerWithNodes() {
+async function runVlanManagerWithNodes(button) {
   closeVlanManagerModal();
   return queueServiceAction('executenodes_vlanmgr', {
+    button,
     description: 'Run VLAN Manager + Nodes',
     cooldownMs: 8000
   });
 }
 
 // Run VLAN Manager with nodes
-async function runVlanManagerOnlyNodes() {
+async function runVlanManagerOnlyNodes(button) {
   closeVlanManagerModal();
   return queueServiceAction('executenodesonly_vlanmgr', {
+    button,
     description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
   });
@@ -6242,7 +6385,7 @@ async function runMacRefresh() {
     description: 'MAC Shield Refresh',
     cooldownMs: 3000,
     loadingOptions: { progressBacked: true },
-    passProgressToken: false,
+    passProgressToken: true,
     afterSubmit: (loadingTask) => {
       // mac_refresh.sh rebuilds the shield DB and kicks off a fresh client
       // collection; poll until the new JSON lands so badges/locks update.
@@ -6250,6 +6393,7 @@ async function runMacRefresh() {
       pollForFreshClientData(macRefreshStarted, {
         previousRunId,
         previousGenerated,
+        isCancelled: () => loadingTask && !loadingTask.isRunning(),
         doneMsg: 'MAC shield refreshed.',
         timeoutMsg: 'MAC shield refresh is taking longer than expected; showing latest available.',
         onFresh: () => {
@@ -7334,6 +7478,7 @@ function startMaintenanceOperation(options) {
   const token = makeMaintenanceRequestToken();
   maintenanceRequestToken = token;
   maintenanceRequestSeen = false;
+  let maintenancePollErrors = 0;
   const submitted = submitMaintenanceThroughParent(options.parentMethod, token, options.payload);
   if (submitted === false) {
     setMaintenanceStatus("The router rejected the maintenance request.", "error");
@@ -7343,10 +7488,13 @@ function startMaintenanceOperation(options) {
   setMaintenanceStatus(options.startMessage || "Request queued…");
   startPolling();
   const poll = async () => {
+    if (maintenancePollInFlight) return;
+    maintenancePollInFlight = true;
     try {
       const response = await fetch(PATHS.MAINTENANCE_RESULT + "?_=" + Date.now(), { cache: "no-store" });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error("HTTP " + response.status);
       const result = await response.json();
+      maintenancePollErrors = 0;
       if (result.request_token !== maintenanceRequestToken) return;
       if (!maintenanceRequestSeen) {
         maintenanceRequestSeen = true;
@@ -7383,7 +7531,22 @@ function startMaintenanceOperation(options) {
       }
       const versionModal = document.getElementById("versionModal");
       if (versionModal && versionModal.style.display !== "none") anchorModalToForm(versionModal);
-    } catch (_) {}
+    } catch (error) {
+      if (maintenanceRequestToken !== token) return;
+      maintenancePollErrors++;
+      if (maintenancePollErrors === 3) {
+        setMaintenanceStatus(
+          "Maintenance status is temporarily unavailable (" + error.message + "). Retrying...",
+          "warning"
+        );
+        appendCliText(
+          "Maintenance status read failed: " + error.message + "\n",
+          { scroll: "force" }
+        );
+      }
+    } finally {
+      maintenancePollInFlight = false;
+    }
   };
   poll();
   maintenancePollTimer = setInterval(poll, 900);
@@ -8123,6 +8286,7 @@ async function applyOverrideWithHwProbe() {
     stopPolling();
     try {
       const merlinPayload = buildOverridePayloadForMerlin();
+      const expectedManaged = extractOverrideSaveExpected(merlinPayload);
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
         appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
@@ -8138,25 +8302,36 @@ async function applyOverrideWithHwProbe() {
       }
 
       // Step 1: Save settings
-      window.parent.MVM_save(merlinPayload);
+      const saveSubmitted = window.parent.MVM_save(merlinPayload);
+      if (saveSubmitted === false) {
+        appendCliText("Hardware override save was rejected or deduplicated.\n", { scroll: "force" });
+        return;
+      }
 
-      setTimeout(() => {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
-      }, 500);
+      appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
+      const persisted = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs: 25000,
+        intervalMs: 700,
+        scope: "override",
+        subset: true
+      });
+      if (!persisted) {
+        appendCliText("Override settings did not persist; HW profile refresh was skipped.\n", { scroll: "force" });
+        return;
+      }
 
-      // Step 2: Chain hwprobe after save completes (~8s)
-      setTimeout(() => {
-        appendCliText("Triggering HW profile refresh...\n", { scroll: "force" });
-        window.parent.MVM_hwprobe();
-      }, 8500);
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
 
-      // Step 3: Reload at 16s (8s save + 8s hwprobe = ~16s)
-      setTimeout(async () => {
-        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-        await loadSettings();
-        appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
-      }, 16000);
+      // Step 2: Wait for the correlated HW probe completion acknowledgement.
+      appendCliText("Triggering HW profile refresh...\n", { scroll: "force" });
+      const probeResult = await runVerifiedHardwareProbe();
+      if (!probeResult.ok) return;
+
+      // Step 3: Reload only after the probe has completed.
+      appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      await loadSettings();
+      appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
 
     } catch (err) {
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
@@ -8164,11 +8339,54 @@ async function applyOverrideWithHwProbe() {
   }, 18000);
 }
 
+function extractOverrideSaveExpected(payload) {
+  const expected = {};
+  Object.keys(payload || {}).forEach(key => {
+    if (key.indexOf("vlanmgr_OVERRIDE_") !== 0) return;
+    expected[key.slice("vlanmgr_".length)] = String(payload[key] ?? "");
+  });
+  return expected;
+}
+
+async function runVerifiedHardwareProbe() {
+  const parentWin = window.parent;
+  if (!parentWin || typeof parentWin.MVM_triggerVerified !== "function") {
+    const message = "Verified HW probe handler is unavailable.";
+    appendCliText(message + "\n", { scroll: "force" });
+    return { ok: false, status: "error", message };
+  }
+
+  const requestToken = createActionRequestToken();
+  const submitted = parentWin.MVM_triggerVerified("hwprobe_vlanmgr", requestToken, {}, {
+    loading: false,
+    skipRefresh: true,
+    waitSec: 0,
+    minLoadingMs: 0
+  });
+  if (submitted === false) {
+    const message = "HW profile refresh was rejected or deduplicated.";
+    appendCliText(message + "\n", { scroll: "force" });
+    return { ok: false, status: "error", message };
+  }
+
+  const result = await waitForVerifiedActionResult(
+    requestToken,
+    "hwprobe_vlanmgr",
+    {},
+    45000
+  );
+  if (!result.ok) {
+    appendCliText("HW profile refresh failed: " + result.message + "\n", { scroll: "force" });
+  }
+  return result;
+}
+
 async function applyOverrideSaveOnly() {
   return withActionLock("override-save", async () => {
     stopPolling();
     try {
       const merlinPayload = buildOverridePayloadForMerlin();
+      const expectedManaged = extractOverrideSaveExpected(merlinPayload);
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
         appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
@@ -8182,30 +8400,28 @@ async function applyOverrideSaveOnly() {
         return;
       }
 
-      window.parent.MVM_save(merlinPayload);
+      const saveSubmitted = window.parent.MVM_save(merlinPayload);
+      if (saveSubmitted === false) {
+        appendCliText("Override save was rejected or deduplicated.\n", { scroll: "force" });
+        return;
+      }
 
-      setTimeout(() => {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
-      }, 500);
-
-      setTimeout(async () => {
-        appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
-        const flat = CURRENT_SETTINGS_CACHE ? { ...CURRENT_SETTINGS_CACHE } : {};
-        const expectedManaged = extractManagedKeysForScope(flat, "override");
-        const ok = await waitForSettingsToMatch(expectedManaged, {
-          timeoutMs: 25000,
-          intervalMs: 700,
-          scope: "override"
-        });
-        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-        await loadSettings();
-        appendCliText(
-          ok ? "Override save complete.\n"
-             : "Override save: settings did not persist in time. Loaded latest available.\n",
-          { scroll: "force" }
-        );
-      }, 3000);
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
+      appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
+      const ok = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs: 25000,
+        intervalMs: 700,
+        scope: "override",
+        subset: true
+      });
+      appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      await loadSettings();
+      appendCliText(
+        ok ? "Override save complete.\n"
+           : "Override save: settings did not persist in time. Loaded latest available.\n",
+        { scroll: "force" }
+      );
 
     } catch (err) {
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
@@ -8217,22 +8433,14 @@ async function refreshHwProfile() {
   hideAdvancedOverrideModal();
   return withActionLock("hwprobe", async () => {
     appendCliText("Refreshing HW profile...\n", { scroll: "force" });
-    if (window.parent && typeof window.parent.MVM_hwprobe === "function") {
-      window.parent.MVM_hwprobe();
-
-      setTimeout(() => {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
-      }, 500);
-
-      setTimeout(async () => {
-        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-        await loadSettings();
-        appendCliText("HW profile refresh complete.\n", { scroll: "force" });
-      }, 9000);
-    } else {
-      appendCliText("Error: parent page handler not available.\n", { scroll: "force" });
-    }
+    const result = await runVerifiedHardwareProbe();
+    if (!result.ok) return result;
+    appendCliText("Clearing form fields...\n", { scroll: "force" });
+    clearFields();
+    appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+    await loadSettings();
+    appendCliText("HW profile refresh complete.\n", { scroll: "force" });
+    return result;
   }, 10000);
 }
 
