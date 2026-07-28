@@ -263,6 +263,11 @@ Contributors should normally:
 4. Ensure that emergency fixes made against `main` are also merged or cherry-picked back into `dev`.
 5. For complex or higher-risk work that needs isolated testing, request a temporary custom branch from the maintainer.
 
+For how the addon works, start with `dev-tools/docs/README.md`. If you are
+using an AI coding agent, tell it to read and start from `dev-tools/AGENTS.md`.
+That is the portable entry point for project rules, developer guidance,
+testing, and deployment constraints.
+
 When a development version is ready for public beta, `dev` is merged into `main` and published as a tagged GitHub pre-release.
 
 ---

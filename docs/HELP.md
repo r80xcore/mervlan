@@ -859,6 +859,11 @@ Before posting, run through these:
 
 To contribute code or test a temporary branch, see [Branches, Releases and Contributions](../README.md#branches-releases-and-contributions). Device profiles and bug reports can be submitted through the links above.
 
+For how the addon works, start with `dev-tools/docs/README.md`. If you are
+using an AI coding agent, tell it to read and start from `dev-tools/AGENTS.md`.
+That is the portable entry point for project rules, developer guidance,
+testing, and deployment constraints.
+
 ---
 
 <h2 id="10-wiki---reference--glossary">11. Wiki - Reference & Glossary <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
