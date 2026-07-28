@@ -25,6 +25,12 @@ device-specific values, line counts, or test results. If it is stale or
 conflicts with source, follow the current source/tests and update the map only
 when a stable boundary or route moved.
 
+In the map, each `task_routes` value is a layer ID. Resolve it through
+`layers.<id>` and read that layer's `start`, then `next`, then `notes` as
+needed. Treat `hard_constraints` as stop conditions and read the applicable
+rule files for their full requirements. Use the exact source and test files to
+confirm callers and behavior before editing.
+
 ## Environment guidance
 
 - On Windows, prefer WSL2 Ubuntu for POSIX shell checks and local test

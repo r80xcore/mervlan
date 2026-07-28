@@ -34,8 +34,10 @@ Read the matching focused notes before editing:
 - Test, live validation, or evidence work: `dev-tools/docs/90-testing-and-evidence.md`,
   `dev-tools/docs/92-test-workflows.md`, `dev-tools/tests/`,
   `dev-tools/evidence/README.md`, and the testing/evidence rules.
-- Unknown or cross-cutting work: read `dev-tools/docs/00-project-overview.md`,
-  `dev-tools/docs/10-architecture.md`, and `dev-tools/docs/developing_notes.md`, then narrow the set.
+- Unknown or cross-cutting work: use `dev-tools/agent-context.json` to select a
+  layer first, then read `dev-tools/docs/00-project-overview.md`,
+  `dev-tools/docs/10-architecture.md`, and `dev-tools/docs/developing_notes.md`
+  only as needed.
 
 After editing, update the relevant developer note when a durable workflow,
 limitation, or ownership boundary has changed. Keep rules and reference notes

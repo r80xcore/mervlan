@@ -7,6 +7,17 @@
     "A source path, action, or shared state name needs localization."
   ],
   "source_is_authority": true,
+  "route_resolution": "task_routes values are layer IDs; read layers.<id>.start, then next, then notes.",
+  "hard_constraints": [
+    "posix_busybox_sh_only",
+    "no_bash_or_gnu_assumptions",
+    "do_not_guess_paths_or_payload_keys",
+    "exact_ebtables_matching",
+    "background_completion_requires_terminal_result",
+    "disruptive_device_actions_need_human_gate",
+    "never_commit_credentials_or_private_keys",
+    "test_then_regression_sweep_each_round"
+  ],
   "layers": {
     "ui": {
       "start": ["www/index.html"],
@@ -30,6 +41,8 @@
         "functions/post_apply_worker.sh"
       ],
       "notes": [
+        "dev-tools/agent-rules/30-ssh-and-device-operations.md",
+        "dev-tools/agent-rules/70-node-orchestration.md",
         "dev-tools/docs/20-runtime-flows.md",
         "dev-tools/docs/70-node-sync-and-ssh.md",
         "dev-tools/docs/95-deployment-checklist.md"
@@ -44,6 +57,7 @@
         "functions/mac_refresh.sh"
       ],
       "notes": [
+        "dev-tools/agent-rules/60-product-behavior.md",
         "dev-tools/docs/20-runtime-flows.md",
         "dev-tools/docs/60-state-and-data.md"
       ]
@@ -83,8 +97,10 @@
         "www/index.html"
       ],
       "notes": [
+        "dev-tools/agent-rules/10-asuswrt-shell.md",
         "dev-tools/docs/40-function-libraries.md",
-        "dev-tools/docs/60-state-and-data.md"
+        "dev-tools/docs/60-state-and-data.md",
+        "dev-tools/docs/80-code-limitations.md"
       ]
     },
     "maintenance": {
@@ -95,42 +111,43 @@
       ],
       "next": ["functions/service-event-handler.sh", "settings/lib_action_ack.sh"],
       "notes": ["dev-tools/docs/20-runtime-flows.md", "dev-tools/docs/95-deployment-checklist.md"]
+    },
+    "testing_evidence": {
+      "start": [
+        "dev-tools/tests/README.md",
+        "dev-tools/docs/90-testing-and-evidence.md"
+      ],
+      "next": [
+        "dev-tools/docs/92-test-workflows.md",
+        "dev-tools/tests/router/mervlan_selftest.sh",
+        "dev-tools/safety/mervlan_live_test_guard.sh"
+      ],
+      "notes": [
+        "dev-tools/agent-rules/50-testing-and-evidence.md",
+        "dev-tools/docs/95-deployment-checklist.md",
+        "dev-tools/evidence/README.md"
+      ]
+    },
+    "orientation": {
+      "start": [
+        "dev-tools/docs/README.md",
+        "dev-tools/docs/00-project-overview.md"
+      ],
+      "next": [
+        "dev-tools/docs/10-architecture.md",
+        "dev-tools/docs/developing_notes.md",
+        "dev-tools/docs/30-script-tree.md"
+      ],
+      "notes": ["dev-tools/docs/troubleshooting.md"]
     }
   },
   "task_routes": {
-    "ui_action_or_loading": [
-      "dev-tools/docs/20-runtime-flows.md",
-      "dev-tools/docs/50-ui-action-pipelines.md",
-      "dev-tools/docs/60-state-and-data.md"
-    ],
-    "shell_or_library": [
-      "dev-tools/agent-rules/10-asuswrt-shell.md",
-      "dev-tools/docs/40-function-libraries.md",
-      "dev-tools/docs/80-code-limitations.md"
-    ],
-    "apply_observation_mac_shield": [
-      "dev-tools/agent-rules/20-locks-and-fail-closed-state.md",
-      "dev-tools/agent-rules/60-product-behavior.md",
-      "dev-tools/docs/60-state-and-data.md"
-    ],
-    "node_sync_ssh_deployment": [
-      "dev-tools/agent-rules/30-ssh-and-device-operations.md",
-      "dev-tools/agent-rules/70-node-orchestration.md",
-      "dev-tools/docs/70-node-sync-and-ssh.md",
-      "dev-tools/docs/95-deployment-checklist.md"
-    ],
-    "testing_evidence": [
-      "dev-tools/agent-rules/50-testing-and-evidence.md",
-      "dev-tools/docs/90-testing-and-evidence.md",
-      "dev-tools/docs/92-test-workflows.md",
-      "dev-tools/tests/"
-    ],
-    "unknown_cross_cutting": [
-      "dev-tools/docs/00-project-overview.md",
-      "dev-tools/docs/10-architecture.md",
-      "dev-tools/docs/developing_notes.md",
-      "dev-tools/docs/README.md"
-    ]
+    "ui_action_or_loading": ["ui"],
+    "shell_or_library": ["settings_libraries"],
+    "apply_observation_mac_shield": ["observation_clients", "locks_progress_safety"],
+    "node_sync_ssh_deployment": ["apply_nodes_sync"],
+    "testing_evidence": ["testing_evidence"],
+    "unknown_cross_cutting": ["orientation"]
   },
   "tests": {
     "local": [
