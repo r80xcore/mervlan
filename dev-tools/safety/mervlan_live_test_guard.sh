@@ -8,6 +8,8 @@
 # ============================================================================ #
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
+: "${DEV_TOOLS_ROOT:=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)}"
+: "${LIVE_TEST_GUARD_SCRIPT:=$DEV_TOOLS_ROOT/safety/mervlan_live_test_guard.sh}"
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null || true
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
@@ -81,9 +83,9 @@ guard_queue_recovery() {
 
 guard_schedule() {
   guard_cru d "$GUARD_CRON" 2>/dev/null || :
-  guard_cru a "$GUARD_CRON" "* * * * * sh $MERV_BASE/functions/mervlan_live_test_guard.sh expire" ||
+  guard_cru a "$GUARD_CRON" "* * * * * sh $LIVE_TEST_GUARD_SCRIPT expire" ||
     return 1
-  guard_cru l 2>/dev/null | grep -q "$MERV_BASE/functions/mervlan_live_test_guard.sh expire"
+  guard_cru l 2>/dev/null | grep -q "$LIVE_TEST_GUARD_SCRIPT expire"
 }
 
 guard_unschedule() {

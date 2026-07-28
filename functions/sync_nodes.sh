@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: sync_nodes.sh || version="0.72.1"                     #
+#             - File: sync_nodes.sh || version="0.72.2"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -196,8 +196,6 @@ functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh 
 functions/mervlan_node_runner.sh
-functions/mervlan_selftest.sh
-functions/mervlan_live_test_guard.sh
 functions/post_apply_worker.sh
 functions/collect_local_clients.sh 
 functions/heal_event.sh  
@@ -208,14 +206,29 @@ functions/mac_refresh.sh
 templates/mervlan_templates.sh
 "
 
+# Developer tools are present on development/test branches only. Keep this
+# manifest separate from the production runtime manifest, but feed it through
+# the same copy, staging, verification, and permission pipeline when present.
+# This makes Sync Nodes provision the router-capable tools everywhere on a
+# development tree while keeping main-branch-style trees fully compatible.
+DEV_TOOLS_FILES_TO_COPY=""
+DEV_TOOLS_FILES_TO_COPY_CHMOD=""
+if [ -f "$MERV_BASE/dev-tools/tests/router/mervlan_selftest.sh" ]; then
+    DEV_TOOLS_FILES_TO_COPY="$DEV_TOOLS_FILES_TO_COPY dev-tools/tests/router/mervlan_selftest.sh"
+    DEV_TOOLS_FILES_TO_COPY_CHMOD="$DEV_TOOLS_FILES_TO_COPY_CHMOD dev-tools/tests/router/mervlan_selftest.sh"
+fi
+if [ -f "$MERV_BASE/dev-tools/safety/mervlan_live_test_guard.sh" ]; then
+    DEV_TOOLS_FILES_TO_COPY="$DEV_TOOLS_FILES_TO_COPY dev-tools/safety/mervlan_live_test_guard.sh"
+    DEV_TOOLS_FILES_TO_COPY_CHMOD="$DEV_TOOLS_FILES_TO_COPY_CHMOD dev-tools/safety/mervlan_live_test_guard.sh"
+fi
+FILES_TO_COPY="$FILES_TO_COPY $DEV_TOOLS_FILES_TO_COPY"
+
 # FILES_TO_COPY_CHMOD — Files requiring executable permissions on nodes (755)
 FILES_TO_COPY_CHMOD="
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
 functions/mervlan_node_runner.sh
-functions/mervlan_selftest.sh
-functions/mervlan_live_test_guard.sh
 functions/post_apply_worker.sh
 functions/collect_local_clients.sh
 functions/heal_event.sh
@@ -224,6 +237,7 @@ functions/hw_probe.sh
 functions/mervlan_trunk.sh
 functions/mac_refresh.sh
 "
+FILES_TO_COPY_CHMOD="$FILES_TO_COPY_CHMOD $DEV_TOOLS_FILES_TO_COPY_CHMOD"
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
 FILES_TO_COPY_CHMOD_644="
 settings/var_settings.sh 
@@ -244,6 +258,7 @@ settings/lib_br0_guard.sh
 templates/mervlan_templates.sh
 "
 dbg_log "File synchronization manifest loaded"
+dbg_var DEV_TOOLS_FILES_TO_COPY DEV_TOOLS_FILES_TO_COPY_CHMOD
 dbg_var FILES_TO_COPY FILES_TO_COPY_CHMOD FILES_TO_COPY_CHMOD_644
 
 # ========================================================================== #
@@ -1184,7 +1199,11 @@ sync_node_worker() {
     # Create base remote directories (addon path + runtime folders + the addon
     # subdirs that tar will extract into — pre-creating them means batch extract
     # never fails on a missing path, and we drop the per-file dir-creation SSH).
-    remote_mkdir_cmd="mkdir -p '/jffs/addons/mervlan_backups'; rm -rf '$REMOTE_MERV_BASE' '$REMOTE_MERV_OLD' 2>/dev/null || exit 70; mkdir -p '$REMOTE_MERV_BASE/settings' '$REMOTE_MERV_BASE/functions' '$REMOTE_MERV_BASE/templates' '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
+    REMOTE_DEV_TOOLS_DIRS=""
+    if [ -n "$DEV_TOOLS_FILES_TO_COPY" ]; then
+        REMOTE_DEV_TOOLS_DIRS="'$REMOTE_MERV_BASE/dev-tools/tests/router' '$REMOTE_MERV_BASE/dev-tools/safety'"
+    fi
+    remote_mkdir_cmd="mkdir -p '/jffs/addons/mervlan_backups'; rm -rf '$REMOTE_MERV_BASE' '$REMOTE_MERV_OLD' 2>/dev/null || exit 70; mkdir -p '$REMOTE_MERV_BASE/settings' '$REMOTE_MERV_BASE/functions' '$REMOTE_MERV_BASE/templates' $REMOTE_DEV_TOOLS_DIRS '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
     dbg_log "Ensuring base directories on node"
     dbg_var node_ip remote_mkdir_cmd
     if [ "$DRY_RUN" = "yes" ]; then

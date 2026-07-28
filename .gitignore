@@ -1,7 +1,9 @@
 .agent
 .agents
+dev-tools/mervlan_ssh_credentials.md
 .github/copilot-instructions.md
-docs/dev/
+dev-tools/evidence/*
+!dev-tools/evidence/README.md
 functions/sync_nodes.sh.bak
 functions/wireless_backhaul.sh
 roadmap.txt

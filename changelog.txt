@@ -1,5 +1,15 @@
 mervlan v0.53.25-dev
 
+Maintenance: Developer tools and test workspace
+- Added the portable `dev-tools/` developer bundle with architecture notes,
+  focused agent rules, local and router-capable tests, SSH/deployment guidance,
+  evidence workflow documentation, and the live-test safety helper.
+- Moved developer test drivers out of the runtime `functions/` directory while
+  preserving their development/test-branch use through Sync Nodes.
+- Development Sync Nodes copies only the approved executable router test tools;
+  documentation, agent rules, planning files, evidence, and local tests remain
+  outside the router runtime payload.
+
 New: Unified MerVLAN loading screens
 - Added a shared loading-screen controller and JSON action policies for Sync Nodes, Save Settings, client metadata, MAC Shield rebuild, SSH key generation, VLAN Apply modes, and client refresh.
 - Loading screens now support live percentage progress, readable current-stage messages, minimize/restore behavior, and a compact minimized bar between Settings and APMO.

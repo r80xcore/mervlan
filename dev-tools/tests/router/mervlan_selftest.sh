@@ -9,7 +9,11 @@
 
 PATH="/sbin:/bin:/usr/sbin:/usr/bin:${PATH:-}"
 export PATH
-: "${MERV_BASE:=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)}"
+: "${DEV_TOOLS_ROOT:=$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd)}"
+: "${MERV_BASE:=${MERV_RUNTIME_BASE:-$(CDPATH= cd -- "$DEV_TOOLS_ROOT/.." 2>/dev/null && pwd)}}"
+: "${MERV_RUNTIME_BASE:=$MERV_BASE}"
+SELFTEST_SCRIPT="$DEV_TOOLS_ROOT/tests/router/mervlan_selftest.sh"
+LIVE_TEST_GUARD_SCRIPT="$DEV_TOOLS_ROOT/safety/mervlan_live_test_guard.sh"
 SELFTEST_ACTION="${1:-all}"
 SELFTEST_RUN_ID="$(date +%s 2>/dev/null || printf '0').$$"
 if [ -n "${MERV_SELFTEST_ROOT_OVERRIDE:-}" ]; then
@@ -482,7 +486,7 @@ test_run_kill_checkpoint() {
   MERV_SELFTEST_ROOT_OVERRIDE="$SELFTEST_ROOT" \
     MERV_DHCP_HOLD_FAULT_POINT="$_trkc_point" \
     MERV_DHCP_HOLD_FAULT_ACTION=kill \
-    /bin/sh "$MERV_BASE/functions/mervlan_selftest.sh" _fault-child "$_trkc_stage" \
+    /bin/sh "$SELFTEST_SCRIPT" _fault-child "$_trkc_stage" \
     >/dev/null 2>&1
   _trkc_rc=$?
   [ "$_trkc_rc" -ne 0 ] && pass "kill checkpoint $_trkc_point terminated owner" ||
@@ -1725,8 +1729,8 @@ test_shell_syntax() {
     "$MERV_BASE/settings/lib_mervqt.sh" \
     "$MERV_BASE/settings/lib_node_jobs.sh" \
     "$MERV_BASE/settings/var_settings.sh" \
-    "$MERV_BASE/functions/mervlan_selftest.sh" \
-    "$MERV_BASE/functions/mervlan_live_test_guard.sh" \
+    "$SELFTEST_SCRIPT" \
+    "$LIVE_TEST_GUARD_SCRIPT" \
     "$MERV_BASE/functions/post_apply_worker.sh" \
     "$MERV_BASE/functions/mac_refresh.sh" \
     "$MERV_BASE/functions/service-event-handler.sh" \
@@ -1734,7 +1738,6 @@ test_shell_syntax() {
     "$MERV_BASE/functions/heal_event.sh" \
     "$MERV_BASE/functions/mervlan_boot.sh" \
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
-    "$MERV_BASE/functions/execute_nodes.sh" \
     "$MERV_BASE/templates/mervlan_templates.sh"; do
     [ -f "$_tss_file" ] || { fail "shell syntax target missing: ${_tss_file##*/}"; _tss_bad=1; continue; }
     if sh -n "$_tss_file"; then pass "shell syntax ${_tss_file##*/}"; else fail "shell syntax ${_tss_file##*/}"; _tss_bad=1; fi

@@ -131,6 +131,12 @@ For installer test mode and other manual installation options, see [Install, Rei
 
 Select **Development branch** in the installer. It may include newer fixes and features that are not yet available in a stable release, but changes may be less tested, reworked, or removed before release.
 
+Development and test branches also contain the `dev-tools/` workspace. It
+holds local tests, router-capable test drivers, safety helpers, evidence, and
+development notes. Development `Sync Nodes` copies only the executable
+router-capable tools to configured nodes; the production `main` branch does
+not include this workspace.
+
 If the web UI looks out of sync after manual file changes, use the log-preserving refresh described under [Install, Reinstall, and Uninstall Commands](docs/HELP.md#install-reinstall-and-uninstall-commands). Do not use a normal uninstall and install as a UI refresh because it can change service state.
 
 ---
@@ -185,7 +191,7 @@ See [Logs & Monitoring](docs/HELP.md#6-logs--monitoring) for common problems and
 
 MerVLAN is beta software developed primarily on ASUS AP-mode systems. Hardware and firmware behavior varies, so development builds and experimental trunk features need broader testing.
 
-See [Branches, Releases and Contributions](#branches-releases-and-contributions) for development channels and [Get Help & Support](docs/HELP.md#9-get-help--support) for testing and discussion links.
+See [Branches, Releases and Contributions](#branches-releases-and-contributions) for development channels and [Get Help & Support](docs/HELP.md#9-get-help--support) for testing and discussion links. Developers working from `dev` should start with `dev-tools/README.md`.
 
 ---
 
