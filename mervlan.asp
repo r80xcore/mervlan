@@ -410,7 +410,8 @@ const MVM_NO_REFRESH = new Set([
 
 const MVM_NO_LOADING = new Set([
   // Actions that should NOT show the loading overlay:
-  // "checkservice_vlanmgr",
+  // Service status is a read-only diagnostic; keep the ASUS overlay hidden.
+  "checkservice_vlanmgr",
   // The client refresh owns a MerVLAN panel, so suppress ASUS's overlay.
   "collectclients_vlanmgr",
   // MerVLAN owns the long-running progress panel for these actions.
@@ -418,6 +419,7 @@ const MVM_NO_LOADING = new Set([
   "executenodes_vlanmgr",
   "executenodesonly_vlanmgr",
   "sync_vlanmgr",
+  "hwprobe_vlanmgr",
   "macclientmeta_vlanmgr",
   "macrefresh_vlanmgr",
   "genkey_vlanmgr",
@@ -636,7 +638,15 @@ function MVM_undoRestore(requestToken, opts) {
 function MVM_undoUpdate(requestToken, opts) {
   return MVM_maintenanceAction("undoupdate_vlanmgr", requestToken, null, opts);
 }
-function MVM_hwprobe(opts)                    { return MVM_exec("hwprobe_vlanmgr",       null,        mvmOptsFor("hwprobe_vlanmgr",       opts)); }
+function MVM_hwprobe(opts) {
+  opts = opts || {};
+  var payload = (opts.payload && typeof opts.payload === "object") ? opts.payload : null;
+  var execOpts = {};
+  Object.keys(opts).forEach(function(key) {
+    if (key !== "payload") execOpts[key] = opts[key];
+  });
+  return MVM_exec("hwprobe_vlanmgr", payload, mvmOptsFor("hwprobe_vlanmgr", execOpts));
+}
 function MVM_macRefresh(opts)                 { return MVM_exec("macrefresh_vlanmgr",    null,        mvmOptsFor("macrefresh_vlanmgr",    opts)); }
 function MVM_macClientMeta(opts)             { return MVM_exec("macclientmeta_vlanmgr", null,        mvmOptsFor("macclientmeta_vlanmgr", opts)); }
 

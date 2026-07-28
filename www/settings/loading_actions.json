@@ -26,6 +26,31 @@
         { "id": "reload", "label": "Loading saved settings", "start": 75, "end": 100 }
       ]
     },
+    "apmo_save_vlanmgr": {
+      "label": "Save Hardware Overrides",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing hardware override save", "start": 0, "end": 15 },
+        { "id": "persist", "label": "Saving hardware overrides", "start": 15, "end": 45 },
+        { "id": "verify", "label": "Verifying saved overrides", "start": 45, "end": 75 },
+        { "id": "reload", "label": "Loading saved hardware profile", "start": 75, "end": 100 }
+      ]
+    },
+    "hwprobe_vlanmgr": {
+      "label": "Refresh HW Profile",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing hardware detection", "start": 0, "end": 15 },
+        { "id": "probe", "label": "Detecting hardware profile", "start": 15, "end": 70 },
+        { "id": "reload", "label": "Loading hardware profile", "start": 70, "end": 100 }
+      ]
+    },
     "collectclients_vlanmgr": {
       "label": "Refresh Clients",
       "display": "panel",

@@ -951,6 +951,9 @@
     .adv-override-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-height: 30px; }
     .adv-override-row > label { min-width: 120px; font-weight: bold; color: #ccc; font-size: 0.93em; }
     .adv-override-control { display: flex; align-items: center; gap: 6px; flex: 1; }
+    .adv-override-device-control { gap: 8px; }
+    .adv-override-device-control select { flex: 1; min-width: 0; }
+    .adv-override-inline-button { height: 30px; min-height: 30px; padding: 2px 10px; white-space: nowrap; }
     .adv-override-custom-input { width: 110px; padding: 2px 6px; background: #2a2a2a; color: #eee; border: 1px solid #555; border-radius: 3px; font-size: 0.92em; text-transform: none; }
     #advancedOverrideModal .input_option { text-transform: none; }
     .adv-override-target-indicator { font-size: 0.95em; font-weight: bold; color: #6cf; margin-bottom: 10px; padding: 4px 0; }
@@ -969,9 +972,12 @@
 
       <div class="adv-override-row">
         <label for="advOverrideTargetSelect">Device</label>
-        <select id="advOverrideTargetSelect" class="input_option" onchange="switchAdvancedOverrideTarget(this.value)">
-          <option value="MAIN">Main Router</option>
-        </select>
+        <div class="adv-override-control adv-override-device-control">
+          <select id="advOverrideTargetSelect" class="input_option" onchange="switchAdvancedOverrideTarget(this.value)">
+            <option value="MAIN">Main Router</option>
+          </select>
+          <button type="button" class="button_gen adv-override-inline-button" id="advOverrideLoadDefaultsBtn" onclick="loadAdvancedOverrideDefaultsForCurrentTarget()" title="Load the detected model defaults into the form without saving them">Load Defaults</button>
+        </div>
       </div>
       <div class="adv-override-target-indicator" id="advOverrideTargetLabel">Editing: Main Router</div>
 
@@ -1111,12 +1117,18 @@
       </div>
 
       <div id="advOverrideError" class="adv-override-error" style="display:none;"></div>
-      <div class="adv-override-help" style="margin-top:6px;">⚠️ <strong>Save</strong> writes override settings to settings.json. Tick <em>Auto-refresh</em> to also re-run hardware detection automatically, or press <em>Refresh HW Profile</em> afterwards.</div>
-      <div class="adv-override-help" style="margin-top:4px;">⚠️ Node overrides require a <strong>Sync Nodes</strong> run after saving, so the updated configuration is pushed and applied on each node. This also applies when disabling a node override.</div>
+      <div class="adv-override-help" style="margin-top:6px;"><strong>Save</strong> stores the overrides. Auto-refresh re-runs hardware detection after saving.</div>
+      <div class="adv-override-help" style="margin-top:4px;">If nodes are configured, use <strong>Auto-sync Nodes</strong> to sync now, or run <strong>Sync Nodes</strong> later.</div>
       <div class="adv-override-auto-refresh" style="margin-top:4px; margin-bottom:2px;">
         <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:0.92em; color:#ccc;">
           <input type="checkbox" id="advOverrideAutoRefreshHw" onchange="toggleOverrideBtnText()">
           <span title="When ticked, pressing Save &amp; Apply will also trigger a HW Profile refresh so the UI updates immediately.&#10;This setting resets every time and is not saved.&#10;If unticked, press Refresh HW Profile afterwards to update the UI.">Auto-refresh HW Profile</span>
+        </label>
+      </div>
+      <div class="adv-override-auto-sync" style="margin-top:4px; margin-bottom:2px;">
+        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:0.92em; color:#ccc;">
+          <input type="checkbox" id="advOverrideAutoSyncNodes" onchange="toggleOverrideBtnText()">
+          <span title="When ticked, pressing Save will run Sync Nodes after the override settings are saved. This setting resets every time and is not saved.">Auto-sync Nodes</span>
         </label>
       </div>
     </div>
@@ -1167,8 +1179,8 @@
       font-size: 0.87em; color: #aaa;
       display: flex; align-items: center; gap: 8px;
     }
-    .svc-status-hint { font-size: 0.78em; color: #555; white-space: nowrap; }
-    .svc-refresh-btn { padding: 1px 7px; font-size: 1em; line-height: 1.4; flex-shrink: 0; }
+    .svc-status-hint { font-size: 0.8em; color: #c1ccd8; font-weight: 500; white-space: nowrap; }
+    .svc-refresh-btn { width: 30px; min-width: 30px; height: 28px; padding: 0; font-size: 1.45em; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
     .svc-status-detail {
       margin-top: 6px; padding: 8px 10px;
@@ -1766,6 +1778,7 @@
           }
           return hw;
         })();
+        let HARDWARE_PROFILES = null;
 
         // effectiveMaxSsidCap — absolute ceiling from Limits.MAX_SSID_CAP (default 16).
         // Used in struct<->flat conversion loops that must cover all possible slots.
@@ -1804,6 +1817,21 @@
           }
         }
 
+        async function loadHardwareProfiles() {
+          try {
+            const response = await fetch("settings/hardware_profiles.json?_=" + Date.now(), {
+              cache: "no-store",
+              headers: { Accept: "application/json", "Cache-Control": "no-cache" }
+            });
+            if (!response.ok) throw new Error("hardware_profiles.json not readable");
+            const data = await response.json();
+            HARDWARE_PROFILES = data && typeof data.profiles === "object" ? data.profiles : null;
+          } catch (_) {
+            HARDWARE_PROFILES = null;
+          }
+          return HARDWARE_PROFILES;
+        }
+
         // Load hardware configuration from settings/settings.json (Hardware block)
         async function loadHwSettings() {
           let json = null;
@@ -1825,6 +1853,7 @@
           }
 
           const hw = (json && typeof json === "object") ? json.Hardware : null;
+          await loadHardwareProfiles();
 
           const productId = hw && typeof hw.PRODUCTID === "string"
             ? hw.PRODUCTID.trim().toUpperCase()
@@ -4688,10 +4717,82 @@ function clientGeneratedMs(data){
   return Date.parse(String(data.generated).replace(' ','T'));
 }
 
+function configuredClientRefreshNodeCount(settings){
+  if (!settings) return 0;
+  let count = 0;
+  for (let i = 1; i <= MAX_NODES; i++){
+    const raw = String(settings['NODE' + i] || '').trim();
+    if (raw && raw.toLowerCase() !== 'none' &&
+        /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(raw)){
+      count++;
+    }
+  }
+  return count;
+}
+
+function createClientRefreshProgress(loadingTask){
+  if (!loadingTask || typeof loadingTask.phase !== 'function') return null;
+
+  const nodeCount = configuredClientRefreshNodeCount(CURRENT_SETTINGS_CACHE);
+  const nodeLabel = nodeCount === 1 ? 'node' : 'nodes';
+  const stages = nodeCount > 0 ? [
+    { after: 0,  percent: 10, message: 'Preparing client refresh...' },
+    { after: 1,  percent: 22, message: 'Checking VLAN and apply state...' },
+    { after: 3,  percent: 36, message: 'Collecting clients from the main router...' },
+    { after: 7,  percent: 52, message: `Checking ${nodeCount} configured ${nodeLabel}...` },
+    { after: 11, percent: 68, message: `Collecting clients from ${nodeCount} configured ${nodeLabel}...` },
+    { after: 20, percent: 82, message: 'Waiting for router and node collections...' },
+    { after: 35, percent: 91, message: 'Processing the combined client list...' },
+    { after: 50, percent: 94, message: 'Still working; final client data is being prepared...' }
+  ] : [
+    { after: 0, percent: 10, message: 'Preparing client refresh...' },
+    { after: 1, percent: 22, message: 'Checking VLAN and apply state...' },
+    { after: 3, percent: 42, message: 'Collecting clients from the main router...' },
+    { after: 8, percent: 70, message: 'Processing the main router collection...' },
+    { after: 18, percent: 88, message: 'Waiting for the refreshed client list...' },
+    { after: 40, percent: 94, message: 'Still working; final client data is being prepared...' }
+  ];
+
+  const started = Date.now();
+  let stageIndex = -1;
+  let timer = null;
+
+  const update = () => {
+    if (typeof loadingTask.isRunning === 'function' && !loadingTask.isRunning()) return;
+    const elapsed = (Date.now() - started) / 1000;
+    let nextIndex = 0;
+    stages.forEach((stage, index) => {
+      if (elapsed >= stage.after) nextIndex = index;
+    });
+    if (nextIndex === stageIndex) return;
+    stageIndex = nextIndex;
+    const stage = stages[stageIndex];
+    loadingTask.phase(stage.message, stage.percent);
+  };
+
+  update();
+  timer = window.setInterval(update, 1000);
+
+  return {
+    stop: () => {
+      if (timer) window.clearInterval(timer);
+      timer = null;
+    },
+    finish: () => {
+      if (timer) window.clearInterval(timer);
+      timer = null;
+      if (typeof loadingTask.isRunning !== 'function' || loadingTask.isRunning()) {
+        loadingTask.phase('Publishing the refreshed client list...', 98);
+      }
+    }
+  };
+}
+
 // Single active poll handle. Starting a new poll cancels any previous one so
 // rapid clicks or overlapping auto/manual refreshes cannot fight over rendering.
 let CLIENTS_REFRESH_TIMER = null;
 let CLIENTS_REFRESH_SEQ   = 0;
+let CLIENTS_REFRESH_PROGRESS = null;
 
 function pollForFreshClientData(sinceMs, opts){
   opts = opts || {};
@@ -4709,6 +4810,16 @@ function pollForFreshClientData(sinceMs, opts){
   const prevGenMs       = opts.previousGenerated
     ? Date.parse(String(opts.previousGenerated).replace(' ','T'))
     : NaN;
+  if (CLIENTS_REFRESH_PROGRESS) {
+    CLIENTS_REFRESH_PROGRESS.stop();
+    CLIENTS_REFRESH_PROGRESS = null;
+  }
+  const progress = opts.loadingTask ? createClientRefreshProgress(opts.loadingTask) : null;
+  CLIENTS_REFRESH_PROGRESS = progress;
+  const stopProgress = () => {
+    if (progress) progress.stop();
+    if (CLIENTS_REFRESH_PROGRESS === progress) CLIENTS_REFRESH_PROGRESS = null;
+  };
 
   CLIENTS_REFRESH_TIMER = setInterval(async () => {
     // Ignore ticks from a superseded poll.
@@ -4716,6 +4827,7 @@ function pollForFreshClientData(sinceMs, opts){
     if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
       clearInterval(CLIENTS_REFRESH_TIMER);
       CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
       return;
     }
 
@@ -4725,6 +4837,7 @@ function pollForFreshClientData(sinceMs, opts){
     if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
       clearInterval(CLIENTS_REFRESH_TIMER);
       CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
       return;
     }
     if (data) {
@@ -4744,6 +4857,8 @@ function pollForFreshClientData(sinceMs, opts){
       if (isFresh) {
         clearInterval(CLIENTS_REFRESH_TIMER);
         CLIENTS_REFRESH_TIMER = null;
+        if (progress) progress.finish();
+        if (CLIENTS_REFRESH_PROGRESS === progress) CLIENTS_REFRESH_PROGRESS = null;
         renderClientsOverview(data);
         appendCliText((opts.doneMsg || 'Client data refreshed.') + '\n', {scroll:'force'});
         if (typeof opts.onFresh === 'function') {
@@ -4757,6 +4872,7 @@ function pollForFreshClientData(sinceMs, opts){
     if (ticks >= maxTicks) {
       clearInterval(CLIENTS_REFRESH_TIMER);
       CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
       if (latestData) renderClientsOverview(latestData);
       appendCliText((opts.timeoutMsg || 'Client data refresh timed out; showing latest available.') + '\n', {scroll:'force'});
       if (typeof opts.onTimeout === 'function') {
@@ -5162,17 +5278,20 @@ async function startClientsOnPageLoad(){
   // Step 4: mark *before* queueing so rapid reloads don't stack multiple jobs.
   markAutoRefreshClients();
 
-  // Step 5: queue one quiet background refresh and poll only for its result.
+    // Step 5: queue one quiet background refresh and poll only for its result.
+    // collectclients_vlanmgr intentionally uses the normal event transport;
+    // the service handler does not have a progress-token variant for this
+    // worker, and the MerVLAN panel is frontend-owned here.
   const started = Date.now();
   queueServiceAction('collectclients_vlanmgr', {
     description: 'Auto-refresh VLAN clients',
     cooldownMs: 8000,
     loadingOptions: { progressBacked: true },
-    passProgressToken: true,
+    passProgressToken: false,
     quiet: true,
     afterSubmit: (loadingTask) => {
-      if (loadingTask) loadingTask.phase('Collecting VLAN clients...', 25);
       pollForFreshClientData(started, {
+        loadingTask,
         previousRunId: cached && cached.run_id,
         previousGenerated: cached && cached.generated,
         doneMsg: 'Client list auto-refreshed.',
@@ -5209,11 +5328,11 @@ async function refreshClients(btn){
     loadingOptions: { progressBacked: true },
     passProgressToken: false,
     afterSubmit: (loadingTask) => {
-      if (loadingTask) loadingTask.phase('Collecting VLAN clients...', 25);
       // Poll until collect_clients.sh emits a JSON newer than this trigger,
       // rather than a fixed tick count, so node collection that runs long still
       // resolves correctly.
       pollForFreshClientData(started, {
+        loadingTask,
         previousRunId,
         previousGenerated,
         doneMsg: 'Client list refreshed.',
@@ -5297,6 +5416,20 @@ const MVM_LOADING_DEFAULT_CONFIG = {
     display: 'panel',
     mode: 'phase',
     poll_ms: 1000
+  },
+  apmo_save_vlanmgr: {
+    label: 'Save Hardware Overrides',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    frontend_owned: true
+  },
+  hwprobe_vlanmgr: {
+    label: 'Refresh HW Profile',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    frontend_owned: true
   },
   collectclients_vlanmgr: {
     label: 'Refresh Clients',
@@ -6138,7 +6271,8 @@ function triggerAction(actionScriptName, button, description) {
               clearForm: false,
               reloadAfterSave: false,
               restartPolling: false,
-              lockName: 'service-settings-save'
+              lockName: 'service-settings-save',
+              loading: false
             });
             if (!saveResult || !saveResult.ok) {
               throw new Error(saveResult?.error || 'Settings could not be confirmed on disk.');
@@ -7478,7 +7612,9 @@ function startMaintenanceOperation(options) {
   const token = makeMaintenanceRequestToken();
   maintenanceRequestToken = token;
   maintenanceRequestSeen = false;
-  let maintenancePollErrors = 0;
+  const maintenanceStartTime = Date.now();
+  let maintenanceWaitingNoticeShown = false;
+  let maintenanceLastPollError = "";
   const submitted = submitMaintenanceThroughParent(options.parentMethod, token, options.payload);
   if (submitted === false) {
     setMaintenanceStatus("The router rejected the maintenance request.", "error");
@@ -7494,7 +7630,6 @@ function startMaintenanceOperation(options) {
       const response = await fetch(PATHS.MAINTENANCE_RESULT + "?_=" + Date.now(), { cache: "no-store" });
       if (!response.ok) throw new Error("HTTP " + response.status);
       const result = await response.json();
-      maintenancePollErrors = 0;
       if (result.request_token !== maintenanceRequestToken) return;
       if (!maintenanceRequestSeen) {
         maintenanceRequestSeen = true;
@@ -7533,15 +7668,12 @@ function startMaintenanceOperation(options) {
       if (versionModal && versionModal.style.display !== "none") anchorModalToForm(versionModal);
     } catch (error) {
       if (maintenanceRequestToken !== token) return;
-      maintenancePollErrors++;
-      if (maintenancePollErrors === 3) {
+      maintenanceLastPollError = error && error.message ? error.message : String(error);
+      if (!maintenanceWaitingNoticeShown && Date.now() - maintenanceStartTime >= 10000) {
+        maintenanceWaitingNoticeShown = true;
         setMaintenanceStatus(
-          "Maintenance status is temporarily unavailable (" + error.message + "). Retrying...",
+          "Still waiting for the router to publish maintenance status. Retrying...",
           "warning"
-        );
-        appendCliText(
-          "Maintenance status read failed: " + error.message + "\n",
-          { scroll: "force" }
         );
       }
     } finally {
@@ -7555,6 +7687,11 @@ function startMaintenanceOperation(options) {
     stopMaintenancePolling();
     setMaintenanceBusy(false);
     setMaintenanceStatus("The router did not start this request. Refresh the backup list and try again.", "error");
+    appendCliText(
+      "Maintenance status did not appear within 30 seconds" +
+        (maintenanceLastPollError ? " (last poll: " + maintenanceLastPollError + ")" : ".") + "\n",
+      { scroll: "force" }
+    );
   }, 30000);
   maintenanceTimeoutTimer = setTimeout(() => {
     stopMaintenancePolling();
@@ -7879,6 +8016,94 @@ function advOverrideDefaultTarget() {
     OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" };
 }
 
+function detectedHardwareProfile(target) {
+  const structured = CURRENT_SETTINGS_STRUCTURED || {};
+  const hardware = structured.Hardware || {};
+  const productKey = target === "MAIN" ? "PRODUCTID" : "PRODUCTID_" + target;
+  const productId = String(hardware[productKey] || "").trim().toUpperCase();
+  if (!productId || productId === "UNSUPPORTED" || productId === "CUSTOM") return null;
+
+  const profile = HARDWARE_PROFILES && HARDWARE_PROFILES[productId];
+  if (profile) return profile;
+
+  // Main-router fallback for older installs generated before the catalog
+  // existed. Node profiles require the generated catalog for exact ordering.
+  if (target === "MAIN") {
+    const eth = Array.isArray(hardware.ETH_PORTS) ? hardware.ETH_PORTS : [];
+    const labels = Array.isArray(hardware.LAN_PORT_LABELS) ? hardware.LAN_PORT_LABELS : [];
+    const max = parseInt(hardware.MAX_ETH_PORTS, 10);
+    if (hardware.WAN_IF && Number.isInteger(max)) {
+      return {
+        model: productId,
+        wan_if: String(hardware.WAN_IF),
+        max_eth_ports: max,
+        eth_ports: eth,
+        lan_labels: labels
+      };
+    }
+  }
+  return null;
+}
+
+function updateAdvancedOverrideTargetLabel(target) {
+  const label = document.getElementById("advOverrideTargetLabel");
+  if (!label) return;
+  const unit = ADV_OVERRIDE_TARGET_LABELS[target] || target;
+  const hardware = CURRENT_SETTINGS_STRUCTURED && CURRENT_SETTINGS_STRUCTURED.Hardware;
+  const productKey = target === "MAIN" ? "PRODUCTID" : "PRODUCTID_" + target;
+  const productId = String((hardware && hardware[productKey]) || "").trim().toUpperCase();
+  const profile = detectedHardwareProfile(target);
+  if (profile && profile.model) {
+    label.textContent = "Editing: " + unit + " - " + profile.model;
+  } else if (productId === "UNSUPPORTED" || productId === "CUSTOM") {
+    label.textContent = "Editing: " + unit + " - Model not supported";
+  } else {
+    label.textContent = "Editing: " + unit + " - Model not detected";
+  }
+}
+
+function loadAdvancedOverrideDefaults(target, showMessage) {
+  const profile = detectedHardwareProfile(target);
+  const errEl = document.getElementById("advOverrideError");
+  if (!profile) {
+    if (errEl) {
+      errEl.textContent = "Model not supported";
+      errEl.style.display = "";
+      errEl.style.color = "";
+      errEl.style.borderColor = "";
+      errEl.style.background = "";
+    }
+    updateAdvancedOverrideTargetLabel(target);
+    return false;
+  }
+
+  const current = advancedOverrideState[target] || advOverrideDefaultTarget();
+  const maxPorts = Math.max(0, Math.min(8, parseInt(profile.max_eth_ports, 10) || 0));
+  const ethPorts = Array.isArray(profile.eth_ports) ? profile.eth_ports : [];
+  current.OVERRIDE_WAN = String(profile.wan_if || "eth0");
+  current.OVERRIDE_MAX_ETH_PORTS = String(maxPorts);
+  for (let i = 1; i <= 8; i++) {
+    current["OVERRIDE_LAN" + i] = i <= maxPorts ? String(ethPorts[i - 1] || "none") : "none";
+  }
+  // Loading defaults must never silently enable or disable the override.
+  advancedOverrideState[target] = current;
+  if (target === advancedOverrideCurrentTarget) loadTargetFields(target);
+  if (errEl) {
+    errEl.textContent = showMessage === false ? "" : "Detected defaults loaded into the form. Nothing has been saved.";
+    errEl.style.display = showMessage === false ? "none" : "";
+    errEl.style.color = "#9fd3ff";
+    errEl.style.borderColor = "#4b779d";
+    errEl.style.background = "rgba(75,119,157,0.12)";
+  }
+  updateAdvancedOverrideTargetLabel(target);
+  return true;
+}
+
+function loadAdvancedOverrideDefaultsForCurrentTarget() {
+  saveCurrentTargetFields();
+  loadAdvancedOverrideDefaults(advancedOverrideCurrentTarget, true);
+}
+
 function fillAdvancedOverrideModalFromCache() {
   const cache = CURRENT_SETTINGS_CACHE || {};
   ADV_OVERRIDE_TARGETS.forEach(t => {
@@ -7981,9 +8206,11 @@ function loadTargetFields(target) {
 function switchAdvancedOverrideTarget(newTarget) {
   saveCurrentTargetFields();
   advancedOverrideCurrentTarget = newTarget;
-  const label = document.getElementById("advOverrideTargetLabel");
-  if (label) label.textContent = "Editing: " + (ADV_OVERRIDE_TARGET_LABELS[newTarget] || newTarget);
+  updateAdvancedOverrideTargetLabel(newTarget);
   loadTargetFields(newTarget);
+  if (!advancedOverrideState[newTarget] || advancedOverrideState[newTarget].MAP_OVERRIDE !== "1") {
+    loadAdvancedOverrideDefaults(newTarget, false);
+  }
   updateAdvancedOverrideOptionDisabling();
   validateAdvancedOverrideDuplicates();
 }
@@ -8187,9 +8414,11 @@ function showAdvancedOverrideModal() {
     sel.value = "MAIN";
     updateAdvOverrideTargetOptions(sel);
   }
-  const label = document.getElementById("advOverrideTargetLabel");
-  if (label) label.textContent = "Editing: Main Router";
+  updateAdvancedOverrideTargetLabel("MAIN");
   loadTargetFields("MAIN");
+  if (!advancedOverrideState.MAIN || advancedOverrideState.MAIN.MAP_OVERRIDE !== "1") {
+    loadAdvancedOverrideDefaults("MAIN", false);
+  }
 
   modal.style.display = "block";
   anchorModalToForm(modal);
@@ -8264,32 +8493,60 @@ function applyAdvancedOverride() {
   syncAdvancedOverrideToCache();
 
   const autoRefresh = document.getElementById("advOverrideAutoRefreshHw");
-  const wantHwProbe = autoRefresh && autoRefresh.checked;
+  const autoSync = document.getElementById("advOverrideAutoSyncNodes");
+  const wantHwProbe = !!(autoRefresh && autoRefresh.checked);
+  const wantAutoSync = !!(autoSync && autoSync.checked);
 
-  // Reset the checkbox (transient, never persisted)
+  // Reset transient follow-up options (never persisted).
   if (autoRefresh) autoRefresh.checked = false;
+  if (autoSync) autoSync.checked = false;
   toggleOverrideBtnText();
 
   if (wantHwProbe) {
-    // Auto-refresh: close modal, save, chain hwprobe, reload at 16s
-    hideAdvancedOverrideModal();
-    applyOverrideWithHwProbe();
+    // Keep the APMO modal open while the loading panel runs and after it ends.
+    applyOverrideWithHwProbe({ autoSyncNodes: wantAutoSync });
   } else {
     // Override-only: persist Hardware_Override keys, no full form save needed
-    hideAdvancedOverrideModal();
-    applyOverrideSaveOnly();
+    applyOverrideSaveOnly({ autoSyncNodes: wantAutoSync });
   }
 }
 
-async function applyOverrideWithHwProbe() {
+async function autoSyncAdvancedOverrideNodes() {
+  const hasNodes = await checkForConfiguredNodes();
+  if (!hasNodes) {
+    appendCliText("Auto-sync skipped: no nodes are configured. Run Sync Nodes later after adding a node.\n", { scroll: "force" });
+    return false;
+  }
+
+  // The APMO task closes shortly after completion. Let the shared loading
+  // controller release its panel before starting the normal Sync Nodes task.
+  await new Promise(resolve => window.setTimeout(resolve, 550));
+  appendCliText("Auto-syncing node overrides...\n", { scroll: "force" });
+  return queueServiceAction('sync_vlanmgr', {
+    description: 'Sync Node Overrides',
+    cooldownMs: 8000,
+    loadingOptions: { progressBacked: true },
+    passProgressToken: true
+  });
+}
+
+async function applyOverrideWithHwProbe(options = {}) {
   return withActionLock("override-save-hwprobe", async () => {
     stopPolling();
+    let loadingTask = null;
     try {
+      if (typeof MerVLANLoading !== 'undefined') {
+        loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
+          progressBacked: true
+        });
+        if (loadingTask) loadingTask.phase('Preparing hardware override save...', 10);
+      }
       const merlinPayload = buildOverridePayloadForMerlin();
       const expectedManaged = extractOverrideSaveExpected(merlinPayload);
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
         appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Hardware override payload is too large.');
         return;
       }
 
@@ -8298,13 +8555,18 @@ async function applyOverrideWithHwProbe() {
       if (!(window.parent && typeof window.parent.MVM_save === "function" &&
             typeof window.parent.MVM_hwprobe === "function")) {
         appendCliText("Error: parent page handlers not available.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('The parent page handlers are unavailable.');
         return;
       }
 
       // Step 1: Save settings
-      const saveSubmitted = window.parent.MVM_save(merlinPayload);
+      if (loadingTask) loadingTask.phase('Saving hardware overrides...', 25);
+      const saveSubmitted = window.parent.MVM_save(merlinPayload, {
+        loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
+      });
       if (saveSubmitted === false) {
         appendCliText("Hardware override save was rejected or deduplicated.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Hardware override save was rejected.');
         return;
       }
 
@@ -8317,23 +8579,33 @@ async function applyOverrideWithHwProbe() {
       });
       if (!persisted) {
         appendCliText("Override settings did not persist; HW profile refresh was skipped.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Override settings did not persist in time.');
         return;
       }
+      if (loadingTask) loadingTask.phase('Verifying saved overrides...', 45);
 
       appendCliText("Clearing form fields...\n", { scroll: "force" });
       clearFields();
 
       // Step 2: Wait for the correlated HW probe completion acknowledgement.
       appendCliText("Triggering HW profile refresh...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Detecting hardware profile...', 60);
       const probeResult = await runVerifiedHardwareProbe();
-      if (!probeResult.ok) return;
+      if (!probeResult.ok) {
+        if (loadingTask) loadingTask.fail(probeResult.message || 'HW profile refresh failed.');
+        return;
+      }
 
       // Step 3: Reload only after the probe has completed.
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
       await loadSettings();
       appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
+      if (loadingTask) loadingTask.complete('Hardware overrides saved and profile refreshed.');
+      if (options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
+      if (loadingTask) loadingTask.fail('Hardware override save failed.');
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
     }
   }, 18000);
@@ -8350,14 +8622,15 @@ function extractOverrideSaveExpected(payload) {
 
 async function runVerifiedHardwareProbe() {
   const parentWin = window.parent;
-  if (!parentWin || typeof parentWin.MVM_triggerVerified !== "function") {
-    const message = "Verified HW probe handler is unavailable.";
+  if (!parentWin || typeof parentWin.MVM_hwprobe !== "function") {
+    const message = "HW probe handler is unavailable.";
     appendCliText(message + "\n", { scroll: "force" });
     return { ok: false, status: "error", message };
   }
 
   const requestToken = createActionRequestToken();
-  const submitted = parentWin.MVM_triggerVerified("hwprobe_vlanmgr", requestToken, {}, {
+  const submitted = parentWin.MVM_hwprobe({
+    payload: { vlanmgr_action_request_token: requestToken },
     loading: false,
     skipRefresh: true,
     waitSec: 0,
@@ -8381,15 +8654,23 @@ async function runVerifiedHardwareProbe() {
   return result;
 }
 
-async function applyOverrideSaveOnly() {
+async function applyOverrideSaveOnly(options = {}) {
   return withActionLock("override-save", async () => {
     stopPolling();
+    let loadingTask = null;
     try {
+      if (typeof MerVLANLoading !== 'undefined') {
+        loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
+          progressBacked: true
+        });
+        if (loadingTask) loadingTask.phase('Preparing hardware override save...', 10);
+      }
       const merlinPayload = buildOverridePayloadForMerlin();
       const expectedManaged = extractOverrideSaveExpected(merlinPayload);
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
         appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Hardware override payload is too large.');
         return;
       }
 
@@ -8397,12 +8678,17 @@ async function applyOverrideSaveOnly() {
 
       if (!(window.parent && typeof window.parent.MVM_save === "function")) {
         appendCliText("Error: parent page handler not available.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('The parent page save handler is unavailable.');
         return;
       }
 
-      const saveSubmitted = window.parent.MVM_save(merlinPayload);
+      if (loadingTask) loadingTask.phase('Saving hardware overrides...', 25);
+      const saveSubmitted = window.parent.MVM_save(merlinPayload, {
+        loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
+      });
       if (saveSubmitted === false) {
         appendCliText("Override save was rejected or deduplicated.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Override save was rejected.');
         return;
       }
 
@@ -8415,32 +8701,58 @@ async function applyOverrideSaveOnly() {
         scope: "override",
         subset: true
       });
+      if (loadingTask) loadingTask.phase('Verifying saved overrides...', 65);
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
       await loadSettings();
       appendCliText(
         ok ? "Override save complete.\n"
            : "Override save: settings did not persist in time. Loaded latest available.\n",
         { scroll: "force" }
       );
+      if (loadingTask) {
+        if (ok) loadingTask.complete('Hardware overrides saved.');
+        else loadingTask.fail('Override settings did not persist in time.');
+      }
+      if (ok && options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
+      if (loadingTask) loadingTask.fail('Hardware override save failed.');
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
     }
   }, 8000);
 }
 
 async function refreshHwProfile() {
-  hideAdvancedOverrideModal();
   return withActionLock("hwprobe", async () => {
-    appendCliText("Refreshing HW profile...\n", { scroll: "force" });
-    const result = await runVerifiedHardwareProbe();
-    if (!result.ok) return result;
-    appendCliText("Clearing form fields...\n", { scroll: "force" });
-    clearFields();
-    appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-    await loadSettings();
-    appendCliText("HW profile refresh complete.\n", { scroll: "force" });
-    return result;
+    let loadingTask = null;
+    try {
+      if (typeof MerVLANLoading !== 'undefined') {
+        loadingTask = MerVLANLoading.start('hwprobe_vlanmgr', 'Refresh HW Profile', {
+          progressBacked: true
+        });
+        if (loadingTask) loadingTask.phase('Preparing hardware detection...', 10);
+      }
+      appendCliText("Refreshing HW profile...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Detecting hardware profile...', 25);
+      const result = await runVerifiedHardwareProbe();
+      if (!result.ok) {
+        if (loadingTask) loadingTask.fail(result.message || 'HW profile refresh failed.');
+        return result;
+      }
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Loading hardware profile...', 75);
+      clearFields();
+      appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      await loadSettings();
+      appendCliText("HW profile refresh complete.\n", { scroll: "force" });
+      if (loadingTask) loadingTask.complete('HW profile refreshed.');
+      return result;
+    } catch (err) {
+      if (loadingTask) loadingTask.fail('HW profile refresh failed.');
+      appendCliText("HW profile refresh error: " + err + "\n", { scroll: "force" });
+      return { ok: false, status: 'error', message: String(err) };
+    }
   }, 10000);
 }
 
@@ -9183,6 +9495,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
     reloadAfterSave = true,
     restartPolling = true,
     lockName = 'save',
+    loading: loadingOverride = null,
     timeoutMs = 25000,
     intervalMs = 700
   } = options;
@@ -9229,7 +9542,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
       }
 
       const expectedManaged = extractManagedKeysForScope(normalizeToFlatSettings(newObj), 'normal');
-      const useMerVLANLoading = lockName === 'save' && reloadAfterSave &&
+      const useMerVLANLoading = loadingOverride !== false && lockName === 'save' && reloadAfterSave &&
         typeof MerVLANLoading !== 'undefined';
       if (useMerVLANLoading) {
         loadingTask = MerVLANLoading.start('save_vlanmgr', 'Save Settings', {
@@ -9243,7 +9556,9 @@ async function uploadSettingsAndSave(btn, options = {}) {
       appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, { scroll: 'force' });
       const submitted = loadingTask
         ? parentWin.MVM_save(merlinPayload, { loading: false, skipRefresh: true, waitSec: 0 })
-        : parentWin.MVM_save(merlinPayload);
+        : parentWin.MVM_save(merlinPayload, loadingOverride === false
+            ? { loading: false, skipRefresh: true, waitSec: 0 }
+            : { skipRefresh: true, waitSec: 0 });
       if (submitted === false) {
         const error = 'The settings save request was rejected or deduplicated.';
         if (loadingTask) loadingTask.fail(error);

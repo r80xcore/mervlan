@@ -751,7 +751,8 @@ case "${TYPE}_${EVENT}" in
     ;;
   hwprobe_vlanmgr)
     # Re-run hardware probe to refresh the Hardware profile in settings.json
-    dispatch_if_executable "/jffs/addons/mervlan/functions/hw_probe.sh"
+    _action_token="$(get_action_request_token)"
+    dispatch_if_executable "/jffs/addons/mervlan/functions/hw_probe.sh" "$_action_token"
     ;;
   hwprobe_vlanmgr_vrt_*)
     _action_token="$(get_verified_action_token "${TYPE}_${EVENT}" hwprobe_vlanmgr)"

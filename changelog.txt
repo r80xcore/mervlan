@@ -30,6 +30,20 @@ Improved: Reliable action completion
 - APMO now waits for settings persistence and verified hardware-probe completion instead of relying on fixed delays.
 - Long-running actions keep their controls locked until confirmed completion or failure, reducing duplicate submissions and stale UI state.
 
+Improved: APMO hardware override workflow
+- APMO now shows the detected hardware model next to the selected unit, making it easier to identify the device being configured.
+- Added a Load default values action that fills the form with the detected model's supported defaults without saving them; unsupported models are reported clearly.
+- Added a transient Auto-sync Nodes option for saving node overrides, with shorter guidance explaining whether to sync immediately or later.
+- APMO remains available after saving and refreshing the hardware profile so the completed result can be reviewed without reopening the modal.
+
+Improved: Settings modal usability
+- Settings Save and Refresh for full status no longer trigger the ASUS loading overlay.
+- Improved the visibility of the full-status refresh hint and made its button more compact with a larger refresh icon.
+
+Improved: Restore status polling
+- Restore/maintenance status checks now tolerate short router startup delays without showing a false error.
+- A subdued waiting message appears only after an extended delay, while genuine timeouts still provide a clear error and retain the last polling diagnostic.
+
 Improved: Failure reporting and diagnostics
 - Apply, MAC Shield, metadata, maintenance, and service-status failures now remain visible in the loading screen and logs.
 - Polling is serialized and bounded, with clearer timeout, partial-result, and backend-unavailable reporting.

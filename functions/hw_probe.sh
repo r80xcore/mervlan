@@ -532,3 +532,103 @@ echo ""
 # Debug output: list all detected ethernet interfaces for verification
 echo "=== Debug: All detected interfaces ==="
 ls /sys/class/net/ | grep -E '^eth[0-9]' | sort
+
+# ============================================================================ #
+#                 PUBLIC HARDWARE PROFILE CATALOG GENERATOR                   #
+# Generate the browser-readable catalog from the active model definitions     #
+# above. The model case list remains the source of truth and normal probe     #
+# behavior is unaffected if this best-effort publication fails.               #
+# ============================================================================ #
+merv_generate_public_hardware_profiles() {
+    _hp_public_dir="${PUBLIC_SETTINGS_DIR:-${PUBLIC_MERV_BASE:-/www/user/mervlan}/settings}"
+    _hp_target="$_hp_public_dir/hardware_profiles.json"
+    _hp_tmp="${_hp_target}.tmp.$$"
+    _hp_source="${MERV_BASE:-/jffs/addons/mervlan}/functions/hw_probe.sh"
+
+    [ -r "$_hp_source" ] || return 1
+    mkdir -p "$_hp_public_dir" 2>/dev/null || return 1
+
+    awk '
+      function jsonq(v, t) {
+        t = v
+        gsub(/\\/, "\\\\", t)
+        gsub(/"/, "\\\"", t)
+        return "\"" t "\""
+      }
+      function jsonarr(v, a, n, i, out) {
+        out = "["
+        n = split(v, a, /[[:space:]]+/)
+        for (i = 1; i <= n; i++) {
+          if (a[i] == "") continue
+          if (out != "[") out = out ","
+          out = out jsonq(a[i])
+        }
+        return out "]"
+      }
+      function field(line, name, start, rest, end) {
+        start = index(line, name "=\"")
+        if (!start) return ""
+        rest = substr(line, start + length(name) + 2)
+        end = index(rest, "\"")
+        return end ? substr(rest, 1, end - 1) : ""
+      }
+      function number_field(line, name, start, rest) {
+        start = index(line, name "=")
+        if (!start) return 0
+        rest = substr(line, start + length(name) + 1)
+        sub(/[^0-9].*$/, "", rest)
+        return rest + 0
+      }
+      BEGIN {
+        in_models = 0
+        first = 1
+        print "{"
+        print "  \"version\": 1,"
+        print "  \"profiles\": {"
+      }
+      /case "\$PRODUCTID" in/ { in_models = 1; next }
+      in_models && /# === Models that needs port layout testing\/verification ===/ { in_models = 0; next }
+      in_models && /^[[:space:]]*#/ { next }
+      in_models && index($0, "MODEL=\"") && index($0, "ETH_PORTS=\"") &&
+        index($0, "LAN_PORT_LABELS=\"") && index($0, "MAX_ETH_PORTS=") &&
+        index($0, "WAN_IF=\"") {
+          model = field($0, "MODEL")
+          eth = field($0, "ETH_PORTS")
+          labels = field($0, "LAN_PORT_LABELS")
+          max = number_field($0, "MAX_ETH_PORTS")
+          wan = field($0, "WAN_IF")
+          override = field($0, "LAN_PORT_LABEL_OVERRIDES")
+          if (model == "" || seen[model]++) next
+          if (!first) print "    ,"
+          printf "    %s: {\"model\":%s,\"wan_if\":%s,\"max_eth_ports\":%s,\"eth_ports\":%s,\"lan_labels\":%s",
+            jsonq(model), jsonq(model), jsonq(wan), max + 0, jsonarr(eth), jsonarr(labels)
+          if (override != "") printf ",\"lan_port_label_overrides\":%s", jsonq(override)
+          printf "}"
+          first = 0
+        }
+      END {
+        print ""
+        print "  }"
+        print "}"
+      }
+    ' "$_hp_source" > "$_hp_tmp" 2>/dev/null || {
+        rm -f "$_hp_tmp" 2>/dev/null || :
+        return 1
+    }
+
+    if [ -f "$_hp_target" ] && cmp -s "$_hp_tmp" "$_hp_target" 2>/dev/null; then
+        rm -f "$_hp_tmp" 2>/dev/null || :
+    else
+        chmod 644 "$_hp_tmp" 2>/dev/null || :
+        mv -f "$_hp_tmp" "$_hp_target" 2>/dev/null || {
+            rm -f "$_hp_tmp" 2>/dev/null || :
+            return 1
+        }
+    fi
+    return 0
+}
+
+# This is deliberately best-effort: hardware detection and settings writes
+# must retain their existing success/failure behavior if the public web path
+# is unavailable during boot or installation.
+merv_generate_public_hardware_profiles || warn "Could not update public hardware_profiles.json"
