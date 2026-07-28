@@ -1,0 +1,192 @@
+{
+  "format": "mervlan-agent-navigation-v1",
+  "purpose": "Compact static map for locating MerVLAN source, focused notes, and tests.",
+  "use_when": [
+    "The task is unknown or crosses multiple subsystems.",
+    "The agent cannot identify the owning file or caller.",
+    "A source path, action, or shared state name needs localization."
+  ],
+  "source_is_authority": true,
+  "layers": {
+    "ui": {
+      "start": ["www/index.html"],
+      "next": ["mervlan.asp", "functions/service-event-handler.sh"],
+      "notes": [
+        "dev-tools/docs/20-runtime-flows.md",
+        "dev-tools/docs/50-ui-action-pipelines.md",
+        "dev-tools/docs/60-state-and-data.md"
+      ]
+    },
+    "apply_nodes_sync": {
+      "start": [
+        "functions/mervlan_manager.sh",
+        "functions/execute_nodes.sh",
+        "functions/sync_nodes.sh"
+      ],
+      "next": [
+        "functions/mervlan_node_runner.sh",
+        "settings/lib_node_jobs.sh",
+        "settings/lib_ssh.sh",
+        "functions/post_apply_worker.sh"
+      ],
+      "notes": [
+        "dev-tools/docs/20-runtime-flows.md",
+        "dev-tools/docs/70-node-sync-and-ssh.md",
+        "dev-tools/docs/95-deployment-checklist.md"
+      ]
+    },
+    "observation_clients": {
+      "start": ["functions/post_apply_worker.sh"],
+      "next": [
+        "functions/collect_local_clients.sh",
+        "functions/collect_clients.sh",
+        "settings/mac_shield_snapshot.sh",
+        "functions/mac_refresh.sh"
+      ],
+      "notes": [
+        "dev-tools/docs/20-runtime-flows.md",
+        "dev-tools/docs/60-state-and-data.md"
+      ]
+    },
+    "locks_progress_safety": {
+      "start": ["settings/lib_mervqt.sh"],
+      "next": [
+        "settings/lib_br0_guard.sh",
+        "settings/lib_progress.sh",
+        "settings/lib_action_progress.sh",
+        "settings/lib_action_ack.sh",
+        "functions/mervlan_boot_wrap.sh",
+        "functions/heal_event.sh"
+      ],
+      "notes": [
+        "dev-tools/agent-rules/20-locks-and-fail-closed-state.md",
+        "dev-tools/docs/60-state-and-data.md",
+        "dev-tools/docs/80-code-limitations.md"
+      ]
+    },
+    "boot_healing": {
+      "start": [
+        "functions/mervlan_boot.sh",
+        "functions/mervlan_boot_wrap.sh",
+        "functions/heal_event.sh"
+      ],
+      "next": ["settings/lib_mervqt.sh", "settings/var_settings.sh"],
+      "notes": ["dev-tools/docs/20-runtime-flows.md"]
+    },
+    "settings_libraries": {
+      "start": ["settings/settings.json", "settings/var_settings.sh"],
+      "next": [
+        "settings/lib_json.sh",
+        "settings/log_settings.sh",
+        "settings/lib_ssh.sh",
+        "settings/lib_ssid_filter.sh",
+        "www/index.html"
+      ],
+      "notes": [
+        "dev-tools/docs/40-function-libraries.md",
+        "dev-tools/docs/60-state-and-data.md"
+      ]
+    },
+    "maintenance": {
+      "start": [
+        "functions/update_mervlan.sh",
+        "functions/mervlan_backup.sh",
+        "functions/mervlan_recover.sh"
+      ],
+      "next": ["functions/service-event-handler.sh", "settings/lib_action_ack.sh"],
+      "notes": ["dev-tools/docs/20-runtime-flows.md", "dev-tools/docs/95-deployment-checklist.md"]
+    }
+  },
+  "task_routes": {
+    "ui_action_or_loading": [
+      "dev-tools/docs/20-runtime-flows.md",
+      "dev-tools/docs/50-ui-action-pipelines.md",
+      "dev-tools/docs/60-state-and-data.md"
+    ],
+    "shell_or_library": [
+      "dev-tools/agent-rules/10-asuswrt-shell.md",
+      "dev-tools/docs/40-function-libraries.md",
+      "dev-tools/docs/80-code-limitations.md"
+    ],
+    "apply_observation_mac_shield": [
+      "dev-tools/agent-rules/20-locks-and-fail-closed-state.md",
+      "dev-tools/agent-rules/60-product-behavior.md",
+      "dev-tools/docs/60-state-and-data.md"
+    ],
+    "node_sync_ssh_deployment": [
+      "dev-tools/agent-rules/30-ssh-and-device-operations.md",
+      "dev-tools/agent-rules/70-node-orchestration.md",
+      "dev-tools/docs/70-node-sync-and-ssh.md",
+      "dev-tools/docs/95-deployment-checklist.md"
+    ],
+    "testing_evidence": [
+      "dev-tools/agent-rules/50-testing-and-evidence.md",
+      "dev-tools/docs/90-testing-and-evidence.md",
+      "dev-tools/docs/92-test-workflows.md",
+      "dev-tools/tests/"
+    ],
+    "unknown_cross_cutting": [
+      "dev-tools/docs/00-project-overview.md",
+      "dev-tools/docs/10-architecture.md",
+      "dev-tools/docs/developing_notes.md",
+      "dev-tools/docs/README.md"
+    ]
+  },
+  "tests": {
+    "local": [
+      "dev-tools/tests/local/action_progress_test.sh",
+      "dev-tools/tests/local/loading_progress_test.sh"
+    ],
+    "router": ["dev-tools/tests/router/mervlan_selftest.sh"],
+    "live_safety": ["dev-tools/safety/mervlan_live_test_guard.sh"],
+    "specifications": ["dev-tools/tests/specs/"]
+  },
+  "high_value_searches": {
+    "actions_progress": [
+      "action identifiers",
+      "MERV_PROGRESS_TOKEN",
+      "merv_action_progress_init",
+      "merv_progress_",
+      "loading_actions.json"
+    ],
+    "locks_recovery": [
+      "merv_dhcp_hold_",
+      "merv_lock_",
+      "merv_proc_start_time",
+      "MERV_DHCP_",
+      "failsafe"
+    ],
+    "nodes_observation": [
+      "mnj_pool_run",
+      "MERV_NODE_PARALLELISM",
+      "post_apply_worker",
+      "vlan_clients.json",
+      "MERV_OBS_"
+    ],
+    "settings": [
+      "structured-to-flat",
+      "flat-to-structured",
+      "managed save",
+      "VAR_SETTINGS_LOADED"
+    ]
+  },
+  "ownership": {
+    "main_router": [
+      "www/index.html",
+      "merged client JSON",
+      "node orchestration",
+      "shared settings"
+    ],
+    "nodes": [
+      "curated runtime subset",
+      "local configuration work",
+      "local client observation"
+    ],
+    "developer_only": [
+      "dev-tools documentation",
+      "dev-tools agent rules",
+      "dev-tools planning and evidence",
+      "dev-tools local tests and specifications"
+    ]
+  }
+}

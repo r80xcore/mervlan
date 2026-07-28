@@ -7,14 +7,23 @@ MerVLAN developer bundle.
 
 1. Read `agent-rules/00-project-safety.md`.
 2. Read `agent-rules/05-developer-reference.md`.
-3. Read only the additional rule files and developer notes routed by the task.
-4. Use `docs/README.md` as the normal developer-document navigation map.
+3. For an unknown, cross-cutting, or unfamiliar task, read
+   `agent-context.json` as the compact static source and task map.
+4. Read only the additional rule files and developer notes routed by the task.
+5. Use `docs/README.md` as the normal developer-document navigation map.
 
 The rules define mandatory operating constraints. The developer notes explain
 the addon, its ownership boundaries, runtime flows, limitations, tests, and
 deployment procedures. Do not load every document by default; follow the
 focused route and return for more context when a contract or safety boundary
 is unclear.
+
+`agent-context.json` is a deliberately small, manually maintained navigation
+map for unknown or cross-cutting work. Use it to locate likely source files
+and focused notes, not to infer behavior. It contains no credentials,
+device-specific values, line counts, or test results. If it is stale or
+conflicts with source, follow the current source/tests and update the map only
+when a stable boundary or route moved.
 
 ## Environment guidance
 
