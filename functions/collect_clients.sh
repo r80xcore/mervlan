@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_clients.sh || version="0.51"                  #
+#                - File: collect_clients.sh || version="0.52"                  #
 # ============================================================================ #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -86,17 +86,37 @@ BG_PIDS=""
 # the stale window. Best-effort — if the lib is absent we proceed unguarded.
 COLLECT_LOCK="$LOCKDIR/client_collect.lock"
 COLLECT_LOCK_ACQUIRED=0
+
+# An apply already requests its own post-apply collection. Do not let a page
+# load or manual refresh start a second collection while configuration is
+# mutating. post_apply_worker.sh retries pending generations after the manager
+# releases these locks, so this is safe for apply-owned collection too.
+if type merv_lock_state >/dev/null 2>&1; then
+  case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
+    active|unknown_recent)
+      info -c cli,vlan "Client collection skipped while VLAN apply is active"
+      exit 75
+      ;;
+  esac
+  case "$(merv_lock_state "$LOCKDIR/execute_nodes.lock")" in
+    active|unknown_recent)
+      info -c cli,vlan "Client collection skipped while node apply is active"
+      exit 75
+      ;;
+  esac
+fi
+
 if type merv_lock_acquire >/dev/null 2>&1; then
   mkdir -p "$LOCKDIR" 2>/dev/null || :
   if merv_lock_acquire "$COLLECT_LOCK" "${COLLECT_STALE_SEC:-300}" 0 "client_collect"; then
     COLLECT_LOCK_ACQUIRED=1
   else
     info -c cli,vlan "Client collection already running — skipping"
-    exit 0
+    exit 75
   fi
 fi
 
-info -c cli,vlan "=== VLAN Client Collection Started ==="
+info -c cli,vlan "Refreshing client list started"
 
 # Create temporary collection directory and results directory
 mkdir -p "$COLLECTDIR" "$RESULTDIR"
@@ -134,7 +154,7 @@ collect_from_node() {
   node_ip="$2"
   output_file="$3"
 
-  info -c cli,vlan "→ Collecting from node $node_ip (NODE${node_id})"
+  info -c vlan "→ Collecting from node $node_ip (NODE${node_id})"
 
   # Use wrapper precheck (validates IP, keys, and ping)
   if ! merv_ssh_precheck "$node_id" "$node_ip"; then
@@ -144,8 +164,13 @@ collect_from_node() {
   fi
 
   # Run remote collector and fetch JSON via SSH wrapper
-  # collect_local_clients.sh writes to /tmp/node_clients.json, we cat and capture output
-  remote_cmd="$MERV_BASE/functions/collect_local_clients.sh /tmp/node_clients.json \"$node_ip\" >/dev/null 2>&1 && cat /tmp/node_clients.json"
+  # Publish a node-local collection generation and wait for that exact target.
+  # This prevents the main cluster merge from bypassing/overlapping the node's
+  # own snapshot or health-cron collection worker.
+  # Keep the remote artifact's router identity equal to the configured IP.
+  # The environment is exported once for both request and run-wait because the
+  # coordinator executes the local collector only during the latter command.
+  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 $MERV_BASE/functions/post_apply_worker.sh request collect >/dev/null 2>&1 && $MERV_BASE/functions/post_apply_worker.sh run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
   
   _result_tmp="$COLLECTDIR/node_${node_ip}.out.$$"
   result=""
@@ -159,7 +184,7 @@ collect_from_node() {
 
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
     printf '%s' "$result" > "$output_file"
-    info -c cli,vlan "✓ Successfully collected from $node_ip"
+    info -c vlan "✓ Successfully collected from $node_ip"
     return 0
   else
     _reason="${MERV_SSH_LAST_REASON:-fetch-failed}"
@@ -176,12 +201,13 @@ collect_from_node() {
 # MAC addresses from the main router. Output written to temporary JSON file.   #
 # ============================================================================ #
 
-info -c cli,vlan "Collecting VLAN clients"
+info -c vlan "Collecting VLAN clients"
 MAIN_JSON="$COLLECTDIR/main.json"
+MAIN_IP=$(nvram get lan_ipaddr 2>/dev/null | tr -d '\r\n')
 
 collect_from_main() {
-  if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" >>"$LOG_chan_cli" 2>&1; then
-    info -c cli,vlan "✓ Main router collection completed"
+  if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1; then
+    info -c vlan "✓ Main router collection completed"
   else
     rc=$?
     error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
@@ -208,12 +234,12 @@ NODE_IPS=$(get_node_ips)
 
 if [ -z "$NODE_IPS" ]; then
   # No nodes configured; collection will only include main router
-  info -c cli,vlan "No nodes configured in settings.json"
+  info -c vlan "No nodes configured in settings.json"
   NODES_ENABLED=false
 else
   # Nodes are configured; check prerequisites before attempting collection
   NODES_ENABLED=true
-  info -c cli,vlan "Found configured nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' ' ')"
+  info -c vlan "Found configured nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' ' ')"
 
   if ! ssh_keys_effectively_installed; then
     warn -c cli,vlan "SSH keys are not fully configured; only collecting from main router"
@@ -626,6 +652,7 @@ fi
 # this rename completes, so the frontend never sees a missing file.
 mv "$OUT_WORK" "$OUT_FINAL" 2>/dev/null || {
   warn -c cli,vlan "Failed to publish $OUT_FINAL; leaving work file at $OUT_WORK"
+  exit 1
 }
 
 # ============================================================================ #
@@ -638,5 +665,5 @@ mv "$OUT_WORK" "$OUT_FINAL" 2>/dev/null || {
 rm -rf "$COLLECTDIR"
 
 info -c vlan "✓ Client collection completed - JSON saved to $OUT_FINAL"
-info -c cli,vlan "=== VLAN Client Collection Finished ==="
+info -c cli,vlan "Refreshing client list complete"
 exit 0

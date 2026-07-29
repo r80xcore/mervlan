@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: log_settings.sh || version="0.46"                      #
+#             - File: log_settings.sh || version="0.72.0"                   #
 # ============================================================================ #
 # - Purpose:    Define logging settings and environment variables used         #
 #               throughout the MerVLAN addon. Enables colored output,          #
@@ -62,8 +62,17 @@ fi
 : "${LOG_CMD_ERROR:=error}" # auto-sends ERROR messages to syslog if used 
 #                             with channel "vlan" and LOG_SYSLOG=1
 # ========================================================== Override settings #
-LOG_chan_cli="$LOGROOT/cli_output.log"
-LOG_chan_vlan="$LOGROOT/vlan_manager.log"
+: "${LOG_chan_cli:=$LOGROOT/cli_output.log}"
+: "${LOG_chan_vlan:=$LOGROOT/vlan_manager.log}"
+# A task must never send its CLI and VLAN records to the same physical file:
+# `info -c cli,vlan` would otherwise duplicate every record.  Preserve the
+# established defaults, but repair an unsafe caller override before logging.
+if [ "$LOG_chan_cli" = "$LOG_chan_vlan" ]; then
+    LOG_chan_vlan="$LOGROOT/vlan_manager.log"
+    if [ "$LOG_chan_cli" = "$LOG_chan_vlan" ]; then
+        LOG_chan_vlan="$LOGROOT/vlan_manager.task.log"
+    fi
+fi
 # ============================================== End of Central settings setup #
 
 
@@ -93,14 +102,11 @@ _log_cprintln() {
 # Fallback: $LOGROOT/<channel>.log
 _log_path_for_channel() {
     ch="$1"
-    # turn '-' and spaces into underscores for var lookup; keep original for filename
-    vname=$(printf '%s' "$ch" | tr ' -' '__')
-    eval "override=\${LOG_chan_${vname}:-}"
-    if [ -n "$override" ]; then
-        printf '%s' "$override"
-    else
-        printf '%s/%s.log' "$LOGROOT" "$ch"
-    fi
+    case "$ch" in
+        cli)  printf '%s' "$LOG_chan_cli" ;;
+        vlan) printf '%s' "$LOG_chan_vlan" ;;
+        *)    printf '%s/%s.log' "$LOGROOT" "$ch" ;;
+    esac
 }
 
 # ensure directory for a file exists; best-effort; silent on failure
@@ -330,21 +336,6 @@ _info_warn_error() {
 info()  { _info_warn_error INFO  "$@"; }
 warn()  { _info_warn_error WARN  "$@"; }
 error() { _info_warn_error ERROR "$@"; }
-
-# --------------------------- command renaming --------------------------------
-# Create wrappers if you want different names (set vars at top)
-# e.g. LOG_CMD_INFO=note -> defines note(){ info "$@"; }
-# (No-ops if names match defaults.)
-_log_define_alias() {
-    name="$1"; target="$2"
-    [ "$name" = "$target" ] && return 0
-    # shellcheck disable=SC3045
-    eval "$name() { $target \"\$@\"; }"
-}
-_log_define_alias "$LOG_CMD_LOG"   log
-_log_define_alias "$LOG_CMD_INFO"  info
-_log_define_alias "$LOG_CMD_WARN"  warn
-_log_define_alias "$LOG_CMD_ERROR" error
 
 LOG_SETTINGS_LOADED=1
 # ========================= end of log_settings ===============================

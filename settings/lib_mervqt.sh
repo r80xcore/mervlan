@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.52"                      #
+#                  - File: lib_mervqt.sh || version="0.54"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -493,56 +493,6 @@ restore_merv_qt_shield() {
 # boot shield is deliberately not an owner: it has its own
 # merv_boot_shield.active marker and must not recreate the shared ownership
 # marker after the manager has released it.
-merv_dhcp_hold_arm() {
-  local _hold_rules _changed _quiet _marker_mode
-  _quiet="${1:-0}"
-  _marker_mode="${2:-marker}"
-  _changed=0
-
-  type ebtables >/dev/null 2>&1 || return 0
-
-  ebtables -t filter -N "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null && _changed=1
-
-  _hold_rules=$(ebtables -t filter -L "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
-  if ! printf '%s\n' "$_hold_rules" | grep -qF 'DROP'; then
-    ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || true
-    _changed=1
-  fi
-
-  if ! ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
-    ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-    _changed=1
-  fi
-
-  if ! ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_DHCP_HOLD_CHAIN"; then
-    ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-    _changed=1
-  fi
-
-  [ "$_marker_mode" = "no-marker" ] || \
-    echo "$(date +%s)" > "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
-  [ "$_changed" -eq 1 ] && [ "$_quiet" != "quiet" ] && \
-    info -c vlan "DHCP hold: armed for br0 critical section"
-}
-
-merv_dhcp_hold_release() {
-  type ebtables >/dev/null 2>&1 || return 0
-
-  while ebtables -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
-  while ebtables -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null; do :; done
-
-  ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-  ebtables -t filter -X "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || true
-
-  rm -f "$LOCKDIR/merv_dhcp_hold.active" 2>/dev/null || true
-  info -c vlan "DHCP hold: released"
-}
-
-merv_dhcp_hold_restore_if_active() {
-  [ -f "$LOCKDIR/merv_dhcp_hold.active" ] || return 0
-  merv_dhcp_hold_arm quiet
-}
-
 # ============================================================================
 # Unified guard tick — restore every active L2 guard layer in one cheap call.
 # Fetches the ebtables dump once and shares it with both shield restorers so a
@@ -557,6 +507,1630 @@ merv_dhcp_hold_restore_if_active() {
 # DHCP hold is (or may be) active. Do NOT sprinkle on trivial settle sleeps —
 # the per-tick ebtables read is cheap but not free.
 # ============================================================================
+# ============================================================================
+# Round 1 DHCP-hold protocol foundation
+# ============================================================================
+# Result classes: 0 success; 1 invalid/unsafe argument; 2 state transaction
+# failure; 3 ebtables unavailable; 4 rule command/verification failure;
+# 5 unsafe cleanup refused (reserved for the lease engine).
+
+_merv_dhcp_log() {
+  local _mdl_level="$1"
+  shift
+  if type "$_mdl_level" >/dev/null 2>&1; then
+    "$_mdl_level" -c vlan "$*"
+  else
+    printf 'MerVLAN DHCP hold: %s\n' "$*" >&2
+  fi
+  return 0
+}
+
+merv_dhcp_hold_valid_id() {
+  case "${1:-}" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+merv_dhcp_hold_test_root_valid() {
+  local _mdtr_root="${MERV_DHCP_HOLD_TEST_ROOT:-}"
+  [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = "1" ] || return 1
+  case "$_mdtr_root" in
+    /tmp/mervlan_tmp/selftest.*) ;;
+    *) return 1 ;;
+  esac
+  case "$_mdtr_root" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  [ "$_mdtr_root" != "/tmp/mervlan_tmp/selftest." ] || return 1
+  return 0
+}
+
+merv_dhcp_hold_state_root_valid() {
+  local _mdsr_root="${MERV_DHCP_HOLD_STATE_ROOT:-}"
+  [ -n "$_mdsr_root" ] || return 1
+  if [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = "1" ]; then
+    merv_dhcp_hold_test_root_valid || return 1
+    case "$_mdsr_root" in
+      "$MERV_DHCP_HOLD_TEST_ROOT"|"$MERV_DHCP_HOLD_TEST_ROOT"/*) ;;
+      *) return 1 ;;
+    esac
+    case "$_mdsr_root" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+    return 0
+  fi
+  [ "$_mdsr_root" = "${LOCKDIR:-/tmp/mervlan_tmp/locks}/dhcp_hold" ]
+}
+
+merv_dhcp_hold_state_init() {
+  merv_dhcp_hold_state_root_valid || {
+    _merv_dhcp_log error "refusing unsafe state root '${MERV_DHCP_HOLD_STATE_ROOT:-}'"
+    return 1
+  }
+  mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT/faults" \
+    "$MERV_DHCP_HOLD_STATE_ROOT/intents" \
+    "$MERV_DHCP_HOLD_STATE_ROOT/owners" \
+    "$MERV_DHCP_HOLD_STATE_ROOT/failsafe" \
+    "$MERV_DHCP_HOLD_STATE_ROOT/handoffs" 2>/dev/null || return 2
+  return 0
+}
+
+# merv_proc_start_time <pid> [proc-root]
+# Parse after the final ") " so spaces/parentheses in comm cannot shift field 22.
+merv_proc_start_time() {
+  local _mps_pid="$1" _mps_root="${2:-/proc}" _mps_line _mps_tail _mps_start
+  case "$_mps_pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$_mps_root" != "/proc" ]; then
+    merv_dhcp_hold_test_root_valid || return 1
+    case "$_mps_root" in "$MERV_DHCP_HOLD_TEST_ROOT"/*) ;; *) return 1 ;; esac
+  fi
+  _mps_line=$(cat "$_mps_root/$_mps_pid/stat" 2>/dev/null) || return 1
+  case "$_mps_line" in *") "*) _mps_tail=${_mps_line##*) } ;; *) return 1 ;; esac
+  _mps_start=$(printf '%s\n' "$_mps_tail" | awk '{print $20}')
+  case "$_mps_start" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$_mps_start"
+  return 0
+}
+
+merv_dhcp_proc_root() {
+  local _mdpr_root="${MERV_DHCP_HOLD_PROC_ROOT:-/proc}"
+  if [ "$_mdpr_root" = "/proc" ]; then
+    printf '/proc\n'
+    return 0
+  fi
+  merv_dhcp_hold_test_root_valid || return 1
+  case "$_mdpr_root" in "$MERV_DHCP_HOLD_TEST_ROOT"/*) ;; *) return 1 ;; esac
+  printf '%s\n' "$_mdpr_root"
+  return 0
+}
+
+merv_process_identity_matches() {
+  local _mpim_pid="$1" _mpim_expected="$2" _mpim_root="${3:-/proc}" _mpim_actual
+  case "$_mpim_expected" in ''|*[!0-9]*) return 1 ;; esac
+  _mpim_actual=$(merv_proc_start_time "$_mpim_pid" "$_mpim_root" 2>/dev/null) || return 1
+  [ "$_mpim_actual" = "$_mpim_expected" ] || return 1
+  if [ "$_mpim_root" = "/proc" ]; then
+    kill -0 "$_mpim_pid" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
+_merv_dhcp_nonce() {
+  local _mdn_start _mdn_now _mdn_proc
+  _mdn_proc=$(merv_dhcp_proc_root 2>/dev/null || printf '/proc')
+  _mdn_start=$(merv_proc_start_time "$$" "$_mdn_proc" 2>/dev/null || printf '0')
+  _mdn_now=$(date +%s 2>/dev/null || printf '0')
+  printf '%s-%s-%s-%s\n' "$_mdn_now" "$$" "$_mdn_start" "${RANDOM:-0}"
+}
+
+# Dedicated DHCP state lock. Live PID/start-time owners are never reclaimed
+# because of age. Dead or reused-PID locks are atomically quarantined first.
+merv_dhcp_state_lock_acquire() {
+  local _mdla_lock _mdla_pid _mdla_start _mdla_nonce _mdla_created _mdla_owner_nonce
+  local _mdla_quarantine _mdla_proc _mdla_attempt=0 _mdla_max=5
+  local _mdla_now _mdla_mtime _mdla_age _mdla_incomplete_stale
+  merv_dhcp_hold_state_init || return $?
+  _mdla_proc=$(merv_dhcp_proc_root) || return 1
+  type usleep >/dev/null 2>&1 && _mdla_max=100
+  _mdla_pid="$$"
+  _mdla_start=$(merv_proc_start_time "$$" "$_mdla_proc" 2>/dev/null || printf '0')
+  _mdla_created=$(date +%s 2>/dev/null || printf '0')
+  _mdla_nonce=$(_merv_dhcp_nonce)
+  _mdla_incomplete_stale="${MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC:-30}"
+  case "$_mdla_incomplete_stale" in ''|*[!0-9]*) _mdla_incomplete_stale=30 ;; esac
+  _mdla_lock="$MERV_DHCP_HOLD_STATE_ROOT/state.lock"
+  while [ "$_mdla_attempt" -lt "$_mdla_max" ]; do
+    if mkdir "$_mdla_lock" 2>/dev/null; then
+      if printf '%s\n' "$_mdla_pid" > "$_mdla_lock/pid" 2>/dev/null &&
+         printf '%s\n' "$_mdla_start" > "$_mdla_lock/proc_start_time" 2>/dev/null &&
+         printf '%s\n' "$_mdla_created" > "$_mdla_lock/created_epoch" 2>/dev/null &&
+         printf '%s\n' "$_mdla_nonce" > "$_mdla_lock/owner_nonce" 2>/dev/null; then
+        MERV_DHCP_STATE_LOCK_NONCE="$_mdla_nonce"
+        return 0
+      fi
+      _mdla_quarantine="${_mdla_lock}.incomplete.${_mdla_created}.$$"
+      mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null || :
+      return 2
+    fi
+
+    _mdla_pid=$(cat "$_mdla_lock/pid" 2>/dev/null || printf '')
+    _mdla_start=$(cat "$_mdla_lock/proc_start_time" 2>/dev/null || printf '')
+    _mdla_created=$(cat "$_mdla_lock/created_epoch" 2>/dev/null || printf '')
+    _mdla_owner_nonce=$(cat "$_mdla_lock/owner_nonce" 2>/dev/null || printf '')
+    case "$_mdla_pid:$_mdla_start:$_mdla_created:$_mdla_owner_nonce" in
+      :*|*::*|*:|*[!A-Za-z0-9._:-]*) _mdla_owner_nonce="" ;;
+    esac
+    if [ -z "$_mdla_owner_nonce" ]; then
+      # mkdir publishes the exclusion point before its metadata files can be
+      # written. Treat that brief incomplete directory as a live publication,
+      # not a stale lock. A PID whose current start time is readable is also
+      # never stolen even when the remaining fields are incomplete.
+      if case "$_mdla_pid" in ''|*[!0-9]*) false ;; *) merv_proc_start_time "$_mdla_pid" "$_mdla_proc" >/dev/null 2>&1 ;; esac; then
+        :
+      else
+        _mdla_now=$(date +%s 2>/dev/null || printf '0')
+        _mdla_mtime=$(stat -c %Y "$_mdla_lock" 2>/dev/null || printf '%s' "$_mdla_now")
+        case "$_mdla_now:$_mdla_mtime" in *[!0-9:]*) _mdla_age=0 ;; *)
+          _mdla_age=$((_mdla_now - _mdla_mtime))
+          [ "$_mdla_age" -ge 0 ] || _mdla_age=0
+          ;;
+        esac
+        if [ "$_mdla_age" -ge "$_mdla_incomplete_stale" ]; then
+          _mdla_quarantine="${_mdla_lock}.incomplete-stale.${_mdla_now}.$$.$_mdla_attempt"
+          if mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null; then
+            _merv_dhcp_log warn "quarantined stale incomplete DHCP state lock"
+          fi
+          _mdla_attempt=$((_mdla_attempt + 1))
+          continue
+        fi
+      fi
+      if type usleep >/dev/null 2>&1; then usleep 50000; else sleep 1; fi
+      _mdla_attempt=$((_mdla_attempt + 1))
+      continue
+    fi
+    if merv_process_identity_matches "$_mdla_pid" "$_mdla_start" "$_mdla_proc" 2>/dev/null; then
+      # A legitimate state transaction is normally held for milliseconds.
+      # Honour it and wait within a strict bound; never steal a matching live
+      # owner, and do not turn harmless poll/publication contention into a
+      # failed security handoff.
+      if type usleep >/dev/null 2>&1; then
+        usleep 50000
+      else
+        sleep 1
+      fi
+      _mdla_attempt=$((_mdla_attempt + 1))
+      continue
+    fi
+    _mdla_created=$(date +%s 2>/dev/null || printf '0')
+    _mdla_quarantine="${_mdla_lock}.stale.${_mdla_created}.$$.$_mdla_attempt"
+    if mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null; then
+      _merv_dhcp_log warn "quarantined dead or reused-PID DHCP state lock"
+    fi
+    _mdla_attempt=$((_mdla_attempt + 1))
+  done
+  return 2
+}
+
+merv_dhcp_state_lock_release() {
+  local _mdlr_lock _mdlr_expected _mdlr_actual
+  merv_dhcp_hold_state_root_valid || return 1
+  _mdlr_lock="$MERV_DHCP_HOLD_STATE_ROOT/state.lock"
+  _mdlr_expected="${1:-${MERV_DHCP_STATE_LOCK_NONCE:-}}"
+  [ -n "$_mdlr_expected" ] || return 2
+  _mdlr_actual=$(cat "$_mdlr_lock/owner_nonce" 2>/dev/null || printf '')
+  [ "$_mdlr_actual" = "$_mdlr_expected" ] || return 2
+  rm -f "$_mdlr_lock/pid" "$_mdlr_lock/proc_start_time" \
+    "$_mdlr_lock/created_epoch" "$_mdlr_lock/owner_nonce" 2>/dev/null || return 2
+  rmdir "$_mdlr_lock" 2>/dev/null || return 2
+  MERV_DHCP_STATE_LOCK_NONCE=""
+  return 0
+}
+
+merv_dhcp_hold_fault_checkpoint() {
+  local _mdfc_name="$1"
+  merv_dhcp_hold_valid_id "$_mdfc_name" || return 1
+  [ "${MERV_DHCP_HOLD_FAULT_POINT:-}" = "$_mdfc_name" ] || return 0
+  _merv_dhcp_log warn "fault injection checkpoint reached: $_mdfc_name"
+  case "${MERV_DHCP_HOLD_FAULT_ACTION:-return}" in
+    kill)
+      kill -9 "$$" 2>/dev/null
+      ;;
+    return) ;;
+    *) return 1 ;;
+  esac
+  return 99
+}
+
+merv_dhcp_hold_record_fault() {
+  local _mdrf_reason="$1" _mdrf_desired="${2:-unknown}" _mdrf_observed="${3:-unknown}"
+  local _mdrf_now _mdrf_id _mdrf_tmp _mdrf_dst
+  merv_dhcp_hold_valid_id "$_mdrf_reason" || _mdrf_reason="invalid-reason"
+  merv_dhcp_hold_state_init || return 2
+  _mdrf_now=$(date +%s 2>/dev/null || printf '0')
+  _mdrf_id="${_mdrf_reason}.${_mdrf_now}.$$.$(_merv_dhcp_nonce)"
+  _mdrf_tmp="$MERV_DHCP_HOLD_STATE_ROOT/faults/.${_mdrf_id}.tmp"
+  _mdrf_dst="$MERV_DHCP_HOLD_STATE_ROOT/faults/${_mdrf_id}"
+  {
+    printf 'reason=%s\n' "$_mdrf_reason"
+    printf 'desired=%s\n' "$_mdrf_desired"
+    printf 'observed=%s\n' "$_mdrf_observed"
+    printf 'epoch=%s\n' "$_mdrf_now"
+  } > "$_mdrf_tmp" 2>/dev/null || return 2
+  mv "$_mdrf_tmp" "$_mdrf_dst" 2>/dev/null || return 2
+  return 0
+}
+
+_merv_dhcp_has_ebtables() {
+  if [ -n "${MERV_DHCP_HOLD_EBTABLES:-}" ]; then
+    merv_dhcp_hold_test_root_valid || return 1
+    case "$MERV_DHCP_HOLD_EBTABLES" in
+      "$MERV_DHCP_HOLD_TEST_ROOT"/*) [ -x "$MERV_DHCP_HOLD_EBTABLES" ] ;;
+      *) return 1 ;;
+    esac
+    return $?
+  fi
+  type ebtables >/dev/null 2>&1
+}
+
+_merv_dhcp_ebtables() {
+  if [ -n "${MERV_DHCP_HOLD_EBTABLES:-}" ]; then
+    _merv_dhcp_has_ebtables || return 127
+    "$MERV_DHCP_HOLD_EBTABLES" "$@"
+  else
+    ebtables "$@"
+  fi
+}
+
+_merv_dhcp_list_chain() {
+  _merv_dhcp_ebtables -t filter -L "$1" --Lx 2>/dev/null ||
+    _merv_dhcp_ebtables -t filter -L "$1" 2>/dev/null
+}
+
+# Prints: exact-rule-count target-jump-count total-rule-count.
+_merv_dhcp_rule_stats() {
+  local _mdrs_chain="$1" _mdrs_exact="$2" _mdrs_target="${3:-}" _mdrs_dump
+  _mdrs_dump=$(_merv_dhcp_list_chain "$_mdrs_chain") || return 1
+  printf '%s\n' "$_mdrs_dump" | awk -v chain="$_mdrs_chain" \
+    -v exact="$_mdrs_exact" -v target="$_mdrs_target" '
+    function normalize(s, p) {
+      gsub(/[[:space:]]+/, " ", s)
+      sub(/^ /, "", s); sub(/ $/, "", s)
+      p = "-A " chain " "
+      if (index(s, p) > 0) s = substr(s, index(s, p) + length(p))
+      return s
+    }
+    {
+      line = normalize($0)
+      if (line !~ /^-/) next
+      total++
+      if (line == exact) exact_count++
+      if (target != "") {
+        n = split(line, word, " ")
+        for (i = 1; i < n; i++)
+          if (word[i] == "-j" && word[i + 1] == target) { target_count++; break }
+      }
+    }
+    END { print exact_count + 0, target_count + 0, total + 0 }
+  '
+}
+
+_merv_dhcp_first_target_rule() {
+  local _mdftr_chain="$1" _mdftr_target="$2" _mdftr_dump
+  _mdftr_dump=$(_merv_dhcp_list_chain "$_mdftr_chain") || return 1
+  printf '%s\n' "$_mdftr_dump" | awk -v chain="$_mdftr_chain" -v target="$_mdftr_target" '
+    function normalize(s, p) {
+      gsub(/[[:space:]]+/, " ", s)
+      sub(/^ /, "", s); sub(/ $/, "", s)
+      p = "-A " chain " "
+      if (index(s, p) > 0) s = substr(s, index(s, p) + length(p))
+      return s
+    }
+    {
+      line = normalize($0)
+      if (line !~ /^-/) next
+      n = split(line, word, " ")
+      for (i = 1; i < n; i++)
+        if (word[i] == "-j" && word[i + 1] == target) { print line; exit }
+    }
+  '
+}
+
+_merv_dhcp_remove_target_jumps() {
+  local _mdrtj_parent="$1" _mdrtj_rule _mdrtj_count=0
+  while :; do
+    _mdrtj_rule=$(_merv_dhcp_first_target_rule "$_mdrtj_parent" "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
+    [ -n "$_mdrtj_rule" ] || return 0
+    set -- $_mdrtj_rule
+    _merv_dhcp_ebtables -t filter -D "$_mdrtj_parent" "$@" 2>/dev/null || return 4
+    _mdrtj_count=$((_mdrtj_count + 1))
+    [ "$_mdrtj_count" -lt 128 ] || return 4
+  done
+}
+
+merv_dhcp_hold_rules_observed() {
+  local _mdro_drop _mdro_forward _mdro_input _mdro_chain
+  _merv_dhcp_has_ebtables || {
+    printf 'ebtables=unavailable\n'
+    return 3
+  }
+  if _merv_dhcp_list_chain "$MERV_DHCP_HOLD_CHAIN" >/dev/null 2>&1; then
+    _mdro_chain=yes
+    _mdro_drop=$(_merv_dhcp_rule_stats "$MERV_DHCP_HOLD_CHAIN" \
+      "-p IPv4 --ip-proto udp --ip-dport 67 -j DROP" "")
+  else
+    _mdro_chain=no
+    _mdro_drop="0 0 0"
+  fi
+  _mdro_forward=$(_merv_dhcp_rule_stats FORWARD "-j $MERV_DHCP_HOLD_CHAIN" "$MERV_DHCP_HOLD_CHAIN") || _mdro_forward="0 0 0"
+  _mdro_input=$(_merv_dhcp_rule_stats INPUT "-j $MERV_DHCP_HOLD_CHAIN" "$MERV_DHCP_HOLD_CHAIN") || _mdro_input="0 0 0"
+  set -- $_mdro_drop
+  printf 'chain=%s drop_exact=%s chain_rules=%s ' "$_mdro_chain" "${1:-0}" "${3:-0}"
+  set -- $_mdro_forward
+  printf 'forward_exact=%s forward_target=%s ' "${1:-0}" "${2:-0}"
+  set -- $_mdro_input
+  printf 'input_exact=%s input_target=%s\n' "${1:-0}" "${2:-0}"
+  return 0
+}
+
+merv_dhcp_hold_rules_present() {
+  local _mdrp_drop _mdrp_forward _mdrp_input
+  merv_dhcp_hold_valid_id "$MERV_DHCP_HOLD_CHAIN" || return 1
+  _merv_dhcp_has_ebtables || return 3
+  _merv_dhcp_list_chain "$MERV_DHCP_HOLD_CHAIN" >/dev/null 2>&1 || return 4
+  _mdrp_drop=$(_merv_dhcp_rule_stats "$MERV_DHCP_HOLD_CHAIN" \
+    "-p IPv4 --ip-proto udp --ip-dport 67 -j DROP" "") || return 4
+  _mdrp_forward=$(_merv_dhcp_rule_stats FORWARD "-j $MERV_DHCP_HOLD_CHAIN" "$MERV_DHCP_HOLD_CHAIN") || return 4
+  _mdrp_input=$(_merv_dhcp_rule_stats INPUT "-j $MERV_DHCP_HOLD_CHAIN" "$MERV_DHCP_HOLD_CHAIN") || return 4
+  set -- $_mdrp_drop
+  [ "${1:-0}" -eq 1 ] && [ "${3:-0}" -eq 1 ] || return 4
+  set -- $_mdrp_forward
+  [ "${1:-0}" -eq 1 ] && [ "${2:-0}" -eq 1 ] || return 4
+  set -- $_mdrp_input
+  [ "${1:-0}" -eq 1 ] && [ "${2:-0}" -eq 1 ] || return 4
+  return 0
+}
+
+merv_dhcp_hold_rules_absent() {
+  local _mdra_forward _mdra_input
+  _merv_dhcp_has_ebtables || return 3
+  _merv_dhcp_list_chain "$MERV_DHCP_HOLD_CHAIN" >/dev/null 2>&1 && return 4
+  _mdra_forward=$(_merv_dhcp_rule_stats FORWARD "" "$MERV_DHCP_HOLD_CHAIN") || return 4
+  _mdra_input=$(_merv_dhcp_rule_stats INPUT "" "$MERV_DHCP_HOLD_CHAIN") || return 4
+  set -- $_mdra_forward
+  [ "${2:-0}" -eq 0 ] || return 4
+  set -- $_mdra_input
+  [ "${2:-0}" -eq 0 ] || return 4
+  return 0
+}
+
+_merv_dhcp_enforce_fail() {
+  local _mdef_rc="$1" _mdef_reason="$2" _mdef_observed
+  _mdef_observed=$(merv_dhcp_hold_rules_observed 2>/dev/null || printf 'unavailable')
+  merv_dhcp_hold_record_fault "$_mdef_reason" hold "$_mdef_observed" >/dev/null 2>&1 || :
+  return "$_mdef_rc"
+}
+
+_merv_dhcp_hold_enforce_locked() {
+  local _mdhe_point
+  merv_dhcp_hold_state_init || return $?
+  merv_dhcp_hold_valid_id "$MERV_DHCP_HOLD_CHAIN" || return 1
+  _merv_dhcp_has_ebtables || {
+    merv_dhcp_hold_record_fault ebtables-unavailable hold unavailable >/dev/null 2>&1 || :
+    return 3
+  }
+
+  # A watchdog tick against an already exact gate must be read-only. Rebuilding
+  # the same rules every second briefly removed each parent jump before
+  # reinserting it, creating an observable FORWARD-only gap on real ebtables.
+  # Firmware-flushed or otherwise non-exact state still takes the repair path.
+  merv_dhcp_hold_rules_present && return 0
+
+  for _mdhe_point in enforce-before-chain enforce-after-chain enforce-after-drop \
+    enforce-after-forward enforce-after-input enforce-before-verify; do
+    case "$_mdhe_point" in
+      enforce-before-chain) ;;
+      enforce-after-chain)
+        _merv_dhcp_ebtables -t filter -N "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
+          _merv_dhcp_list_chain "$MERV_DHCP_HOLD_CHAIN" >/dev/null 2>&1 || \
+          { _merv_dhcp_enforce_fail 4 chain-create-failed; return $?; }
+        ;;
+      enforce-after-drop)
+        _merv_dhcp_ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
+          { _merv_dhcp_enforce_fail 4 chain-flush-failed; return $?; }
+        _merv_dhcp_ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" \
+          -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || \
+          { _merv_dhcp_enforce_fail 4 drop-install-failed; return $?; }
+        ;;
+      enforce-after-forward)
+        _merv_dhcp_remove_target_jumps FORWARD || \
+          { _merv_dhcp_enforce_fail 4 forward-cleanup-failed; return $?; }
+        _merv_dhcp_ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
+          { _merv_dhcp_enforce_fail 4 forward-install-failed; return $?; }
+        ;;
+      enforce-after-input)
+        _merv_dhcp_remove_target_jumps INPUT || \
+          { _merv_dhcp_enforce_fail 4 input-cleanup-failed; return $?; }
+        _merv_dhcp_ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
+          { _merv_dhcp_enforce_fail 4 input-install-failed; return $?; }
+        ;;
+      enforce-before-verify) ;;
+    esac
+    if ! merv_dhcp_hold_fault_checkpoint "$_mdhe_point"; then
+      _merv_dhcp_enforce_fail 4 checkpoint-interrupted
+      return 4
+    fi
+  done
+
+  merv_dhcp_hold_rules_present || {
+    _merv_dhcp_enforce_fail 4 exact-verification-failed
+    return 4
+  }
+  return 0
+}
+
+merv_dhcp_hold_enforce() {
+  local _mdhe_nonce _mdhe_rc
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhe_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_hold_enforce_locked
+  _mdhe_rc=$?
+  merv_dhcp_state_lock_release "$_mdhe_nonce" || return 2
+  return "$_mdhe_rc"
+}
+
+_merv_dhcp_hold_rules_remove_locked() {
+  local _mdhrr_observed
+  merv_dhcp_hold_state_init || return $?
+  merv_dhcp_hold_valid_id "$MERV_DHCP_HOLD_CHAIN" || return 1
+  _merv_dhcp_has_ebtables || {
+    merv_dhcp_hold_record_fault cleanup-unavailable clear unavailable >/dev/null 2>&1 || :
+    return 3
+  }
+  _merv_dhcp_remove_target_jumps FORWARD || {
+    merv_dhcp_hold_record_fault forward-remove-failed clear mismatch >/dev/null 2>&1 || :
+    return 4
+  }
+  _merv_dhcp_remove_target_jumps INPUT || {
+    merv_dhcp_hold_record_fault input-remove-failed clear mismatch >/dev/null 2>&1 || :
+    return 4
+  }
+  if _merv_dhcp_list_chain "$MERV_DHCP_HOLD_CHAIN" >/dev/null 2>&1; then
+    _merv_dhcp_ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || return 4
+    _merv_dhcp_ebtables -t filter -X "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || return 4
+  fi
+  merv_dhcp_hold_rules_absent || {
+    _mdhrr_observed=$(merv_dhcp_hold_rules_observed 2>/dev/null || printf 'unavailable')
+    merv_dhcp_hold_record_fault cleanup-mismatch clear "$_mdhrr_observed" >/dev/null 2>&1 || :
+    return 4
+  }
+  return 0
+}
+
+merv_dhcp_hold_rules_remove() {
+  local _mdhrr_nonce _mdhrr_rc
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhrr_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_hold_rules_remove_locked
+  _mdhrr_rc=$?
+  merv_dhcp_state_lock_release "$_mdhrr_nonce" || return 2
+  return "$_mdhrr_rc"
+}
+
+_merv_dhcp_atomic_field() {
+  local _mdaf_dir="$1" _mdaf_name="$2" _mdaf_value="$3" _mdaf_tmp
+  [ -d "$_mdaf_dir" ] || return 2
+  case "$_mdaf_name" in
+    owner_type|run_id|pid|proc_start_time|created_epoch|phase|reason|parent_run_id|handoff_id|heartbeat_epoch|ready|verification_id|owner_token_reference|requested_epoch|source|handoff_state|parent_owner_type|parent_token_reference|child_owner_type|ack_child_run_id|ack_child_token_reference|ack_epoch|completed_epoch|parent_retired_epoch|coalesced_epoch|failed_epoch|failure_reason|failed_interfaces|expected_bridges|observed_bridges|missing_rules|asus_work|suggested_action|last_retry_epoch) ;;
+    *) return 1 ;;
+  esac
+  _mdaf_tmp="$_mdaf_dir/.${_mdaf_name}.tmp.$$"
+  printf '%s\n' "$_mdaf_value" > "$_mdaf_tmp" 2>/dev/null || return 2
+  mv "$_mdaf_tmp" "$_mdaf_dir/$_mdaf_name" 2>/dev/null || return 2
+  return 0
+}
+
+_merv_dhcp_record_remove_locked() {
+  local _mdrr_kind="$1" _mdrr_id="$2" _mdrr_dir
+  merv_dhcp_hold_valid_id "$_mdrr_id" || return 1
+  case "$_mdrr_kind" in
+    intents|owners|failsafe|handoffs) ;;
+    *) return 1 ;;
+  esac
+  _mdrr_dir="$MERV_DHCP_HOLD_STATE_ROOT/$_mdrr_kind/$_mdrr_id"
+  [ -d "$_mdrr_dir" ] || return 0
+  rm -f "$_mdrr_dir/owner_type" "$_mdrr_dir/run_id" "$_mdrr_dir/pid" \
+    "$_mdrr_dir/proc_start_time" "$_mdrr_dir/created_epoch" \
+    "$_mdrr_dir/phase" "$_mdrr_dir/reason" "$_mdrr_dir/parent_run_id" \
+    "$_mdrr_dir/handoff_id" "$_mdrr_dir/heartbeat_epoch" \
+    "$_mdrr_dir/verification_id" "$_mdrr_dir/owner_token_reference" \
+    "$_mdrr_dir/requested_epoch" "$_mdrr_dir/source" \
+    "$_mdrr_dir/handoff_state" "$_mdrr_dir/parent_owner_type" \
+    "$_mdrr_dir/parent_token_reference" "$_mdrr_dir/child_owner_type" \
+    "$_mdrr_dir/ack_child_run_id" "$_mdrr_dir/ack_child_token_reference" \
+    "$_mdrr_dir/ack_epoch" "$_mdrr_dir/completed_epoch" \
+    "$_mdrr_dir/parent_retired_epoch" "$_mdrr_dir/coalesced_epoch" \
+    "$_mdrr_dir/failed_epoch" "$_mdrr_dir/failure_reason" \
+    "$_mdrr_dir/failed_interfaces" "$_mdrr_dir/expected_bridges" \
+    "$_mdrr_dir/observed_bridges" "$_mdrr_dir/missing_rules" \
+    "$_mdrr_dir/asus_work" "$_mdrr_dir/suggested_action" \
+    "$_mdrr_dir/last_retry_epoch" \
+    "$_mdrr_dir/ready" 2>/dev/null || return 2
+  rmdir "$_mdrr_dir" 2>/dev/null || return 2
+  return 0
+}
+
+_merv_dhcp_pending_remove_locked() {
+  local _mdpr_dir="$1"
+  case "$_mdpr_dir" in "$MERV_DHCP_HOLD_STATE_ROOT/owners/".*.pending.*) ;; *) return 1 ;; esac
+  [ -d "$_mdpr_dir" ] || return 0
+  rm -f "$_mdpr_dir/owner_type" "$_mdpr_dir/run_id" "$_mdpr_dir/pid" \
+    "$_mdpr_dir/proc_start_time" "$_mdpr_dir/created_epoch" \
+    "$_mdpr_dir/phase" "$_mdpr_dir/reason" "$_mdpr_dir/parent_run_id" \
+    "$_mdpr_dir/handoff_id" "$_mdpr_dir/heartbeat_epoch" \
+    "$_mdpr_dir/verification_id" "$_mdpr_dir/ready" 2>/dev/null || return 2
+  rmdir "$_mdpr_dir" 2>/dev/null || return 2
+  return 0
+}
+
+_merv_dhcp_owner_type_valid() {
+  case "$1" in boot-watchdog|manager|heal|recovery) return 0 ;; *) return 1 ;; esac
+}
+
+_merv_dhcp_short_token() {
+  printf '%s' "$1" | cut -c 1-12
+}
+
+_merv_dhcp_owner_load_locked() {
+  local _mdol_token="$1" _mdol_dir
+  merv_dhcp_hold_valid_id "$_mdol_token" || return 1
+  _mdol_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_mdol_token"
+  [ -d "$_mdol_dir" ] && [ -f "$_mdol_dir/ready" ] || return 1
+  _MERV_DHCP_OWNER_DIR="$_mdol_dir"
+  _MERV_DHCP_OWNER_TYPE=$(cat "$_mdol_dir/owner_type" 2>/dev/null || printf '')
+  _MERV_DHCP_OWNER_RUN_ID=$(cat "$_mdol_dir/run_id" 2>/dev/null || printf '')
+  _MERV_DHCP_OWNER_PID=$(cat "$_mdol_dir/pid" 2>/dev/null || printf '')
+  _MERV_DHCP_OWNER_START=$(cat "$_mdol_dir/proc_start_time" 2>/dev/null || printf '')
+  _MERV_DHCP_OWNER_PHASE=$(cat "$_mdol_dir/phase" 2>/dev/null || printf '')
+  _merv_dhcp_owner_type_valid "$_MERV_DHCP_OWNER_TYPE" || return 1
+  merv_dhcp_hold_valid_id "$_MERV_DHCP_OWNER_RUN_ID" || return 1
+  case "$_MERV_DHCP_OWNER_PHASE" in protected|mutating|handoff_wait|verified) ;; *) return 1 ;; esac
+  return 0
+}
+
+_merv_dhcp_owner_is_caller_locked() {
+  local _mdoic_proc _mdoic_start
+  _merv_dhcp_owner_load_locked "$1" || return 1
+  [ "$_MERV_DHCP_OWNER_PID" = "$$" ] || return 1
+  _mdoic_proc=$(merv_dhcp_proc_root) || return 1
+  _mdoic_start=$(merv_proc_start_time "$$" "$_mdoic_proc" 2>/dev/null) || return 1
+  [ "$_MERV_DHCP_OWNER_START" = "$_mdoic_start" ] || return 1
+  merv_process_identity_matches "$_MERV_DHCP_OWNER_PID" "$_MERV_DHCP_OWNER_START" "$_mdoic_proc"
+}
+
+_merv_dhcp_required_locked() {
+  local _mdreq_dir
+  [ -f "${MERV_DHCP_HOLD_LEGACY_MARKER:-${LOCKDIR}/merv_dhcp_hold.active}" ] && return 0
+  for _mdreq_dir in "$MERV_DHCP_HOLD_STATE_ROOT/owners/"*; do
+    [ -d "$_mdreq_dir" ] && [ -f "$_mdreq_dir/ready" ] && return 0
+  done
+  for _mdreq_dir in "$MERV_DHCP_HOLD_STATE_ROOT/failsafe/"*; do
+    [ -d "$_mdreq_dir" ] && [ -f "$_mdreq_dir/ready" ] && return 0
+  done
+  return 1
+}
+
+merv_dhcp_hold_required() {
+  merv_dhcp_hold_state_root_valid || return 1
+  _merv_dhcp_required_locked
+}
+
+_merv_dhcp_rules_reconcile_locked() {
+  if _merv_dhcp_required_locked; then
+    _merv_dhcp_hold_enforce_locked
+  else
+    _merv_dhcp_hold_rules_remove_locked
+  fi
+}
+
+_merv_dhcp_queue_recovery_locked() {
+  local _mdqr_reason="$1" _mdqr_tmp
+  merv_dhcp_hold_valid_id "$_mdqr_reason" || _mdqr_reason="security-failsafe"
+  _mdqr_tmp="$MERV_DHCP_HOLD_STATE_ROOT/.recovery.pending.tmp.$$"
+  {
+    printf 'reason=%s\n' "$_mdqr_reason"
+    printf 'requested_epoch=%s\n' "$(date +%s 2>/dev/null || printf '0')"
+    printf 'source=dhcp-hold-reconcile\n'
+  } > "$_mdqr_tmp" 2>/dev/null || return 2
+  mv "$_mdqr_tmp" "$MERV_DHCP_HOLD_STATE_ROOT/recovery.pending" 2>/dev/null || return 2
+  return 0
+}
+
+_merv_dhcp_failsafe_create_locked() {
+  local _mdfc_type="$1" _mdfc_run="$2" _mdfc_phase="$3" _mdfc_reason="$4" _mdfc_token="$5"
+  local _mdfc_now _mdfc_id _mdfc_tmp _mdfc_dir
+  _merv_dhcp_owner_type_valid "$_mdfc_type" || _mdfc_type=recovery
+  merv_dhcp_hold_valid_id "$_mdfc_run" || _mdfc_run=unknown
+  merv_dhcp_hold_valid_id "$_mdfc_reason" || _mdfc_reason=interrupted-owner
+  _mdfc_now=$(date +%s 2>/dev/null || printf '0')
+  _mdfc_id="${_mdfc_type}-${_mdfc_run}-${_mdfc_now}-$$"
+  merv_dhcp_hold_valid_id "$_mdfc_id" || return 1
+  _mdfc_dir="$MERV_DHCP_HOLD_STATE_ROOT/failsafe/$_mdfc_id"
+  [ ! -e "$_mdfc_dir" ] || _mdfc_dir="${_mdfc_dir}-$(_merv_dhcp_nonce)"
+  _mdfc_tmp="${_mdfc_dir}.pending"
+  mkdir "$_mdfc_tmp" 2>/dev/null || return 2
+  _merv_dhcp_atomic_field "$_mdfc_tmp" owner_type "$_mdfc_type" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" run_id "$_mdfc_run" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" phase "$_mdfc_phase" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" reason "$_mdfc_reason" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" created_epoch "$_mdfc_now" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" owner_token_reference "$_mdfc_token" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" failed_interfaces "${MERV_DHCP_FAILSAFE_FAILED_INTERFACES:-unknown}" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" expected_bridges "${MERV_DHCP_FAILSAFE_EXPECTED_BRIDGES:-unknown}" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" observed_bridges "${MERV_DHCP_FAILSAFE_OBSERVED_BRIDGES:-unknown}" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" missing_rules "${MERV_DHCP_FAILSAFE_MISSING_RULES:-unknown}" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" asus_work "${MERV_DHCP_FAILSAFE_ASUS_WORK:-unknown}" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" suggested_action "${MERV_DHCP_FAILSAFE_SUGGESTED_ACTION:-mervlan-recovery}" &&
+    _merv_dhcp_atomic_field "$_mdfc_tmp" ready 1 || return 2
+  mv "$_mdfc_tmp" "$_mdfc_dir" 2>/dev/null || return 2
+  _merv_dhcp_queue_recovery_locked "$_mdfc_reason" || :
+  return 0
+}
+
+_merv_dhcp_phase_set_locked() {
+  local _mdps_token="$1" _mdps_phase="$2" _mdps_reason="${3:-}"
+  _merv_dhcp_owner_is_caller_locked "$_mdps_token" || return 1
+  _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" phase "$_mdps_phase" || return 2
+  [ -z "$_mdps_reason" ] || _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" reason "$_mdps_reason" || return 2
+  _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" heartbeat_epoch "$(date +%s 2>/dev/null || printf '0')" || return 2
+  return 0
+}
+
+_merv_dhcp_acquire_abort_locked() {
+  local _mdaa_token="$1" _mdaa_pending="$2"
+  [ -z "$_mdaa_pending" ] || _merv_dhcp_pending_remove_locked "$_mdaa_pending" || :
+  _merv_dhcp_record_remove_locked owners "$_mdaa_token" || :
+  _merv_dhcp_record_remove_locked intents "$_mdaa_token" || :
+  _merv_dhcp_rules_reconcile_locked || :
+  return 0
+}
+
+merv_dhcp_hold_acquire() {
+  local _mdac_type="$1" _mdac_run="${2:-}" _mdac_parent="${3:-}"
+  local _mdac_now _mdac_proc _mdac_start _mdac_token _mdac_intent
+  local _mdac_pending="" _mdac_owner _mdac_nonce _mdac_rc
+  _merv_dhcp_owner_type_valid "$_mdac_type" || return 1
+  _mdac_now=$(date +%s 2>/dev/null || printf '0')
+  [ -n "$_mdac_run" ] || _mdac_run="${_mdac_type}-${_mdac_now}-$$"
+  merv_dhcp_hold_valid_id "$_mdac_run" || return 1
+  [ -z "$_mdac_parent" ] || merv_dhcp_hold_valid_id "$_mdac_parent" || return 1
+  _mdac_proc=$(merv_dhcp_proc_root) || return 1
+  _mdac_start=$(merv_proc_start_time "$$" "$_mdac_proc" 2>/dev/null) || return 1
+  _mdac_token="${_mdac_type}.${_mdac_run}.${_mdac_now}.$$.$_mdac_start.$(_merv_dhcp_nonce)"
+  merv_dhcp_hold_valid_id "$_mdac_token" || return 1
+
+  merv_dhcp_state_lock_acquire || return 2
+  _mdac_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _mdac_intent="$MERV_DHCP_HOLD_STATE_ROOT/intents/$_mdac_token"
+  mkdir "$_mdac_intent" 2>/dev/null || { merv_dhcp_state_lock_release "$_mdac_nonce" || :; return 2; }
+  _merv_dhcp_atomic_field "$_mdac_intent" owner_type "$_mdac_type" &&
+    _merv_dhcp_atomic_field "$_mdac_intent" run_id "$_mdac_run" &&
+    _merv_dhcp_atomic_field "$_mdac_intent" pid "$$" &&
+    _merv_dhcp_atomic_field "$_mdac_intent" proc_start_time "$_mdac_start" &&
+    _merv_dhcp_atomic_field "$_mdac_intent" created_epoch "$_mdac_now" &&
+    _merv_dhcp_atomic_field "$_mdac_intent" phase intent &&
+    _merv_dhcp_atomic_field "$_mdac_intent" reason acquisition || {
+      _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+      merv_dhcp_state_lock_release "$_mdac_nonce" || :
+      return 2
+    }
+  [ -z "$_mdac_parent" ] || _merv_dhcp_atomic_field "$_mdac_intent" parent_run_id "$_mdac_parent" || {
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 2
+  }
+  if ! merv_dhcp_hold_fault_checkpoint acquire-intent-published; then
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 4
+  fi
+
+  _merv_dhcp_hold_enforce_locked || {
+    _mdac_rc=$?
+    merv_dhcp_hold_record_fault acquire-enforcement-failed hold unavailable >/dev/null 2>&1 || :
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return "$_mdac_rc"
+  }
+  if ! merv_dhcp_hold_fault_checkpoint acquire-rules-enforced; then
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 4
+  fi
+
+  _mdac_pending="$MERV_DHCP_HOLD_STATE_ROOT/owners/.${_mdac_token}.pending.$$"
+  _mdac_owner="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_mdac_token"
+  mkdir "$_mdac_pending" 2>/dev/null || {
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 2
+  }
+  _merv_dhcp_atomic_field "$_mdac_pending" owner_type "$_mdac_type" &&
+    _merv_dhcp_atomic_field "$_mdac_pending" run_id "$_mdac_run" &&
+    _merv_dhcp_atomic_field "$_mdac_pending" pid "$$" &&
+    _merv_dhcp_atomic_field "$_mdac_pending" proc_start_time "$_mdac_start" &&
+    _merv_dhcp_atomic_field "$_mdac_pending" created_epoch "$_mdac_now" &&
+    _merv_dhcp_atomic_field "$_mdac_pending" phase protected &&
+    _merv_dhcp_atomic_field "$_mdac_pending" reason acquisition-complete || {
+      _merv_dhcp_acquire_abort_locked "$_mdac_token" "$_mdac_pending"
+      merv_dhcp_state_lock_release "$_mdac_nonce" || :
+      return 2
+    }
+  [ -z "$_mdac_parent" ] || _merv_dhcp_atomic_field "$_mdac_pending" parent_run_id "$_mdac_parent" || {
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" "$_mdac_pending"
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 2
+  }
+  if ! merv_dhcp_hold_fault_checkpoint acquire-owner-staged; then
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" "$_mdac_pending"
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 4
+  fi
+  _merv_dhcp_atomic_field "$_mdac_pending" ready 1 || {
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" "$_mdac_pending"
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 2
+  }
+  mv "$_mdac_pending" "$_mdac_owner" 2>/dev/null || {
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" "$_mdac_pending"
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 2
+  }
+  _mdac_pending=""
+  if ! merv_dhcp_hold_fault_checkpoint acquire-owner-published; then
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 4
+  fi
+  _merv_dhcp_record_remove_locked intents "$_mdac_token" || {
+    _merv_dhcp_acquire_abort_locked "$_mdac_token" ""
+    merv_dhcp_state_lock_release "$_mdac_nonce" || :
+    return 2
+  }
+  merv_dhcp_state_lock_release "$_mdac_nonce" || return 2
+  MERV_DHCP_HOLD_TOKEN="$_mdac_token"
+  _merv_dhcp_log info "owner acquired type=$_mdac_type run=$_mdac_run token=$(_merv_dhcp_short_token "$_mdac_token")"
+  return 0
+}
+
+merv_dhcp_hold_mark_mutating() {
+  local _mdmm_token="$1" _mdmm_reason="${2:-mutation}" _mdmm_nonce
+  merv_dhcp_hold_valid_id "$_mdmm_reason" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdmm_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdmm_token" || { merv_dhcp_state_lock_release "$_mdmm_nonce" || :; return 1; }
+  case "$_MERV_DHCP_OWNER_PHASE" in
+    protected) _merv_dhcp_phase_set_locked "$_mdmm_token" mutating "$_mdmm_reason" || { merv_dhcp_state_lock_release "$_mdmm_nonce" || :; return 2; } ;;
+    mutating) ;;
+    *) merv_dhcp_state_lock_release "$_mdmm_nonce" || :; return 1 ;;
+  esac
+  if ! merv_dhcp_hold_fault_checkpoint mutate-phase-published; then
+    merv_dhcp_state_lock_release "$_mdmm_nonce" || :
+    return 4
+  fi
+  merv_dhcp_state_lock_release "$_mdmm_nonce" || return 2
+  _merv_dhcp_log info "mutation begun token=$(_merv_dhcp_short_token "$_mdmm_token") reason=$_mdmm_reason"
+  return 0
+}
+
+merv_dhcp_hold_mark_handoff_wait() {
+  local _mdhw_token="$1" _mdhw_handoff="$2" _mdhw_nonce
+  merv_dhcp_hold_valid_id "$_mdhw_handoff" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhw_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdhw_token" || { merv_dhcp_state_lock_release "$_mdhw_nonce" || :; return 1; }
+  case "$_MERV_DHCP_OWNER_PHASE" in
+    protected|mutating) ;;
+    *) merv_dhcp_state_lock_release "$_mdhw_nonce" || :; return 1 ;;
+  esac
+  _merv_dhcp_phase_set_locked "$_mdhw_token" handoff_wait handoff-requested &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" handoff_id "$_mdhw_handoff" || {
+      merv_dhcp_state_lock_release "$_mdhw_nonce" || :
+      return 2
+    }
+  merv_dhcp_state_lock_release "$_mdhw_nonce" || return 2
+  return 0
+}
+
+_merv_dhcp_handoff_load_locked() {
+  local _mdhl_id="$1" _mdhl_dir
+  merv_dhcp_hold_valid_id "$_mdhl_id" || return 1
+  _mdhl_dir="$MERV_DHCP_HOLD_STATE_ROOT/handoffs/$_mdhl_id"
+  [ -d "$_mdhl_dir" ] && [ -f "$_mdhl_dir/ready" ] || return 1
+  _MERV_DHCP_HANDOFF_DIR="$_mdhl_dir"
+  _MERV_DHCP_HANDOFF_PARENT_TYPE=$(cat "$_mdhl_dir/parent_owner_type" 2>/dev/null || printf '')
+  _MERV_DHCP_HANDOFF_PARENT_RUN=$(cat "$_mdhl_dir/parent_run_id" 2>/dev/null || printf '')
+  _MERV_DHCP_HANDOFF_PARENT_TOKEN=$(cat "$_mdhl_dir/parent_token_reference" 2>/dev/null || printf '')
+  _MERV_DHCP_HANDOFF_CHILD_TYPE=$(cat "$_mdhl_dir/child_owner_type" 2>/dev/null || printf '')
+  _MERV_DHCP_HANDOFF_STATE=$(cat "$_mdhl_dir/handoff_state" 2>/dev/null || printf '')
+  _merv_dhcp_owner_type_valid "$_MERV_DHCP_HANDOFF_PARENT_TYPE" || return 1
+  _merv_dhcp_owner_type_valid "$_MERV_DHCP_HANDOFF_CHILD_TYPE" || return 1
+  merv_dhcp_hold_valid_id "$_MERV_DHCP_HANDOFF_PARENT_RUN" || return 1
+  merv_dhcp_hold_valid_id "$_MERV_DHCP_HANDOFF_PARENT_TOKEN" || return 1
+  case "$_MERV_DHCP_HANDOFF_STATE" in requested|acknowledged|completed|failed) ;; *) return 1 ;; esac
+  return 0
+}
+
+_merv_dhcp_handoff_ack_valid_locked() {
+  local _mdhav_id="$1" _mdhav_child_dir _mdhav_parent_dir
+  _merv_dhcp_handoff_load_locked "$_mdhav_id" || return 1
+  case "$_MERV_DHCP_HANDOFF_STATE" in acknowledged|completed) ;; *) return 1 ;; esac
+  _MERV_DHCP_HANDOFF_ACK_RUN=$(cat "$_MERV_DHCP_HANDOFF_DIR/ack_child_run_id" 2>/dev/null || printf '')
+  _MERV_DHCP_HANDOFF_ACK_TOKEN=$(cat "$_MERV_DHCP_HANDOFF_DIR/ack_child_token_reference" 2>/dev/null || printf '')
+  merv_dhcp_hold_valid_id "$_MERV_DHCP_HANDOFF_ACK_RUN" || return 1
+  merv_dhcp_hold_valid_id "$_MERV_DHCP_HANDOFF_ACK_TOKEN" || return 1
+  _mdhav_parent_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_MERV_DHCP_HANDOFF_PARENT_TOKEN"
+  if [ -d "$_mdhav_parent_dir" ] && [ -f "$_mdhav_parent_dir/ready" ]; then
+    [ "$(cat "$_mdhav_parent_dir/run_id" 2>/dev/null)" = "$_MERV_DHCP_HANDOFF_PARENT_RUN" ] || return 1
+    [ "$(cat "$_mdhav_parent_dir/handoff_id" 2>/dev/null)" = "$_mdhav_id" ] || return 1
+    [ "$(cat "$_mdhav_parent_dir/phase" 2>/dev/null)" = handoff_wait ] || return 1
+  else
+    [ -n "$(cat "$_MERV_DHCP_HANDOFF_DIR/parent_retired_epoch" 2>/dev/null)" ] || return 1
+  fi
+  _mdhav_child_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_MERV_DHCP_HANDOFF_ACK_TOKEN"
+  if [ -d "$_mdhav_child_dir" ] && [ -f "$_mdhav_child_dir/ready" ]; then
+    [ "$(cat "$_mdhav_child_dir/owner_type" 2>/dev/null)" = "$_MERV_DHCP_HANDOFF_CHILD_TYPE" ] || return 1
+    [ "$(cat "$_mdhav_child_dir/run_id" 2>/dev/null)" = "$_MERV_DHCP_HANDOFF_ACK_RUN" ] || return 1
+    [ "$(cat "$_mdhav_child_dir/parent_run_id" 2>/dev/null)" = "$_MERV_DHCP_HANDOFF_PARENT_RUN" ] || return 1
+    [ "$(cat "$_mdhav_child_dir/handoff_id" 2>/dev/null)" = "$_mdhav_id" ] || return 1
+    return 0
+  fi
+  [ "$_MERV_DHCP_HANDOFF_STATE" = completed ] &&
+    [ -n "$(cat "$_MERV_DHCP_HANDOFF_DIR/verification_id" 2>/dev/null)" ]
+}
+
+merv_dhcp_handoff_request() {
+  local _mdhr_token="$1" _mdhr_child="$2" _mdhr_id="${3:-}"
+  local _mdhr_now _mdhr_nonce _mdhr_tmp _mdhr_dir
+  _merv_dhcp_owner_type_valid "$_mdhr_child" || return 1
+  _mdhr_now=$(date +%s 2>/dev/null || printf '0')
+  [ -n "$_mdhr_id" ] || _mdhr_id="handoff-${_mdhr_now}-$$-$(_merv_dhcp_nonce)"
+  merv_dhcp_hold_valid_id "$_mdhr_id" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhr_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdhr_token" || {
+    merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+    return 1
+  }
+  case "$_MERV_DHCP_OWNER_PHASE" in protected|mutating) ;; *)
+    merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+    return 1
+  esac
+  _mdhr_dir="$MERV_DHCP_HOLD_STATE_ROOT/handoffs/$_mdhr_id"
+  [ ! -e "$_mdhr_dir" ] || {
+    merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+    return 1
+  }
+  _mdhr_tmp="${_mdhr_dir}.pending.$$"
+  mkdir "$_mdhr_tmp" 2>/dev/null || {
+    merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+    return 2
+  }
+  _merv_dhcp_atomic_field "$_mdhr_tmp" handoff_id "$_mdhr_id" &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" parent_owner_type "$_MERV_DHCP_OWNER_TYPE" &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" parent_run_id "$_MERV_DHCP_OWNER_RUN_ID" &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" parent_token_reference "$_mdhr_token" &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" child_owner_type "$_mdhr_child" &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" requested_epoch "$_mdhr_now" &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" handoff_state requested &&
+    _merv_dhcp_atomic_field "$_mdhr_tmp" ready 1 &&
+    mv "$_mdhr_tmp" "$_mdhr_dir" 2>/dev/null || {
+      rm -f "$_mdhr_tmp/"* 2>/dev/null || :
+      rmdir "$_mdhr_tmp" 2>/dev/null || :
+      merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+      return 2
+    }
+  merv_dhcp_state_lock_release "$_mdhr_nonce" || return 2
+  MERV_DHCP_HANDOFF_ID="$_mdhr_id"
+  _merv_dhcp_log info "handoff requested id=$_mdhr_id parent=$_MERV_DHCP_OWNER_RUN_ID child=$_mdhr_child"
+  return 0
+}
+
+merv_dhcp_handoff_ack() {
+  local _mdha_id="$1" _mdha_parent_run="$2" _mdha_child_token="$3"
+  local _mdha_nonce _mdha_now
+  merv_dhcp_hold_valid_id "$_mdha_parent_run" || {
+    _merv_dhcp_log error "handoff ack rejected: invalid parent run id=$_mdha_id"
+    return 1
+  }
+  merv_dhcp_state_lock_acquire || {
+    _merv_dhcp_log error "handoff ack failed: state lock unavailable id=$_mdha_id"
+    return 2
+  }
+  _mdha_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_handoff_load_locked "$_mdha_id" || {
+    _merv_dhcp_log error "handoff ack rejected: record missing/invalid id=$_mdha_id"
+    merv_dhcp_state_lock_release "$_mdha_nonce" || :
+    return 1
+  }
+  [ "$_MERV_DHCP_HANDOFF_STATE" = requested ] &&
+    [ "$_MERV_DHCP_HANDOFF_PARENT_RUN" = "$_mdha_parent_run" ] || {
+      _merv_dhcp_log error "handoff ack rejected: state/parent mismatch id=$_mdha_id state=$_MERV_DHCP_HANDOFF_STATE"
+      merv_dhcp_state_lock_release "$_mdha_nonce" || :
+      return 1
+    }
+  _merv_dhcp_owner_is_caller_locked "$_mdha_child_token" || {
+    _merv_dhcp_log error "handoff ack rejected: child owner identity mismatch id=$_mdha_id"
+    merv_dhcp_state_lock_release "$_mdha_nonce" || :
+    return 1
+  }
+  [ "$_MERV_DHCP_OWNER_TYPE" = "$_MERV_DHCP_HANDOFF_CHILD_TYPE" ] &&
+    [ "$(cat "$_MERV_DHCP_OWNER_DIR/parent_run_id" 2>/dev/null)" = "$_mdha_parent_run" ] || {
+      _merv_dhcp_log error "handoff ack rejected: child type/parent mismatch id=$_mdha_id"
+      merv_dhcp_state_lock_release "$_mdha_nonce" || :
+      return 1
+    }
+  _mdha_now=$(date +%s 2>/dev/null || printf '0')
+  _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" handoff_id "$_mdha_id" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" ack_child_run_id "$_MERV_DHCP_OWNER_RUN_ID" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" ack_child_token_reference "$_mdha_child_token" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" ack_epoch "$_mdha_now" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" handoff_state acknowledged || {
+      _merv_dhcp_log error "handoff ack failed: atomic publication error id=$_mdha_id"
+      merv_dhcp_state_lock_release "$_mdha_nonce" || :
+      return 2
+    }
+  merv_dhcp_state_lock_release "$_mdha_nonce" || return 2
+  _merv_dhcp_log info "handoff acknowledged id=$_mdha_id child=$_MERV_DHCP_OWNER_RUN_ID"
+  return 0
+}
+
+merv_dhcp_handoff_is_acknowledged() {
+  local _mdhia_id="$1" _mdhia_parent="$2" _mdhia_child="${3:-}" _mdhia_nonce _mdhia_rc=1
+  merv_dhcp_hold_valid_id "$_mdhia_parent" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhia_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  if _merv_dhcp_handoff_ack_valid_locked "$_mdhia_id" &&
+     [ "$_MERV_DHCP_HANDOFF_PARENT_RUN" = "$_mdhia_parent" ]; then
+    [ -z "$_mdhia_child" ] || [ "$_MERV_DHCP_HANDOFF_ACK_RUN" = "$_mdhia_child" ]
+    _mdhia_rc=$?
+  fi
+  merv_dhcp_state_lock_release "$_mdhia_nonce" || return 2
+  return "$_mdhia_rc"
+}
+
+merv_dhcp_handoff_wait_ack() {
+  local _mdhwa_id="$1" _mdhwa_parent="$2" _mdhwa_max="${3:-10}" _mdhwa_elapsed=0
+  case "$_mdhwa_max" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$_mdhwa_elapsed" -le "$_mdhwa_max" ]; do
+    merv_dhcp_handoff_is_acknowledged "$_mdhwa_id" "$_mdhwa_parent" && return 0
+    [ "$_mdhwa_elapsed" -eq "$_mdhwa_max" ] && break
+    sleep 1
+    _mdhwa_elapsed=$((_mdhwa_elapsed + 1))
+  done
+  return 1
+}
+
+merv_dhcp_handoff_fail() {
+  local _mdhf_id="$1" _mdhf_parent_token="$2" _mdhf_reason="$3"
+  local _mdhf_nonce _mdhf_now
+  merv_dhcp_hold_valid_id "$_mdhf_id" || return 1
+  merv_dhcp_hold_valid_id "$_mdhf_reason" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhf_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_handoff_load_locked "$_mdhf_id" || {
+    merv_dhcp_state_lock_release "$_mdhf_nonce" || :
+    return 1
+  }
+  case "$_MERV_DHCP_HANDOFF_STATE" in requested|acknowledged) ;; *)
+    merv_dhcp_state_lock_release "$_mdhf_nonce" || :
+    return 1
+  esac
+  _merv_dhcp_owner_is_caller_locked "$_mdhf_parent_token" || {
+    merv_dhcp_state_lock_release "$_mdhf_nonce" || :
+    return 1
+  }
+  [ "$_MERV_DHCP_OWNER_RUN_ID" = "$_MERV_DHCP_HANDOFF_PARENT_RUN" ] &&
+    [ "$_MERV_DHCP_HANDOFF_PARENT_TOKEN" = "$_mdhf_parent_token" ] &&
+    [ "$_MERV_DHCP_OWNER_PHASE" = handoff_wait ] &&
+    [ "$(cat "$_MERV_DHCP_OWNER_DIR/handoff_id" 2>/dev/null)" = "$_mdhf_id" ] || {
+      merv_dhcp_state_lock_release "$_mdhf_nonce" || :
+      return 1
+    }
+  _mdhf_now=$(date +%s 2>/dev/null || printf '0')
+  _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" failed_epoch "$_mdhf_now" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" failure_reason "$_mdhf_reason" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" handoff_state failed &&
+    _merv_dhcp_queue_recovery_locked handoff-failed || {
+      merv_dhcp_state_lock_release "$_mdhf_nonce" || :
+      return 2
+    }
+  merv_dhcp_state_lock_release "$_mdhf_nonce" || return 2
+  _merv_dhcp_log error "handoff failed id=$_mdhf_id reason=$_mdhf_reason"
+  return 0
+}
+
+merv_dhcp_handoff_parent_release() {
+  local _mdhpr_token="$1" _mdhpr_id="$2" _mdhpr_nonce _mdhpr_now _mdhpr_rc
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhpr_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdhpr_token" || {
+    merv_dhcp_state_lock_release "$_mdhpr_nonce" || :
+    return 1
+  }
+  [ "$_MERV_DHCP_OWNER_PHASE" = handoff_wait ] &&
+    [ "$(cat "$_MERV_DHCP_OWNER_DIR/handoff_id" 2>/dev/null)" = "$_mdhpr_id" ] &&
+    _merv_dhcp_handoff_ack_valid_locked "$_mdhpr_id" || {
+      merv_dhcp_state_lock_release "$_mdhpr_nonce" || :
+      return 1
+    }
+  [ "$_MERV_DHCP_HANDOFF_PARENT_TOKEN" = "$_mdhpr_token" ] || {
+    merv_dhcp_state_lock_release "$_mdhpr_nonce" || :
+    return 1
+  }
+  if [ "$_MERV_DHCP_HANDOFF_PARENT_TYPE" = boot-watchdog ] &&
+     [ "$_MERV_DHCP_HANDOFF_STATE" != completed ]; then
+    merv_dhcp_state_lock_release "$_mdhpr_nonce" || :
+    return 5
+  fi
+  _merv_dhcp_record_remove_locked owners "$_mdhpr_token" || {
+    merv_dhcp_state_lock_release "$_mdhpr_nonce" || :
+    return 2
+  }
+  _mdhpr_now=$(date +%s 2>/dev/null || printf '0')
+  _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" parent_retired_epoch "$_mdhpr_now" || :
+  _merv_dhcp_rules_reconcile_locked
+  _mdhpr_rc=$?
+  merv_dhcp_state_lock_release "$_mdhpr_nonce" || return 2
+  [ "$_mdhpr_rc" -eq 0 ] && _merv_dhcp_log info "handoff parent retired id=$_mdhpr_id"
+  return "$_mdhpr_rc"
+}
+
+merv_dhcp_handoff_child_verified() {
+  local _mdhcv_id="$1" _mdhcv_token="$2" _mdhcv_verification="$3"
+  local _mdhcv_nonce _mdhcv_now
+  merv_dhcp_hold_valid_id "$_mdhcv_verification" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhcv_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_handoff_ack_valid_locked "$_mdhcv_id" || {
+    merv_dhcp_state_lock_release "$_mdhcv_nonce" || :
+    return 1
+  }
+  [ "$_MERV_DHCP_HANDOFF_ACK_TOKEN" = "$_mdhcv_token" ] || {
+    merv_dhcp_state_lock_release "$_mdhcv_nonce" || :
+    return 1
+  }
+  _merv_dhcp_owner_is_caller_locked "$_mdhcv_token" || {
+    merv_dhcp_state_lock_release "$_mdhcv_nonce" || :
+    return 1
+  }
+  [ "$_MERV_DHCP_OWNER_PHASE" = verified ] || {
+    merv_dhcp_state_lock_release "$_mdhcv_nonce" || :
+    return 1
+  }
+  _mdhcv_now=$(date +%s 2>/dev/null || printf '0')
+  _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" verification_id "$_mdhcv_verification" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" completed_epoch "$_mdhcv_now" &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" handoff_state completed || {
+      merv_dhcp_state_lock_release "$_mdhcv_nonce" || :
+      return 2
+    }
+  merv_dhcp_state_lock_release "$_mdhcv_nonce" || return 2
+  _merv_dhcp_log info "handoff completed id=$_mdhcv_id verification=$_mdhcv_verification"
+  return 0
+}
+
+merv_dhcp_handoff_coalesce() {
+  local _mdhc_parent="$1" _mdhc_child="$2" _mdhc_reason="${3:-duplicate-event}"
+  local _mdhc_nonce _mdhc_dir _mdhc_state _mdhc_tmp _mdhc_found=1
+  _merv_dhcp_owner_type_valid "$_mdhc_parent" || return 1
+  _merv_dhcp_owner_type_valid "$_mdhc_child" || return 1
+  merv_dhcp_hold_valid_id "$_mdhc_reason" || _mdhc_reason=duplicate-event
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhc_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  for _mdhc_dir in "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/"*; do
+    [ -d "$_mdhc_dir" ] && [ -f "$_mdhc_dir/ready" ] || continue
+    [ "$(cat "$_mdhc_dir/parent_owner_type" 2>/dev/null)" = "$_mdhc_parent" ] || continue
+    [ "$(cat "$_mdhc_dir/child_owner_type" 2>/dev/null)" = "$_mdhc_child" ] || continue
+    _mdhc_state=$(cat "$_mdhc_dir/handoff_state" 2>/dev/null || printf '')
+    case "$_mdhc_state" in requested|acknowledged) _mdhc_found=0; break ;; esac
+  done
+  _mdhc_tmp="$MERV_DHCP_HOLD_STATE_ROOT/.${_mdhc_parent}.pending.tmp.$$"
+  {
+    printf 'reason=%s\n' "$_mdhc_reason"
+    printf 'requested_epoch=%s\n' "$(date +%s 2>/dev/null || printf '0')"
+    [ "$_mdhc_found" -ne 0 ] || printf 'attached_handoff=%s\n' "${_mdhc_dir##*/}"
+  } > "$_mdhc_tmp" 2>/dev/null &&
+    mv "$_mdhc_tmp" "$MERV_DHCP_HOLD_STATE_ROOT/${_mdhc_parent}.pending" 2>/dev/null || :
+  merv_dhcp_state_lock_release "$_mdhc_nonce" || return 2
+  return "$_mdhc_found"
+}
+
+merv_dhcp_hold_mark_verified() {
+  local _mdmv_token="$1" _mdmv_verification="$2" _mdmv_nonce
+  merv_dhcp_hold_valid_id "$_mdmv_verification" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdmv_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdmv_token" || { merv_dhcp_state_lock_release "$_mdmv_nonce" || :; return 1; }
+  case "$_MERV_DHCP_OWNER_PHASE" in mutating|protected) ;; *) merv_dhcp_state_lock_release "$_mdmv_nonce" || :; return 1 ;; esac
+  _merv_dhcp_phase_set_locked "$_mdmv_token" verified final-verification &&
+    _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" verification_id "$_mdmv_verification" || {
+      merv_dhcp_state_lock_release "$_mdmv_nonce" || :
+      return 2
+    }
+  if ! merv_dhcp_hold_fault_checkpoint verify-phase-published; then
+    merv_dhcp_state_lock_release "$_mdmv_nonce" || :
+    return 4
+  fi
+  merv_dhcp_state_lock_release "$_mdmv_nonce" || return 2
+  _merv_dhcp_log info "final verification passed token=$(_merv_dhcp_short_token "$_mdmv_token") verification=$_mdmv_verification"
+  return 0
+}
+
+_merv_dhcp_token_release() {
+  local _mdtr_token="$1" _mdtr_nonce _mdtr_rc
+  merv_dhcp_state_lock_acquire || return 2
+  _mdtr_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdtr_token" || { merv_dhcp_state_lock_release "$_mdtr_nonce" || :; return 1; }
+  case "$_MERV_DHCP_OWNER_PHASE" in protected|verified) ;; *) merv_dhcp_state_lock_release "$_mdtr_nonce" || :; return 5 ;; esac
+  _merv_dhcp_record_remove_locked owners "$_mdtr_token" || { merv_dhcp_state_lock_release "$_mdtr_nonce" || :; return 2; }
+  if ! merv_dhcp_hold_fault_checkpoint release-owner-removed; then
+    merv_dhcp_state_lock_release "$_mdtr_nonce" || :
+    return 4
+  fi
+  _merv_dhcp_rules_reconcile_locked
+  _mdtr_rc=$?
+  merv_dhcp_state_lock_release "$_mdtr_nonce" || return 2
+  [ "$_mdtr_rc" -eq 0 ] && _merv_dhcp_log info "own lease released token=$(_merv_dhcp_short_token "$_mdtr_token")"
+  return "$_mdtr_rc"
+}
+
+merv_dhcp_hold_abandon() {
+  local _mdab_token="$1" _mdab_reason="$2" _mdab_nonce _mdab_rc
+  merv_dhcp_hold_valid_id "$_mdab_reason" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdab_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  if ! _merv_dhcp_owner_is_caller_locked "$_mdab_token"; then
+    merv_dhcp_hold_record_fault abandon-identity-mismatch hold untouched >/dev/null 2>&1 || :
+    _merv_dhcp_queue_recovery_locked abandon-identity-mismatch || :
+    merv_dhcp_state_lock_release "$_mdab_nonce" || :
+    return 1
+  fi
+  case "$_MERV_DHCP_OWNER_PHASE" in
+    protected|verified)
+      _merv_dhcp_record_remove_locked owners "$_mdab_token" || { merv_dhcp_state_lock_release "$_mdab_nonce" || :; return 2; }
+      ;;
+    mutating|handoff_wait)
+      _merv_dhcp_failsafe_create_locked "$_MERV_DHCP_OWNER_TYPE" "$_MERV_DHCP_OWNER_RUN_ID" \
+        "$_MERV_DHCP_OWNER_PHASE" "$_mdab_reason" "$_mdab_token" || {
+        merv_dhcp_state_lock_release "$_mdab_nonce" || :
+        return 2
+      }
+      _merv_dhcp_record_remove_locked owners "$_mdab_token" || { merv_dhcp_state_lock_release "$_mdab_nonce" || :; return 2; }
+      _merv_dhcp_log error "lease converted to failsafe token=$(_merv_dhcp_short_token "$_mdab_token") reason=$_mdab_reason"
+      ;;
+    *) merv_dhcp_state_lock_release "$_mdab_nonce" || :; return 1 ;;
+  esac
+  _merv_dhcp_rules_reconcile_locked
+  _mdab_rc=$?
+  merv_dhcp_state_lock_release "$_mdab_nonce" || return 2
+  return "$_mdab_rc"
+}
+
+_merv_dhcp_reconcile_records_locked() {
+  local _mdrec_dir _mdrec_id _mdrec_pid _mdrec_start _mdrec_phase
+  local _mdrec_type _mdrec_run _mdrec_proc
+  _mdrec_proc=$(merv_dhcp_proc_root) || return 1
+
+  for _mdrec_dir in "$MERV_DHCP_HOLD_STATE_ROOT/intents/"*; do
+    [ -d "$_mdrec_dir" ] || continue
+    _mdrec_id=${_mdrec_dir##*/}
+    merv_dhcp_hold_valid_id "$_mdrec_id" || continue
+    _mdrec_pid=$(cat "$_mdrec_dir/pid" 2>/dev/null || printf '')
+    _mdrec_start=$(cat "$_mdrec_dir/proc_start_time" 2>/dev/null || printf '')
+    if ! merv_process_identity_matches "$_mdrec_pid" "$_mdrec_start" "$_mdrec_proc" 2>/dev/null; then
+      _merv_dhcp_record_remove_locked intents "$_mdrec_id" || :
+    fi
+  done
+
+  for _mdrec_dir in "$MERV_DHCP_HOLD_STATE_ROOT/owners/".*.pending.*; do
+    [ -d "$_mdrec_dir" ] || continue
+    _mdrec_pid=$(cat "$_mdrec_dir/pid" 2>/dev/null || printf '')
+    _mdrec_start=$(cat "$_mdrec_dir/proc_start_time" 2>/dev/null || printf '')
+    if ! merv_process_identity_matches "$_mdrec_pid" "$_mdrec_start" "$_mdrec_proc" 2>/dev/null; then
+      _merv_dhcp_pending_remove_locked "$_mdrec_dir" || :
+    fi
+  done
+
+  for _mdrec_dir in "$MERV_DHCP_HOLD_STATE_ROOT/owners/"*; do
+    [ -d "$_mdrec_dir" ] || continue
+    _mdrec_id=${_mdrec_dir##*/}
+    case "$_mdrec_id" in .*) continue ;; esac
+    if ! merv_dhcp_hold_valid_id "$_mdrec_id" || [ ! -f "$_mdrec_dir/ready" ]; then
+      merv_dhcp_hold_record_fault invalid-owner-record hold retained >/dev/null 2>&1 || :
+      continue
+    fi
+    _mdrec_pid=$(cat "$_mdrec_dir/pid" 2>/dev/null || printf '')
+    _mdrec_start=$(cat "$_mdrec_dir/proc_start_time" 2>/dev/null || printf '')
+    merv_process_identity_matches "$_mdrec_pid" "$_mdrec_start" "$_mdrec_proc" 2>/dev/null && continue
+    _mdrec_phase=$(cat "$_mdrec_dir/phase" 2>/dev/null || printf '')
+    _mdrec_type=$(cat "$_mdrec_dir/owner_type" 2>/dev/null || printf '')
+    _mdrec_run=$(cat "$_mdrec_dir/run_id" 2>/dev/null || printf '')
+    case "$_mdrec_phase" in
+      protected|verified)
+        _merv_dhcp_record_remove_locked owners "$_mdrec_id" || :
+        ;;
+      mutating|handoff_wait)
+        _merv_dhcp_failsafe_create_locked "$_mdrec_type" "$_mdrec_run" "$_mdrec_phase" \
+          interrupted-owner "$_mdrec_id" || :
+        _merv_dhcp_record_remove_locked owners "$_mdrec_id" || :
+        ;;
+      *)
+        merv_dhcp_hold_record_fault invalid-owner-phase hold retained >/dev/null 2>&1 || :
+        ;;
+    esac
+  done
+  return 0
+}
+
+_merv_dhcp_reconcile_handoffs_locked() {
+  local _mdrh_dir _mdrh_id _mdrh_state _mdrh_parent_type _mdrh_parent_token
+  local _mdrh_parent_dir _mdrh_child_dir _mdrh_pid _mdrh_start _mdrh_proc _mdrh_now
+  _mdrh_proc=$(merv_dhcp_proc_root) || return 1
+  for _mdrh_dir in "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/"*; do
+    [ -d "$_mdrh_dir" ] && [ -f "$_mdrh_dir/ready" ] || continue
+    _mdrh_id=${_mdrh_dir##*/}
+    if ! _merv_dhcp_handoff_load_locked "$_mdrh_id"; then
+      merv_dhcp_hold_record_fault invalid-handoff-record hold retained >/dev/null 2>&1 || :
+      continue
+    fi
+    _mdrh_state="$_MERV_DHCP_HANDOFF_STATE"
+    case "$_mdrh_state" in
+      requested)
+        _mdrh_parent_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_MERV_DHCP_HANDOFF_PARENT_TOKEN"
+        _mdrh_pid=$(cat "$_mdrh_parent_dir/pid" 2>/dev/null || printf '')
+        _mdrh_start=$(cat "$_mdrh_parent_dir/proc_start_time" 2>/dev/null || printf '')
+        if [ -f "$_mdrh_parent_dir/ready" ] &&
+           [ "$(cat "$_mdrh_parent_dir/run_id" 2>/dev/null)" = "$_MERV_DHCP_HANDOFF_PARENT_RUN" ] &&
+           [ "$(cat "$_mdrh_parent_dir/handoff_id" 2>/dev/null)" = "$_mdrh_id" ] &&
+           merv_process_identity_matches "$_mdrh_pid" "$_mdrh_start" "$_mdrh_proc" 2>/dev/null; then
+          continue
+        fi
+        _mdrh_now=$(date +%s 2>/dev/null || printf '0')
+        _merv_dhcp_atomic_field "$_mdrh_dir" failed_epoch "$_mdrh_now" &&
+          _merv_dhcp_atomic_field "$_mdrh_dir" failure_reason orphaned-parent &&
+          _merv_dhcp_atomic_field "$_mdrh_dir" handoff_state failed || return 1
+        _merv_dhcp_queue_recovery_locked handoff-failed || :
+        _merv_dhcp_log error "orphaned requested handoff failed id=$_mdrh_id"
+        ;;
+      acknowledged|completed)
+        if ! _merv_dhcp_handoff_ack_valid_locked "$_mdrh_id"; then
+          _mdrh_now=$(date +%s 2>/dev/null || printf '0')
+          _merv_dhcp_atomic_field "$_mdrh_dir" failed_epoch "$_mdrh_now" &&
+            _merv_dhcp_atomic_field "$_mdrh_dir" failure_reason invalid-successor &&
+            _merv_dhcp_atomic_field "$_mdrh_dir" handoff_state failed || return 1
+          _merv_dhcp_queue_recovery_locked handoff-failed || :
+          _merv_dhcp_log error "handoff successor invalid; marked failed id=$_mdrh_id"
+          continue
+        fi
+        if [ "$_mdrh_state" = acknowledged ]; then
+          _mdrh_child_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_MERV_DHCP_HANDOFF_ACK_TOKEN"
+          _mdrh_pid=$(cat "$_mdrh_child_dir/pid" 2>/dev/null || printf '')
+          _mdrh_start=$(cat "$_mdrh_child_dir/proc_start_time" 2>/dev/null || printf '')
+          if ! merv_process_identity_matches "$_mdrh_pid" "$_mdrh_start" "$_mdrh_proc" 2>/dev/null; then
+            _mdrh_now=$(date +%s 2>/dev/null || printf '0')
+            _merv_dhcp_atomic_field "$_mdrh_dir" failed_epoch "$_mdrh_now" &&
+              _merv_dhcp_atomic_field "$_mdrh_dir" failure_reason dead-successor &&
+              _merv_dhcp_atomic_field "$_mdrh_dir" handoff_state failed || return 1
+            _merv_dhcp_queue_recovery_locked handoff-failed || :
+            _merv_dhcp_log error "acknowledged handoff successor died; marked failed id=$_mdrh_id"
+            continue
+          fi
+        fi
+        _mdrh_parent_type="$_MERV_DHCP_HANDOFF_PARENT_TYPE"
+        _mdrh_parent_token="$_MERV_DHCP_HANDOFF_PARENT_TOKEN"
+        case "$_mdrh_parent_type:$_mdrh_state" in
+          heal:acknowledged|heal:completed|boot-watchdog:completed)
+            _mdrh_parent_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_mdrh_parent_token"
+            if [ -d "$_mdrh_parent_dir" ] && [ -f "$_mdrh_parent_dir/ready" ]; then
+              _merv_dhcp_record_remove_locked owners "$_mdrh_parent_token" || :
+              _mdrh_now=$(date +%s 2>/dev/null || printf '0')
+              _merv_dhcp_atomic_field "$_mdrh_dir" parent_retired_epoch "$_mdrh_now" || :
+              _merv_dhcp_log info "handoff parent reconciled id=$_mdrh_id"
+            fi
+            ;;
+        esac
+        ;;
+      failed)
+        _merv_dhcp_queue_recovery_locked handoff-failed || :
+        ;;
+    esac
+  done
+  return 0
+}
+
+merv_dhcp_hold_reconcile() {
+  local _mdhr_reason="${1:-state-reconcile}" _mdhr_nonce _mdhr_rc
+  merv_dhcp_hold_valid_id "$_mdhr_reason" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhr_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_reconcile_handoffs_locked || {
+    merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+    return 2
+  }
+  _merv_dhcp_reconcile_records_locked || {
+    merv_dhcp_state_lock_release "$_mdhr_nonce" || :
+    return 2
+  }
+  _merv_dhcp_rules_reconcile_locked
+  _mdhr_rc=$?
+  merv_dhcp_state_lock_release "$_mdhr_nonce" || return 2
+  return "$_mdhr_rc"
+}
+
+merv_dhcp_hold_settle_tick() {
+  case "${1:-}" in
+    :) return 0 ;;
+    sleep) sleep 1 ;;
+    "sleep 1") sleep 1 ;;
+    sleep\ [0-9]*)
+      _mdst_seconds=${1#sleep }
+      case "$_mdst_seconds" in ''|*[!0-9]*) return 1 ;; esac
+      sleep "$_mdst_seconds"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+merv_dhcp_hold_wait_stable() {
+  local _mdws_observe="$1" _mdws_correct="${2:-:}"
+  local _mdws_need="${3:-${MERV_DHCP_SETTLE_STABLE_SEC:-3}}"
+  local _mdws_max="${4:-${MERV_DHCP_SETTLE_MAX_SEC:-60}}"
+  local _mdws_tick="${MERV_DHCP_SETTLE_TICK_CMD:-sleep 1}"
+  local _mdws_pass=1 _mdws_elapsed _mdws_stable _mdws_state _mdws_last
+  type "$_mdws_observe" >/dev/null 2>&1 || return 1
+  type "$_mdws_correct" >/dev/null 2>&1 || return 1
+  merv_dhcp_hold_settle_tick "$_mdws_tick" || return 1
+  case "$_mdws_need:$_mdws_max" in *[!0-9:]*) return 1 ;; esac
+  [ "$_mdws_need" -gt 0 ] && [ "$_mdws_max" -gt 0 ] || return 1
+
+  while [ "$_mdws_pass" -le 2 ]; do
+    _mdws_elapsed=0
+    _mdws_stable=0
+    _mdws_last=unhealthy
+    while [ "$_mdws_elapsed" -lt "$_mdws_max" ]; do
+      merv_dhcp_hold_enforce >/dev/null 2>&1 || return 4
+      _mdws_state=$("$_mdws_observe" 2>/dev/null | tail -n 1)
+      case "$_mdws_state" in
+        healthy)
+          _mdws_stable=$((_mdws_stable + 1))
+          [ "$_mdws_stable" -ge "$_mdws_need" ] && return 0
+          ;;
+        busy|busy:*)
+          _mdws_stable=0
+          ;;
+        *)
+          _mdws_stable=0
+          ;;
+      esac
+      _mdws_last="$_mdws_state"
+      merv_dhcp_hold_settle_tick "$_mdws_tick" || return 5
+      _mdws_elapsed=$((_mdws_elapsed + 1))
+    done
+    case "$_mdws_last" in
+      busy|busy:*)
+        merv_dhcp_hold_record_fault settle-asus-work-active hold "$_mdws_last" >/dev/null 2>&1 || :
+        merv_dhcp_state_lock_acquire >/dev/null 2>&1 || return 6
+        _mdws_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+        _merv_dhcp_queue_recovery_locked asus-work-active >/dev/null 2>&1 || :
+        merv_dhcp_state_lock_release "$_mdws_nonce" >/dev/null 2>&1 || :
+        return 6
+        ;;
+    esac
+    [ "$_mdws_pass" -eq 1 ] || break
+    "$_mdws_correct" || :
+    _mdws_pass=2
+  done
+  merv_dhcp_hold_record_fault settle-verification-failed hold "${_mdws_last:-unhealthy}" >/dev/null 2>&1 || :
+  merv_dhcp_state_lock_acquire >/dev/null 2>&1 || return 7
+  _mdws_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_queue_recovery_locked settle-verification-failed >/dev/null 2>&1 || :
+  merv_dhcp_state_lock_release "$_mdws_nonce" >/dev/null 2>&1 || :
+  return 7
+}
+
+merv_dhcp_hold_clear_failsafes() {
+  local _mdcf_token="$1" _mdcf_verification="$2" _mdcf_run="${3:-}"
+  local _mdcf_nonce _mdcf_dir _mdcf_id _mdcf_remaining=0 _mdcf_handoff_state
+  merv_dhcp_hold_valid_id "$_mdcf_verification" || return 1
+  [ -z "$_mdcf_run" ] || merv_dhcp_hold_valid_id "$_mdcf_run" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdcf_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_owner_is_caller_locked "$_mdcf_token" || {
+    merv_dhcp_state_lock_release "$_mdcf_nonce" || :
+    return 1
+  }
+  case "$_MERV_DHCP_OWNER_TYPE" in recovery|manager) ;; *)
+    merv_dhcp_state_lock_release "$_mdcf_nonce" || :
+    return 1
+  esac
+  [ "$_MERV_DHCP_OWNER_PHASE" = verified ] &&
+    [ "$(cat "$_MERV_DHCP_OWNER_DIR/verification_id" 2>/dev/null)" = "$_mdcf_verification" ] || {
+      merv_dhcp_state_lock_release "$_mdcf_nonce" || :
+      return 1
+    }
+  for _mdcf_dir in "$MERV_DHCP_HOLD_STATE_ROOT/failsafe/"*; do
+    [ -d "$_mdcf_dir" ] && [ -f "$_mdcf_dir/ready" ] || continue
+    if [ -n "$_mdcf_run" ] && [ "$(cat "$_mdcf_dir/run_id" 2>/dev/null)" != "$_mdcf_run" ]; then
+      _mdcf_remaining=1
+      continue
+    fi
+    _mdcf_id=${_mdcf_dir##*/}
+    _merv_dhcp_atomic_field "$_mdcf_dir" verification_id "$_mdcf_verification" || :
+    _merv_dhcp_log info "failsafe cleared id=$_mdcf_id verification=$_mdcf_verification"
+    _merv_dhcp_record_remove_locked failsafe "$_mdcf_id" || {
+      merv_dhcp_state_lock_release "$_mdcf_nonce" || :
+      return 2
+    }
+  done
+  # A terminal failed handoff is also a recovery request.  Once this exact
+  # manager/recovery owner has published final verification, retaining that
+  # record would re-queue recovery forever even though the current topology
+  # has been checked and is safe.  Do not touch live handoffs here.
+  for _mdcf_dir in "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/"*; do
+    [ -d "$_mdcf_dir" ] && [ -f "$_mdcf_dir/ready" ] || continue
+    _mdcf_id=${_mdcf_dir##*/}
+    _mdcf_handoff_state=$(cat "$_mdcf_dir/handoff_state" 2>/dev/null || printf '')
+    case "$_mdcf_handoff_state" in
+      failed)
+        _merv_dhcp_atomic_field "$_mdcf_dir" verification_id "$_mdcf_verification" || :
+        _merv_dhcp_log info "failed handoff cleared id=$_mdcf_id verification=$_mdcf_verification"
+        _merv_dhcp_record_remove_locked handoffs "$_mdcf_id" || {
+          merv_dhcp_state_lock_release "$_mdcf_nonce" || :
+          return 2
+        }
+        ;;
+      requested|acknowledged)
+        _mdcf_remaining=1
+        ;;
+    esac
+  done
+  if [ "$_mdcf_remaining" -eq 0 ]; then
+    for _mdcf_dir in "$MERV_DHCP_HOLD_STATE_ROOT/failsafe/"*; do
+      [ -d "$_mdcf_dir" ] && [ -f "$_mdcf_dir/ready" ] && _mdcf_remaining=1
+    done
+  fi
+  [ "$_mdcf_remaining" -ne 0 ] || rm -f "$MERV_DHCP_HOLD_STATE_ROOT/recovery.pending" 2>/dev/null || :
+  _merv_dhcp_rules_reconcile_locked
+  _mdcf_rc=$?
+  merv_dhcp_state_lock_release "$_mdcf_nonce" || return 2
+  return "$_mdcf_rc"
+}
+
+merv_dhcp_hold_status() {
+  local _mdhs_desired=clear _mdhs_observed _mdhs_rc _mdhs_dir _mdhs_id
+  local _mdhs_type _mdhs_run _mdhs_phase _mdhs_pid _mdhs_start _mdhs_valid _mdhs_proc
+  merv_dhcp_hold_state_root_valid || return 1
+  _merv_dhcp_required_locked && _mdhs_desired=hold
+  _mdhs_observed=$(merv_dhcp_hold_rules_observed)
+  _mdhs_rc=$?
+  printf 'desired=%s\n' "$_mdhs_desired"
+  printf 'observed=%s\n' "$_mdhs_observed"
+  _mdhs_proc=$(merv_dhcp_proc_root 2>/dev/null || printf '/proc')
+  for _mdhs_dir in "$MERV_DHCP_HOLD_STATE_ROOT/owners/"*; do
+    [ -d "$_mdhs_dir" ] && [ -f "$_mdhs_dir/ready" ] || continue
+    _mdhs_id=${_mdhs_dir##*/}
+    _mdhs_type=$(cat "$_mdhs_dir/owner_type" 2>/dev/null || printf unknown)
+    _mdhs_run=$(cat "$_mdhs_dir/run_id" 2>/dev/null || printf unknown)
+    _mdhs_phase=$(cat "$_mdhs_dir/phase" 2>/dev/null || printf unknown)
+    _mdhs_pid=$(cat "$_mdhs_dir/pid" 2>/dev/null || printf 0)
+    _mdhs_start=$(cat "$_mdhs_dir/proc_start_time" 2>/dev/null || printf 0)
+    _mdhs_valid=no
+    merv_process_identity_matches "$_mdhs_pid" "$_mdhs_start" "$_mdhs_proc" 2>/dev/null && _mdhs_valid=yes
+    printf 'owner token=%s type=%s run=%s phase=%s pid=%s identity_valid=%s\n' \
+      "$(_merv_dhcp_short_token "$_mdhs_id")" "$_mdhs_type" "$_mdhs_run" "$_mdhs_phase" "$_mdhs_pid" "$_mdhs_valid"
+  done
+  for _mdhs_dir in "$MERV_DHCP_HOLD_STATE_ROOT/failsafe/"*; do
+    [ -d "$_mdhs_dir" ] && [ -f "$_mdhs_dir/ready" ] || continue
+    printf 'failsafe type=%s run=%s phase=%s reason=%s failed_interfaces=%s expected_bridges=%s observed_bridges=%s missing_rules=%s asus_work=%s suggested_action=%s\n' \
+      "$(cat "$_mdhs_dir/owner_type" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/run_id" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/phase" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/reason" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/failed_interfaces" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/expected_bridges" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/observed_bridges" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/missing_rules" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/asus_work" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/suggested_action" 2>/dev/null || printf mervlan-recovery)"
+  done
+  if [ -f "$MERV_DHCP_HOLD_STATE_ROOT/recovery.pending" ]; then
+    printf 'pending_recovery=yes\n'
+  else
+    printf 'pending_recovery=no\n'
+  fi
+  for _mdhs_dir in "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/"*; do
+    [ -d "$_mdhs_dir" ] && [ -f "$_mdhs_dir/ready" ] || continue
+    printf 'handoff id=%s parent=%s parent_run=%s child=%s child_run=%s state=%s failure_reason=%s\n' \
+      "${_mdhs_dir##*/}" \
+      "$(cat "$_mdhs_dir/parent_owner_type" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/parent_run_id" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/child_owner_type" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/ack_child_run_id" 2>/dev/null || printf pending)" \
+      "$(cat "$_mdhs_dir/handoff_state" 2>/dev/null || printf unknown)" \
+      "$(cat "$_mdhs_dir/failure_reason" 2>/dev/null || printf none)"
+  done
+  if [ "$_mdhs_desired" = hold ]; then
+    merv_dhcp_hold_rules_present || return $?
+  else
+    merv_dhcp_hold_rules_absent || return $?
+  fi
+  return "$_mdhs_rc"
+}
+
+# Compatibility wrappers remain for boot and heal during mixed-version rounds.
+merv_dhcp_hold_arm() {
+  local _mdha_quiet="${1:-0}" _mdha_marker_mode="${2:-marker}"
+  local _mdha_parent _mdha_tmp _mdha_nonce _mdha_rc
+  if [ "$_mdha_marker_mode" = "no-marker" ]; then
+    merv_dhcp_hold_enforce
+    return $?
+  fi
+  merv_dhcp_state_lock_acquire || return 2
+  _mdha_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _merv_dhcp_hold_enforce_locked || {
+    _mdha_rc=$?
+    merv_dhcp_state_lock_release "$_mdha_nonce" || :
+    return "$_mdha_rc"
+  }
+  _mdha_parent=${MERV_DHCP_HOLD_LEGACY_MARKER%/*}
+  mkdir -p "$_mdha_parent" 2>/dev/null || { merv_dhcp_state_lock_release "$_mdha_nonce" || :; return 2; }
+  _mdha_tmp="${MERV_DHCP_HOLD_LEGACY_MARKER}.tmp.$$"
+  printf '%s\n' "$(date +%s 2>/dev/null || printf '0')" > "$_mdha_tmp" 2>/dev/null &&
+    mv "$_mdha_tmp" "$MERV_DHCP_HOLD_LEGACY_MARKER" 2>/dev/null || {
+      merv_dhcp_state_lock_release "$_mdha_nonce" || :
+      return 2
+    }
+  merv_dhcp_state_lock_release "$_mdha_nonce" || return 2
+  [ "$_mdha_quiet" = "quiet" ] || _merv_dhcp_log info "legacy hold armed"
+  return 0
+}
+
+merv_dhcp_hold_release() {
+  local _mdhrel_token="${1:-}" _mdhrel_nonce _mdhrel_rc
+  [ -z "$_mdhrel_token" ] || { _merv_dhcp_token_release "$_mdhrel_token"; return $?; }
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhrel_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  rm -f "${MERV_DHCP_HOLD_LEGACY_MARKER:-${LOCKDIR}/merv_dhcp_hold.active}" 2>/dev/null || {
+    merv_dhcp_state_lock_release "$_mdhrel_nonce" || :
+    return 2
+  }
+  _merv_dhcp_rules_reconcile_locked
+  _mdhrel_rc=$?
+  merv_dhcp_state_lock_release "$_mdhrel_nonce" || return 2
+  [ "$_mdhrel_rc" -eq 0 ] && _merv_dhcp_log info "legacy hold released"
+  return "$_mdhrel_rc"
+}
+
+merv_dhcp_hold_restore_if_active() {
+  merv_dhcp_hold_required || return 0
+  merv_dhcp_hold_enforce
+  return $?
+}
+
+merv_observation_wait_idle() {
+  local _mowi_max="${1:-120}" _mowi_elapsed=0
+  local _mowi_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/observation/worker.lock"
+  local _mowi_pid _mowi_start _mowi_proc
+  case "$_mowi_max" in ''|*[!0-9]*) return 1 ;; esac
+  _mowi_proc=$(merv_dhcp_proc_root 2>/dev/null || printf '/proc')
+  while [ -d "$_mowi_lock" ]; do
+    _mowi_pid=$(cat "$_mowi_lock/pid" 2>/dev/null || printf '')
+    _mowi_start=$(cat "$_mowi_lock/proc_start_time" 2>/dev/null || printf '')
+    merv_process_identity_matches "$_mowi_pid" "$_mowi_start" "$_mowi_proc" 2>/dev/null || return 0
+    [ "$_mowi_elapsed" -lt "$_mowi_max" ] || return 1
+    sleep 1
+    _mowi_elapsed=$((_mowi_elapsed + 1))
+  done
+  return 0
+}
+
 merv_l2_guard_restore_all() {
   local _rules="${1:-}"
   type ebtables >/dev/null 2>&1 || return 0

@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "actions": {
+    "sync_vlanmgr": {
+      "label": "Sync Nodes",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "phases": [
+        { "id": "preflight", "label": "Preparing synchronization", "start": 0, "end": 15 },
+        { "id": "nodes", "label": "Synchronizing nodes", "start": 15, "end": 80 },
+        { "id": "verify", "label": "Verifying synchronization", "start": 80, "end": 95 },
+        { "id": "complete", "label": "Finishing", "start": 95, "end": 100 }
+      ]
+    },
+    "save_vlanmgr": {
+      "label": "Save Settings",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing save", "start": 0, "end": 25 },
+        { "id": "persist", "label": "Saving settings", "start": 25, "end": 50 },
+        { "id": "verify", "label": "Verifying saved settings", "start": 50, "end": 75 },
+        { "id": "reload", "label": "Loading saved settings", "start": 75, "end": 100 }
+      ]
+    },
+    "apmo_save_vlanmgr": {
+      "label": "Save Hardware Overrides",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing hardware override save", "start": 0, "end": 15 },
+        { "id": "persist", "label": "Saving hardware overrides", "start": 15, "end": 45 },
+        { "id": "verify", "label": "Verifying saved overrides", "start": 45, "end": 75 },
+        { "id": "reload", "label": "Loading saved hardware profile", "start": 75, "end": 100 }
+      ]
+    },
+    "hwprobe_vlanmgr": {
+      "label": "Refresh HW Profile",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing hardware detection", "start": 0, "end": 15 },
+        { "id": "probe", "label": "Detecting hardware profile", "start": 15, "end": 70 },
+        { "id": "reload", "label": "Loading hardware profile", "start": 70, "end": 100 }
+      ]
+    },
+    "collectclients_vlanmgr": {
+      "label": "Refresh Clients",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing client refresh", "start": 0, "end": 20 },
+        { "id": "collect", "label": "Collecting VLAN clients", "start": 20, "end": 85 },
+        { "id": "complete", "label": "Finishing client refresh", "start": 85, "end": 100 }
+      ]
+    },
+    "macclientmeta_vlanmgr": {
+      "label": "Save Client Metadata",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing client metadata", "start": 0, "end": 20 },
+        { "id": "persist", "label": "Saving metadata settings", "start": 20, "end": 50 },
+        { "id": "verify", "label": "Verifying saved metadata", "start": 50, "end": 65 },
+        { "id": "apply", "label": "Applying client metadata", "start": 65, "end": 82 },
+        { "id": "refresh", "label": "Refreshing client inventory", "start": 82, "end": 100 }
+      ]
+    },
+    "macrefresh_vlanmgr": {
+      "label": "Rebuild MAC Shield",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "frontend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing MAC shield rebuild", "start": 0, "end": 20 },
+        { "id": "rebuild", "label": "Rebuilding MAC shield database", "start": 20, "end": 65 },
+        { "id": "refresh", "label": "Refreshing client inventory", "start": 65, "end": 100 }
+      ]
+    },
+    "genkey_vlanmgr": {
+      "label": "Generate SSH Keys",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing SSH key generation", "start": 0, "end": 20 },
+        { "id": "generate", "label": "Generating ED25519 key pair", "start": 20, "end": 65 },
+        { "id": "publish", "label": "Publishing public key", "start": 65, "end": 90 },
+        { "id": "complete", "label": "SSH keys ready", "start": 90, "end": 100 }
+      ]
+    },
+    "apply_vlanmgr": {
+      "label": "Apply VLAN",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "notice": "Configuration in progress: the router may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.",
+      "phases": [
+        { "id": "prepare", "label": "Preparing VLAN apply", "start": 0, "end": 10 },
+        { "id": "validate", "label": "Validating VLAN and SSID settings", "start": 10, "end": 20 },
+        { "id": "cleanup", "label": "Cleaning previous VLAN configuration", "start": 20, "end": 30 },
+        { "id": "configure", "label": "Configuring bridges, ports, and SSIDs", "start": 30, "end": 55 },
+        { "id": "restart", "label": "Restarting wireless services", "start": 55, "end": 80 },
+        { "id": "verify", "label": "Running final VLAN security verification", "start": 80, "end": 97 },
+        { "id": "complete", "label": "Apply complete", "start": 97, "end": 100 }
+      ]
+    },
+    "executenodes_vlanmgr": {
+      "label": "Apply VLAN + Nodes",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "notice": "Configuration in progress: the router and node(s) may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.",
+      "phases": [
+        { "id": "prepare", "label": "Preparing router and nodes", "start": 0, "end": 10 },
+        { "id": "preflight", "label": "Validating SSH, JFFS, and node configuration", "start": 10, "end": 25 },
+        { "id": "node_prepare", "label": "Preparing nodes and copying settings", "start": 25, "end": 40 },
+        { "id": "apply", "label": "Applying VLAN configuration on router and nodes", "start": 40, "end": 70 },
+        { "id": "wait", "label": "Waiting for router and nodes to finish", "start": 70, "end": 85 },
+        { "id": "verify", "label": "Verifying router and node completion", "start": 85, "end": 95 },
+        { "id": "complete", "label": "Apply complete", "start": 95, "end": 100 }
+      ]
+    },
+    "executenodesonly_vlanmgr": {
+      "label": "Apply VLAN to Nodes",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "notice": "Configuration in progress: the node(s) may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.",
+      "phases": [
+        { "id": "prepare", "label": "Preparing node apply", "start": 0, "end": 10 },
+        { "id": "preflight", "label": "Validating SSH, JFFS, and node configuration", "start": 10, "end": 25 },
+        { "id": "node_prepare", "label": "Preparing nodes and copying settings", "start": 25, "end": 40 },
+        { "id": "apply", "label": "Applying VLAN configuration to nodes", "start": 40, "end": 75 },
+        { "id": "wait", "label": "Waiting for nodes to finish", "start": 75, "end": 90 },
+        { "id": "verify", "label": "Verifying node completion", "start": 90, "end": 97 },
+        { "id": "complete", "label": "Node apply complete", "start": 97, "end": 100 }
+      ]
+    }
+  }
+}

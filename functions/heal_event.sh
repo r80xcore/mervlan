@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.67"                     #
+#                  - File: heal_event.sh || version="0.69"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -37,6 +37,14 @@ fi
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
+
+# Every event and health-cron entry reconciles interrupted token owners before
+# observing or mutating bridge state. Compatibility heal ownership remains in
+# place until the Round 3 handoff migration.
+if type merv_dhcp_hold_reconcile >/dev/null 2>&1; then
+  merv_dhcp_hold_reconcile heal-start >/dev/null 2>&1 || \
+    warn -c vlan "Heal: DHCP ownership reconciliation reported an unresolved fault"
+fi
 
 # Bootstrap hardware layout (MAX_SSIDS, ETH_PORTS) similar to mervlan_manager.sh
 : "${HW_SETTINGS_FILE:=$SETTINGS_FILE}"
@@ -188,6 +196,8 @@ else
 fi
 case "$_mgr_state" in
   active|unknown_recent)
+    type merv_dhcp_handoff_coalesce >/dev/null 2>&1 &&
+      merv_dhcp_handoff_coalesce heal manager manager-active >/dev/null 2>&1 || :
     info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active (${_mgr_state})"
     exit 0
     ;;
@@ -197,6 +207,8 @@ case "$_mgr_state" in
     ;;
   legacy)
     if [ -d "$MANAGER_LOCK" ]; then
+      type merv_dhcp_handoff_coalesce >/dev/null 2>&1 &&
+        merv_dhcp_handoff_coalesce heal manager manager-active >/dev/null 2>&1 || :
       info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active"
       exit 0
     fi
@@ -218,10 +230,24 @@ mkdir -p "$LOCKDIR" 2>/dev/null
 # elapses instead of wedging every future event.
 LOCK="$LOCKDIR/vlan_event.lock"
 HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-${MERV_HEAL_LOCK_STALE_SEC:-180}}"
+HEAL_DHCP_TOKEN=""
+HEAL_EXIT_REASON="process-exit"
+heal_cleanup_on_exit() {
+  _heal_cleanup_rc=$?
+  if [ -n "${HEAL_DHCP_TOKEN:-}" ]; then
+    merv_dhcp_hold_abandon "$HEAL_DHCP_TOKEN" "${HEAL_EXIT_REASON}-${_heal_cleanup_rc}" >/dev/null 2>&1 || :
+    HEAL_DHCP_TOKEN=""
+  fi
+  type merv_lock_release >/dev/null 2>&1 && merv_lock_release "$LOCK" 2>/dev/null || rmdir "$LOCK" 2>/dev/null || :
+}
 if type merv_lock_acquire >/dev/null 2>&1; then
   if merv_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
-    trap 'merv_lock_release "$LOCK" 2>/dev/null' EXIT INT TERM
+    trap 'HEAL_EXIT_REASON=signal-int; exit 130' INT
+    trap 'HEAL_EXIT_REASON=signal-term; exit 143' TERM
+    trap heal_cleanup_on_exit EXIT
   else
+    type merv_dhcp_handoff_coalesce >/dev/null 2>&1 &&
+      merv_dhcp_handoff_coalesce heal manager duplicate-heal >/dev/null 2>&1 || :
     info -c vlan "Heal: skipping [${1:-initial}] — vlan_event.lock held by another instance"
     exit 0
   fi
@@ -232,7 +258,15 @@ else
     info -c vlan "Heal: skipping [${1:-initial}] — vlan_event.lock present (lib unavailable)"
     exit 0
   fi
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+  trap 'HEAL_EXIT_REASON=signal-int; exit 130' INT
+  trap 'HEAL_EXIT_REASON=signal-term; exit 143' TERM
+  trap heal_cleanup_on_exit EXIT
+fi
+
+if type merv_observation_wait_idle >/dev/null 2>&1 &&
+   ! merv_observation_wait_idle "${MERV_OBSERVATION_WAIT_SEC:-120}"; then
+  warn -c vlan "Heal: observation worker did not become idle; event remains for the next health tick"
+  exit 0
 fi
 
 # ============================================================================ #
@@ -564,7 +598,12 @@ wait_for_rc_quiet() {
 
     current_tick=$((current_tick + 1))
     if [ "$current_tick" -ge "$max_ticks" ]; then
-      warn -c vlan "wait_for_rc_quiet: timeout reached; continuing"
+      if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
+         rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
+        warn -c vlan "wait_for_rc_quiet: timeout reached while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout reached with rc idle; continuing to stable verification"
       return 0
     fi
 
@@ -1111,7 +1150,11 @@ if [ "$EVENT" = "cron" ]; then
   # that inline while holding the lock would block every subsequent 5-minute
   # cron tick for the full SSH retry window (~96s worst case per node).
   # The snapshot has its own mac_snapshot.lock to prevent concurrent runs.
-  type merv_mac_snapshot >/dev/null 2>&1 && ( merv_mac_snapshot ) &
+  if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+    MERV_OBS_NO_AUTOSTART=1 "$MERV_BASE/functions/post_apply_worker.sh" \
+      request snapshot >/dev/null 2>&1 || :
+    ( sleep 1; "$MERV_BASE/functions/post_apply_worker.sh" run ) >/dev/null 2>&1 &
+  fi
 
   exit 0
 fi
@@ -1210,11 +1253,17 @@ should_heal_event() {
 if should_heal_event "$EVENT"; then
   _MANAGER_STARTED=0
   _HOLD_RELEASED=0
+  HEAL_RUN_ID="heal-$(date +%s 2>/dev/null || echo 0)-$$"
+  HEAL_HANDOFF_ID=""
   info -c vlan "Heal: event [$EVENT_LABEL] matched watchlist"
 
-  # Security-first: block native br0 DHCP during the whole heal decision window.
-  # This runs before rc wait and before reading bridge state.
-  merv_dhcp_hold_arm
+  # Own a distinct lease before observing or mutating event-driven bridge state.
+  if ! merv_dhcp_hold_acquire heal "$HEAL_RUN_ID"; then
+    error -c cli,vlan "Heal: cannot establish token-owned DHCP protection; aborting"
+    HEAL_EXIT_REASON="acquire-failed"
+    exit 1
+  fi
+  HEAL_DHCP_TOKEN="$MERV_DHCP_HOLD_TOKEN"
 
   # For wireless restart events, wait for rc to settle BEFORE reading kernel
   # state. Firmware's restart_wireless can take several minutes on some
@@ -1270,7 +1319,12 @@ if should_heal_event "$EVENT"; then
       [ "$_pw_ticks" -ge "$_pw_max" ] && \
         info -c vlan "Heal: pre-entry timeout (5s) — proceeding to rc wait"
       info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
-      wait_for_rc_quiet 6 120
+      if ! wait_for_rc_quiet 6 120; then
+        warn -c vlan "Heal: rc remained active after wireless settle timeout; retaining DHCP protection"
+        merv_dhcp_hold_mark_mutating "$HEAL_DHCP_TOKEN" rc-active-timeout >/dev/null 2>&1 || :
+        HEAL_EXIT_REASON="rc-active-timeout"
+        exit 1
+      fi
 
       # rc/wlconf is now quiet enough to stop fighting firmware.
       # Bridge surgery is allowed after wait_for_rc_quiet returns.
@@ -1285,7 +1339,12 @@ if should_heal_event "$EVENT"; then
       # If rc is already quiet, a single read is sufficient — no polling overhead.
       if rc_queue_has 'restart_wireless' || rc_proc_busy 'restart_wireless|wlconf'; then
         info -c vlan "Heal: non-wireless event but wireless rc active — waiting for rc quiet (max 30s)"
-        wait_for_rc_quiet 6 30
+        if ! wait_for_rc_quiet 6 30; then
+          warn -c vlan "Heal: rc remained active after settle timeout; retaining DHCP protection"
+          merv_dhcp_hold_mark_mutating "$HEAL_DHCP_TOKEN" rc-active-timeout >/dev/null 2>&1 || :
+          HEAL_EXIT_REASON="rc-active-timeout"
+          exit 1
+        fi
       elif type ebtables >/dev/null 2>&1; then
         _evt_rules=$(ebtables -t filter -L 2>/dev/null)
         restore_merv_qt_shield "$_evt_rules"
@@ -1306,6 +1365,11 @@ if should_heal_event "$EVENT"; then
 
       # Mark first to prevent rapid re-triggers while we close the leak.
       mark_heal
+      if ! merv_dhcp_hold_mark_mutating "$HEAL_DHCP_TOKEN" heal-hard-eviction; then
+        error -c cli,vlan "Heal: cannot publish mutation phase; refusing bridge changes"
+        HEAL_EXIT_REASON="mutating-publish-failed"
+        exit 1
+      fi
 
       # Hard evict once: wl down + brctl delif. Only runs on confirmed mismatch.
       if type merv_hard_evict_wl_from_br0 >/dev/null 2>&1; then
@@ -1318,27 +1382,75 @@ if should_heal_event "$EVENT"; then
       type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
         merv_soft_evict_wl_from_br0 "heal-pre-manager"
 
-      # Invoke VLAN manager in background to restore full VLAN/bridge config.
-      "$VLAN_MANAGER" >/dev/null 2>&1 &
+      # Publish an exact handoff before launching the successor manager.
+      if ! merv_dhcp_handoff_request "$HEAL_DHCP_TOKEN" manager; then
+        error -c cli,vlan "Heal: cannot publish manager handoff request"
+        HEAL_EXIT_REASON="handoff-request-failed"
+        exit 1
+      fi
+      HEAL_HANDOFF_ID="$MERV_DHCP_HANDOFF_ID"
+      if ! merv_dhcp_hold_mark_handoff_wait "$HEAL_DHCP_TOKEN" "$HEAL_HANDOFF_ID"; then
+        error -c cli,vlan "Heal: cannot publish handoff-wait phase"
+        HEAL_EXIT_REASON="handoff-wait-failed"
+        exit 1
+      fi
+      "$VLAN_MANAGER" "--parent-run-id=$HEAL_RUN_ID" "--handoff-id=$HEAL_HANDOFF_ID" >/dev/null 2>&1 &
       _MANAGER_STARTED=1
+      if merv_dhcp_handoff_wait_ack "$HEAL_HANDOFF_ID" "$HEAL_RUN_ID" "${MERV_HEAL_HANDOFF_ACK_SEC:-10}"; then
+        if merv_dhcp_handoff_parent_release "$HEAL_DHCP_TOKEN" "$HEAL_HANDOFF_ID"; then
+          HEAL_DHCP_TOKEN=""
+          _HOLD_RELEASED=1
+          info -c cli,vlan "Heal: exact manager handoff acknowledged ($HEAL_HANDOFF_ID)"
+        else
+          error -c cli,vlan "Heal: acknowledged manager handoff could not retire parent; retaining fail-closed protection"
+          HEAL_EXIT_REASON="handoff-parent-release-failed"
+          exit 1
+        fi
+      else
+        merv_dhcp_handoff_fail "$HEAL_HANDOFF_ID" "$HEAL_DHCP_TOKEN" acknowledgement-timeout >/dev/null 2>&1 || :
+        error -c cli,vlan "Heal: manager handoff acknowledgement timed out; retaining fail-closed protection"
+        HEAL_EXIT_REASON="handoff-timeout"
+        exit 1
+      fi
     else
       # Cooldown is active — do not run manager again.
       # Still hard-evict so confirmed br0 leaks are not left sitting.
+      if ! merv_dhcp_hold_mark_mutating "$HEAL_DHCP_TOKEN" heal-cooldown-eviction; then
+        HEAL_EXIT_REASON="cooldown-mutation-publish-failed"
+        exit 1
+      fi
       if type merv_hard_evict_wl_from_br0 >/dev/null 2>&1; then
         merv_hard_evict_wl_from_br0 "heal-cooldown"
       else
         evict_wl_from_br0
       fi
-      merv_dhcp_hold_release
-      _HOLD_RELEASED=1
+      if check_vlan_config && merv_dhcp_hold_rules_present; then
+        _heal_verification="${HEAL_RUN_ID}-cooldown-$(date +%s 2>/dev/null || echo 0)"
+        if merv_dhcp_hold_mark_verified "$HEAL_DHCP_TOKEN" "$_heal_verification" &&
+           merv_dhcp_hold_release "$HEAL_DHCP_TOKEN"; then
+          HEAL_DHCP_TOKEN=""
+          _HOLD_RELEASED=1
+        fi
+      fi
+      if [ "$_HOLD_RELEASED" -eq 0 ]; then
+        error -c cli,vlan "Heal: cooldown eviction did not reach verified state; retaining failsafe"
+        HEAL_EXIT_REASON="cooldown-verification-failed"
+        exit 1
+      fi
       info -c cli,vlan "Heal suppressed after [$EVENT_LABEL] (within ${COOLDOWN_SEC}s cooldown)"
     fi
   fi
 
   if [ "$_MANAGER_STARTED" -eq 0 ] && [ "$_HOLD_RELEASED" -eq 0 ]; then
-    type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
-      merv_soft_evict_wl_from_br0 "heal-final-no-manager"
-    merv_dhcp_hold_release
+    # No mismatch was observed, so mutation never began and protected release
+    # is valid. Do not perform a late untracked bridge eviction here.
+    if merv_dhcp_hold_release "$HEAL_DHCP_TOKEN"; then
+      HEAL_DHCP_TOKEN=""
+      _HOLD_RELEASED=1
+    else
+      HEAL_EXIT_REASON="protected-release-failed"
+      exit 1
+    fi
   fi
 
   # Fix 3 — Deferred safety-net recheck for wireless events.

@@ -39,7 +39,7 @@ done
 
 # ============================================================================ #
 #                            CONFIGURATION & SETUP                             #
-# Parse command-line arguments for output path and node name. Initialize       #
+# Parse command-line arguments for output path, node name, and IP. Initialize   #
 # FDB (Forwarding Database) collection parameters with safe defaults.          #
 # ============================================================================ #
 
@@ -47,6 +47,9 @@ done
 OUT="${1:-$COLLECTDIR/clients_local.json}"
 # Node/router name for identification in JSON; defaults to system hostname
 NODE_NAME="${2:-$(hostname)}"
+# Optional stable IP identity. The main router supplies this for node requests;
+# it lets the UI map the result to NODE<n>, alias, and ProductID consistently.
+NODE_IP="${3:-}"
 # Whether to attempt reverse-DNS lookup for MAC addresses (disabled by default)
 RESOLVE_HOSTNAMES="${RESOLVE_HOSTNAMES:-0}"
 
@@ -409,6 +412,9 @@ DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
   echo "{"
   printf '  "generated": "%s",\n' "$DATE_NOW"
   printf '  "router": "%s",\n' "$(json_escape "$NODE_NAME")"
+  if [ -n "$NODE_IP" ]; then
+    printf '  "ip": "%s",\n' "$(json_escape "$NODE_IP")"
+  fi
   echo '  "vlans": ['
 } > "$OUT"
 

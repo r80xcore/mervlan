@@ -56,6 +56,7 @@ fi
 : "${MERV_MAC_SNAPSHOT_RESET:=0}"
 : "${MERV_MAC_SNAPSHOT_FORCE_RELOAD:=0}"
 : "${MERV_MAC_SNAPSHOT_ALLOW_EMPTY:=0}"
+: "${MERV_NVRAM_READ_TIMEOUT:=10}"
 
 # ============================================================================
 # Snapshot status output globals
@@ -156,8 +157,16 @@ merv_mac_build_expected_iface_vid() {
     [ "$max_ssids" -gt 16 ] 2>/dev/null && max_ssids=16
   fi
 
-  # Single cached NVRAM read across all slot iterations
-  nvram_ssids=$(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.([0-9]+))?_ssid=')
+  # Single cached NVRAM read across all slot iterations. Some ASUS firmware
+  # builds can leave `nvram show` asleep indefinitely; fail this snapshot
+  # generation instead of holding the observation worker forever.
+  nvram_ssids=$(_merv_timeout_run "$MERV_NVRAM_READ_TIMEOUT" nvram show 2>/dev/null)
+  _mmb_nvram_rc=$?
+  if [ "$_mmb_nvram_rc" -ne 0 ]; then
+    _merv_mac_log warn "MERV_MAC: timed out reading NVRAM SSID inventory (rc=$_mmb_nvram_rc)"
+    return 1
+  fi
+  nvram_ssids=$(printf '%s\n' "$nvram_ssids" | grep -E '^wl[0-9][0-9]*(\.([0-9]+))?_ssid=')
 
   i=1
   while [ "$i" -le "$max_ssids" ]; do

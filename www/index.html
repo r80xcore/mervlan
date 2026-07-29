@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.24-dev" -->
+  <!-- index.html version="0.53.25-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -55,7 +55,7 @@
     }
 
     #advancedOverrideBtn {
-      margin-left: auto;
+      margin-left: 0;
     }
 
     .experimental-toggle {
@@ -537,6 +537,19 @@
             title="Service and addon settings"
             onclick="showServiceSettingsModal()"
           >Settings</button>
+          <div id="mervlanLoadingSlot" class="mervlan-loading-slot" aria-hidden="true">
+            <button
+              type="button"
+              id="mervlanLoadingMini"
+              class="mervlan-loading-mini"
+              aria-hidden="true"
+              aria-label="Show MerVLAN loading details"
+              title="Show MerVLAN loading details"
+            >
+              <span class="mervlan-loading-mini__dot" aria-hidden="true"></span>
+              <span id="mervlanLoadingMiniText" class="mervlan-loading-mini__text">Working...</span>
+            </button>
+          </div>
           <button
             type="button"
             class="experimental-version"
@@ -552,6 +565,44 @@
             title="Show version and update options"
           ></button>
         </div>
+
+          <!-- MerVLAN-owned loading panel. The controller enables this only for
+               actions present in settings/loading_actions.json. -->
+          <div
+            id="mervlanLoadingBackdrop"
+            class="mervlan-loading-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-hidden="true"
+            aria-labelledby="mervlanLoadingHeading"
+            aria-describedby="mervlanLoadingPhase"
+          >
+            <section class="mervlan-loading-panel">
+              <h2 id="mervlanLoadingHeading" class="mervlan-loading-heading">MerVLAN Loading</h2>
+              <div id="mervlanLoadingAction" class="mervlan-loading-action">Working...</div>
+              <div id="mervlanLoadingPhase" class="mervlan-loading-phase" aria-live="polite">Starting...</div>
+              <div class="mervlan-loading-progress-row">
+                <div
+                  id="mervlanLoadingProgress"
+                  class="mervlan-loading-progress is-indeterminate"
+                  role="progressbar"
+                  aria-label="MerVLAN action progress"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                >
+                  <div id="mervlanLoadingProgressFill" class="mervlan-loading-progress-fill"></div>
+                </div>
+                <span id="mervlanLoadingPercent" class="mervlan-loading-percent">—</span>
+              </div>
+              <div id="mervlanLoadingNotice" class="mervlan-loading-notice"></div>
+              <div id="mervlanLoadingError" class="mervlan-loading-error" role="alert"></div>
+              <div class="mervlan-loading-actions">
+                <button type="button" class="button_gen" id="mervlanLoadingMinimizeBtn">Minimize</button>
+                <button type="button" class="button_gen" id="mervlanLoadingCloseBtn" style="display:none;">Close</button>
+              </div>
+            </section>
+          </div>
+
           <div id="leftPanelOverlay" class="overlay"></div>
           <div class="cli-container collapsed" id="cliPanel">
             <div class="cli-shell" aria-hidden="true">
@@ -686,17 +737,17 @@
     <div class="modal__body">
       <p class="modal__intro">Choose how to run the VLAN Manager:</p>
       <div class="modal__section vlan-options">
-        <button type="button" class="button_gen" onclick="runVlanManagerLocal()">
+        <button type="button" class="button_gen" onclick="runVlanManagerLocal(this)">
           <div class="vlan-option__title">Local Router Only</div>
           <div class="vlan-option__subtitle">Apply to this router only</div>
         </button>
 
-        <button type="button" class="button_gen" onclick="runVlanManagerWithNodes()">
+        <button type="button" class="button_gen" onclick="runVlanManagerWithNodes(this)">
           <div class="vlan-option__title">Router + Nodes</div>
           <div class="vlan-option__subtitle">Apply to this router and all nodes</div>
         </button>
 
-        <button type="button" class="button_gen" onclick="runVlanManagerOnlyNodes()">
+        <button type="button" class="button_gen" onclick="runVlanManagerOnlyNodes(this)">
           <div class="vlan-option__title">Nodes Only</div>
           <div class="vlan-option__subtitle">Apply to configured nodes onl</div>
         </button>
@@ -900,6 +951,9 @@
     .adv-override-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-height: 30px; }
     .adv-override-row > label { min-width: 120px; font-weight: bold; color: #ccc; font-size: 0.93em; }
     .adv-override-control { display: flex; align-items: center; gap: 6px; flex: 1; }
+    .adv-override-device-control { gap: 8px; }
+    .adv-override-device-control select { flex: 1; min-width: 0; }
+    .adv-override-inline-button { height: 30px; min-height: 30px; padding: 2px 10px; white-space: nowrap; }
     .adv-override-custom-input { width: 110px; padding: 2px 6px; background: #2a2a2a; color: #eee; border: 1px solid #555; border-radius: 3px; font-size: 0.92em; text-transform: none; }
     #advancedOverrideModal .input_option { text-transform: none; }
     .adv-override-target-indicator { font-size: 0.95em; font-weight: bold; color: #6cf; margin-bottom: 10px; padding: 4px 0; }
@@ -918,9 +972,12 @@
 
       <div class="adv-override-row">
         <label for="advOverrideTargetSelect">Device</label>
-        <select id="advOverrideTargetSelect" class="input_option" onchange="switchAdvancedOverrideTarget(this.value)">
-          <option value="MAIN">Main Router</option>
-        </select>
+        <div class="adv-override-control adv-override-device-control">
+          <select id="advOverrideTargetSelect" class="input_option" onchange="switchAdvancedOverrideTarget(this.value)">
+            <option value="MAIN">Main Router</option>
+          </select>
+          <button type="button" class="button_gen adv-override-inline-button" id="advOverrideLoadDefaultsBtn" onclick="loadAdvancedOverrideDefaultsForCurrentTarget()" title="Load the detected model defaults into the form without saving them">Load Defaults</button>
+        </div>
       </div>
       <div class="adv-override-target-indicator" id="advOverrideTargetLabel">Editing: Main Router</div>
 
@@ -1060,12 +1117,18 @@
       </div>
 
       <div id="advOverrideError" class="adv-override-error" style="display:none;"></div>
-      <div class="adv-override-help" style="margin-top:6px;">⚠️ <strong>Save</strong> writes override settings to settings.json. Tick <em>Auto-refresh</em> to also re-run hardware detection automatically, or press <em>Refresh HW Profile</em> afterwards.</div>
-      <div class="adv-override-help" style="margin-top:4px;">⚠️ Node overrides require a <strong>Sync Nodes</strong> run after saving, so the updated configuration is pushed and applied on each node. This also applies when disabling a node override.</div>
+      <div class="adv-override-help" style="margin-top:6px;"><strong>Save</strong> stores the overrides. Auto-refresh re-runs hardware detection after saving.</div>
+      <div class="adv-override-help" style="margin-top:4px;">If nodes are configured, use <strong>Auto-sync Nodes</strong> to sync now, or run <strong>Sync Nodes</strong> later.</div>
       <div class="adv-override-auto-refresh" style="margin-top:4px; margin-bottom:2px;">
         <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:0.92em; color:#ccc;">
           <input type="checkbox" id="advOverrideAutoRefreshHw" onchange="toggleOverrideBtnText()">
           <span title="When ticked, pressing Save &amp; Apply will also trigger a HW Profile refresh so the UI updates immediately.&#10;This setting resets every time and is not saved.&#10;If unticked, press Refresh HW Profile afterwards to update the UI.">Auto-refresh HW Profile</span>
+        </label>
+      </div>
+      <div class="adv-override-auto-sync" style="margin-top:4px; margin-bottom:2px;">
+        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:0.92em; color:#ccc;">
+          <input type="checkbox" id="advOverrideAutoSyncNodes" onchange="toggleOverrideBtnText()">
+          <span title="When ticked, pressing Save will run Sync Nodes after the override settings are saved. This setting resets every time and is not saved.">Auto-sync Nodes</span>
         </label>
       </div>
     </div>
@@ -1116,8 +1179,8 @@
       font-size: 0.87em; color: #aaa;
       display: flex; align-items: center; gap: 8px;
     }
-    .svc-status-hint { font-size: 0.78em; color: #555; white-space: nowrap; }
-    .svc-refresh-btn { padding: 1px 7px; font-size: 1em; line-height: 1.4; flex-shrink: 0; }
+    .svc-status-hint { font-size: 0.8em; color: #c1ccd8; font-weight: 500; white-space: nowrap; }
+    .svc-refresh-btn { width: 30px; min-width: 30px; height: 28px; padding: 0; font-size: 1.45em; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
     .svc-status-detail {
       margin-top: 6px; padding: 8px 10px;
@@ -1402,6 +1465,7 @@
           flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
           flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
           flat.ENABLE_NATIVE_SSID = stringOrDefault(general.ENABLE_NATIVE_SSID, "0");
+          flat.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(general.HTML_CLIENT_REFRESH_MINUTES, "15");
 
           const nodes = ensurePlainObject(data.Nodes);
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1575,7 +1639,8 @@
               DRY_RUN: "yes",
               ENABLE_STP: "0",
               EXPERIMENTAL: "0",
-              ENABLE_NATIVE_SSID: "0"
+              ENABLE_NATIVE_SSID: "0",
+              HTML_CLIENT_REFRESH_MINUTES: "15"
             },
             SSH: {
               _description: "SSH settings for main router and nodes",
@@ -1623,6 +1688,10 @@
           general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
           general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
           general.ENABLE_NATIVE_SSID = stringOrDefault(flat.ENABLE_NATIVE_SSID, general.ENABLE_NATIVE_SSID ?? "0");
+          general.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(
+            flat.HTML_CLIENT_REFRESH_MINUTES,
+            general.HTML_CLIENT_REFRESH_MINUTES ?? "15"
+          );
 
           const nodes = target.Nodes = ensurePlainObject(target.Nodes);
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1709,6 +1778,7 @@
           }
           return hw;
         })();
+        let HARDWARE_PROFILES = null;
 
         // effectiveMaxSsidCap — absolute ceiling from Limits.MAX_SSID_CAP (default 16).
         // Used in struct<->flat conversion loops that must cover all possible slots.
@@ -1729,8 +1799,8 @@
         function showUnsupportedModelModal() {
           const modal = document.getElementById("unsupportedModelModal");
           if (!modal) return;
+          ensureConfigViewForModal();
           const overlay = document.getElementById("leftPanelOverlay");
-          const cliLatch = document.getElementById("cliLatch");
 
           modal.style.display = "block";
           anchorModalToForm(modal);
@@ -1739,12 +1809,22 @@
             overlay.style.display = "block";
             overlay.style.pointerEvents = "auto";
           }
-          if (cliLatch) {
-            if (cliLatch.dataset.prevDisplay === undefined) {
-              cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
-            }
-            cliLatch.style.display = "none";
+          syncInfoLatchVisibility();
+        }
+
+        async function loadHardwareProfiles() {
+          try {
+            const response = await fetch("settings/hardware_profiles.json?_=" + Date.now(), {
+              cache: "no-store",
+              headers: { Accept: "application/json", "Cache-Control": "no-cache" }
+            });
+            if (!response.ok) throw new Error("hardware_profiles.json not readable");
+            const data = await response.json();
+            HARDWARE_PROFILES = data && typeof data.profiles === "object" ? data.profiles : null;
+          } catch (_) {
+            HARDWARE_PROFILES = null;
           }
+          return HARDWARE_PROFILES;
         }
 
         // Load hardware configuration from settings/settings.json (Hardware block)
@@ -1768,6 +1848,7 @@
           }
 
           const hw = (json && typeof json === "object") ? json.Hardware : null;
+          await loadHardwareProfiles();
 
           const productId = hw && typeof hw.PRODUCTID === "string"
             ? hw.PRODUCTID.trim().toUpperCase()
@@ -2526,6 +2607,50 @@ function showTooltip() {
 
     // SSID view toggle: "Config" (VLAN/APISO/Status) vs "Assign" (Node Assignment)
     let CURRENT_SSID_VIEW = "config";
+
+    const MVM_INFO_MODAL_IDS = [
+      "sshKeyModal",
+      "unsupportedModelModal",
+      "serviceSettingsModal",
+      "advancedOverrideModal",
+      "vlanManagerModal",
+      "versionModal"
+    ];
+    let MVM_INFO_LATCH_BASE_DISPLAY = null;
+
+    function mvmIsModalVisible(id) {
+      const modal = document.getElementById(id);
+      if (!modal) return false;
+      if (id === "maintenanceConfirmOverlay") {
+        return modal.classList.contains("is-visible");
+      }
+      if (!window.getComputedStyle) return modal.style.display !== "none";
+      return window.getComputedStyle(modal).display !== "none";
+    }
+
+    function ensureConfigViewForModal() {
+      if (CURRENT_SSID_VIEW === "assign") setSSIDView("config");
+    }
+
+    function syncInfoLatchVisibility() {
+      const info = document.getElementById("cliLatch");
+      if (!info) return;
+      if (MVM_INFO_LATCH_BASE_DISPLAY === null) {
+        MVM_INFO_LATCH_BASE_DISPLAY = info.style.display || "";
+      }
+
+      const loadingBackdrop = document.getElementById("mervlanLoadingBackdrop");
+      const loadingMini = document.getElementById("mervlanLoadingMini");
+      const loadingOpen = !!(loadingBackdrop && loadingBackdrop.classList.contains("is-open"));
+      const loadingMinimized = !!(loadingMini && loadingMini.classList.contains("is-visible"));
+      const modalOpen = MVM_INFO_MODAL_IDS.some(mvmIsModalVisible) ||
+        mvmIsModalVisible("maintenanceConfirmOverlay");
+
+      // A visible loading panel always owns the addon overlay. When it is
+      // minimized, INFO is intentionally available while the action continues.
+      const hidden = loadingOpen || (!loadingMinimized && modalOpen);
+      info.style.display = hidden ? "none" : MVM_INFO_LATCH_BASE_DISPLAY;
+    }
 
     function setSSIDView(view) {
       CURRENT_SSID_VIEW = view;
@@ -3616,8 +3741,9 @@ function showTooltip() {
       document.querySelectorAll('input[name^="SSID_"]').forEach(el => validateSSIDField(el));
       document.querySelectorAll('input[name^="NODE"]:not([name$="_ALIAS"])').forEach(el => validateNodeField(el));
       updateStatusTooltips();
-  syncNodeCollapseWithValues();
+      syncNodeCollapseWithValues();
       startClientsPolling();
+      startVlanApplyStatusPolling();
 
       /* === CLI collapse/expand === */
       const cliPanel = document.getElementById('cliPanel');
@@ -3748,6 +3874,7 @@ function showTooltip() {
       }
       // Ensure default collapsed visual
       setCliState(false);
+      syncInfoLatchVisibility();
       // Schedule one-time intro blink on first load
       scheduleLatchIntroBlink();
 
@@ -3865,6 +3992,9 @@ function toggleCliFullsize() {
     let pollingTimeout = null;
     let pollTimer = null;
     let lastLogText = '';
+    let cliPollInFlight = false;
+    let cliPollErrors = 0;
+    let clientFetchErrors = 0;
 
     // === Version/update modal live status ===
     let updateSpinnerTimer = null;
@@ -3875,12 +4005,14 @@ function toggleCliFullsize() {
     let updateActionIdleDisplay = "none";
 
     let updateLogTimer = null;
+    let updateLogPollInFlight = false;
     let lastUpdateLogLine = "";
     let lastUpdateLogSnapshot = "";
     let updateLogBaselineText = "";
     let updateLogBaselineReady = false;
     let _updateTimeoutId = null;
     let maintenancePollTimer = null;
+    let maintenancePollInFlight = false;
     let maintenanceTimeoutTimer = null;
     let maintenanceStartTimeoutTimer = null;
     let maintenanceRequestSeen = false;
@@ -4072,6 +4204,8 @@ function toggleCliFullsize() {
     async function pollUpdateLogOnce() {
       const logLineEl = document.getElementById("updateLogLine");
       if (!logLineEl) return;
+      if (updateLogPollInFlight) return;
+      updateLogPollInFlight = true;
 
       try {
         const r = await fetch(PATHS.UPDATE_LOG + "?_=" + Date.now());
@@ -4134,7 +4268,11 @@ function toggleCliFullsize() {
           stopUpdateLogPolling();
         }
       } catch (e) {
-        // optional: ignore errors
+        if (!lastUpdateLogLine) {
+          logLineEl.textContent = "Update output is temporarily unavailable; retrying...";
+        }
+      } finally {
+        updateLogPollInFlight = false;
       }
     }
 
@@ -4263,11 +4401,23 @@ function toggleCliFullsize() {
         }
 
   function pollOnce(){
-        if(currentView !== 'normal') return Promise.resolve(); // Only poll in normal view
+        if(currentView !== 'normal' || cliPollInFlight) return Promise.resolve(); // Only one CLI read at a time
+        cliPollInFlight = true;
         
         return fetch(PATHS.CLI_LOG+"?_="+Date.now())
             .then(r=> {
-                if(!r.ok) return ''; // If log doesn't exist yet, return empty
+                if(!r.ok) {
+                  if (r.status === 404) {
+                    cliPollErrors = 0;
+                  } else {
+                    cliPollErrors++;
+                    if (cliPollErrors === 3) {
+                      appendCliText('CLI log polling is temporarily unavailable (HTTP ' + r.status + '). Retrying...\n', { scroll: 'force' });
+                    }
+                  }
+                  return ''; // If log doesn't exist yet, return empty
+                }
+                cliPollErrors = 0;
                 return r.text();
             })
             .then(t=>{
@@ -4292,7 +4442,13 @@ function toggleCliFullsize() {
         }
         lastLogText = t;
             })
-            .catch(()=>{});
+            .catch(error=>{
+              cliPollErrors++;
+              if (cliPollErrors === 3) {
+                appendCliText('CLI log polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+              }
+            })
+            .then(()=>{ cliPollInFlight = false; }, ()=>{ cliPollInFlight = false; });
     }
 
   function startPolling(){ 
@@ -4341,8 +4497,16 @@ async function fetchClientsJSON(){
   try{
     const r = await fetch(PATHS.CLIENTS_JSON + "?_=" + Date.now(), { cache:"no-store" });
     if(!r.ok) throw new Error("HTTP "+r.status);
-    return await r.json();
-  }catch(_){ return null; }
+    const data = await r.json();
+    clientFetchErrors = 0;
+    return data;
+  }catch(error){
+    clientFetchErrors++;
+    if (clientFetchErrors === 3) {
+      appendCliText('Client inventory polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+    }
+    return null;
+  }
 }
 
 /* ===== Client metadata (MAC shield override + display names) ===== */
@@ -4593,10 +4757,82 @@ function clientGeneratedMs(data){
   return Date.parse(String(data.generated).replace(' ','T'));
 }
 
+function configuredClientRefreshNodeCount(settings){
+  if (!settings) return 0;
+  let count = 0;
+  for (let i = 1; i <= MAX_NODES; i++){
+    const raw = String(settings['NODE' + i] || '').trim();
+    if (raw && raw.toLowerCase() !== 'none' &&
+        /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(raw)){
+      count++;
+    }
+  }
+  return count;
+}
+
+function createClientRefreshProgress(loadingTask){
+  if (!loadingTask || typeof loadingTask.phase !== 'function') return null;
+
+  const nodeCount = configuredClientRefreshNodeCount(CURRENT_SETTINGS_CACHE);
+  const nodeLabel = nodeCount === 1 ? 'node' : 'nodes';
+  const stages = nodeCount > 0 ? [
+    { after: 0,  percent: 10, message: 'Preparing client refresh...' },
+    { after: 1,  percent: 22, message: 'Checking VLAN and apply state...' },
+    { after: 3,  percent: 36, message: 'Collecting clients from the main router...' },
+    { after: 7,  percent: 52, message: `Checking ${nodeCount} configured ${nodeLabel}...` },
+    { after: 11, percent: 68, message: `Collecting clients from ${nodeCount} configured ${nodeLabel}...` },
+    { after: 20, percent: 82, message: 'Waiting for router and node collections...' },
+    { after: 35, percent: 91, message: 'Processing the combined client list...' },
+    { after: 50, percent: 94, message: 'Still working; final client data is being prepared...' }
+  ] : [
+    { after: 0, percent: 10, message: 'Preparing client refresh...' },
+    { after: 1, percent: 22, message: 'Checking VLAN and apply state...' },
+    { after: 3, percent: 42, message: 'Collecting clients from the main router...' },
+    { after: 8, percent: 70, message: 'Processing the main router collection...' },
+    { after: 18, percent: 88, message: 'Waiting for the refreshed client list...' },
+    { after: 40, percent: 94, message: 'Still working; final client data is being prepared...' }
+  ];
+
+  const started = Date.now();
+  let stageIndex = -1;
+  let timer = null;
+
+  const update = () => {
+    if (typeof loadingTask.isRunning === 'function' && !loadingTask.isRunning()) return;
+    const elapsed = (Date.now() - started) / 1000;
+    let nextIndex = 0;
+    stages.forEach((stage, index) => {
+      if (elapsed >= stage.after) nextIndex = index;
+    });
+    if (nextIndex === stageIndex) return;
+    stageIndex = nextIndex;
+    const stage = stages[stageIndex];
+    loadingTask.phase(stage.message, stage.percent);
+  };
+
+  update();
+  timer = window.setInterval(update, 1000);
+
+  return {
+    stop: () => {
+      if (timer) window.clearInterval(timer);
+      timer = null;
+    },
+    finish: () => {
+      if (timer) window.clearInterval(timer);
+      timer = null;
+      if (typeof loadingTask.isRunning !== 'function' || loadingTask.isRunning()) {
+        loadingTask.phase('Publishing the refreshed client list...', 98);
+      }
+    }
+  };
+}
+
 // Single active poll handle. Starting a new poll cancels any previous one so
 // rapid clicks or overlapping auto/manual refreshes cannot fight over rendering.
 let CLIENTS_REFRESH_TIMER = null;
 let CLIENTS_REFRESH_SEQ   = 0;
+let CLIENTS_REFRESH_PROGRESS = null;
 
 function pollForFreshClientData(sinceMs, opts){
   opts = opts || {};
@@ -4614,13 +4850,36 @@ function pollForFreshClientData(sinceMs, opts){
   const prevGenMs       = opts.previousGenerated
     ? Date.parse(String(opts.previousGenerated).replace(' ','T'))
     : NaN;
+  if (CLIENTS_REFRESH_PROGRESS) {
+    CLIENTS_REFRESH_PROGRESS.stop();
+    CLIENTS_REFRESH_PROGRESS = null;
+  }
+  const progress = opts.loadingTask ? createClientRefreshProgress(opts.loadingTask) : null;
+  CLIENTS_REFRESH_PROGRESS = progress;
+  const stopProgress = () => {
+    if (progress) progress.stop();
+    if (CLIENTS_REFRESH_PROGRESS === progress) CLIENTS_REFRESH_PROGRESS = null;
+  };
 
   CLIENTS_REFRESH_TIMER = setInterval(async () => {
     // Ignore ticks from a superseded poll.
-    if (seq !== CLIENTS_REFRESH_SEQ) { clearInterval(CLIENTS_REFRESH_TIMER); return; }
+    if (seq !== CLIENTS_REFRESH_SEQ) return;
+    if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
+      clearInterval(CLIENTS_REFRESH_TIMER);
+      CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
+      return;
+    }
 
     ticks++;
     const data = await fetchClientsJSON();
+    if (seq !== CLIENTS_REFRESH_SEQ) return;
+    if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
+      clearInterval(CLIENTS_REFRESH_TIMER);
+      CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
+      return;
+    }
     if (data) {
       // Primary freshness signal: run_id changed (backend wrote a new file).
       const runIdChanged = prevRunId
@@ -4638,8 +4897,13 @@ function pollForFreshClientData(sinceMs, opts){
       if (isFresh) {
         clearInterval(CLIENTS_REFRESH_TIMER);
         CLIENTS_REFRESH_TIMER = null;
+        if (progress) progress.finish();
+        if (CLIENTS_REFRESH_PROGRESS === progress) CLIENTS_REFRESH_PROGRESS = null;
         renderClientsOverview(data);
         appendCliText((opts.doneMsg || 'Client data refreshed.') + '\n', {scroll:'force'});
+        if (typeof opts.onFresh === 'function') {
+          try { opts.onFresh(data); } catch (err) { console.error(err); }
+        }
         return;
       }
       // Keep the most recent fetch so we can render it on timeout.
@@ -4648,8 +4912,12 @@ function pollForFreshClientData(sinceMs, opts){
     if (ticks >= maxTicks) {
       clearInterval(CLIENTS_REFRESH_TIMER);
       CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
       if (latestData) renderClientsOverview(latestData);
       appendCliText((opts.timeoutMsg || 'Client data refresh timed out; showing latest available.') + '\n', {scroll:'force'});
+      if (typeof opts.onTimeout === 'function') {
+        try { opts.onTimeout(latestData); } catch (err) { console.error(err); }
+      }
     }
   }, 1000);
 }
@@ -4691,8 +4959,25 @@ async function saveClientMeta(btn){
     appendCliText(`Error: Client metadata payload too large (${_cmPayloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, {scroll:'force'});
     return;
   }
+
+  let metadataLoadingTask = null;
+  if (typeof MerVLANLoading !== 'undefined') {
+    metadataLoadingTask = MerVLANLoading.start('macclientmeta_vlanmgr', 'Save Client Metadata', {
+      progressBacked: true
+    });
+    if (metadataLoadingTask) metadataLoadingTask.phase('Preparing client metadata...', 10);
+  }
+
   appendCliText(`Saving client metadata (${_cmPayloadStr.length} bytes)...\n`, {scroll:'force'});
-  window.parent.MVM_save(merlinPayload);
+  const saveResult = (typeof window.parent.MVM_save_quiet === 'function')
+    ? window.parent.MVM_save_quiet(merlinPayload)
+    : window.parent.MVM_save(merlinPayload, { loading:false, waitSec:0, skipRefresh:true });
+  if (saveResult === false) {
+    if (metadataLoadingTask) metadataLoadingTask.fail('Client metadata could not be saved.');
+    appendCliText('Client metadata save was rejected by the parent page.\n', {scroll:'force'});
+    return;
+  }
+  if (metadataLoadingTask) metadataLoadingTask.phase('Saving metadata settings...', 30);
 
   // Close the editor back to the normal overview.
   toggleClientMetaEdit(false);
@@ -4709,6 +4994,7 @@ async function saveClientMeta(btn){
   };
 
   appendCliText('Waiting for settings to persist...\n', {scroll:'force'});
+  if (metadataLoadingTask) metadataLoadingTask.phase('Waiting for metadata settings to persist...', 50);
   const persisted = await waitForSettingsToMatch(expectedManaged, {
     timeoutMs: 25000,
     intervalMs: 700,
@@ -4716,25 +5002,45 @@ async function saveClientMeta(btn){
     subset: true
   });
   if (!persisted){
+    if (metadataLoadingTask) metadataLoadingTask.fail('Metadata settings did not persist in time.');
     appendCliText('Client metadata: settings did not persist in time — skipping apply to avoid acting on stale state. Try Save again.\n', {scroll:'force'});
     return;
   }
 
   // Settings are on disk; now materialize the DBs, reload the shield, recollect.
   appendCliText('Applying client metadata...\n', {scroll:'force'});
+  if (metadataLoadingTask) metadataLoadingTask.phase('Applying client metadata...', 68);
   const metaStartTime = Date.now();
   const prevRunIdForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
   const prevGenForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
+  let metaSubmitted = false;
   if (window.parent && typeof window.parent.MVM_macClientMeta === 'function'){
-    window.parent.MVM_macClientMeta();
-  } else {
-    queueServiceAction('macclientmeta_vlanmgr', { description:'Apply client metadata', cooldownMs:3000 });
+    // The frontend still waits for fresh inventory, while the backend progress
+    // token can fail the task early if DB materialization or collection fails.
+    metaSubmitted = window.parent.MVM_macClientMeta({
+      progressToken: metadataLoadingTask ? metadataLoadingTask.token : ''
+    });
+  } else if (window.parent && typeof window.parent.MVM_trigger === 'function') {
+    metaSubmitted = window.parent.MVM_trigger('macclientmeta_vlanmgr');
   }
+  if (metaSubmitted === false || !metaSubmitted) {
+    if (metadataLoadingTask) metadataLoadingTask.fail('Client metadata apply could not be started.');
+    appendCliText('Client metadata apply could not be started.\n', {scroll:'force'});
+    return;
+  }
+  if (metadataLoadingTask) metadataLoadingTask.phase('Refreshing client inventory...', 84);
   pollForFreshClientData(metaStartTime, {
     previousRunId: prevRunIdForMeta,
     previousGenerated: prevGenForMeta,
+    isCancelled: () => metadataLoadingTask && !metadataLoadingTask.isRunning(),
     doneMsg: 'Client metadata applied.',
-    timeoutMsg: 'Client metadata apply is taking longer than expected; showing latest available.'
+    timeoutMsg: 'Client metadata apply is taking longer than expected; showing latest available.',
+    onFresh: () => {
+      if (metadataLoadingTask) metadataLoadingTask.complete('Client metadata saved.');
+    },
+    onTimeout: () => {
+      if (metadataLoadingTask) metadataLoadingTask.complete('Client metadata saved; refresh is still catching up.');
+    }
   });
 }
 
@@ -4749,10 +5055,23 @@ function renderClientsOverview(data){
     return;
   }
   
-  // Helper to get friendly node name with alias
-  function getNodeDisplayName(routerValue) {
+  // Render a stable, human-useful client source identity. Node slot/IP are the
+  // identity; ProductID is descriptive because multiple nodes may share it.
+  function getNodeDisplayName(node) {
+    const routerValue = String(node && node.router || '').trim();
+    const reportedIp = String(node && node.ip || '').trim();
     if(!routerValue) return 'Node';
-    if(routerValue === 'Main Router') return 'Main Router';
+    const formatName = (name, productId, ip) => {
+      const product = String(productId || '').trim();
+      const address = String(ip || '').trim();
+      if(product && address) return `${name}, ${product} (${address})`;
+      if(product) return `${name}, ${product}`;
+      if(address) return `${name} (${address})`;
+      return name;
+    };
+    if(routerValue === 'Main Router') {
+      return formatName('Main Router', HW_SETTINGS.PRODUCTID, reportedIp);
+    }
     
     // Check if this router IP matches any configured node
     const settings = typeof CURRENT_SETTINGS_CACHE === 'object' ? CURRENT_SETTINGS_CACHE : {};
@@ -4760,11 +5079,11 @@ function renderClientsOverview(data){
       const nodeIp = settings['NODE' + i] || '';
       if(nodeIp && nodeIp !== 'none' && nodeIp === routerValue) {
         const alias = settings['NODE' + i + '_ALIAS'] || ('Node ' + i);
-        return `${alias} (${routerValue})`;
+        return formatName(alias, HW_SETTINGS['PRODUCTID_NODE' + i], nodeIp);
       }
     }
     // If no match found, just return the router value (IP or hostname)
-    return routerValue;
+    return formatName(routerValue, '', reportedIp);
   }
   
   // Helper to format interface badges
@@ -4799,7 +5118,7 @@ function renderClientsOverview(data){
   
   let html = '';
   data.nodes.forEach(node=>{
-    const displayName = getNodeDisplayName(node.router);
+    const displayName = getNodeDisplayName(node);
     const right = node.error ? `<span class=\"err\">${node.error}</span>` : `<span class=\"node-meta\">${formatDate(node.generated)}</span>`;
     html += `<div class=\"client-node\">`+
             `  <h3><span>${displayName}</span>${right}</h3>`;
@@ -4877,6 +5196,55 @@ function renderClientsOverview(data){
 // ===== Page-load client refresh =====
 
 let clientsAutoTimer = null;
+const CLIENTS_APPLY_STATUS_URL = 'tmp/results/vlan_action_status.json';
+const CLIENTS_REFRESH_BUTTON_TITLE = 'Refresh the visible client list only. This does not rebuild or change the MAC shield database.';
+const CLIENTS_APPLY_ACTIONS = new Set([
+  'apply_vlanmgr',
+  'executenodes_vlanmgr',
+  'executenodesonly_vlanmgr'
+]);
+let clientsApplyActive = false;
+let clientsApplyStatusTimer = null;
+
+function setRefreshClientsBlocked(blocked){
+  const btn = document.getElementById('refreshClientsBtn');
+  if (!btn) return;
+  const isBlocked = !!blocked;
+  btn.disabled = isBlocked;
+  btn.classList.toggle('clients-refresh-btn--blocked', isBlocked);
+  btn.setAttribute('aria-disabled', isBlocked ? 'true' : 'false');
+  btn.title = isBlocked ? 'Applying VLANs, please wait.' : CLIENTS_REFRESH_BUTTON_TITLE;
+}
+
+function isLocalVlanApplyActive(){
+  const task = (typeof MerVLANLoading !== 'undefined') ? MerVLANLoading.active : null;
+  return !!(task && task.state === 'running' && CLIENTS_APPLY_ACTIONS.has(task.action));
+}
+
+async function refreshVlanApplyGuard(){
+  let backendActive = false;
+  try {
+    const response = await fetch(CLIENTS_APPLY_STATUS_URL + '?_=' + Date.now(), { cache: 'no-store' });
+    if (response.ok) {
+      const status = await response.json();
+      backendActive = !!(status && status.state === 'running' &&
+        CLIENTS_APPLY_ACTIONS.has(String(status.action || '')));
+    }
+  } catch(_){
+    // Keep a known active state through a transient fetch failure. A later
+    // successful read clears it when the marker is removed.
+    backendActive = clientsApplyActive;
+  }
+  clientsApplyActive = backendActive || isLocalVlanApplyActive();
+  setRefreshClientsBlocked(clientsApplyActive);
+  return clientsApplyActive;
+}
+
+function startVlanApplyStatusPolling(){
+  if (clientsApplyStatusTimer) clearInterval(clientsApplyStatusTimer);
+  refreshVlanApplyGuard();
+  clientsApplyStatusTimer = setInterval(refreshVlanApplyGuard, 1500);
+}
 
 // Returns true when at least one SSID/VLAN pair has been configured
 // (ignoring the default placeholder values written by normalizeToFlatSettings).
@@ -4894,16 +5262,29 @@ function hasConfiguredVlans(){
   return false;
 }
 
-// Per-tab 5-minute cooldown so the auto-refresh runs at most once per session
-// window. Using sessionStorage means each tab is independent and the cooldown
-// resets naturally when the tab closes.
-const CLIENTS_AUTO_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
+// Per-tab cooldown so auto-refresh runs at most once per session window.
+// The value is configured in General.HTML_CLIENT_REFRESH_MINUTES. sessionStorage
+// keeps tabs independent and resets naturally when the tab closes.
+const CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES = 15;
+const CLIENTS_AUTO_REFRESH_MINUTES_MIN = 1;
+const CLIENTS_AUTO_REFRESH_MINUTES_MAX = 1440;
 const CLIENTS_AUTO_REFRESH_KEY = 'mervlan_clients_auto_refresh_last';
+
+function clientAutoRefreshCooldownMs(){
+  const raw = String((CURRENT_SETTINGS_CACHE || {}).HTML_CLIENT_REFRESH_MINUTES ?? '').trim();
+  if(!/^\d+$/.test(raw)) return CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES * 60 * 1000;
+  const minutes = Number(raw);
+  if(!Number.isInteger(minutes) || minutes < CLIENTS_AUTO_REFRESH_MINUTES_MIN ||
+     minutes > CLIENTS_AUTO_REFRESH_MINUTES_MAX){
+    return CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES * 60 * 1000;
+  }
+  return minutes * 60 * 1000;
+}
 
 function canAutoRefreshClients(){
   try {
     const last = Number(sessionStorage.getItem(CLIENTS_AUTO_REFRESH_KEY) || 0);
-    return !last || Date.now() - last > CLIENTS_AUTO_REFRESH_COOLDOWN_MS;
+    return !last || Date.now() - last > clientAutoRefreshCooldownMs();
   } catch(_){ return false; }
 }
 
@@ -4928,23 +5309,35 @@ async function startClientsOnPageLoad(){
   }
 
   // Step 3: cooldown — another tab or a recent page reload already triggered one.
+  if (await refreshVlanApplyGuard()) return;
   if (!canAutoRefreshClients()) return;
+
+  // Close the small race between the first status read and an apply event.
+  if (await refreshVlanApplyGuard()) return;
 
   // Step 4: mark *before* queueing so rapid reloads don't stack multiple jobs.
   markAutoRefreshClients();
 
-  // Step 5: queue one quiet background refresh and poll only for its result.
+    // Step 5: queue one quiet background refresh and poll only for its result.
+    // collectclients_vlanmgr intentionally uses the normal event transport;
+    // the service handler does not have a progress-token variant for this
+    // worker, and the MerVLAN panel is frontend-owned here.
   const started = Date.now();
   queueServiceAction('collectclients_vlanmgr', {
     description: 'Auto-refresh VLAN clients',
     cooldownMs: 8000,
+    loadingOptions: { progressBacked: true },
+    passProgressToken: false,
     quiet: true,
-    afterSubmit: () => {
+    afterSubmit: (loadingTask) => {
       pollForFreshClientData(started, {
+        loadingTask,
         previousRunId: cached && cached.run_id,
         previousGenerated: cached && cached.generated,
         doneMsg: 'Client list auto-refreshed.',
-        timeoutMsg: 'Client auto-refresh is taking longer than expected; showing latest available.'
+        timeoutMsg: 'Client auto-refresh is taking longer than expected; showing latest available.',
+        onFresh: () => { if (loadingTask) loadingTask.complete('Client list auto-refreshed.'); },
+        onTimeout: () => { if (loadingTask) loadingTask.fail('Client auto-refresh did not complete in time.'); }
       });
     }
   });
@@ -4961,6 +5354,10 @@ function stopClientsPolling(){
 }
 
 async function refreshClients(btn){
+  if (await refreshVlanApplyGuard()){
+    appendCliText('Client refresh skipped: VLAN apply is in progress. Please wait.\n', {scroll:'force'});
+    return false;
+  }
   const started = Date.now();
   const previousRunId = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
   const previousGenerated = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
@@ -4968,15 +5365,20 @@ async function refreshClients(btn){
     button: btn,
     description: 'Collect VLAN clients',
     cooldownMs: 8000,
-    afterSubmit: () => {
+    loadingOptions: { progressBacked: true },
+    passProgressToken: false,
+    afterSubmit: (loadingTask) => {
       // Poll until collect_clients.sh emits a JSON newer than this trigger,
       // rather than a fixed tick count, so node collection that runs long still
       // resolves correctly.
       pollForFreshClientData(started, {
+        loadingTask,
         previousRunId,
         previousGenerated,
         doneMsg: 'Client list refreshed.',
-        timeoutMsg: 'Client refresh is taking longer than expected; showing latest available.'
+        timeoutMsg: 'Client refresh is taking longer than expected; showing latest available.',
+        onFresh: () => { if (loadingTask) loadingTask.complete('Client list refreshed.'); },
+        onTimeout: () => { if (loadingTask) loadingTask.fail('Client refresh did not complete in time.'); }
       });
     }
   });
@@ -4984,21 +5386,50 @@ async function refreshClients(btn){
 
 /* ===== Per-action lock + optional button disable ===== */
 const actionLocks = new Map();
+const actionButtons = new Map();
 
-function withActionLock(name, fn, cooldownMs = 8000) {
-    const now = Date.now();
-    const last = actionLocks.get(name) || 0;
-    if (now - last < cooldownMs) {
+function releaseActionLock(name) {
+    if (!name) return;
+    actionLocks.delete(name);
+    const button = actionButtons.get(name);
+    if (button) {
+        button.disabled = false;
+        button.style.opacity = "";
+        if (button.dataset.mervlanAction === name) delete button.dataset.mervlanAction;
+        actionButtons.delete(name);
+    }
+}
+
+function holdActionButton(name, button) {
+    if (!name || !button) return;
+    button.disabled = true;
+    button.style.opacity = 0.6;
+    button.dataset.mervlanAction = name;
+    actionButtons.set(name, button);
+}
+
+function withActionLock(name, fn, cooldownMs = 8000, holdUntilReleased = false) {
+    if (actionLocks.has(name)) {
         appendCliText(`[Action skipped] ${name} - too recent\n`, { scroll: 'force' });
         return Promise.resolve();
     }
-    actionLocks.set(name, now);
-    const release = () => setTimeout(() => actionLocks.delete(name), cooldownMs);
+    const lockStarted = Date.now();
+    actionLocks.set(name, lockStarted);
+    const release = () => setTimeout(() => {
+        if (actionLocks.get(name) === lockStarted) actionLocks.delete(name);
+    }, cooldownMs);
     try {
         const p = Promise.resolve(fn());
+        if (holdUntilReleased) {
+            return p.catch(error => {
+                if (actionLocks.get(name) === lockStarted) releaseActionLock(name);
+                throw error;
+            });
+        }
         return p.finally(release);
     } catch (e) {
-        release();
+        if (holdUntilReleased) releaseActionLock(name);
+        else release();
         throw e;
     }
 }
@@ -5010,6 +5441,386 @@ function disableBtnTemporarily(btn, ms=5000) {
     setTimeout(() => { btn.disabled = false; btn.style.opacity = ""; }, ms);
 }
 
+/* ======================================================================= */
+/* MerVLAN-owned loading controller                                         */
+/* ======================================================================= */
+const MVM_LOADING_DEFAULT_CONFIG = {
+  sync_vlanmgr: {
+    label: 'Sync Nodes',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000
+  },
+  save_vlanmgr: {
+    label: 'Save Settings',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000
+  },
+  apmo_save_vlanmgr: {
+    label: 'Save Hardware Overrides',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    frontend_owned: true
+  },
+  hwprobe_vlanmgr: {
+    label: 'Refresh HW Profile',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    frontend_owned: true
+  },
+  collectclients_vlanmgr: {
+    label: 'Refresh Clients',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    frontend_owned: true
+  },
+  macclientmeta_vlanmgr: {
+    label: 'Save Client Metadata',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000
+  },
+  macrefresh_vlanmgr: {
+    label: 'Rebuild MAC Shield',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000
+  },
+  genkey_vlanmgr: {
+    label: 'Generate SSH Keys',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000
+  },
+  apply_vlanmgr: {
+    label: 'Apply VLAN',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    notice: 'Configuration in progress: the router may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.'
+  },
+  executenodes_vlanmgr: {
+    label: 'Apply VLAN + Nodes',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    notice: 'Configuration in progress: the router and node(s) may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.'
+  },
+  executenodesonly_vlanmgr: {
+    label: 'Apply VLAN to Nodes',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000,
+    notice: 'Configuration in progress: the node(s) may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.'
+  }
+};
+
+let MVM_LOADING_CONFIG = null;
+let MVM_LOADING_CONFIG_PROMISE = null;
+
+function loadMerVLANLoadingConfig() {
+  if (MVM_LOADING_CONFIG_PROMISE) return MVM_LOADING_CONFIG_PROMISE;
+  MVM_LOADING_CONFIG_PROMISE = fetch('settings/loading_actions.json?_=' + Date.now(), { cache: 'no-store' })
+    .then(response => response.ok ? response.json() : Promise.reject(new Error('loading policy unavailable')))
+    .then(config => {
+      MVM_LOADING_CONFIG = (config && config.actions && typeof config.actions === 'object')
+        ? config.actions : {};
+      return MVM_LOADING_CONFIG;
+    })
+    .catch(() => {
+      MVM_LOADING_CONFIG = {};
+      return MVM_LOADING_CONFIG;
+    });
+  return MVM_LOADING_CONFIG_PROMISE;
+}
+
+function createMerVLANLoadingToken() {
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).slice(2, 10);
+  return timestamp + '-' + random;
+}
+
+const MerVLANLoading = (() => {
+  let active = null;
+  let pollTimer = null;
+  let transportFallbackTimer = null;
+
+  const el = id => document.getElementById(id);
+  const getConfig = actionName => {
+    const configured = MVM_LOADING_CONFIG && MVM_LOADING_CONFIG[actionName];
+    return configured || MVM_LOADING_DEFAULT_CONFIG[actionName] || null;
+  };
+
+  function clearTimers() {
+    if (pollTimer) clearInterval(pollTimer);
+    if (transportFallbackTimer) clearTimeout(transportFallbackTimer);
+    pollTimer = null;
+    transportFallbackTimer = null;
+  }
+
+  function setMiniVisible(visible) {
+    const mini = el('mervlanLoadingMini');
+    const slot = el('mervlanLoadingSlot');
+    const row = mini && mini.closest('.form-box--experimental');
+    if (!mini) return;
+    mini.classList.toggle('is-visible', !!visible);
+    mini.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    if (slot) slot.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    if (row) row.classList.toggle('experimental-row--loading', !!visible);
+    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
+  }
+
+  function setInfoVisible() {
+    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
+  }
+
+  function setPanelOpen(open) {
+    const backdrop = el('mervlanLoadingBackdrop');
+    if (!backdrop) return;
+    backdrop.classList.toggle('is-open', !!open);
+    backdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
+    // The shared coordinator hides INFO for the full panel, restores it for
+    // the minimized bar, and accounts for any other visible modal.
+    setInfoVisible();
+  }
+
+  function setNotice(text) {
+    const notice = el('mervlanLoadingNotice');
+    if (!notice) return;
+    notice.textContent = text || '';
+    notice.classList.toggle('is-visible', !!text);
+  }
+
+  function setProgress(percent, mode) {
+    const progress = el('mervlanLoadingProgress');
+    const fill = el('mervlanLoadingProgressFill');
+    const percentEl = el('mervlanLoadingPercent');
+    if (!progress || !fill || !percentEl) return;
+
+    const numeric = Number(percent);
+    const determinate = Number.isFinite(numeric) && numeric >= 0 && numeric <= 100 && mode === 'determinate';
+    progress.classList.toggle('is-indeterminate', !determinate);
+    if (determinate) {
+      const rounded = Math.round(numeric);
+      fill.style.width = rounded + '%';
+      percentEl.textContent = rounded + '%';
+      progress.setAttribute('aria-valuenow', String(rounded));
+    } else {
+      fill.style.width = '0%';
+      percentEl.textContent = '—';
+      progress.removeAttribute('aria-valuenow');
+    }
+  }
+
+  function setMessage(message, fallback) {
+    const phase = el('mervlanLoadingPhase');
+    const miniText = el('mervlanLoadingMiniText');
+    const value = String(message || fallback || 'Working...');
+    if (phase) phase.textContent = value;
+    if (miniText) miniText.textContent = value;
+  }
+
+  function renderStart() {
+    if (!active) return;
+    const actionEl = el('mervlanLoadingAction');
+    const error = el('mervlanLoadingError');
+    const close = el('mervlanLoadingCloseBtn');
+    if (actionEl) actionEl.textContent = active.label;
+    if (error) {
+      error.textContent = '';
+      error.classList.remove('is-visible');
+    }
+    if (close) close.style.display = 'none';
+    setNotice(active.notice);
+    setMessage('Starting ' + active.label.toLowerCase() + '...');
+    setProgress(0, active.mode === 'phase' ? 'determinate' : active.mode);
+    setMiniVisible(false);
+    setPanelOpen(true);
+  }
+
+  function applyStatus(status) {
+    if (!active || !status || status.token !== active.token) return;
+    active.statusSeen = true;
+    if (status.label) active.label = String(status.label);
+    if (status.notice) active.notice = String(status.notice);
+    const actionEl = el('mervlanLoadingAction');
+    if (actionEl) actionEl.textContent = active.label;
+    setNotice(active.notice);
+    setMessage(status.message || status.phase, active.label + ' is running...');
+    setProgress(status.percent, status.mode || active.mode);
+
+    if (status.state === 'failed' || status.state === 'stale') {
+      fail(status.error || status.message || 'The action did not complete successfully.');
+    } else if (status.state === 'complete') {
+      complete(status.message || 'Complete');
+    }
+  }
+
+  function pollStatus() {
+    if (!active) return;
+    const token = active.token;
+    fetch('tmp/progress/' + encodeURIComponent(token) + '.json?_=' + Date.now(), { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) return null;
+        return response.json();
+      })
+      .then(status => {
+        if (status) applyStatus(status);
+      })
+      .catch(() => {
+        // A missing status file is expected during the staged rollout. The
+        // transport completion fallback handles the pilot until sync_nodes
+        // begins publishing its own status.
+      });
+  }
+
+  function complete(message) {
+    if (!active || active.state === 'complete') return;
+    active.state = 'complete';
+    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
+    clearTimers();
+    setMessage(message, 'Complete');
+    setProgress(100, 'determinate');
+    setMiniVisible(false);
+    window.setTimeout(() => close(), 450);
+  }
+
+  function fail(message) {
+    if (!active) return;
+    active.state = 'failed';
+    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
+    clearTimers();
+    const error = el('mervlanLoadingError');
+    const closeButton = el('mervlanLoadingCloseBtn');
+    if (error) {
+      error.textContent = String(message || 'Action failed.');
+      error.classList.add('is-visible');
+    }
+    if (closeButton) closeButton.style.display = '';
+    setMessage('Action failed.');
+    setMiniVisible(true);
+  }
+
+  function close() {
+    if (!active || active.state === 'running') return;
+    clearTimers();
+    setPanelOpen(false);
+    setMiniVisible(false);
+    active = null;
+  }
+
+  function minimize() {
+    if (!active || active.state !== 'running') return;
+    active.minimized = true;
+    setPanelOpen(false);
+    setMiniVisible(true);
+  }
+
+  function restore() {
+    if (!active) return;
+    active.minimized = false;
+    setMiniVisible(false);
+    setPanelOpen(true);
+  }
+
+  function start(actionName, label, options = {}) {
+    const config = getConfig(actionName);
+    if (!config || config.display !== 'panel') return null;
+    if (active) return null;
+
+    const token = createMerVLANLoadingToken();
+    active = {
+      token,
+      action: actionName,
+      label: String(label || config.label || actionName),
+      mode: config.mode || 'indeterminate',
+      notice: String(options.notice || config.notice || ''),
+      state: 'running',
+      statusSeen: false,
+      progressBacked: options.progressBacked !== false,
+      minimized: false
+    };
+    renderStart();
+    loadMerVLANLoadingConfig();
+    pollStatus();
+    pollTimer = window.setInterval(pollStatus, Math.max(500, Number(config.poll_ms) || 1000));
+    return {
+      token,
+      action: actionName,
+      phase: (message, percent) => updateTask(token, message, percent),
+      complete: message => completeTask(token, message),
+      fail: message => failTask(token, message),
+      isRunning: () => !!active && active.token === token && active.state === 'running'
+    };
+  }
+
+  function updateTask(token, message, percent) {
+    if (!active || active.token !== token || active.state !== 'running') return false;
+    setMessage(message, active.label + ' is running...');
+    const numeric = Number(percent);
+    if (Number.isFinite(numeric) && numeric >= 0 && numeric <= 100) {
+      setProgress(numeric, 'determinate');
+    }
+    return true;
+  }
+
+  function completeTask(token, message) {
+    if (!active || active.token !== token) return false;
+    complete(message);
+    return true;
+  }
+
+  function failTask(token, message) {
+    if (!active || active.token !== token) return false;
+    fail(message);
+    return true;
+  }
+
+  function transportComplete(token) {
+    if (!active || active.token !== token || active.state !== 'running') return;
+    // For progress-backed actions the iframe event only confirms that the
+    // request was submitted. The backend owns completion and may continue
+    // running for several minutes, so never close this panel from the short
+    // transport fallback while progress status is authoritative.
+    if (active.progressBacked) return;
+    if (transportFallbackTimer) clearTimeout(transportFallbackTimer);
+    transportFallbackTimer = window.setTimeout(() => {
+      if (active && active.token === token && !active.statusSeen && active.state === 'running') {
+        complete('Action completed');
+      }
+    }, 1200);
+  }
+
+  const mini = el('mervlanLoadingMini');
+  if (mini) mini.addEventListener('click', restore);
+  const minimizeButton = el('mervlanLoadingMinimizeBtn');
+  if (minimizeButton) minimizeButton.addEventListener('click', minimize);
+  const closeButton = el('mervlanLoadingCloseBtn');
+  if (closeButton) closeButton.addEventListener('click', close);
+
+  return {
+    start,
+    minimize,
+    restore,
+    complete,
+    fail,
+    close,
+    transportComplete,
+    get active() { return active; }
+  };
+})();
+
+window.MerVLANLoading = MerVLANLoading;
+window.addEventListener('message', event => {
+  const data = event && event.data;
+  if (!data || data.source !== 'mervlan' || data.type !== 'mervlan-action-complete') return;
+  MerVLANLoading.transportComplete(String(data.token || ''));
+});
+
 function queueServiceAction(actionScriptName, opts = {}) {
     const {
         button = null,
@@ -5017,12 +5828,24 @@ function queueServiceAction(actionScriptName, opts = {}) {
         cooldownMs = 8000,
         afterSubmit,
         parentOpts,
+        loadingOptions = {},
+        passProgressToken = true,
         quiet = false
     } = opts;
 
     const handler = async () => {
         stopPolling();
-        disableBtnTemporarily(button, cooldownMs);
+        if (button) holdActionButton(actionScriptName, button);
+
+        let loadingTask = null;
+        let actionParentOpts = parentOpts;
+        if (typeof MerVLANLoading !== 'undefined') {
+            loadingTask = MerVLANLoading.start(actionScriptName, description, loadingOptions);
+            if (loadingTask && passProgressToken) {
+                const existingParentOpts = (parentOpts && typeof parentOpts === 'object') ? parentOpts : {};
+                actionParentOpts = Object.assign({}, existingParentOpts, { progressToken: loadingTask.token });
+            }
+        }
 
         const timestamp = new Date().toLocaleString();
         if (!quiet) {
@@ -5033,30 +5856,49 @@ function queueServiceAction(actionScriptName, opts = {}) {
         const parentWin = window.parent;
         let submitted;
         if (parentWin && typeof parentWin.MVM_trigger === "function") {
-            submitted = parentWin.MVM_trigger(actionScriptName, parentOpts);
+            submitted = parentWin.MVM_trigger(actionScriptName, actionParentOpts);
         } else if (parentWin && typeof parentWin.MVM_exec === "function") {
-            submitted = parentWin.MVM_exec(actionScriptName, null, parentOpts);
+            submitted = parentWin.MVM_exec(actionScriptName, null, actionParentOpts);
         } else {
             // Always log failures, even in quiet mode.
             appendCliText(`[${new Date().toLocaleString()}] Parent handler not available for ${description}.\n`, { scroll: 'force' });
+            if (loadingTask) loadingTask.fail('The action could not be submitted.');
+            releaseActionLock(actionScriptName);
             startPolling();
             return false;
         }
 
         if (submitted === false) {
             appendCliText(`[${new Date().toLocaleString()}] Parent rejected or deduplicated ${description}.\n`, { scroll: 'force' });
+            if (loadingTask) loadingTask.fail('The action was rejected or is already running.');
+            releaseActionLock(actionScriptName);
             startPolling();
             return false;
         }
 
         if (typeof afterSubmit === "function") {
-            try { afterSubmit(); } catch (err) { console.error(err); }
+            try {
+                const followUp = afterSubmit(loadingTask);
+                if (followUp && typeof followUp.then === "function") await followUp;
+            } catch (err) {
+                console.error(err);
+                appendCliText(`[${new Date().toLocaleString()}] ${description} follow-up failed: ${err.message || err}.\n`, { scroll: 'force' });
+                if (loadingTask) loadingTask.fail('The action follow-up failed.');
+                releaseActionLock(actionScriptName);
+                startPolling();
+                return false;
+            }
         }
         startPolling();
+        if (!loadingTask) {
+            // Actions without a MerVLAN loading policy have no terminal UI
+            // callback; retain the historical cooldown as their fallback.
+            setTimeout(() => releaseActionLock(actionScriptName), cooldownMs);
+        }
         return true;
     };
 
-    return withActionLock(actionScriptName, handler, cooldownMs);
+    return withActionLock(actionScriptName, handler, cooldownMs, true);
 }
 
 function triggerAction(actionScriptName, button, description) {
@@ -5312,6 +6154,7 @@ function triggerAction(actionScriptName, button, description) {
     async function showServiceSettingsModal() {
       const modal = document.getElementById('serviceSettingsModal');
       if (!modal) return;
+      ensureConfigViewForModal();
 
       // Always do a fresh load so all toggles reflect the last saved state on disk.
       // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
@@ -5365,13 +6208,7 @@ function triggerAction(actionScriptName, button, description) {
         overlay.style.display = 'block';
         overlay.style.pointerEvents = 'auto';
       }
-      const cliLatch = document.getElementById('cliLatch');
-      if (cliLatch) {
-        if (cliLatch.dataset.prevDisplay === undefined) {
-          cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
-        }
-        cliLatch.style.display = 'none';
-      }
+      syncInfoLatchVisibility();
     }
 
     function closeServiceSettingsModal() {
@@ -5395,12 +6232,7 @@ function triggerAction(actionScriptName, button, description) {
           overlay.style.pointerEvents = 'none';
         }
       }
-      const cliLatch = document.getElementById('cliLatch');
-      if (cliLatch) {
-        const previous = cliLatch.dataset.prevDisplay;
-        cliLatch.style.display = previous !== undefined ? previous : '';
-        if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-      }
+      syncInfoLatchVisibility();
       scheduleHostIframeResize();
       _svcSnapshot = null;
     }
@@ -5448,7 +6280,8 @@ function triggerAction(actionScriptName, button, description) {
               clearForm: false,
               reloadAfterSave: false,
               restartPolling: false,
-              lockName: 'service-settings-save'
+              lockName: 'service-settings-save',
+              loading: false
             });
             if (!saveResult || !saveResult.ok) {
               throw new Error(saveResult?.error || 'Settings could not be confirmed on disk.');
@@ -5503,14 +6336,26 @@ function triggerAction(actionScriptName, button, description) {
       // Snapshot the current ts before triggering so we can detect when the
       // new file has been written (ts changed = fresh data).
       let _prevTs = '';
+      let _statusReadErrors = 0;
       try {
         const _pr = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
           { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
         if (_pr.ok) { const _pd = await _pr.json(); _prevTs = _pd.ts || ''; }
-      } catch (_) {}
+      } catch (error) {
+        _statusReadErrors++;
+        appendCliText('Service status baseline read failed: ' + error.message + '\n', { scroll: 'force' });
+      }
 
       // Fire the check action — full output still goes to CLI log as before
-      triggerAction('checkservice_vlanmgr', btn, 'Service Status');
+      const actionSubmitted = await triggerAction('checkservice_vlanmgr', btn, 'Service Status');
+      if (actionSubmitted === false) {
+        if (statusLine) {
+          statusLine.textContent = 'Boot service: request rejected (see CLI log)';
+          statusLine.style.color = '#ffaa6b';
+        }
+        appendCliText('Service status request could not be started.\n', { scroll: 'force' });
+        return;
+      }
 
       // Poll until the file has a new ts (max 20s, 1s interval)
       const _deadline = Date.now() + 20000;
@@ -5520,11 +6365,22 @@ function triggerAction(actionScriptName, button, description) {
         try {
           const _r = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
             { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
-          if (_r.ok) {
+          if (!_r.ok) {
+            _statusReadErrors++;
+            if (_statusReadErrors === 3) {
+              appendCliText('Service status polling is temporarily unavailable (HTTP ' + _r.status + '). Retrying...\n', { scroll: 'force' });
+            }
+          } else {
             const _d = await _r.json();
+            _statusReadErrors = 0;
             if (_d.ts && _d.ts !== _prevTs) { data = _d; break; }
           }
-        } catch (_) {}
+        } catch (error) {
+          _statusReadErrors++;
+          if (_statusReadErrors === 3) {
+            appendCliText('Service status polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+          }
+        }
       }
 
       if (data) {
@@ -5576,12 +6432,29 @@ function triggerAction(actionScriptName, button, description) {
     }
 
 async function handleApplyClick(button) {
-    const hasNodes = await checkForConfiguredNodes();
-    if (hasNodes) {
-        showVlanManagerModal();
-        return;
+    if (button && button.disabled) return false;
+    if (button) {
+      button.disabled = true;
+      button.style.opacity = 0.6;
     }
-    triggerAction('apply_vlanmgr', button, 'Apply VLAN');
+    try {
+      const hasNodes = await checkForConfiguredNodes();
+      if (hasNodes) {
+          showVlanManagerModal();
+          return true;
+      }
+      return await triggerAction('apply_vlanmgr', button, 'Apply VLAN');
+    } finally {
+      // queueServiceAction marks a submitted button as action-owned and keeps
+      // it disabled until terminal progress. A preflight-only/modal path is
+      // released immediately after the node check finishes.
+      if (!button || button.dataset.mervlanAction !== 'apply_vlanmgr') {
+        if (button) {
+          button.disabled = false;
+          button.style.opacity = '';
+        }
+      }
+    }
 }
 
 // Check if any nodes are configured in settings.json
@@ -5617,27 +6490,30 @@ async function checkForConfiguredNodes() {
 }
 
 // Run VLAN Manager locally only
-async function runVlanManagerLocal() {
+async function runVlanManagerLocal(button) {
   closeVlanManagerModal();
   return queueServiceAction('apply_vlanmgr', {
+    button,
     description: 'Run VLAN Manager (Local Only)',
     cooldownMs: 8000
   });
 }
 
 // Run VLAN Manager with nodes
-async function runVlanManagerWithNodes() {
+async function runVlanManagerWithNodes(button) {
   closeVlanManagerModal();
   return queueServiceAction('executenodes_vlanmgr', {
+    button,
     description: 'Run VLAN Manager + Nodes',
     cooldownMs: 8000
   });
 }
 
 // Run VLAN Manager with nodes
-async function runVlanManagerOnlyNodes() {
+async function runVlanManagerOnlyNodes(button) {
   closeVlanManagerModal();
   return queueServiceAction('executenodesonly_vlanmgr', {
+    button,
     description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
   });
@@ -5645,16 +6521,32 @@ async function runVlanManagerOnlyNodes() {
 
 async function runMacRefresh() {
   closeVlanManagerModal();
+  const macRefreshStarted = Date.now();
+  const previousRunId = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
+  const previousGenerated = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
   return queueServiceAction('macrefresh_vlanmgr', {
     description: 'MAC Shield Refresh',
     cooldownMs: 3000,
-    afterSubmit: () => {
+    loadingOptions: { progressBacked: true },
+    passProgressToken: true,
+    afterSubmit: (loadingTask) => {
       // mac_refresh.sh rebuilds the shield DB and kicks off a fresh client
       // collection; poll until the new JSON lands so badges/locks update.
-      pollForFreshClientData(Date.now(), {
+      if (loadingTask) loadingTask.phase('Rebuilding MAC shield database...', 30);
+      pollForFreshClientData(macRefreshStarted, {
+        previousRunId,
+        previousGenerated,
+        isCancelled: () => loadingTask && !loadingTask.isRunning(),
         doneMsg: 'MAC shield refreshed.',
-        timeoutMsg: 'MAC shield refresh is taking longer than expected; showing latest available.'
+        timeoutMsg: 'MAC shield refresh is taking longer than expected; showing latest available.',
+        onFresh: () => {
+          if (loadingTask) loadingTask.complete('MAC shield rebuilt.');
+        },
+        onTimeout: () => {
+          if (loadingTask) loadingTask.fail('MAC shield refresh did not complete in time. Check the log for details.');
+        }
       });
+      if (loadingTask) loadingTask.phase('Refreshing client inventory...', 68);
     }
   });
 }
@@ -6240,12 +7132,7 @@ function closeSSHKeyModal() {
     overlay.style.display = 'none';
     overlay.style.pointerEvents = 'none';
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : '';
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 }
 
 function closeUnsupportedModelModal() {
@@ -6266,12 +7153,7 @@ function closeUnsupportedModelModal() {
     }
   }
 
-  const cliLatch = document.getElementById("cliLatch");
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : "";
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 }
 
 function openSupportModelLink() {
@@ -6290,14 +7172,22 @@ function openSupportModelLink() {
 
 // Update the showSSHKeyModal function
 function showSSHKeyModal() {
+  ensureConfigViewForModal();
   // Ensure VLAN modal is closed before opening SSH modal
   const vlanModal = document.getElementById('vlanManagerModal');
   if (vlanModal) vlanModal.style.display = 'none';
   const modal = document.getElementById('sshKeyModal');
   if (!modal) return;
 
+  // Keep the SSH modal in the same stacking context as the MerVLAN loading
+  // backdrop. The main form pane owns the addon-local overlay, while the
+  // page-level modal would otherwise remain above it regardless of z-index.
+  const formPane = document.querySelector('.form-box--main');
+  if (formPane && modal.parentElement !== formPane) {
+    try { formPane.appendChild(modal); } catch (e) { /* ignore */ }
+  }
+
   const overlay = document.getElementById('leftPanelOverlay');
-  const cliLatch = document.getElementById('cliLatch');
   const showModal = () => {
   modal.style.display = 'block';
   anchorModalToForm(modal);
@@ -6306,12 +7196,7 @@ function showSSHKeyModal() {
     overlay.style.display = 'block';
     overlay.style.pointerEvents = 'auto';
   }
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
-    }
-    cliLatch.style.display = 'none';
-  }
+  syncInfoLatchVisibility();
   };
 
   fetch('.ssh/vlan_manager.json?' + Date.now())
@@ -6331,6 +7216,7 @@ function showSSHKeyModal() {
 
 // Open VLAN Manager modal in top-level body to avoid being hidden by any parent
 function showVlanManagerModal() {
+  ensureConfigViewForModal();
   // Close SSH modal if open
   closeSSHKeyModal();
 
@@ -6351,13 +7237,7 @@ function showVlanManagerModal() {
     overlay.style.display = 'block';
     overlay.style.pointerEvents = 'auto';
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
-    }
-    cliLatch.style.display = 'none';
-  }
+  syncInfoLatchVisibility();
 
   // Ensure height alignment after modal changes layout
   setTimeout(adjustClientsPanelHeight, 50);
@@ -6379,12 +7259,7 @@ function closeVlanManagerModal() {
       overlay.style.pointerEvents = 'none';
     }
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : '';
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 }
 
 
@@ -6406,6 +7281,7 @@ function settleMaintenanceConfirmation(accepted) {
     overlay.classList.remove("is-visible");
     overlay.setAttribute("aria-hidden", "true");
   }
+  syncInfoLatchVisibility();
   if (input) input.value = "";
   maintenanceConfirmationRequiredText = "";
   const resolve = maintenanceConfirmationResolve;
@@ -6436,6 +7312,7 @@ function handleMaintenanceConfirmationKey(event) {
 
 function showMaintenanceConfirmation(options) {
   options = options || {};
+  ensureConfigViewForModal();
   if (maintenanceConfirmationResolve) settleMaintenanceConfirmation(false);
   const overlay = document.getElementById("maintenanceConfirmOverlay");
   const title = document.getElementById("maintenanceConfirmTitle");
@@ -6465,6 +7342,7 @@ function showMaintenanceConfirmation(options) {
   positionMaintenanceConfirmationOverlay();
   overlay.classList.add("is-visible");
   overlay.setAttribute("aria-hidden", "false");
+  syncInfoLatchVisibility();
   return new Promise(resolve => {
     maintenanceConfirmationResolve = resolve;
     requestAnimationFrame(() => {
@@ -6715,6 +7593,9 @@ function startMaintenanceOperation(options) {
   const token = makeMaintenanceRequestToken();
   maintenanceRequestToken = token;
   maintenanceRequestSeen = false;
+  const maintenanceStartTime = Date.now();
+  let maintenanceWaitingNoticeShown = false;
+  let maintenanceLastPollError = "";
   const submitted = submitMaintenanceThroughParent(options.parentMethod, token, options.payload);
   if (submitted === false) {
     setMaintenanceStatus("The router rejected the maintenance request.", "error");
@@ -6724,9 +7605,11 @@ function startMaintenanceOperation(options) {
   setMaintenanceStatus(options.startMessage || "Request queued…");
   startPolling();
   const poll = async () => {
+    if (maintenancePollInFlight) return;
+    maintenancePollInFlight = true;
     try {
       const response = await fetch(PATHS.MAINTENANCE_RESULT + "?_=" + Date.now(), { cache: "no-store" });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error("HTTP " + response.status);
       const result = await response.json();
       if (result.request_token !== maintenanceRequestToken) return;
       if (!maintenanceRequestSeen) {
@@ -6764,7 +7647,19 @@ function startMaintenanceOperation(options) {
       }
       const versionModal = document.getElementById("versionModal");
       if (versionModal && versionModal.style.display !== "none") anchorModalToForm(versionModal);
-    } catch (_) {}
+    } catch (error) {
+      if (maintenanceRequestToken !== token) return;
+      maintenanceLastPollError = error && error.message ? error.message : String(error);
+      if (!maintenanceWaitingNoticeShown && Date.now() - maintenanceStartTime >= 10000) {
+        maintenanceWaitingNoticeShown = true;
+        setMaintenanceStatus(
+          "Still waiting for the router to publish maintenance status. Retrying...",
+          "warning"
+        );
+      }
+    } finally {
+      maintenancePollInFlight = false;
+    }
   };
   poll();
   maintenancePollTimer = setInterval(poll, 900);
@@ -6773,6 +7668,11 @@ function startMaintenanceOperation(options) {
     stopMaintenancePolling();
     setMaintenanceBusy(false);
     setMaintenanceStatus("The router did not start this request. Refresh the backup list and try again.", "error");
+    appendCliText(
+      "Maintenance status did not appear within 30 seconds" +
+        (maintenanceLastPollError ? " (last poll: " + maintenanceLastPollError + ")" : ".") + "\n",
+      { scroll: "force" }
+    );
   }, 30000);
   maintenanceTimeoutTimer = setTimeout(() => {
     stopMaintenancePolling();
@@ -6889,12 +7789,12 @@ async function undoLastUpdate() {
 function openVersionModal() {
   const modal = document.getElementById("versionModal");
   if (!modal) return;
+  ensureConfigViewForModal();
   const retainedUpdateFlowState = updateFlowState;
   settleMaintenanceConfirmation(false);
   modal.scrollTop = 0;
 
   const overlay = document.getElementById("leftPanelOverlay");
-  const cliLatch = document.getElementById("cliLatch");
   const current = getIndexHtmlVersion();
   const currentText = document.getElementById("currentVersionText");
   if (currentText) {
@@ -7027,12 +7927,7 @@ function openVersionModal() {
     overlay.style.display = "block";
     overlay.style.pointerEvents = "auto";
   }
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
-    }
-    cliLatch.style.display = "none";
-  }
+  syncInfoLatchVisibility();
 }
 
 function closeVersionModal() {
@@ -7053,7 +7948,6 @@ function closeVersionModal() {
 
   const modal = document.getElementById("versionModal");
   const overlay = document.getElementById("leftPanelOverlay");
-  const cliLatch = document.getElementById("cliLatch");
 
   if (modal) {
     modal.style.display = "none";
@@ -7068,11 +7962,7 @@ function closeVersionModal() {
       overlay.style.pointerEvents = "none";
     }
   }
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : "";
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 
   isUpdateInProgress = false;
   stopUpdateSpinner("");
@@ -7095,6 +7985,94 @@ function advOverrideDefaultTarget() {
   return { MAP_OVERRIDE: "0", OVERRIDE_WAN: "eth0", OVERRIDE_MAX_ETH_PORTS: "0",
     OVERRIDE_LAN1: "none", OVERRIDE_LAN2: "none", OVERRIDE_LAN3: "none", OVERRIDE_LAN4: "none",
     OVERRIDE_LAN5: "none", OVERRIDE_LAN6: "none", OVERRIDE_LAN7: "none", OVERRIDE_LAN8: "none" };
+}
+
+function detectedHardwareProfile(target) {
+  const structured = CURRENT_SETTINGS_STRUCTURED || {};
+  const hardware = structured.Hardware || {};
+  const productKey = target === "MAIN" ? "PRODUCTID" : "PRODUCTID_" + target;
+  const productId = String(hardware[productKey] || "").trim().toUpperCase();
+  if (!productId || productId === "UNSUPPORTED" || productId === "CUSTOM") return null;
+
+  const profile = HARDWARE_PROFILES && HARDWARE_PROFILES[productId];
+  if (profile) return profile;
+
+  // Main-router fallback for older installs generated before the catalog
+  // existed. Node profiles require the generated catalog for exact ordering.
+  if (target === "MAIN") {
+    const eth = Array.isArray(hardware.ETH_PORTS) ? hardware.ETH_PORTS : [];
+    const labels = Array.isArray(hardware.LAN_PORT_LABELS) ? hardware.LAN_PORT_LABELS : [];
+    const max = parseInt(hardware.MAX_ETH_PORTS, 10);
+    if (hardware.WAN_IF && Number.isInteger(max)) {
+      return {
+        model: productId,
+        wan_if: String(hardware.WAN_IF),
+        max_eth_ports: max,
+        eth_ports: eth,
+        lan_labels: labels
+      };
+    }
+  }
+  return null;
+}
+
+function updateAdvancedOverrideTargetLabel(target) {
+  const label = document.getElementById("advOverrideTargetLabel");
+  if (!label) return;
+  const unit = ADV_OVERRIDE_TARGET_LABELS[target] || target;
+  const hardware = CURRENT_SETTINGS_STRUCTURED && CURRENT_SETTINGS_STRUCTURED.Hardware;
+  const productKey = target === "MAIN" ? "PRODUCTID" : "PRODUCTID_" + target;
+  const productId = String((hardware && hardware[productKey]) || "").trim().toUpperCase();
+  const profile = detectedHardwareProfile(target);
+  if (profile && profile.model) {
+    label.textContent = "Editing: " + unit + " - " + profile.model;
+  } else if (productId === "UNSUPPORTED" || productId === "CUSTOM") {
+    label.textContent = "Editing: " + unit + " - Model not supported";
+  } else {
+    label.textContent = "Editing: " + unit + " - Model not detected";
+  }
+}
+
+function loadAdvancedOverrideDefaults(target, showMessage) {
+  const profile = detectedHardwareProfile(target);
+  const errEl = document.getElementById("advOverrideError");
+  if (!profile) {
+    if (errEl) {
+      errEl.textContent = "Model not supported";
+      errEl.style.display = "";
+      errEl.style.color = "";
+      errEl.style.borderColor = "";
+      errEl.style.background = "";
+    }
+    updateAdvancedOverrideTargetLabel(target);
+    return false;
+  }
+
+  const current = advancedOverrideState[target] || advOverrideDefaultTarget();
+  const maxPorts = Math.max(0, Math.min(8, parseInt(profile.max_eth_ports, 10) || 0));
+  const ethPorts = Array.isArray(profile.eth_ports) ? profile.eth_ports : [];
+  current.OVERRIDE_WAN = String(profile.wan_if || "eth0");
+  current.OVERRIDE_MAX_ETH_PORTS = String(maxPorts);
+  for (let i = 1; i <= 8; i++) {
+    current["OVERRIDE_LAN" + i] = i <= maxPorts ? String(ethPorts[i - 1] || "none") : "none";
+  }
+  // Loading defaults must never silently enable or disable the override.
+  advancedOverrideState[target] = current;
+  if (target === advancedOverrideCurrentTarget) loadTargetFields(target);
+  if (errEl) {
+    errEl.textContent = showMessage === false ? "" : "Detected defaults loaded into the form. Nothing has been saved.";
+    errEl.style.display = showMessage === false ? "none" : "";
+    errEl.style.color = "#9fd3ff";
+    errEl.style.borderColor = "#4b779d";
+    errEl.style.background = "rgba(75,119,157,0.12)";
+  }
+  updateAdvancedOverrideTargetLabel(target);
+  return true;
+}
+
+function loadAdvancedOverrideDefaultsForCurrentTarget() {
+  saveCurrentTargetFields();
+  loadAdvancedOverrideDefaults(advancedOverrideCurrentTarget, true);
 }
 
 function fillAdvancedOverrideModalFromCache() {
@@ -7199,9 +8177,11 @@ function loadTargetFields(target) {
 function switchAdvancedOverrideTarget(newTarget) {
   saveCurrentTargetFields();
   advancedOverrideCurrentTarget = newTarget;
-  const label = document.getElementById("advOverrideTargetLabel");
-  if (label) label.textContent = "Editing: " + (ADV_OVERRIDE_TARGET_LABELS[newTarget] || newTarget);
+  updateAdvancedOverrideTargetLabel(newTarget);
   loadTargetFields(newTarget);
+  if (!advancedOverrideState[newTarget] || advancedOverrideState[newTarget].MAP_OVERRIDE !== "1") {
+    loadAdvancedOverrideDefaults(newTarget, false);
+  }
   updateAdvancedOverrideOptionDisabling();
   validateAdvancedOverrideDuplicates();
 }
@@ -7395,6 +8375,7 @@ function updateAdvOverrideTargetOptions(sel) {
 function showAdvancedOverrideModal() {
   const modal = document.getElementById("advancedOverrideModal");
   if (!modal) return;
+  ensureConfigViewForModal();
   const overlay = document.getElementById("leftPanelOverlay");
 
   fillAdvancedOverrideModalFromCache();
@@ -7405,9 +8386,11 @@ function showAdvancedOverrideModal() {
     sel.value = "MAIN";
     updateAdvOverrideTargetOptions(sel);
   }
-  const label = document.getElementById("advOverrideTargetLabel");
-  if (label) label.textContent = "Editing: Main Router";
+  updateAdvancedOverrideTargetLabel("MAIN");
   loadTargetFields("MAIN");
+  if (!advancedOverrideState.MAIN || advancedOverrideState.MAIN.MAP_OVERRIDE !== "1") {
+    loadAdvancedOverrideDefaults("MAIN", false);
+  }
 
   modal.style.display = "block";
   anchorModalToForm(modal);
@@ -7419,13 +8402,7 @@ function showAdvancedOverrideModal() {
     overlay.style.pointerEvents = "auto";
   }
 
-  const cliLatch = document.getElementById("cliLatch");
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
-    }
-    cliLatch.style.display = "none";
-  }
+  syncInfoLatchVisibility();
 }
 
 function hideAdvancedOverrideModal() {
@@ -7445,12 +8422,7 @@ function hideAdvancedOverrideModal() {
       overlay.style.pointerEvents = "none";
     }
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : '';
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
   scheduleHostIframeResize();
 }
 
@@ -7482,31 +8454,60 @@ function applyAdvancedOverride() {
   syncAdvancedOverrideToCache();
 
   const autoRefresh = document.getElementById("advOverrideAutoRefreshHw");
-  const wantHwProbe = autoRefresh && autoRefresh.checked;
+  const autoSync = document.getElementById("advOverrideAutoSyncNodes");
+  const wantHwProbe = !!(autoRefresh && autoRefresh.checked);
+  const wantAutoSync = !!(autoSync && autoSync.checked);
 
-  // Reset the checkbox (transient, never persisted)
+  // Reset transient follow-up options (never persisted).
   if (autoRefresh) autoRefresh.checked = false;
+  if (autoSync) autoSync.checked = false;
   toggleOverrideBtnText();
 
   if (wantHwProbe) {
-    // Auto-refresh: close modal, save, chain hwprobe, reload at 16s
-    hideAdvancedOverrideModal();
-    applyOverrideWithHwProbe();
+    // Keep the APMO modal open while the loading panel runs and after it ends.
+    applyOverrideWithHwProbe({ autoSyncNodes: wantAutoSync });
   } else {
     // Override-only: persist Hardware_Override keys, no full form save needed
-    hideAdvancedOverrideModal();
-    applyOverrideSaveOnly();
+    applyOverrideSaveOnly({ autoSyncNodes: wantAutoSync });
   }
 }
 
-async function applyOverrideWithHwProbe() {
+async function autoSyncAdvancedOverrideNodes() {
+  const hasNodes = await checkForConfiguredNodes();
+  if (!hasNodes) {
+    appendCliText("Auto-sync skipped: no nodes are configured. Run Sync Nodes later after adding a node.\n", { scroll: "force" });
+    return false;
+  }
+
+  // The APMO task closes shortly after completion. Let the shared loading
+  // controller release its panel before starting the normal Sync Nodes task.
+  await new Promise(resolve => window.setTimeout(resolve, 550));
+  appendCliText("Auto-syncing node overrides...\n", { scroll: "force" });
+  return queueServiceAction('sync_vlanmgr', {
+    description: 'Sync Node Overrides',
+    cooldownMs: 8000,
+    loadingOptions: { progressBacked: true },
+    passProgressToken: true
+  });
+}
+
+async function applyOverrideWithHwProbe(options = {}) {
   return withActionLock("override-save-hwprobe", async () => {
     stopPolling();
+    let loadingTask = null;
     try {
+      if (typeof MerVLANLoading !== 'undefined') {
+        loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
+          progressBacked: true
+        });
+        if (loadingTask) loadingTask.phase('Preparing hardware override save...', 10);
+      }
       const merlinPayload = buildOverridePayloadForMerlin();
+      const expectedManaged = extractOverrideSaveExpected(merlinPayload);
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
         appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Hardware override payload is too large.');
         return;
       }
 
@@ -7515,44 +8516,122 @@ async function applyOverrideWithHwProbe() {
       if (!(window.parent && typeof window.parent.MVM_save === "function" &&
             typeof window.parent.MVM_hwprobe === "function")) {
         appendCliText("Error: parent page handlers not available.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('The parent page handlers are unavailable.');
         return;
       }
 
       // Step 1: Save settings
-      window.parent.MVM_save(merlinPayload);
+      if (loadingTask) loadingTask.phase('Saving hardware overrides...', 25);
+      const saveSubmitted = window.parent.MVM_save(merlinPayload, {
+        loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
+      });
+      if (saveSubmitted === false) {
+        appendCliText("Hardware override save was rejected or deduplicated.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Hardware override save was rejected.');
+        return;
+      }
 
-      setTimeout(() => {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
-      }, 500);
+      appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
+      const persisted = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs: 25000,
+        intervalMs: 700,
+        scope: "override",
+        subset: true
+      });
+      if (!persisted) {
+        appendCliText("Override settings did not persist; HW profile refresh was skipped.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Override settings did not persist in time.');
+        return;
+      }
+      if (loadingTask) loadingTask.phase('Verifying saved overrides...', 45);
 
-      // Step 2: Chain hwprobe after save completes (~8s)
-      setTimeout(() => {
-        appendCliText("Triggering HW profile refresh...\n", { scroll: "force" });
-        window.parent.MVM_hwprobe();
-      }, 8500);
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
 
-      // Step 3: Reload at 16s (8s save + 8s hwprobe = ~16s)
-      setTimeout(async () => {
-        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-        await loadSettings();
-        appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
-      }, 16000);
+      // Step 2: Wait for the correlated HW probe completion acknowledgement.
+      appendCliText("Triggering HW profile refresh...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Detecting hardware profile...', 60);
+      const probeResult = await runVerifiedHardwareProbe();
+      if (!probeResult.ok) {
+        if (loadingTask) loadingTask.fail(probeResult.message || 'HW profile refresh failed.');
+        return;
+      }
+
+      // Step 3: Reload only after the probe has completed.
+      appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
+      await loadSettings();
+      appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
+      if (loadingTask) loadingTask.complete('Hardware overrides saved and profile refreshed.');
+      if (options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
+      if (loadingTask) loadingTask.fail('Hardware override save failed.');
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
     }
   }, 18000);
 }
 
-async function applyOverrideSaveOnly() {
+function extractOverrideSaveExpected(payload) {
+  const expected = {};
+  Object.keys(payload || {}).forEach(key => {
+    if (key.indexOf("vlanmgr_OVERRIDE_") !== 0) return;
+    expected[key.slice("vlanmgr_".length)] = String(payload[key] ?? "");
+  });
+  return expected;
+}
+
+async function runVerifiedHardwareProbe() {
+  const parentWin = window.parent;
+  if (!parentWin || typeof parentWin.MVM_hwprobe !== "function") {
+    const message = "HW probe handler is unavailable.";
+    appendCliText(message + "\n", { scroll: "force" });
+    return { ok: false, status: "error", message };
+  }
+
+  const requestToken = createActionRequestToken();
+  const submitted = parentWin.MVM_hwprobe({
+    payload: { vlanmgr_action_request_token: requestToken },
+    loading: false,
+    skipRefresh: true,
+    waitSec: 0,
+    minLoadingMs: 0
+  });
+  if (submitted === false) {
+    const message = "HW profile refresh was rejected or deduplicated.";
+    appendCliText(message + "\n", { scroll: "force" });
+    return { ok: false, status: "error", message };
+  }
+
+  const result = await waitForVerifiedActionResult(
+    requestToken,
+    "hwprobe_vlanmgr",
+    {},
+    45000
+  );
+  if (!result.ok) {
+    appendCliText("HW profile refresh failed: " + result.message + "\n", { scroll: "force" });
+  }
+  return result;
+}
+
+async function applyOverrideSaveOnly(options = {}) {
   return withActionLock("override-save", async () => {
     stopPolling();
+    let loadingTask = null;
     try {
+      if (typeof MerVLANLoading !== 'undefined') {
+        loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
+          progressBacked: true
+        });
+        if (loadingTask) loadingTask.phase('Preparing hardware override save...', 10);
+      }
       const merlinPayload = buildOverridePayloadForMerlin();
+      const expectedManaged = extractOverrideSaveExpected(merlinPayload);
       const payloadStr = JSON.stringify(merlinPayload);
       if (payloadStr.length > MERLIN_SAVE_PAYLOAD_LIMIT) {
         appendCliText(`Error: Payload too large to save (${payloadStr.length}/${MERLIN_SAVE_PAYLOAD_LIMIT} bytes).\n`, { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Hardware override payload is too large.');
         return;
       }
 
@@ -7560,59 +8639,80 @@ async function applyOverrideSaveOnly() {
 
       if (!(window.parent && typeof window.parent.MVM_save === "function")) {
         appendCliText("Error: parent page handler not available.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('The parent page save handler is unavailable.');
         return;
       }
 
-      window.parent.MVM_save(merlinPayload);
+      if (loadingTask) loadingTask.phase('Saving hardware overrides...', 25);
+      const saveSubmitted = window.parent.MVM_save(merlinPayload, {
+        loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
+      });
+      if (saveSubmitted === false) {
+        appendCliText("Override save was rejected or deduplicated.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail('Override save was rejected.');
+        return;
+      }
 
-      setTimeout(() => {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
-      }, 500);
-
-      setTimeout(async () => {
-        appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
-        const flat = CURRENT_SETTINGS_CACHE ? { ...CURRENT_SETTINGS_CACHE } : {};
-        const expectedManaged = extractManagedKeysForScope(flat, "override");
-        const ok = await waitForSettingsToMatch(expectedManaged, {
-          timeoutMs: 25000,
-          intervalMs: 700,
-          scope: "override"
-        });
-        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-        await loadSettings();
-        appendCliText(
-          ok ? "Override save complete.\n"
-             : "Override save: settings did not persist in time. Loaded latest available.\n",
-          { scroll: "force" }
-        );
-      }, 3000);
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
+      appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
+      const ok = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs: 25000,
+        intervalMs: 700,
+        scope: "override",
+        subset: true
+      });
+      if (loadingTask) loadingTask.phase('Verifying saved overrides...', 65);
+      appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
+      await loadSettings();
+      appendCliText(
+        ok ? "Override save complete.\n"
+           : "Override save: settings did not persist in time. Loaded latest available.\n",
+        { scroll: "force" }
+      );
+      if (loadingTask) {
+        if (ok) loadingTask.complete('Hardware overrides saved.');
+        else loadingTask.fail('Override settings did not persist in time.');
+      }
+      if (ok && options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
+      if (loadingTask) loadingTask.fail('Hardware override save failed.');
       appendCliText("Save error: " + err + "\n", { scroll: "force" });
     }
   }, 8000);
 }
 
 async function refreshHwProfile() {
-  hideAdvancedOverrideModal();
   return withActionLock("hwprobe", async () => {
-    appendCliText("Refreshing HW profile...\n", { scroll: "force" });
-    if (window.parent && typeof window.parent.MVM_hwprobe === "function") {
-      window.parent.MVM_hwprobe();
-
-      setTimeout(() => {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
-      }, 500);
-
-      setTimeout(async () => {
-        appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-        await loadSettings();
-        appendCliText("HW profile refresh complete.\n", { scroll: "force" });
-      }, 9000);
-    } else {
-      appendCliText("Error: parent page handler not available.\n", { scroll: "force" });
+    let loadingTask = null;
+    try {
+      if (typeof MerVLANLoading !== 'undefined') {
+        loadingTask = MerVLANLoading.start('hwprobe_vlanmgr', 'Refresh HW Profile', {
+          progressBacked: true
+        });
+        if (loadingTask) loadingTask.phase('Preparing hardware detection...', 10);
+      }
+      appendCliText("Refreshing HW profile...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Detecting hardware profile...', 25);
+      const result = await runVerifiedHardwareProbe();
+      if (!result.ok) {
+        if (loadingTask) loadingTask.fail(result.message || 'HW profile refresh failed.');
+        return result;
+      }
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      if (loadingTask) loadingTask.phase('Loading hardware profile...', 75);
+      clearFields();
+      appendCliText("Reloading settings from disk...\n", { scroll: "force" });
+      await loadSettings();
+      appendCliText("HW profile refresh complete.\n", { scroll: "force" });
+      if (loadingTask) loadingTask.complete('HW profile refreshed.');
+      return result;
+    } catch (err) {
+      if (loadingTask) loadingTask.fail('HW profile refresh failed.');
+      appendCliText("HW profile refresh error: " + err + "\n", { scroll: "force" });
+      return { ok: false, status: 'error', message: String(err) };
     }
   }, 10000);
 }
@@ -8214,7 +9314,7 @@ function isManagedNodeKey(k) {
 
 function extractManagedKeys(flat) {
   const out = {};
-  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
+  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
   Object.keys(flat || {}).forEach(k => {
     if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
   });
@@ -8241,7 +9341,7 @@ function extractManagedKeysForScope(flat, scope) {
   }
 
   // "normal": all managed keys except OVERRIDE_* and ClientMeta
-  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(all).forEach(k => {
     if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
     let m;
@@ -8356,6 +9456,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
     reloadAfterSave = true,
     restartPolling = true,
     lockName = 'save',
+    loading: loadingOverride = null,
     timeoutMs = 25000,
     intervalMs = 700
   } = options;
@@ -8364,6 +9465,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
     stopPolling();
     const triggerBtn = btn instanceof HTMLElement ? btn : document.querySelector('button[onclick*="uploadSettingsAndSave"]');
     if (triggerBtn) disableBtnTemporarily(triggerBtn, 5000);
+    let loadingTask = null;
 
     try {
       let newObj;
@@ -8401,15 +9503,37 @@ async function uploadSettingsAndSave(btn, options = {}) {
       }
 
       const expectedManaged = extractManagedKeysForScope(normalizeToFlatSettings(newObj), 'normal');
+      const useMerVLANLoading = loadingOverride !== false && lockName === 'save' && reloadAfterSave &&
+        typeof MerVLANLoading !== 'undefined';
+      if (useMerVLANLoading) {
+        loadingTask = MerVLANLoading.start('save_vlanmgr', 'Save Settings', {
+          progressBacked: false
+        });
+      }
+      if (loadingTask) {
+        loadingTask.phase('Preparing settings save...', 25);
+        await new Promise(resolve => window.setTimeout(resolve, 300));
+      }
       appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, { scroll: 'force' });
-      parentWin.MVM_save(merlinPayload);
+      const submitted = loadingTask
+        ? parentWin.MVM_save(merlinPayload, { loading: false, skipRefresh: true, waitSec: 0 })
+        : parentWin.MVM_save(merlinPayload, loadingOverride === false
+            ? { loading: false, skipRefresh: true, waitSec: 0 }
+            : { skipRefresh: true, waitSec: 0 });
+      if (submitted === false) {
+        const error = 'The settings save request was rejected or deduplicated.';
+        if (loadingTask) loadingTask.fail(error);
+        return { ok: false, changed: true, error };
+      }
 
       if (shouldClearForm) {
         appendCliText('Clearing form fields...\n', { scroll: 'force' });
         clearFields();
       }
 
+      if (loadingTask) loadingTask.phase('Waiting for settings to persist...', 50);
       appendCliText('Waiting for settings to persist...\n', { scroll: 'force' });
+      if (loadingTask) loadingTask.phase('Verifying saved settings...', 75);
       const ok = await waitForSettingsToMatch(expectedManaged, {
         timeoutMs,
         intervalMs,
@@ -8417,20 +9541,24 @@ async function uploadSettingsAndSave(btn, options = {}) {
       });
 
       if (reloadAfterSave) {
+        if (loadingTask) loadingTask.phase('Loading saved settings...', 90);
         appendCliText('Reloading settings from disk...\n', { scroll: 'force' });
         await loadSettings();
       }
 
       if (!ok) {
         const error = 'Settings did not match the requested values before the save timeout.';
+        if (loadingTask) loadingTask.fail(error);
         appendCliText('Save verification failed: ' + error + '\n', { scroll: 'force' });
         return { ok: false, changed: true, error };
       }
 
+      if (loadingTask) loadingTask.complete('Saved settings loaded');
       appendCliText('Save verification complete.\n', { scroll: 'force' });
       return { ok: true, changed: true };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
+      if (loadingTask) loadingTask.fail(message);
       appendCliText('Save error: ' + message + '\n', { scroll: 'force' });
       return { ok: false, changed: false, error: message };
     }

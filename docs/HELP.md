@@ -577,6 +577,21 @@ These commands are useful when working over SSH on the main router. Most users s
 >
 > `cd /jffs/addons/mervlan`
 
+Development/test branches include router-capable developer tools. They are not
+part of the production `main` branch. After development `Sync Nodes`, the
+router-capable scripts are available under the addon-local `dev-tools/` tree:
+
+```sh
+sh dev-tools/tests/router/mervlan_selftest.sh <case>
+sh dev-tools/safety/mervlan_live_test_guard.sh status
+```
+
+Keep router/AP evidence below
+`/tmp/mervlan_tmp/evidence/<test-run-id>/`. Download it to the development
+computer, verify the local copy, and delete the remote evidence directory only
+after verification succeeds. See the development branch's
+`dev-tools/docs/90-testing-and-evidence.md` for the complete workflow.
+
 <a id="update-backup-and-restore-commands"></a>
 
 ### Update, Backup, and Restore Commands
@@ -843,6 +858,11 @@ Before posting, run through these:
 ### Contributing
 
 To contribute code or test a temporary branch, see [Branches, Releases and Contributions](../README.md#branches-releases-and-contributions). Device profiles and bug reports can be submitted through the links above.
+
+For how the addon works, start with `dev-tools/docs/README.md`. If you are
+using an AI coding agent, tell it to read and start from `dev-tools/AGENTS.md`.
+That is the portable entry point for project rules, developer guidance,
+testing, and deployment constraints.
 
 ---
 

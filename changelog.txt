@@ -1,3 +1,94 @@
+mervlan v0.53.25-dev
+
+Maintenance: Developer tools and test workspace
+- Added the portable `dev-tools/` developer bundle with architecture notes,
+  focused agent rules, local and router-capable tests, SSH/deployment guidance,
+  evidence workflow documentation, and the live-test safety helper.
+- Moved developer test drivers out of the runtime `functions/` directory while
+  preserving their development/test-branch use through Sync Nodes.
+- Development Sync Nodes copies only the approved executable router test tools;
+  documentation, agent rules, planning files, evidence, and local tests remain
+  outside the router runtime payload.
+
+New: Unified MerVLAN loading screens
+- Added a shared loading-screen controller and JSON action policies for Sync Nodes, Save Settings, client metadata, MAC Shield rebuild, SSH key generation, VLAN Apply modes, and client refresh.
+- Loading screens now support live percentage progress, readable current-stage messages, minimize/restore behavior, and a compact minimized bar between Settings and APMO.
+- VLAN Apply screens include concise notices explaining that the router and/or nodes may be momentarily unresponsive while security policies prevent VLAN leaks and WiFi restarts.
+
+Improved: Client refresh coordination
+- Manual and automatic client refreshes now use the MerVLAN loading screen, with the automatic refresh interval set to 15 minutes.
+- Boot- and service-started VLAN applies publish a shared runtime marker so page-load refreshes are skipped and the Refresh Clients button is disabled with an explanatory tooltip while an apply is active.
+- Backend lock protection prevents redundant client collection during router or node applies; apply-owned post-apply collection remains deferred and safe.
+- The ASUS loading overlay is suppressed for the MerVLAN-owned client refresh panel, and the loading policy/helper files are included in installer packaging.
+
+Improved: Consistent Apply completion
+- Local-only, Nodes-only, and Router + Nodes Apply now finish with one coordinated client-inventory refresh.
+- Apply loading screens remain active through that refresh and show the clear “Refreshing client inventory...” phase.
+- Refresh completion is generation-aware and bounded, with visible failure handling and no duplicate collection scheduling.
+
+Improved: Reliable action completion
+- APMO now waits for settings persistence and verified hardware-probe completion instead of relying on fixed delays.
+- Long-running actions keep their controls locked until confirmed completion or failure, reducing duplicate submissions and stale UI state.
+
+Improved: APMO hardware override workflow
+- APMO now shows the detected hardware model next to the selected unit, making it easier to identify the device being configured.
+- Added a Load default values action that fills the form with the detected model's supported defaults without saving them; unsupported models are reported clearly.
+- Added a transient Auto-sync Nodes option for saving node overrides, with shorter guidance explaining whether to sync immediately or later.
+- APMO remains available after saving and refreshing the hardware profile so the completed result can be reviewed without reopening the modal.
+
+Improved: Settings modal usability
+- Settings Save and Refresh for full status no longer trigger the ASUS loading overlay.
+- Improved the visibility of the full-status refresh hint and made its button more compact with a larger refresh icon.
+
+Improved: Restore status polling
+- Restore/maintenance status checks now tolerate short router startup delays without showing a false error.
+- A subdued waiting message appears only after an extended delay, while genuine timeouts still provide a clear error and retain the last polling diagnostic.
+
+Improved: Failure reporting and diagnostics
+- Apply, MAC Shield, metadata, maintenance, and service-status failures now remain visible in the loading screen and logs.
+- Polling is serialized and bounded, with clearer timeout, partial-result, and backend-unavailable reporting.
+- Logs avoid exposing full user-provided client names or other unnecessary sensitive details.
+
+Fixed: Loading-screen WebUI coordination
+- Loading overlays are scoped to the MerVLAN addon pane, hide and restore the INFO latch correctly, and remain above the SSH key modal when an SSH operation starts.
+- The loading notice is consistent between the fetched JSON policy and the HTML fallback, so the intended message is shown even before the policy file finishes loading.
+
+Security: DHCP-hold owner leases and boot watchdog hardening
+- Replaced the shared DHCP marker lifecycle with token-specific owner leases. Every boot watchdog, manager, and heal run now has its own identity, mutation phase, and explicit successor handoff instead of relying on one shared file that competing processes could clear or recreate at the wrong time.
+  This closes the boot/restart race where a VLAN client could briefly reach br0 and request a native DHCP lease while ASUS firmware is rebuilding bridges and ebtables rules.
+- Boot and recovery now stay fail-closed: a timed-out, killed, or orphaned owner records an exact failure and pending recovery state rather than silently releasing DHCP protection. PID and `/proc` start-time validation prevent a reused PID from being trusted as the original owner.
+- Exact DHCP rule reconciliation verifies one chain, one DROP rule, and one jump from both FORWARD and INPUT. Already-correct watchdog ticks are now read-only, avoiding the transient rule gap caused by repeatedly rebuilding an exact rule set.
+- Added consecutive stable-state verification before a manager may complete its handoff and remove protection. MAC Shield and quarantine rules are restored alongside DHCP protection during guarded recovery.
+- Thank you to @inventor7777 - PR #38 for identifying the boot issue that prompted this hardening work.
+
+Improved: Reliable, bounded node operations
+- Node synchronization and cluster-wide Apply preparation now use a bounded worker pool, allowing independent nodes to progress in parallel without opening an unbounded number of SSH sessions. This reduces unnecessary waiting in larger AiMesh installations while preserving a deliberate concurrency limit for router stability.
+- Each node operation has a run-specific status record, isolated logs, and an independently tracked process identity. The router waits for a definitive terminal result instead of treating a short SSH disconnect or a single missing marker check as a failed Apply.
+- Slow, interrupted, or timed-out node work is reconciled fail-closed: the worker and its active operation are verified before a slot is reused, and an exact failure result is retained for diagnosis and recovery. This prevents stale completion markers, PID reuse, and background process leftovers from being mistaken for a successful node handoff.
+- Validated terminal node-runner records and their per-run logs are retained for a bounded period, then pruned without touching live, malformed, or unverified work.
+
+Improved: Sync observability and log viewing
+- Sync now reports queued nodes immediately in the CLI log and relays new worker progress to the detailed VLAN log while preserving isolated worker writes and the two-session SSH limit.
+- The log viewer now includes copied per-worker CLI, VLAN, and command-output logs through a strict JSON index; private worker metadata and SSH temporary files are not published to the WebUI.
+- The log viewer now uses responsive dynamic viewport sizing and page scrolling on phones, keeping its controls and log panel reachable with mobile browser address bars.
+
+New: Coordinated post-apply observation
+- Added a generation-based post-apply worker that serializes MAC snapshots and client collection, defers safely while configuration is mutating, coalesces duplicate requests, and resumes pending work after a worker interruption.
+- Fresh worker processes now load the JSON, hardware-profile, and node-identity context they need, so client observation follows the same SSID assignment rules as the manager.
+- Client JSON publication is atomic: the previous readable result is retained if a refresh or rename cannot complete.
+
+Improved: Boot and observation resilience
+- Boot watchdog handoffs now use a configurable 480-second ceiling with exact completion acknowledgement. Curated nodes mark their own runtime ready without invoking the main-router-only installer path.
+- NVRAM SSID inventory and node SSH observation calls are bounded, so a slow firmware command or unavailable node cannot leave a worker stuck indefinitely.
+- Successful client collection now uses concise routine logs: `Refreshing client list started` and `Refreshing client list complete`; warnings and errors remain detailed.
+
+Maintenance: Validation and controlled recovery tooling
+- Added isolated fake-ebtables/state-machine regression coverage for owner leases, exact rules, handoffs, watchdogs, worker coalescing, PID reuse, crash recovery, and atomic publication.
+- Added a live-test guard and focused live-test support for controlled recovery testing without leaving a router or node in an unsafe intermediate state.
+- Live qualification covered repeated Apply, wireless restart, warm reboot, and cold boot cycles on the node, plus a guarded main-router boot validation with exact-rule and bridge-placement observation.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.24-dev
 
 New: Standalone emergency recovery

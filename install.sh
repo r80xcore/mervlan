@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.59"                      #
+#                    - File: install.sh || version="0.60"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1896,7 +1896,8 @@ download_mervlan() {
   if [ -n "$topdir" ]; then
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
             functions/mervlan_boot.sh functions/hw_probe.sh settings/settings.json \
-            settings/lib_json.sh www/index.html; do
+            settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
                 RESULT_ARCHIVE="FAIL - missing $required"
@@ -1963,7 +1964,9 @@ create_dirs() {
     for d in \
         "$TMP_DIR" \
         "$TMP_DIR/logs" \
+        "$TMP_DIR/logs/node_workers" \
         "$TMP_DIR/locks" \
+        "$TMP_DIR/progress" \
         "$TMP_DIR"/results \
         "$TMP_DIR"/results/vlan_changes \
         "$TMP_DIR"/results/client_collection
@@ -2053,7 +2056,7 @@ create_logs() {
         : > "$log_file" || { printf 'ERROR: Failed to init %s\n' "${log_file##*/}" >&2; return 1; }
     fi
 
-    chmod 755 "$TMP_DIR" "$TMP_DIR/logs"
+    chmod 755 "$TMP_DIR" "$TMP_DIR/logs" "$TMP_DIR/logs/node_workers"
     chmod 644 \
         "$TMP_DIR/logs/cli_output.log" \
         "$TMP_DIR/logs/vlan_manager.log" \
@@ -2073,6 +2076,8 @@ verify_reinstall_projection() {
         "$PUBLIC_DIR/vlan_form_style.css" \
         "$PUBLIC_DIR/help.html" \
         "$PUBLIC_DIR/view_logs.html" \
+        "$PUBLIC_DIR/settings/loading_actions.json" \
+        "$PUBLIC_DIR/settings/hardware_profiles.json" \
         "$PUBLIC_DIR/docs/HELP.json" \
         "$PUBLIC_DIR/vendor/marked.umd.js" \
         "$PUBLIC_DIR/vendor/github-markdown-dark.css" \
@@ -2096,7 +2101,9 @@ verify_reinstall_projection() {
         "$PUBLIC_DIR/tmp/logs/cli_output.json" \
         "$PUBLIC_DIR/tmp/logs/vlan_manager.json" \
         "$PUBLIC_DIR/tmp/logs/boot_wrap.json" \
-        "$PUBLIC_DIR/tmp/results/vlan_clients.json"
+        "$PUBLIC_DIR/tmp/logs/node_workers" \
+        "$PUBLIC_DIR/tmp/results/vlan_clients.json" \
+        "$PUBLIC_DIR/tmp/progress"
     do
         if [ ! -L "$required" ]; then
             printf '[install] ERROR: Reinstall projection missing symlink %s\n' "$required" >&2
@@ -2350,6 +2357,7 @@ cp -p "$ADDON_DIR/$ADDON/www/vlan_index_style.css"  "$PUBLIC_DIR/vlan_index_styl
 cp -p "$ADDON_DIR/$ADDON/www/vlan_form_style.css"   "$PUBLIC_DIR/vlan_form_style.css" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/help.html"             "$PUBLIC_DIR/help.html" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/view_logs.html"        "$PUBLIC_DIR/view_logs.html" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/www/settings/loading_actions.json" "$PUBLIC_DIR/settings/loading_actions.json" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/vendor/marked.umd.js"  "$PUBLIC_DIR/vendor/marked.umd.js" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/vendor/github-markdown-dark.css" "$PUBLIC_DIR/vendor/github-markdown-dark.css" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/www/vendor/THIRD_PARTY_LICENSES.md" "$PUBLIC_DIR/vendor/THIRD_PARTY_LICENSES.json" 2>/dev/null
@@ -2372,6 +2380,17 @@ create_link "$MERV_BASE/settings/settings.json" "$PUBLIC_DIR/settings/settings.j
 # The SPA now reads the Hardware block from settings/settings.json directly;
 # keep the consolidated settings.json published for the UI.
 
+# Reinstall republishes the current source without running the full install
+# wizard. Refresh the generated public hardware catalog here so the APMO model
+# defaults always match the model definitions shipped by this source tree.
+if [ "$MODE" = "reinstall" ]; then
+    run_install_hardware_probe || {
+        RESULT_HARDWARE="FAIL - hardware profile refresh"
+        echo "[install] ERROR: Failed to refresh public hardware profiles" >&2
+        exit 1
+    }
+fi
+
 # 3c. Publish SSH public key for UI if it already exists (rename to .json for compatibility)
 if [ -f "$ADDON_DIR/$ADDON/.ssh/vlan_manager.pub" ]; then
     # Copy it to a .json filename so fetch('.ssh/vlan_manager.json') returns raw text
@@ -2388,7 +2407,9 @@ fi
 create_link "$TMP_DIR/logs/cli_output.log"              "$PUBLIC_DIR/tmp/logs/cli_output.json"
 create_link "$TMP_DIR/logs/vlan_manager.log"            "$PUBLIC_DIR/tmp/logs/vlan_manager.json"
 create_link "$TMP_DIR/logs/boot_wrap.log"                "$PUBLIC_DIR/tmp/logs/boot_wrap.json"
+create_link "$TMP_DIR/logs/node_workers"                 "$PUBLIC_DIR/tmp/logs/node_workers"
 create_link "$TMP_DIR/results/vlan_clients.json"        "$PUBLIC_DIR/tmp/results/vlan_clients.json"
+create_link "$TMP_DIR/progress"                          "$PUBLIC_DIR/tmp/progress"
 # settings.json symlink is created above with the static asset copies
 
 logger -t "$ADDON" "Symlinks created successfully"
@@ -2558,7 +2579,9 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/hw_probe.sh settings/settings.json settings/lib_json.sh www/index.html
+    functions/hw_probe.sh settings/settings.json settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    www/index.html \
+    www/settings/loading_actions.json
 do
     [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; }
 done
@@ -2568,10 +2591,11 @@ settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings va
 
 if [ "$WEBUI_ENABLED" = "1" ]; then
     [ -n "$am_webui_page" ] && [ -f "/www/user/$am_webui_page" ] || { RESULT_WEBUI="FAIL - published ASP missing"; FINAL_STATUS=1; }
-    for _public_req in index.html vlan_index_style.css vlan_form_style.css; do
+    for _public_req in index.html vlan_index_style.css vlan_form_style.css settings/loading_actions.json settings/hardware_profiles.json; do
         [ -f "$PUBLIC_DIR/$_public_req" ] || { RESULT_WEBUI="FAIL - public asset missing: $_public_req"; FINAL_STATUS=1; }
     done
     [ -L "$PUBLIC_DIR/settings/settings.json" ] || { RESULT_WEBUI="FAIL - settings link missing"; FINAL_STATUS=1; }
+    [ -L "$PUBLIC_DIR/tmp/logs/node_workers" ] || { RESULT_WEBUI="FAIL - worker-log link missing"; FINAL_STATUS=1; }
     if [ "$TEST_RUN" = "1" ]; then
         [ -f "$PUBLIC_DIR/installer-test.html" ] || { RESULT_WEBUI="FAIL - diagnostic asset missing"; FINAL_STATUS=1; }
         grep -q '/user/mervlan-test-run/installer-test.html' "/www/user/$am_webui_page" 2>/dev/null || {

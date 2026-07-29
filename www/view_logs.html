@@ -1,16 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <!-- view_logs.html version="0.45" -->
+    <!-- view_logs.html version="0.47" -->
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MerVLAN Log Viewer</title>
   <style>
+    html,
+    body {
+        height: 100%;
+    }
+
     body { 
         background: #1E1E1E; 
         color: #DADADA; 
         font-family: Tahoma, Arial, sans-serif; 
-        margin: 0; 
+        margin: 0;
         padding: 15px;
+        box-sizing: border-box;
+        min-height: 100vh;
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
         overflow: hidden;
     }
     
@@ -19,6 +30,7 @@
         margin-bottom: 15px; 
         border-bottom: 1px solid #444;
         padding-bottom: 10px;
+        flex: 0 0 auto;
     }
     
     h1 { 
@@ -37,6 +49,7 @@
         border-radius: 4px;
         height: 50px;
         box-sizing: border-box;
+        flex: 0 0 auto;
     }
     
     .control-group {
@@ -59,6 +72,7 @@
         gap: 5px;
         margin-bottom: 10px;
         border-bottom: 1px solid #444;
+        flex: 0 0 auto;
     }
     
     .tab {
@@ -79,6 +93,13 @@
     
     .tab:hover {
         background: #357ABD;
+    }
+
+    .worker-select {
+        display: none;
+        margin: 0 0 10px 0;
+        width: 100%;
+        flex: 0 0 auto;
     }
     
     select, button {
@@ -126,9 +147,10 @@
         background: #000;
         border-radius: 8px;
         overflow: hidden;
-        height: calc(100vh - 180px);
         display: flex;
         flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
     }
     
     .log-content {
@@ -190,6 +212,39 @@
         font-size: 11px;
         margin-left: 10px;
     }
+
+    @media (max-width: 720px) {
+        html,
+        body {
+            height: auto;
+            min-height: 100%;
+        }
+
+        body {
+            padding: 10px;
+            min-height: 100dvh;
+            overflow: auto;
+        }
+
+        .controls {
+            height: auto;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .control-group {
+            height: auto;
+            flex-wrap: wrap;
+        }
+
+        .log-container {
+            flex: 0 0 auto;
+            height: 55vh;
+            height: 55dvh;
+            min-height: 260px;
+        }
+    }
   </style>
 </head>
 <body>
@@ -232,7 +287,9 @@
     <div class="tab active" data-log="vlanmgr">VLAN Manager</div>
     <div class="tab" data-log="cli">CLI Output</div>
     <div class="tab" data-log="boot">Boot &amp; Startup</div>
+    <div class="tab" data-log="worker">Node worker logs</div>
   </div>
+  <select id="workerLog" class="worker-select" aria-label="Node worker log"></select>
   
   <div class="log-container">
     <div class="log-content" id="logContent">
@@ -245,7 +302,8 @@ Loading log content...
     const LOG_PATHS = {
         vlanmgr: "tmp/logs/vlan_manager.json",
         cli: "tmp/logs/cli_output.json",
-        boot: "tmp/logs/boot_wrap.json"
+        boot: "tmp/logs/boot_wrap.json",
+        workerIndex: "tmp/logs/node_workers/index.json"
     };
     
     let currentLog = 'vlanmgr';
@@ -255,6 +313,46 @@ Loading log content...
     let isTabSwitching = false;
     let isUserSelecting = false;
     let mouseDownTimeout = null;
+    let workerLogs = [];
+    let workerIndexLoaded = false;
+
+    async function loadWorkerIndex() {
+        const response = await fetch(LOG_PATHS.workerIndex, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!data || data.format_version !== 1 || !Array.isArray(data.jobs)) {
+            throw new Error('Invalid worker log index');
+        }
+        workerLogs = data.jobs.filter(item =>
+            item && item.phase === 'sync' && typeof item.node_id === 'string' &&
+            typeof item.state === 'string' && typeof item.cli === 'string' && typeof item.vlan === 'string' && typeof item.stdout === 'string' &&
+            ['running', 'ok', 'failed', 'timeout'].includes(item.state) &&
+            [item.cli, item.vlan, item.stdout].every(path => /^[A-Za-z0-9._/-]+\.json$/.test(path) && !path.includes('..'))
+        );
+        const select = document.getElementById('workerLog');
+        const previous = select.value;
+        select.textContent = '';
+        workerLogs.forEach((item, index) => {
+            ['cli', 'vlan', 'stdout'].forEach(channel => {
+                const option = document.createElement('option');
+                option.value = item[channel];
+                option.textContent = `${item.job} · NODE${item.node_id} · ${channel.toUpperCase()} · ${item.state}`;
+                select.appendChild(option);
+            });
+        });
+        if (previous && [...select.options].some(option => option.value === previous)) {
+            select.value = previous;
+        }
+        workerIndexLoaded = true;
+    }
+
+    async function currentLogPath() {
+        if (currentLog !== 'worker') return LOG_PATHS[currentLog];
+        await loadWorkerIndex();
+        const select = document.getElementById('workerLog');
+        if (!select.value) throw new Error('No worker logs are available yet');
+        return `tmp/logs/node_workers/${select.value}`;
+    }
     
     function updateTimestamp() {
         const now = new Date();
@@ -279,7 +377,7 @@ Loading log content...
         try {
             // Avoid stale ASUS/browser cache without adding query strings that
             // can create noisy access-log variants.
-            const response = await fetch(LOG_PATHS[currentLog], { cache: 'no-store' });
+            const response = await fetch(await currentLogPath(), { cache: 'no-store' });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
@@ -300,7 +398,9 @@ Loading log content...
             }
         } catch (error) {
             const logContent = document.getElementById('logContent');
-            if (error.message.includes('404')) {
+            if (error.message.includes('No worker logs')) {
+                logContent.textContent = 'No worker logs are available yet. Start a node synchronization to create them.';
+            } else if (error.message.includes('404')) {
                 logContent.textContent = 'Log file not found. The system may not be fully initialized.';
             } else {
                 logContent.textContent = `Error loading log: ${error.message}`;
@@ -345,6 +445,7 @@ Loading log content...
         
         isTabSwitching = true;
         currentLog = logType;
+        document.getElementById('workerLog').style.display = logType === 'worker' ? 'block' : 'none';
         
         // Update tabs immediately for responsive UI
         document.querySelectorAll('.tab').forEach(tab => {
@@ -433,6 +534,13 @@ Loading log content...
         tab.addEventListener('click', function() {
             switchTab(this.getAttribute('data-log'));
         });
+    });
+
+    document.getElementById('workerLog').addEventListener('change', function() {
+        if (currentLog === 'worker') {
+            lastContent = '';
+            loadLog();
+        }
     });
     
     // Initialize

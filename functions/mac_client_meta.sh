@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_client_meta.sh || version="0.11"                    #
+#               - File: mac_client_meta.sh || version="0.12"                    #
 # ============================================================================ #
 # Purpose: Materialize the two client-metadata databases from settings.json and
 #   re-enforce them, then refresh the client inventory so the UI reflects the
@@ -48,14 +48,24 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ]              || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_SSH_LOADED:-}" ]                 || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || true
+[ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ]    || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+if ! type merv_action_progress_init >/dev/null 2>&1; then
+  merv_action_progress_init() { :; }
+  merv_action_progress_phase() { :; }
+  merv_action_progress_complete() { :; }
+  merv_action_progress_fail() { :; }
+fi
 
 DRY_RUN="no"
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macclientmeta_vlanmgr" "Save Client Metadata" \
+  "Preparing client metadata..."
 
 # ---------------------------------------------------------------- Main guard --
 # Override DB is materialized + pushed from the main router; the name DB is a
 # main-only display aid. A node run has nothing useful to do here.
 if ! merv_mac_is_main; then
   info -c cli,vlan "Client Metadata: skipped on node context"
+  merv_action_progress_complete "Client metadata skipped on node context"
   exit 0
 fi
 
@@ -70,6 +80,7 @@ if type merv_lock_acquire >/dev/null 2>&1; then
     META_LOCK_ACQUIRED=1
     trap '[ "$META_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$META_LOCK" 2>/dev/null' EXIT INT TERM
   else
+    merv_action_progress_fail "Another client metadata save is already running"
     info -c cli,vlan "Client Metadata: another save is in progress — skipping"
     exit 0
   fi
@@ -78,6 +89,7 @@ fi
 # ------------------------------------------------------------- Read settings --
 RAW_OVERRIDES=$(json_get_section_value "ClientMeta" "MAC_SHIELD_OVERRIDES" "$SETTINGS_FILE" 2>/dev/null)
 RAW_NAMES=$(json_get_section_value "ClientMeta" "CLIENT_NAME_OVERRIDES" "$SETTINGS_FILE" 2>/dev/null)
+merv_action_progress_phase "Writing MAC override and display-name databases..."
 
 # ----------------------------------------------- Materialize MAC override DB --
 # Split comma-separated MACs, lowercase + validate, dedupe. An empty result is
@@ -96,6 +108,7 @@ if [ -n "$RAW_OVERRIDES" ]; then
   done | sort -u > "$OVR_TMP"
 fi
 _ovr_count=$(awk 'NF' "$OVR_TMP" 2>/dev/null | wc -l | tr -d ' ')
+_meta_partial=0
 if mv "$OVR_TMP" "$MERV_MAC_OVERRIDE_DB" 2>/dev/null; then
   chmod 600 "$MERV_MAC_OVERRIDE_DB" 2>/dev/null || :
   info -c cli,vlan "Client Metadata: MAC override DB written (${_ovr_count} entry/entries)"
@@ -104,6 +117,7 @@ if mv "$OVR_TMP" "$MERV_MAC_OVERRIDE_DB" 2>/dev/null; then
   _ovr_macs=$(tr '\n' ' ' < "$MERV_MAC_OVERRIDE_DB" 2>/dev/null | sed 's/ *$//')
   info -c cli,vlan "Client Metadata: override MACs: ${_ovr_macs:-(none)}"
 else
+  merv_action_progress_fail "Client metadata override DB could not be written"
   rm -f "$OVR_TMP" 2>/dev/null || :
   # The override DB drives which MACs lose their DROP rule. If the write fails
   # the on-disk DB is stale, so reloading/pushing now would enforce an outdated
@@ -138,11 +152,9 @@ _name_count=$(awk 'NF' "$NAME_TMP" 2>/dev/null | wc -l | tr -d ' ')
 if mv "$NAME_TMP" "$MERV_CLIENT_NAME_DB" 2>/dev/null; then
   chmod 600 "$MERV_CLIENT_NAME_DB" 2>/dev/null || :
   info -c cli,vlan "Client Metadata: client name DB written (${_name_count} entry/entries)"
-  # Echo materialized name entries (mac=name), one compact line, for diagnosis.
-  _name_pairs=$(awk -F'\t' 'NF>=2{printf "%s=%s ", $1, $2}' "$MERV_CLIENT_NAME_DB" 2>/dev/null | sed 's/ *$//')
-  info -c cli,vlan "Client Metadata: name entries: ${_name_pairs:-(none)}"
 else
   rm -f "$NAME_TMP" 2>/dev/null || :
+  _meta_partial=1
   warn -c cli,vlan "Client Metadata: failed to write client name DB"
 fi
 
@@ -150,6 +162,7 @@ fi
 # Reload the local MERV_MAC shield from the best available db so the new
 # override set takes effect immediately (overridden MACs lose their DROP rule).
 _shield_reload=skip
+merv_action_progress_phase "Reloading MAC shield and synchronizing overrides..."
 if type ebt_mac_shield_init_and_apply >/dev/null 2>&1; then
   _best=$(merv_mac_best_db 2>/dev/null)
   if [ -n "$_best" ]; then
@@ -172,25 +185,44 @@ if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ]; then
     MERV_MAC_LAST_PUSH_FAILED=0
     merv_mac_push_db_to_nodes "$_nodes"
     _nodes_pushed=${MERV_MAC_LAST_PUSH_OK:-0}
+    [ "${MERV_MAC_LAST_PUSH_FAILED:-0}" -eq 0 ] || _meta_partial=1
     info -c cli,vlan "Client Metadata: override pushed to nodes ${MERV_MAC_LAST_PUSH_OK:-0}/${MERV_MAC_LAST_PUSH_TOTAL:-0}"
   fi
 fi
 
 # ------------------------------------------------ Refresh client inventory ----
-# Rebuild the merged client JSON so the UI immediately reflects the new names
-# and override/locked badges. Foreground so the freshly-written timestamp
-# satisfies the UI's freshness poll. Best-effort.
+# Release the metadata writer lock before entering the observation coordinator:
+# global ordering is observation lock before operation-specific locks.
+if [ "$META_LOCK_ACQUIRED" -eq 1 ]; then
+  merv_lock_release "$META_LOCK" 2>/dev/null || :
+  META_LOCK_ACQUIRED=0
+fi
+
+# Rebuild through the one generation coordinator. Foreground execution ensures
+# the freshly-published JSON satisfies the UI freshness poll.
 _collect=skip
-if [ -x "$MERV_BASE/functions/collect_clients.sh" ]; then
-  if sh "$MERV_BASE/functions/collect_clients.sh" >/dev/null 2>&1; then
+merv_action_progress_phase "Refreshing client inventory..."
+if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+  if MERV_OBS_NO_AUTOSTART=1 "$MERV_BASE/functions/post_apply_worker.sh" \
+       request collect >/dev/null 2>&1 &&
+     "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
     _collect=ok
   else
     _collect=failed
-    warn -c cli,vlan "Client Metadata: client inventory refresh failed"
+    warn -c cli,vlan "Client Metadata: coordinated refresh failed; generation remains pending"
   fi
 fi
 
 # Consolidated one-line summary for quick log scanning.
 info -c cli,vlan "Client Metadata summary: overrides_written=${_ovr_count:-0} names_written=${_name_count:-0} shield_reload=${_shield_reload:-skip} nodes_pushed=${_nodes_pushed:-0} collect_triggered=${_collect:-skip}"
+if [ "$_collect" = "failed" ]; then
+  merv_action_progress_fail "Client metadata saved, but client inventory refresh failed"
+  exit 2
+fi
+if [ "${_meta_partial:-0}" -ne 0 ]; then
+  merv_action_progress_fail "Client metadata applied with warnings; see the VLAN log for details"
+  exit 2
+fi
 info -c cli,vlan "Client Metadata: save complete"
+merv_action_progress_complete "Client metadata saved"
 exit 0

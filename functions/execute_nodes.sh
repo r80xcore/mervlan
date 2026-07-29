@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: execute_nodes.sh || version="0.54"                    #
+#              - File: execute_nodes.sh || version="0.72.2"                  #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -29,9 +29,47 @@ fi
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh"
+# Optional web progress publication. The parent orchestration script owns the
+# progress token; worker processes must never publish to the shared status file.
+merv_action_progress_init() { :; }
+merv_action_progress_update() { :; }
+merv_action_progress_complete() { :; }
+merv_action_progress_fail() { :; }
+if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+fi
+# Runtime marker used by the HTML to block redundant client refreshes during
+# node applies, including applies started by boot/event handlers.
+if [ -f "$MERV_BASE/settings/lib_action_runtime.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_runtime.sh" 2>/dev/null || :
+fi
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+
+execute_nodes_progress_cleanup() {
+  _enpc_rc=$?
+  if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
+     [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
+    if [ "$_enpc_rc" -eq 0 ]; then
+      if [ "${MODE:-full}" = "nodesonly" ]; then
+        merv_action_progress_complete "Node apply complete"
+      else
+        merv_action_progress_complete "Apply complete"
+      fi
+    else
+      if [ "${MODE:-full}" = "nodesonly" ]; then
+        merv_action_progress_fail "Node apply failed; see the VLAN log for details"
+      else
+        merv_action_progress_fail "Apply with nodes failed; see the VLAN log for details"
+      fi
+    fi
+  fi
+  [ "${EXEC_RUNTIME_OWNED:-0}" -eq 1 ] &&
+    merv_action_runtime_finish 2>/dev/null || :
+  [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ] && merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null || :
+}
 
 # ----------------------------------------------------------- Concurrency lock --
 # execute_nodes orchestrates a local manager apply plus remote node runs. The
@@ -43,9 +81,9 @@ EXEC_NODES_LOCK="$LOCKDIR/execute_nodes.lock"
 EXEC_NODES_LOCK_ACQUIRED=0
 if type merv_lock_acquire >/dev/null 2>&1; then
   mkdir -p "$LOCKDIR" 2>/dev/null || :
-  if merv_lock_acquire "$EXEC_NODES_LOCK" "${MERV_SYNC_LOCK_STALE_SEC:-600}" 0 "execute_nodes"; then
+  if merv_lock_acquire "$EXEC_NODES_LOCK" "${MERV_EXEC_NODES_LOCK_STALE_SEC:-900}" 0 "execute_nodes"; then
     EXEC_NODES_LOCK_ACQUIRED=1
-    trap '[ "$EXEC_NODES_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null' EXIT INT TERM
+    trap 'execute_nodes_progress_cleanup' EXIT INT TERM
   else
     warn -c cli,vlan "Execute: another execute_nodes run is in progress — skipping"
     exit 0
@@ -73,6 +111,25 @@ if [ $# -gt 0 ]; then
             warn -c cli,vlan "Unknown argument '$1'; ignoring and proceeding normally"
             ;;
     esac
+fi
+
+if [ "$MODE" = "full" ]; then
+    EXECUTE_PROGRESS_ACTION="executenodes_vlanmgr"
+    EXECUTE_PROGRESS_LABEL="Apply VLAN + Nodes"
+    EXECUTE_PROGRESS_START="Preparing router and nodes..."
+else
+    EXECUTE_PROGRESS_ACTION="executenodesonly_vlanmgr"
+    EXECUTE_PROGRESS_LABEL="Apply VLAN to Nodes"
+    EXECUTE_PROGRESS_START="Preparing node apply..."
+fi
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$EXECUTE_PROGRESS_ACTION" \
+    "$EXECUTE_PROGRESS_LABEL" "$EXECUTE_PROGRESS_START"
+
+EXEC_RUNTIME_OWNED=0
+if type merv_action_runtime_start >/dev/null 2>&1 &&
+   merv_action_runtime_start "$EXECUTE_PROGRESS_ACTION" "$EXECUTE_PROGRESS_LABEL" \
+     "Applying VLAN configuration on router and node(s)..."; then
+  EXEC_RUNTIME_OWNED=1
 fi
 
 # ============================================================================ #
@@ -135,6 +192,21 @@ get_node_ips() {
 }
 
 NODE_IPS=$(get_node_ips)
+APPLY_RUN_ID="$(date +%s 2>/dev/null || printf 0)-$$"
+_exec_seen_ids=" "
+_exec_seen_ips=" "
+while IFS=' ' read -r _exec_check_id _exec_check_ip _exec_check_extra || [ -n "$_exec_check_id" ]; do
+    [ -z "$_exec_check_extra" ] && merv_is_valid_node_id "$_exec_check_id" && _merv_is_ipv4 "$_exec_check_ip" || {
+        error -c cli,vlan "Execute: invalid node list entry"
+        exit 1
+    }
+    case "$_exec_seen_ids" in *" $_exec_check_id "*) error -c cli,vlan "Execute: duplicate node ID $_exec_check_id"; exit 1;; esac
+    case "$_exec_seen_ips" in *" $_exec_check_ip "*) error -c cli,vlan "Execute: duplicate node IP $_exec_check_ip"; exit 1;; esac
+    _exec_seen_ids="$_exec_seen_ids$_exec_check_id "
+    _exec_seen_ips="$_exec_seen_ips$_exec_check_ip "
+done <<EOF
+$NODE_IPS
+EOF
 
 # Check if any nodes are configured
 if [ -z "$NODE_IPS" ]; then
@@ -144,6 +216,9 @@ fi
 
 info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' ' ')"
 echo ""
+EXEC_NODE_COUNT=$(printf '%s\n' "$NODE_IPS" | awk 'NF { count++ } END { print count + 0 }')
+merv_action_progress_update preflight 1 1 15 \
+    "Validated settings, SSH, and $EXEC_NODE_COUNT configured node(s)..."
 
 # ============================================================================ #
 # check_remote_jffs_status                                                     #
@@ -540,32 +615,58 @@ fi
 verify_node_completion() {
     node_id="$1"
     node_ip="$2"
-    marker_file="/tmp/mervlan_tmp/results/node_complete/node_${node_id}.marker"
-    
-    # Read the completion marker from the node
-    marker_content=$(merv_ssh_exec "$node_id" "$node_ip" "cat '$marker_file' 2>/dev/null")
-    
-    if [ -n "$marker_content" ]; then
-        info -c cli,vlan "✓ Node $node_ip (NODE${node_id}) completed: $marker_content"
-        return 0
-    else
-        warn -c cli,vlan "✗ Node $node_ip (NODE${node_id}) completion marker not found"
-        return 1
-    fi
+    _vnc_deadline=$(( $(date +%s) + ${MERV_NODE_COMPLETION_MAX_SEC:-600} ))
+    while [ "$(date +%s)" -lt "$_vnc_deadline" ]; do
+        marker_content=$(MERV_SSH_RETRIES=1 merv_ssh_exec "$node_id" "$node_ip" "sh '$MERV_BASE/functions/mervlan_node_runner.sh' status '$APPLY_RUN_ID' '$node_id'" 2>/dev/null)
+        if [ $? -eq 0 ] && execute_status_valid "$marker_content" "$node_id"; then
+            case "$EXEC_STATUS_STATE" in
+                complete) return 0 ;;
+                failed) fetch_node_runner_logs "$node_id" "$node_ip"; return 1 ;;
+            esac
+        fi
+        sleep "${MERV_NODE_MARKER_POLL_SEC:-5}"
+    done
+    fetch_node_runner_logs "$node_id" "$node_ip"
+    return 1
 }
 
-# ============================================================================ #
-# clear_node_completion_marker                                                 #
-# Remove the completion marker on a node before execution starts.              #
-# ============================================================================ #
-clear_node_completion_marker() {
-    node_id="$1"
-    node_ip="$2"
-    marker_dir="/tmp/mervlan_tmp/results/node_complete"
-    marker_file="$marker_dir/node_${node_id}.marker"
-    
-    # Ensure directory exists and clear any old marker
-    merv_ssh_exec "$node_id" "$node_ip" "mkdir -p '$marker_dir' && rm -f '$marker_file'" >/dev/null 2>&1
+# Strictly validate the remote runner payload again on the parent.  The remote
+# runner already validates its file; this prevents an SSH response from being
+# mistaken for a current-run terminal status.
+execute_status_valid() {
+    _esv_text="$1" _esv_node="$2"
+    EXEC_STATUS_STATE=""; _esv_keys=" "
+    _esv_run=""; _esv_pid=""; _esv_start=""; _esv_started=""; _esv_done=""; _esv_exit=""; _esv_reason=""
+    while IFS= read -r _esv_line || [ -n "$_esv_line" ]; do
+        case "$_esv_line" in *=*) _esv_key=${_esv_line%%=*}; _esv_val=${_esv_line#*=} ;; *) return 1;; esac
+        case "$_esv_keys" in *" $_esv_key "*) return 1;; esac
+        _esv_keys="$_esv_keys$_esv_key "
+        case "$_esv_key" in
+            format_version) [ "$_esv_val" = 1 ] || return 1;; run_id) _esv_run=$_esv_val;; node_id) [ "$_esv_val" = "$_esv_node" ] || return 1;;
+            state) EXEC_STATUS_STATE=$_esv_val;; pid) _esv_pid=$_esv_val;; proc_start_time) _esv_start=$_esv_val;; started_epoch) _esv_started=$_esv_val;;
+            completed_epoch) _esv_done=$_esv_val;; exit_code) _esv_exit=$_esv_val;; reason) _esv_reason=$_esv_val;; *) return 1;; esac
+    done <<EOF
+$_esv_text
+EOF
+    for _esv_required in format_version run_id node_id state pid proc_start_time started_epoch completed_epoch exit_code reason; do
+        case "$_esv_keys" in *" $_esv_required "*) ;; *) return 1;; esac
+    done
+    [ "$_esv_run" = "$APPLY_RUN_ID" ] || return 1
+    case "$_esv_pid:$_esv_start:$_esv_started:$_esv_done" in *[!0-9:]*|:*|*::*) return 1;; esac
+    case "$_esv_reason" in ''|*[!A-Za-z0-9._-]*) return 1;; esac
+    case "$EXEC_STATUS_STATE" in
+      started) [ "$_esv_done" = 0 ] && [ -z "$_esv_exit" ];;
+      complete) [ "$_esv_exit" = 0 ] && [ "$_esv_done" -ge "$_esv_started" ] 2>/dev/null;;
+      failed) case "$_esv_exit" in ''|*[!0-9]*) false;; *) [ "$_esv_exit" -ne 0 ] 2>/dev/null && [ "$_esv_done" -ge "$_esv_started" ] 2>/dev/null;; esac;;
+      *) false;;
+    esac
+}
+
+fetch_node_runner_logs() {
+    _enrl_id="$1" _enrl_ip="$2"
+    [ "${DEBUG:-0}" = 1 ] || [ "${MERV_NODE_FETCH_LOGS_ON_FAILURE:-0}" = 1 ] || return 0
+    _enrl_out=$(MERV_SSH_RETRIES=1 merv_ssh_exec "$_enrl_id" "$_enrl_ip" "d='$MERV_NODE_STATUS_ROOT/$APPLY_RUN_ID'; for f in \"\$d/cli.log\" \"\$d/vlan.log\" \"\$d/stdout.log\"; do [ -f \"\$f\" ] && tail -n 200 \"\$f\"; done" 2>/dev/null)
+    [ -n "$_enrl_out" ] && printf '%s\n' "$_enrl_out" | while IFS= read -r _enrl_line; do info -c vlan "NODE${_enrl_id}: $_enrl_line"; done
 }
 
 # ============================================================================ #
@@ -590,22 +691,85 @@ execute_vlan_manager_on_node() {
 
     # Execute the remote script and capture its output for logging/diagnostics
     output=""
-    output=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE' && sh '$remote_vlan_manager'" 2>&1)
+    output=$(MERV_SSH_RETRIES=1 merv_ssh_exec "$node_id" "$node_ip" "sh '$MERV_BASE/functions/mervlan_node_runner.sh' start '$APPLY_RUN_ID' '$node_id'" 2>&1)
     rc=$?
 
     if [ $rc -eq 0 ]; then
         info -c cli,vlan "✓ Successfully executed VLAN manager on $node_ip"
-        if [ -n "$output" ]; then
-            printf '%s\n' "$output" >>"$CLI_LOG"
-        fi
         return 0
     else
         error -c cli,vlan "✗ Failed to execute VLAN manager on $node_ip (rc=$rc)"
-        if [ -n "$output" ]; then
-            printf '%s\n' "$output" >>"$CLI_LOG"
-        fi
         return 1
     fi
+}
+
+# Bounded-worker handlers.  Parent aggregation remains in this script.
+execute_prepare_job() {
+    _epj_id="$1" _epj_ip="$2"
+    merv_ssh_precheck "$_epj_id" "$_epj_ip" || return 1
+    test_ssh_connection "$_epj_id" "$_epj_ip" || return 1
+    sync_settings_conf_for_node "$_epj_id" "$_epj_ip" || return 1
+    set_node_flags_remote "$_epj_id" "$_epj_ip"
+}
+execute_launch_job() { execute_vlan_manager_on_node "$1" "$2"; }
+execute_status_job() { verify_node_completion "$1" "$2"; }
+
+# Parent-only progress hook for bounded node worker pools. Each worker writes
+# only to its own result file; this hook aggregates validated success markers
+# into a small user-facing node count without exposing the full CLI log.
+execute_nodes_progress_hook() {
+    [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] || return 0
+    _enph_root="$1"
+    _enph_phase="$2"
+    _enph_nodes_file=""
+    _enph_base=0
+    _enph_span=0
+    _enph_label="Working on nodes..."
+    case "$_enph_phase" in
+        prepare)
+            _enph_nodes_file="${_exec_nodes_file:-}"
+            _enph_base=25
+            _enph_span=15
+            _enph_label="Preparing nodes"
+            ;;
+        launch)
+            _enph_nodes_file="${_exec_jobs_root:-}/ready"
+            _enph_base=45
+            if [ "${MODE:-full}" = "nodesonly" ]; then
+                _enph_span=30
+                _enph_label="Applying VLAN configuration to nodes"
+            else
+                _enph_span=25
+                _enph_label="Applying VLAN configuration on router and nodes"
+            fi
+            ;;
+        status)
+            _enph_nodes_file="${_exec_jobs_root:-}/launched"
+            if [ "${MODE:-full}" = "nodesonly" ]; then
+                _enph_base=90
+                _enph_span=7
+            else
+                _enph_base=85
+                _enph_span=10
+            fi
+            _enph_label="Verifying node completion"
+            ;;
+        *) return 0 ;;
+    esac
+    [ -f "$_enph_nodes_file" ] || return 0
+    _enph_total=$(awk 'NF { count++ } END { print count + 0 }' "$_enph_nodes_file" 2>/dev/null)
+    case "$_enph_total" in ''|*[!0-9]*) _enph_total=0 ;; esac
+    [ "$_enph_total" -gt 0 ] 2>/dev/null || return 0
+    _enph_done=0
+    while IFS=' ' read -r _enph_node _enph_ip _enph_extra || [ -n "$_enph_node" ]; do
+        [ -z "$_enph_extra" ] || continue
+        [ -f "$_enph_root/node_${_enph_node}/result" ] || continue
+        grep -q '^state=ok$' "$_enph_root/node_${_enph_node}/result" 2>/dev/null &&
+            _enph_done=$((_enph_done + 1))
+    done < "$_enph_nodes_file"
+    _enph_percent=$((_enph_base + (_enph_span * _enph_done / _enph_total)))
+    merv_action_progress_update "$_enph_phase" "$_enph_done" "$_enph_total" \
+        "$_enph_percent" "$_enph_label: $_enph_done of $_enph_total complete..."
 }
 
 # ============================================================================ #
@@ -621,68 +785,35 @@ local_success=true
 
 # Track which nodes are ready for execution
 READY_NODES=""
+LAUNCHED_NODES=""
 
 # ============================================================================ #
-# PHASE 1: Prepare all nodes (sequential - required before parallel exec)     #
+# PHASE 1: Prepare all nodes in bounded parallel workers                       #
 # ============================================================================ #
 info -c cli,vlan "--- Phase 1: Preparing nodes ---"
 
-_exec_node_tmp="$TMPDIR/execute_node_ips.$$"
-printf '%s\n' "$NODE_IPS" > "$_exec_node_tmp"
-
-_exec_node_count=$(wc -l < "$_exec_node_tmp" 2>/dev/null | tr -cd '0-9')
-[ -n "$_exec_node_count" ] || _exec_node_count=0
-_exec_node_idx=1
-
-while [ "$_exec_node_idx" -le "$_exec_node_count" ]; do
-    _exec_node_line=$(sed -n "${_exec_node_idx}p" "$_exec_node_tmp" 2>/dev/null)
-    _exec_node_idx=$((_exec_node_idx + 1))
-    [ -n "$_exec_node_line" ] || continue
-    set -- $_exec_node_line
-    node_id="$1"
-    node_ip="$2"
-    [ -n "$node_id" ] || continue
-    info -c cli,vlan "Preparing node: $node_ip (NODE${node_id})"
-    
-    # Use wrapper precheck (validates IP, keys, and ping in one call)
-    if ! merv_ssh_precheck "$node_id" "$node_ip"; then
-        merv_ssh_skip_log "$node_id" "$node_ip" "execute"
+_exec_nodes_file="$TMPDIR/execute_nodes.$APPLY_RUN_ID"
+printf '%s\n' "$NODE_IPS" > "$_exec_nodes_file"
+_exec_jobs_root="$TMPDIR/node_jobs/$APPLY_RUN_ID"
+merv_action_progress_update node_prepare 0 "$EXEC_NODE_COUNT" 25 \
+    "Preparing nodes: 0 of $EXEC_NODE_COUNT complete..."
+MNJ_POOL_PROGRESS_HOOK=execute_nodes_progress_hook
+if ! mnj_pool_run "$_exec_jobs_root/prepare" prepare "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_PREPARE_MAX_SEC:-180}" "$_exec_nodes_file" execute_prepare_job; then
+    overall_success=false
+fi
+execute_nodes_progress_hook "$_exec_jobs_root/prepare" prepare
+while IFS=' ' read -r node_id node_ip _exec_extra || [ -n "$node_id" ]; do
+    [ -z "$_exec_extra" ] || continue
+    if mnj_result_validate "$_exec_jobs_root/prepare/node_$node_id/result" "$node_id" prepare && [ "$MNJ_RESULT_STATE" = ok ]; then
+        READY_NODES="${READY_NODES}${READY_NODES:+
+}$node_id $node_ip"
+    else
         overall_success=false
-        continue
     fi
-    
-    # Test SSH connectivity; skip node if SSH fails
-    if ! test_ssh_connection "$node_id" "$node_ip"; then
-        merv_ssh_skip_log "$node_id" "$node_ip" "execute"
-        overall_success=false
-        continue
-    fi
-    
-    info -c cli,vlan "✓ SSH connection successful to $node_ip"
-
-    # Verify JFFS and copy settings.json to node
-    if ! sync_settings_conf_for_node "$node_id" "$node_ip"; then
-        overall_success=false
-        continue
-    fi
-
-    # Set IS_NODE and NODE_ID on the remote node before execution
-    if ! set_node_flags_remote "$node_id" "$node_ip"; then
-        overall_success=false
-        continue
-    fi
-    
-    # Clear any old completion marker before execution
-    clear_node_completion_marker "$node_id" "$node_ip"
-    
-    # Add to ready list
-    READY_NODES="$READY_NODES
-$node_id $node_ip"
-done
-rm -f "$_exec_node_tmp" 2>/dev/null || :
-
-# Trim leading newline
-READY_NODES=$(echo "$READY_NODES" | sed '/^$/d')
+done < "$_exec_nodes_file"
+_execute_ready_count=$(printf '%s\n' "$READY_NODES" | awk 'NF { count++ } END { print count + 0 }')
+merv_action_progress_update node_prepare "$_execute_ready_count" "$EXEC_NODE_COUNT" 40 \
+    "Nodes prepared: $_execute_ready_count of $EXEC_NODE_COUNT ready..."
 
 if [ -z "$READY_NODES" ]; then
     warn -c cli,vlan "No nodes ready for execution"
@@ -692,8 +823,9 @@ if [ -z "$READY_NODES" ]; then
         info -c cli,vlan "Executing VLAN manager on main router (no nodes)..."
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
-            # No nodes, so run with collect_clients included
-            sh "$local_script" >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
+            # Keep collection in the shared final phase below so a no-node
+            # combined run cannot publish the client inventory twice.
+            MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
         fi
     fi
 else
@@ -702,26 +834,28 @@ else
     # ============================================================================ #
     info -c cli,vlan "--- Phase 2: Executing on all routers in parallel ---"
     
-    # Launch node executions in background
-    _ready_node_tmp="$TMPDIR/execute_ready_nodes.$$"
-    printf '%s\n' "$READY_NODES" > "$_ready_node_tmp"
-
-    _ready_node_count=$(wc -l < "$_ready_node_tmp" 2>/dev/null | tr -cd '0-9')
-    [ -n "$_ready_node_count" ] || _ready_node_count=0
-    _ready_node_idx=1
-
-    while [ "$_ready_node_idx" -le "$_ready_node_count" ]; do
-        _ready_node_line=$(sed -n "${_ready_node_idx}p" "$_ready_node_tmp" 2>/dev/null)
-        _ready_node_idx=$((_ready_node_idx + 1))
-        [ -n "$_ready_node_line" ] || continue
-        set -- $_ready_node_line
-        node_id="$1"
-        node_ip="$2"
-        [ -n "$node_id" ] || continue
-        info -c cli,vlan "Launching execution on $node_ip (NODE${node_id})..."
-        execute_vlan_manager_on_node "$node_id" "$node_ip" &
-    done
-    rm -f "$_ready_node_tmp" 2>/dev/null || :
+    printf '%s\n' "$READY_NODES" > "$_exec_jobs_root/ready"
+    _execute_ready_count=$(printf '%s\n' "$READY_NODES" | awk 'NF { count++ } END { print count + 0 }')
+    if [ "$MODE" = "nodesonly" ]; then
+        merv_action_progress_update apply 0 "$EXEC_NODE_COUNT" 45 \
+            "Starting VLAN configuration on $_execute_ready_count node(s)..."
+    else
+        merv_action_progress_update apply 0 "$EXEC_NODE_COUNT" 45 \
+            "Starting VLAN configuration on router and $_execute_ready_count node(s)..."
+    fi
+    if ! mnj_pool_run "$_exec_jobs_root/launch" launch "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_PREPARE_MAX_SEC:-180}" "$_exec_jobs_root/ready" execute_launch_job; then
+        overall_success=false
+    fi
+    execute_nodes_progress_hook "$_exec_jobs_root/launch" launch
+    while IFS=' ' read -r node_id node_ip _exec_extra || [ -n "$node_id" ]; do
+        [ -z "$_exec_extra" ] || continue
+        if mnj_result_validate "$_exec_jobs_root/launch/node_$node_id/result" "$node_id" launch && [ "$MNJ_RESULT_STATE" = ok ]; then
+            LAUNCHED_NODES="${LAUNCHED_NODES}${LAUNCHED_NODES:+
+}$node_id $node_ip"
+        else
+            overall_success=false
+        fi
+    done < "$_exec_jobs_root/ready"
     
     # Launch main router execution in background (with --no-collect flag)
     if [ "$MODE" != "nodesonly" ]; then
@@ -729,14 +863,30 @@ else
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
             _main_rc_file="$TMPDIR/main_exec_rc.$$"
-            ( sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; echo $? > "$_main_rc_file" ) &
+            ( MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; echo $? > "$_main_rc_file" ) &
             main_pid=$!
         fi
     fi
     
     # Wait for all background executions to complete
+    if [ "$MODE" = "nodesonly" ]; then
+        merv_action_progress_update wait 0 1 75 \
+            "Waiting for $_execute_ready_count node(s) to finish..."
+    else
+        merv_action_progress_update wait 0 1 70 \
+            "Waiting for router and $_execute_ready_count node(s) to finish..."
+    fi
     info -c cli,vlan "Waiting for all executions to complete..."
-    wait
+    if [ -n "${main_pid:-}" ]; then
+        wait "$main_pid"
+    fi
+    if [ "$MODE" = "nodesonly" ]; then
+        merv_action_progress_update wait 1 1 90 \
+            "Node operations finished; verifying node completion..."
+    else
+        merv_action_progress_update wait 1 2 78 \
+            "Router execution finished; waiting for node operations..."
+    fi
     info -c cli,vlan "All executions finished"
     
     # Check if main router succeeded (if we ran it)
@@ -766,40 +916,46 @@ else
     # ============================================================================ #
     info -c cli,vlan "--- Phase 3: Verifying node completions ---"
 
-    _verify_node_tmp="$TMPDIR/execute_verify_nodes.$$"
-    printf '%s\n' "$READY_NODES" > "$_verify_node_tmp"
-    _verify_node_count=$(wc -l < "$_verify_node_tmp" 2>/dev/null | tr -cd '0-9')
-    [ -n "$_verify_node_count" ] || _verify_node_count=0
-    _verify_node_idx=1
-
-    while [ "$_verify_node_idx" -le "$_verify_node_count" ]; do
-        _verify_node_line=$(sed -n "${_verify_node_idx}p" "$_verify_node_tmp" 2>/dev/null)
-        _verify_node_idx=$((_verify_node_idx + 1))
-        [ -n "$_verify_node_line" ] || continue
-        set -- $_verify_node_line
-        node_id="$1"
-        node_ip="$2"
-        [ -n "$node_id" ] || continue
-        if ! verify_node_completion "$node_id" "$node_ip"; then
+    if [ -n "$LAUNCHED_NODES" ]; then
+        printf '%s\n' "$LAUNCHED_NODES" > "$_exec_jobs_root/launched"
+        if [ "$MODE" = "nodesonly" ]; then
+            merv_action_progress_update verify 0 "$EXEC_NODE_COUNT" 90 \
+                "Verifying node completion: 0 of $EXEC_NODE_COUNT complete..."
+        else
+            merv_action_progress_update verify 0 "$EXEC_NODE_COUNT" 85 \
+                "Verifying node completion: 0 of $EXEC_NODE_COUNT complete..."
+        fi
+        MNJ_POOL_PROGRESS_HOOK=execute_nodes_progress_hook
+        if ! mnj_pool_run "$_exec_jobs_root/status" status "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_COMPLETION_MAX_SEC:-600}" "$_exec_jobs_root/launched" execute_status_job; then
             overall_success=false
         fi
-    done
-    rm -f "$_verify_node_tmp" 2>/dev/null || :
+        execute_nodes_progress_hook "$_exec_jobs_root/status" status
+    else
+        warn -c cli,vlan "No node launches acknowledged; skipping completion polling"
+    fi
     
     # ============================================================================ #
-    # PHASE 4: Run collect_clients.sh after all nodes verified                   #
+    # PHASE 4: Publish one cluster observation after all work is verified       #
     # ============================================================================ #
-    if [ "$MODE" != "nodesonly" ] && [ -x "$FUNCDIR/collect_clients.sh" ]; then
-        info -c cli,vlan "--- Phase 4: Collecting clients ---"
-        info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
-        sleep 5
-        info -c cli,vlan "Refreshing VLAN client list via collect_clients.sh"
-        if "$FUNCDIR/collect_clients.sh"; then
+    if [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
+        merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
+        info -c cli,vlan "--- Phase 4: Refreshing client inventory ---"
+        if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+            merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null || :
+            EXEC_NODES_LOCK_ACQUIRED=0
+        fi
+        if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
+             request snapshot collect >/dev/null 2>&1 &&
+           "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
             info -c cli,vlan "✓ VLAN client list refresh completed"
         else
-            rc=$?
-            warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
+            _exec_observation_rc=$?
+            overall_success=false
+            warn -c cli,vlan "✗ Post-apply observation failed (rc=$_exec_observation_rc); generation remains pending"
         fi
+    else
+        overall_success=false
+        warn -c cli,vlan "✗ Post-apply observation unavailable; client inventory was not refreshed"
     fi
 fi
 
@@ -812,29 +968,6 @@ echo ""
 # ============================================================================ #
 
 info -c cli,vlan "=== Execution Summary ==="
-
-# Final cleanup: clear all node completion markers to prevent false positives
-if [ -n "$READY_NODES" ]; then
-    info -c cli,vlan "Cleaning up node completion markers..."
-
-    _cleanup_node_tmp="$TMPDIR/execute_cleanup_nodes.$$"
-    printf '%s\n' "$READY_NODES" > "$_cleanup_node_tmp"
-    _cleanup_node_count=$(wc -l < "$_cleanup_node_tmp" 2>/dev/null | tr -cd '0-9')
-    [ -n "$_cleanup_node_count" ] || _cleanup_node_count=0
-    _cleanup_node_idx=1
-
-    while [ "$_cleanup_node_idx" -le "$_cleanup_node_count" ]; do
-        _cleanup_node_line=$(sed -n "${_cleanup_node_idx}p" "$_cleanup_node_tmp" 2>/dev/null)
-        _cleanup_node_idx=$((_cleanup_node_idx + 1))
-        [ -n "$_cleanup_node_line" ] || continue
-        set -- $_cleanup_node_line
-        node_id="$1"
-        node_ip="$2"
-        [ -n "$node_id" ] || continue
-        clear_node_completion_marker "$node_id" "$node_ip"
-    done
-    rm -f "$_cleanup_node_tmp" 2>/dev/null || :
-fi
 
 if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then
     if [ "$MODE" = "nodesonly" ]; then

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_manager.sh || version="0.70.3"                   #
+#             - File: mervlan_manager.sh || version="0.72.2"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -34,6 +34,20 @@ fi
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
+# Optional web progress publication. Progress is best-effort and must never
+# change the VLAN manager result when the helper or token is unavailable.
+merv_action_progress_init() { :; }
+merv_action_progress_update() { :; }
+merv_action_progress_complete() { :; }
+merv_action_progress_fail() { :; }
+if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+fi
+# Runtime marker used by the HTML to block redundant client refreshes during
+# applies that started from boot or a service event and have no UI token.
+if [ -f "$MERV_BASE/settings/lib_action_runtime.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_runtime.sh" 2>/dev/null || :
+fi
 # Optional CLI overrides:
 #   boot                 → boot mode (enables SSID readiness gate)
 #   dryrun|--dry-run|-n  → forces dry-run regardless of settings.json
@@ -41,6 +55,8 @@ fi
 MERV_MANAGER_MODE="normal"
 CLI_DRY_RUN="no"
 SKIP_COLLECT="no"
+MANAGER_PARENT_RUN_ID=""
+MANAGER_HANDOFF_ID=""
 for arg in "$@"; do
   case "$arg" in
     boot)
@@ -52,8 +68,17 @@ for arg in "$@"; do
     --no-collect)
       SKIP_COLLECT="yes"
       ;;
+    --parent-run-id=*)
+      MANAGER_PARENT_RUN_ID=${arg#--parent-run-id=}
+      ;;
+    --handoff-id=*)
+      MANAGER_HANDOFF_ID=${arg#--handoff-id=}
+      ;;
   esac
 done
+
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "apply_vlanmgr" "Apply VLAN" \
+  "Preparing VLAN apply..."
 
 # Boot mode: ensure log directories and files exist before any logging
 # This is critical because install.sh may not have run yet on first boot
@@ -79,10 +104,6 @@ MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 # Initialize SSID filter based on node identity (affects which SSIDs we manage)
 ssid_filter_init "$MERV_NODE_ID"
 info -c vlan "SSID filter: identity=${_SSID_FILTER_TOKEN} node_id=${MERV_NODE_ID:-none}"
-
-# Completion marker directory and file (used by main router to verify node execution)
-MERV_COMPLETION_DIR="/tmp/mervlan_tmp/results/node_complete"
-MERV_COMPLETION_MARKER="$MERV_COMPLETION_DIR/node_${MERV_NODE_ID}.marker"
 
 # ========================================================================== #
 # JSON HELPERS — BusyBox-safe parsing for settings and hardware JSON files    #
@@ -218,7 +239,6 @@ to_lower() {
 BOUND_IFACES=""
 WATCH_IFACES=""
 TRUNK_APPLIED=0
-WATCHDOG_HOLD_OWNED=0
 
 # ========================================================================== #
 # INITIALIZATION & HARDWARE DETECTION — Load configs and validate setup       #
@@ -376,6 +396,10 @@ else
 fi
 
 LOCK_ACQUIRED=0
+MANAGER_DHCP_TOKEN=""
+MANAGER_RUN_ID=""
+MANAGER_EXIT_REASON="process-exit"
+MANAGER_RUNTIME_OWNED=0
 
 acquire_script_lock() {
   # Prevent concurrent runs from stomping on bridges/interfaces. The lock
@@ -406,6 +430,12 @@ acquire_script_lock() {
   stale="${MERV_MANAGER_LOCK_STALE_SEC:-420}"
   if merv_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
     LOCK_ACQUIRED=1
+    if [ "${MERV_ACTION_RUNTIME_OWNER:-0}" != "1" ] &&
+       type merv_action_runtime_start >/dev/null 2>&1 &&
+       merv_action_runtime_start "apply_vlanmgr" "Apply VLAN" \
+         "Applying VLAN configuration..."; then
+      MANAGER_RUNTIME_OWNED=1
+    fi
   else
     error -c cli,vlan "Could not acquire mervlan_manager lock; aborting"
     exit 1
@@ -421,11 +451,32 @@ release_script_lock() {
 }
 
 cleanup_on_exit() {
+    _cleanup_rc=$?
+    if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
+       [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
+      if [ "$_cleanup_rc" -eq 0 ]; then
+        merv_action_progress_complete "Apply complete"
+      else
+        merv_action_progress_fail "Apply failed; see the VLAN log for details"
+      fi
+    fi
+    if [ -n "${MANAGER_DHCP_TOKEN:-}" ]; then
+      _cleanup_reason="${MANAGER_EXIT_REASON:-exit}-${_cleanup_rc}"
+      if merv_dhcp_hold_abandon "$MANAGER_DHCP_TOKEN" "$_cleanup_reason"; then
+        MANAGER_DHCP_TOKEN=""
+      else
+        error -c cli,vlan "Manager cleanup could not resolve its DHCP lease; reconciliation queued"
+      fi
+    fi
+    [ "${MANAGER_RUNTIME_OWNED:-0}" -eq 1 ] &&
+      merv_action_runtime_finish 2>/dev/null || :
     # Remove per-execution change log file
     [ -f "$CHANGE_LOG" ] && rm -f "$CHANGE_LOG"
     release_script_lock
 }
-trap cleanup_on_exit EXIT INT TERM
+trap 'MANAGER_EXIT_REASON=signal-int; exit 130' INT
+trap 'MANAGER_EXIT_REASON=signal-term; exit 143' TERM
+trap cleanup_on_exit EXIT
 
 # track_change — Log configuration changes with timestamp for audit trail
 # Args: $1=change_description (string)
@@ -1404,6 +1455,7 @@ show_configuration_summary() {
     info -c cli,vlan "Trunk summary: trunk config detected but script was not applied"
   fi
 
+  release_script_lock
   if [ "$DRY_RUN" = "yes" ]; then
     # Dry-run mode: remind user no changes were made
     info -c cli,vlan "=== DRY-RUN COMPLETE ==="
@@ -1651,9 +1703,8 @@ rc_proc_busy() {
   ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$pattern" >/dev/null 2>&1
 }
 
-# merv_dhcp_hold_arm / merv_dhcp_hold_release / merv_dhcp_hold_restore_if_active
-# now live in settings/lib_mervqt.sh (sourced at the top of this script) so the
-# manager, heal_event.sh and the MERV_MAC snapshot share one implementation.
+# Token lease and neutral enforcement APIs live in settings/lib_mervqt.sh so
+# manager, compatibility callers, tests, and reconciliation share one engine.
 
 merv_native_auth_snapshot() {
   local _auth_file _ridx _radio _key _nv _indexes
@@ -1697,6 +1748,11 @@ merv_manager_final_security_check() {
   bad=0
   have_vlan_ssid=0
 
+  if ! merv_dhcp_hold_rules_present; then
+    error -c cli,vlan "SECURITY FAIL: token owner exists but exact DHCP-hold rules are incomplete"
+    bad=1
+  fi
+
   i=1
   while [ "$i" -le "$MAX_SSIDS" ]; do
     ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
@@ -1720,7 +1776,8 @@ merv_manager_final_security_check() {
       error -c cli,vlan "SECURITY FAIL: no expected managed VAP list available"
       return 1
     fi
-    return 0
+    [ "$bad" -eq 0 ]
+    return $?
   fi
 
   while IFS=' ' read -r iface vid; do
@@ -1835,7 +1892,12 @@ wait_for_rc_quiet() {
 
     now=$(date +%s)
     if [ $((now - start)) -ge "$max_wait" ]; then
-      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s; continuing"
+      if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
+         rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
+        warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s with rc idle; continuing to stable verification"
       return 0
     fi
 
@@ -1904,12 +1966,23 @@ restart_services() {
   # before wait_for_rc_quiet enters its per-tick restore loop. Any IoT client
   # racing reassociation in that window could pull a br0 lease and end up
   # wedged across the wrong bridge after the watchdog reorganises VAPs.
-  type merv_dhcp_hold_arm >/dev/null 2>&1 && merv_dhcp_hold_arm quiet
+  type merv_dhcp_hold_enforce >/dev/null 2>&1 && merv_dhcp_hold_enforce
 
   # Optional per-VAP bounce could be added here when specific VAPs changed.
 }
 
-post_rc_watchdog() {
+merv_manager_settle_observe() {
+  if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch' ||
+     rc_proc_busy 'restart_wireless|wlconf|start_lan|switch'; then
+    printf '%s\n' 'busy:asus-rc-work'
+  elif merv_manager_final_security_check >/dev/null 2>&1; then
+    printf '%s\n' healthy
+  else
+    printf '%s\n' unhealthy
+  fi
+}
+
+merv_manager_corrective_pass() {
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "watchdog: dry-run mode; skipping verification"
     return 0
@@ -1921,13 +1994,10 @@ post_rc_watchdog() {
       ;;
   esac
 
-  WATCHDOG_HOLD_OWNED=1
-  # Guard-tick every second during the settle window so that any rc ebtables
-  # flush (secondary wireless event, lan restart, etc.) is caught immediately
-  # and the DHCP hold rule is re-inserted before we do placement verification.
-  merv_guarded_sleep "${WATCHDOG_DELAY_SEC:-25}"
-
-  merv_dhcp_hold_arm
+  merv_dhcp_hold_enforce || {
+    error -c cli,vlan "watchdog: DHCP hold enforcement failed"
+    return 1
+  }
   ebt_quarantine_ensure_expected_rules
 
   info -c cli,vlan "watchdog: starting verification for: $WATCH_IFACES"
@@ -1971,12 +2041,31 @@ post_rc_watchdog() {
   done
 
   if merv_manager_final_security_check; then
-    merv_dhcp_hold_release
+    info -c cli,vlan "watchdog: placement verification passed; manager lease remains active"
   else
-    error -c cli,vlan "SECURITY FAIL: watchdog keeping DHCP hold armed"
+    error -c cli,vlan "SECURITY FAIL: watchdog placement verification failed; manager lease remains active"
+    return 1
   fi
 
   info -c cli,vlan "watchdog: verification complete"
+  return 0
+}
+
+post_rc_watchdog() {
+  local _prw_max="${MERV_DHCP_SETTLE_MAX_SEC:-60}"
+  [ "$MERV_MANAGER_MODE" != boot ] || _prw_max="${MERV_DHCP_SETTLE_BOOT_MAX_SEC:-150}"
+  if merv_dhcp_hold_wait_stable merv_manager_settle_observe \
+       merv_manager_corrective_pass "${MERV_DHCP_SETTLE_STABLE_SEC:-3}" "$_prw_max"; then
+    info -c cli,vlan "watchdog: consecutive stable security observations passed"
+    return 0
+  else
+    _prw_rc=$?
+  fi
+  case "$_prw_rc" in
+    6) error -c cli,vlan "watchdog: ASUS work remained active at timeout; no corrective bridge pass attempted" ;;
+    *) error -c cli,vlan "watchdog: stable security verification failed after bounded corrective pass" ;;
+  esac
+  return "$_prw_rc"
 }
 
 # ========================================================================== #
@@ -1988,10 +2077,43 @@ post_rc_watchdog() {
 # Returns: none (exit code via mervlan_manager.sh script)
 main() {
   acquire_script_lock
+  merv_action_progress_update prepare 0 1 5 "Preparing VLAN apply..."
+  if [ "$DRY_RUN" != "yes" ] && ! merv_observation_wait_idle "${MERV_OBSERVATION_WAIT_SEC:-120}"; then
+    error -c cli,vlan "Observation worker did not become idle; aborting before configuration mutation"
+    return 1
+  fi
 
-  # Manager critical section starts here.
-  # Keep broad br0 DHCP hold active until final placement verification passes.
-  [ "$DRY_RUN" = "yes" ] || merv_dhcp_hold_arm
+  # Lock order is manager/configuration lock -> DHCP state.lock.
+  # The token is acquired and exact rules are verified before any mutation.
+  if [ "$DRY_RUN" != "yes" ]; then
+    MANAGER_RUN_ID="manager-$(date +%s 2>/dev/null || echo 0)-$$"
+    if { [ -n "$MANAGER_PARENT_RUN_ID" ] && [ -z "$MANAGER_HANDOFF_ID" ]; } ||
+       { [ -z "$MANAGER_PARENT_RUN_ID" ] && [ -n "$MANAGER_HANDOFF_ID" ]; }; then
+      error -c cli,vlan "Incomplete DHCP handoff context; both parent run and handoff ID are required"
+      return 1
+    fi
+    [ -z "$MANAGER_PARENT_RUN_ID" ] || merv_dhcp_hold_valid_id "$MANAGER_PARENT_RUN_ID" || {
+      error -c cli,vlan "Invalid DHCP handoff parent run ID"
+      return 1
+    }
+    [ -z "$MANAGER_HANDOFF_ID" ] || merv_dhcp_hold_valid_id "$MANAGER_HANDOFF_ID" || {
+      error -c cli,vlan "Invalid DHCP handoff ID"
+      return 1
+    }
+    merv_dhcp_hold_reconcile manager-start >/dev/null 2>&1 || :
+    if ! merv_dhcp_hold_acquire manager "$MANAGER_RUN_ID" "$MANAGER_PARENT_RUN_ID"; then
+      error -c cli,vlan "Cannot establish token-owned DHCP protection; aborting before mutation"
+      return 1
+    fi
+    MANAGER_DHCP_TOKEN="$MERV_DHCP_HOLD_TOKEN"
+    if [ -n "$MANAGER_HANDOFF_ID" ]; then
+      if ! merv_dhcp_handoff_ack "$MANAGER_HANDOFF_ID" "$MANAGER_PARENT_RUN_ID" "$MANAGER_DHCP_TOKEN"; then
+        error -c cli,vlan "Exact DHCP handoff acknowledgement failed; aborting before mutation"
+        MANAGER_EXIT_REASON="handoff-ack-failed"
+        return 1
+      fi
+    fi
+  fi
   merv_native_auth_snapshot
 
   # mervlan_manager always logs MAC shield activity regardless of the global default
@@ -2011,6 +2133,7 @@ main() {
 
   # Pre-flight validation: verify required files and settings exist
   validate_configuration
+  merv_action_progress_update validate 1 1 15 "Validating VLAN and SSID settings..."
 
   # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
   # This only runs when invoked with "boot" argument from services-start
@@ -2064,7 +2187,14 @@ main() {
   # wl*.*_ifname NVRAM mappings, and disabled before the final security check
   # and snapshot so they always see fresh state.
   type merv_iface_vid_cache_enable >/dev/null 2>&1 && merv_iface_vid_cache_enable
+  if [ "$DRY_RUN" != "yes" ]; then
+    if ! merv_dhcp_hold_mark_mutating "$MANAGER_DHCP_TOKEN" bridge-cleanup; then
+      error -c cli,vlan "Cannot publish manager mutation phase; aborting before bridge cleanup"
+      return 1
+    fi
+  fi
   cleanup_existing_config
+  merv_action_progress_update cleanup 1 1 25 "Cleaning previous VLAN configuration..."
 
   # Configuration phase 1: Attach Ethernet LAN ports to appropriate bridges
   if [ -n "$ETH_PORTS" ]; then
@@ -2077,6 +2207,7 @@ main() {
       idx=$((idx+1))
     done
   fi
+  merv_action_progress_update configure 1 2 40 "Configuring Ethernet bridges and ports..."
 
   # Configuration phase 2: Bind all configured SSIDs dynamically (1..MAX_SSIDS)
   # This includes restoring unconfigured SSIDs to br0
@@ -2102,11 +2233,14 @@ main() {
     fi
     i=$((i+1))
   done
+  merv_action_progress_update configure 2 2 55 "Applying SSID and isolation settings..."
 
   # Service restart phase: only if not in dry-run mode
   [ "$DRY_RUN" = "yes" ] || {
+    merv_action_progress_update restart 1 3 65 "Restarting wireless services..."
     # Restart WiFi services to pick up new VAP configuration
     restart_services
+    merv_action_progress_update restart 2 3 72 "Waiting for wireless services to settle..."
 
     # rc/wlconf may have reshuffled wl*.*_ifname NVRAM mappings during the
     # restart. Invalidate the iface→VID cache so the next read rebuilds from
@@ -2122,10 +2256,16 @@ main() {
 
     if is_ap_mode; then
       info -c cli,vlan "Waiting briefly for AP-mode switch rc to go quiet..."
-      wait_for_rc_quiet 2 10
+      if ! wait_for_rc_quiet 2 10; then
+        error -c cli,vlan "rc remained active after AP-mode restart wait; aborting bridge mutation"
+        return 1
+      fi
     else
       info -c cli,vlan "Waiting for rc/wlconf to go quiet..."
-      wait_for_rc_quiet 6 30
+      if ! wait_for_rc_quiet 6 30; then
+        error -c cli,vlan "rc/wlconf remained active after restart wait; aborting bridge mutation"
+        return 1
+      fi
     fi
 
     type merv_soft_evict_wl_from_br0 >/dev/null 2>&1 && \
@@ -2171,14 +2311,10 @@ main() {
     # check, and the backgrounded MERV_MAC snapshot all see fresh NVRAM.
     type merv_iface_vid_cache_disable >/dev/null 2>&1 && merv_iface_vid_cache_disable
 
-    post_rc_watchdog
+    MANAGER_SETTLE_VERIFIED=0
+    post_rc_watchdog && MANAGER_SETTLE_VERIFIED=1
+    merv_action_progress_update restart 3 3 82 "Rebinding interfaces and rearming security rules..."
 
-    # MERV_MAC snapshot: runs after the watchdog correction window closes.
-    # Captures currently-associated clients per VLAN bridge and merges into
-    # the persistent db so heal_event.sh can re-arm the shield after any
-    # firmware-triggered restart_wireless that occurs post-watchdog.
-    _snap_delay=$(( ${WATCHDOG_DELAY_SEC:-25} + 5 ))
-    ( sleep "$_snap_delay"; merv_mac_snapshot ) &
   }
 
   run_trunk_if_configured
@@ -2186,12 +2322,55 @@ main() {
   merv_native_auth_audit
 
   if [ "$DRY_RUN" != "yes" ]; then
-    if [ "$WATCHDOG_HOLD_OWNED" = "1" ]; then
-      info -c cli,vlan "watchdog completed; DHCP hold decision handled in watchdog"
-    elif merv_manager_final_security_check; then
-      merv_dhcp_hold_release
+    merv_action_progress_update verify 1 2 90 "Running final VLAN security verification..."
+    if [ "${MANAGER_SETTLE_VERIFIED:-0}" -eq 1 ] && merv_manager_final_security_check; then
+      merv_action_progress_update verify 2 2 95 "Final VLAN security verification passed..."
+      _manager_verification="${MANAGER_RUN_ID}-final-$(date +%s 2>/dev/null || echo 0)"
+      if ! merv_dhcp_hold_mark_verified "$MANAGER_DHCP_TOKEN" "$_manager_verification"; then
+        error -c cli,vlan "SECURITY FAIL: could not publish verified manager phase"
+        MANAGER_EXIT_REASON="verify-publish-failed"
+        return 1
+      fi
+      if [ -n "$MANAGER_HANDOFF_ID" ] &&
+         ! merv_dhcp_handoff_child_verified "$MANAGER_HANDOFF_ID" "$MANAGER_DHCP_TOKEN" "$_manager_verification"; then
+        error -c cli,vlan "SECURITY FAIL: could not publish verified handoff completion"
+        MANAGER_EXIT_REASON="handoff-completion-failed"
+        return 1
+      fi
+      if [ -f "$MERV_DHCP_HOLD_STATE_ROOT/recovery.pending" ]; then
+        if ! merv_dhcp_hold_clear_failsafes "$MANAGER_DHCP_TOKEN" "$_manager_verification"; then
+          error -c cli,vlan "SECURITY FAIL: verified manager could not clear covered failsafes"
+          MANAGER_EXIT_REASON="failsafe-clear-failed"
+          return 1
+        fi
+      fi
+      if ! merv_dhcp_hold_release "$MANAGER_DHCP_TOKEN"; then
+        error -c cli,vlan "Manager lease release incomplete; reconciliation will retry"
+        MANAGER_EXIT_REASON="verified-release-failed"
+        return 1
+      fi
+      MANAGER_DHCP_TOKEN=""
     else
-      error -c cli,vlan "SECURITY FAIL: keeping DHCP hold armed because final placement verification failed"
+      error -c cli,vlan "SECURITY FAIL: final placement verification failed; converting manager lease to failsafe"
+      MERV_DHCP_FAILSAFE_FAILED_INTERFACES="${WATCH_IFACES:-unknown}"
+      MERV_DHCP_FAILSAFE_EXPECTED_BRIDGES="${WATCH_IFACES:-unknown}"
+      MERV_DHCP_FAILSAFE_OBSERVED_BRIDGES="final-security-check-failed"
+      MERV_DHCP_FAILSAFE_MISSING_RULES="$(merv_dhcp_hold_rules_observed 2>/dev/null || printf unavailable)"
+      if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch' ||
+         rc_proc_busy 'restart_wireless|wlconf|start_lan|switch'; then
+        MERV_DHCP_FAILSAFE_ASUS_WORK=active
+      else
+        MERV_DHCP_FAILSAFE_ASUS_WORK=quiet
+      fi
+      MERV_DHCP_FAILSAFE_SUGGESTED_ACTION=mervlan-manager-recovery
+      export MERV_DHCP_FAILSAFE_FAILED_INTERFACES MERV_DHCP_FAILSAFE_EXPECTED_BRIDGES
+      export MERV_DHCP_FAILSAFE_OBSERVED_BRIDGES MERV_DHCP_FAILSAFE_MISSING_RULES
+      export MERV_DHCP_FAILSAFE_ASUS_WORK MERV_DHCP_FAILSAFE_SUGGESTED_ACTION
+      if merv_dhcp_hold_abandon "$MANAGER_DHCP_TOKEN" final-verification-failed; then
+        MANAGER_DHCP_TOKEN=""
+      fi
+      MANAGER_EXIT_REASON="final-verification-failed"
+      return 1
     fi
   fi
 
@@ -2200,31 +2379,30 @@ main() {
 
   info -c cli,vlan "VLAN manager run completed at $(date '+%H:%M:%S')"
 
-  # On nodes: write completion marker for main router to verify
-  if [ "$MERV_IS_NODE" = "1" ]; then
-    mkdir -p "$MERV_COMPLETION_DIR" 2>/dev/null
-    echo "$(date +%s) NODE$MERV_NODE_ID" > "$MERV_COMPLETION_MARKER"
-    info -c cli,vlan "Node execution complete - marker written"
-  fi
-
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "Dry-run mode; skipping VLAN client list refresh (collect_clients.sh)"
   elif [ "$MERV_IS_NODE" = "1" ]; then
-    info -c cli,vlan "Running on node; skipping client refresh (handled by main router)"
+    "$FUNCDIR/post_apply_worker.sh" request snapshot >/dev/null 2>&1 || \
+      warn -c cli,vlan "Node post-apply snapshot request failed"
   elif [ "$SKIP_COLLECT" = "yes" ]; then
-    info -c cli,vlan "Parallel mode; skipping client refresh (will be run after node verification)"
-  elif [ -x "$FUNCDIR/collect_clients.sh" ]; then
-    info -c cli,vlan "Waiting 5 seconds before refreshing VLAN client list..."
-    sleep 5
-    info -c cli,vlan "Refreshing VLAN client list via collect_clients.sh"
-    if "$FUNCDIR/collect_clients.sh"; then
+    info -c cli,vlan "Parallel mode; cluster observation will follow node verification"
+  elif [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
+    merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
+    info -c cli,vlan "Refreshing client inventory after apply..."
+    if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
+         request snapshot collect >/dev/null 2>&1 &&
+       "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
       info -c cli,vlan "✓ VLAN client list refresh completed"
     else
-      rc=$?
-      warn -c cli,vlan "✗ collect_clients.sh failed (rc=$rc)"
+      _manager_observation_rc=$?
+      warn -c cli,vlan "✗ Post-apply observation failed (rc=$_manager_observation_rc); generation remains pending"
+      MANAGER_EXIT_REASON="post-apply-observation-failed"
+      return 1
     fi
   else
-    info -c cli,vlan "collect_clients.sh not available; skipping client refresh"
+    warn -c cli,vlan "Post-apply observation unavailable; client inventory was not refreshed"
+    MANAGER_EXIT_REASON="post-apply-observation-unavailable"
+    return 1
   fi
 }
 

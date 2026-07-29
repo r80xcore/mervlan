@@ -28,7 +28,21 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 # =========================================== End of MerVLAN environment setup #
+
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "genkey_vlanmgr" "Generate SSH Keys" "Preparing SSH key generation..."
+
+ssh_key_progress_exit() {
+    _progress_rc=$?
+    if [ "$_progress_rc" -eq 0 ]; then
+        merv_action_progress_complete "SSH keys ready"
+    else
+        merv_action_progress_fail "SSH key generation failed"
+    fi
+    return 0
+}
+trap ssh_key_progress_exit EXIT
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -94,6 +108,7 @@ info -c cli ""
 mkdir -p "$(dirname "$SSH_KEY")"
 # Ensure public-facing SSH directory exists for symlink publication
 mkdir -p "$PUBLIC_MERV_BASE/.ssh"
+merv_action_progress_update "prepare" 10 100 10 "Preparing SSH key storage..."
 
 # ============================================================================ #
 #                      CHECK FOR EXISTING KEY PAIR                             #
@@ -102,6 +117,7 @@ mkdir -p "$PUBLIC_MERV_BASE/.ssh"
 # ============================================================================ #
 
 if [ -f "$SSH_KEY" ] && [ -f "$SSH_PUBKEY" ]; then
+    merv_action_progress_update "prepare" 60 100 60 "Existing key pair found; preserving current keys..."
     # Keys already exist; report status and show public key
     info -c cli "✓ SSH key pair already exists:"
     info -c cli "  Private key: $SSH_KEY"
@@ -129,6 +145,7 @@ fi
 # ============================================================================ #
 
 info -c cli "Generating new ED25519 SSH key pair..."
+merv_action_progress_update "generate" 35 100 35 "Generating ED25519 key pair..."
 # Invoke dropbearkey to generate ED25519 key; store in SSH_KEY file
 if "$DROPBEARKEY" -t ed25519 -f "$SSH_KEY" 2>/dev/null; then
     # Extract public key from generated private key (dropbearkey -y outputs it)
@@ -138,6 +155,7 @@ if "$DROPBEARKEY" -t ed25519 -f "$SSH_KEY" 2>/dev/null; then
     chmod 600 "$SSH_KEY"
     # Set readable permissions on public key (can be shared)
     chmod 644 "$SSH_PUBKEY"
+    merv_action_progress_update "publish" 70 100 70 "Publishing public key..."
     
     # Report successful generation with file locations
     info -c cli "✓ SSH key pair generated successfully:"
@@ -149,6 +167,7 @@ if "$DROPBEARKEY" -t ed25519 -f "$SSH_KEY" 2>/dev/null; then
     cat "$SSH_PUBKEY"
     
     # Mark keys as installed in settings file
+    merv_action_progress_update "publish" 85 100 85 "Updating SSH key status..."
     update_json_flag "1"
     info -c cli,vlan "Keys generated successfully"
     # Create symlink to expose public key to web UI

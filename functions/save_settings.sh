@@ -268,6 +268,18 @@ grep -v '^SAVE_SCOPE	' "${TMP_KV}" > "${_tmp_kv_scoped}" && mv "${_tmp_kv_scoped
 # Re-sort after stripping SAVE_SCOPE
 sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
 
+# Request-correlation fields are transport metadata for one action. They must
+# never become persistent MerVLAN settings when a progress-enabled save later
+# uses the shared MVM_exec path.
+_tmp_kv_transport="${TMP_KV}.transport.$$"
+grep -v '^\(progress_token\|action_request_token\)[[:space:]]' "${TMP_KV}" > "${_tmp_kv_transport}" || :
+if [ -f "${_tmp_kv_transport}" ]; then
+    mv "${_tmp_kv_transport}" "${TMP_KV}"
+else
+    rm -f "${_tmp_kv_transport}"
+fi
+sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
+
 # ============================================================================ #
 # STEP 1.6: Scope filter                                                       #
 # Keep only the keys relevant to this save scope. This prevents stale          #

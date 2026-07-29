@@ -46,6 +46,55 @@ function initial(){
 </script>
 <script type="text/javascript">
 var _mvmLast = { name: null, t: 0 };
+var _mvmRefreshGuard = {
+  count: 0,
+  refresh_self: undefined,
+  redirect_self: undefined,
+  refresh_parent: undefined,
+  redirect_parent: undefined
+};
+
+function _mvmRestoreFunction(target, key, value) {
+  if (!target) return;
+  try {
+    if (typeof value !== "undefined") target[key] = value;
+    else delete target[key];
+  } catch (e) {
+    try { target[key] = value; } catch (e2) {}
+  }
+}
+
+function mvmAcquireRefreshGuard() {
+  if (_mvmRefreshGuard.count === 0) {
+    _mvmRefreshGuard.refresh_self = (typeof window.refreshpage !== "undefined") ? window.refreshpage : undefined;
+    _mvmRefreshGuard.redirect_self = (typeof window.redirect_page !== "undefined") ? window.redirect_page : undefined;
+    _mvmRefreshGuard.refresh_parent = (window.parent && window.parent !== window && typeof window.parent.refreshpage !== "undefined") ? window.parent.refreshpage : undefined;
+    _mvmRefreshGuard.redirect_parent = (window.parent && window.parent !== window && typeof window.parent.redirect_page !== "undefined") ? window.parent.redirect_page : undefined;
+  }
+  _mvmRefreshGuard.count++;
+  window.refreshpage = function() {};
+  window.redirect_page = function() {};
+  if (window.parent && window.parent !== window) {
+    try { window.parent.refreshpage = function() {}; } catch (e) {}
+    try { window.parent.redirect_page = function() {}; } catch (e2) {}
+  }
+}
+
+function mvmReleaseRefreshGuard() {
+  if (_mvmRefreshGuard.count <= 0) return;
+  _mvmRefreshGuard.count--;
+  if (_mvmRefreshGuard.count !== 0) return;
+  _mvmRestoreFunction(window, "refreshpage", _mvmRefreshGuard.refresh_self);
+  _mvmRestoreFunction(window, "redirect_page", _mvmRefreshGuard.redirect_self);
+  if (window.parent && window.parent !== window) {
+    try { _mvmRestoreFunction(window.parent, "refreshpage", _mvmRefreshGuard.refresh_parent); } catch (e) {}
+    try { _mvmRestoreFunction(window.parent, "redirect_page", _mvmRefreshGuard.redirect_parent); } catch (e2) {}
+  }
+  _mvmRefreshGuard.refresh_self = undefined;
+  _mvmRefreshGuard.redirect_self = undefined;
+  _mvmRefreshGuard.refresh_parent = undefined;
+  _mvmRefreshGuard.redirect_parent = undefined;
+}
 
 // === Loading overlay guard: block early hides until minimum time passes ===
 (function() {
@@ -118,10 +167,43 @@ function showLoadingSafe(secHint) {
  * @param {string} actionScriptName - backend script (e.g., "sync_vlanmgr")
  * @param {?object} settingsObjOrNull - JSON payload for amng_custom
  * @param {?object} opts - { loading?: boolean, waitSec?: number, target?: string,
- *                           skipRefresh?: boolean }
+ *                           skipRefresh?: boolean, progressToken?: string }
  */
 function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   opts = opts || {};
+
+  // Progress tokens travel through the same Merlin custom-settings transport
+  // as existing vlanmgr_* request data. They are validated here, before any
+  // backend action is submitted, and are never accepted from rawAmng because
+  // raw payloads are used by compatibility/update paths.
+  var progressToken = (typeof opts.progressToken === "string") ? opts.progressToken : "";
+  if (progressToken) {
+    if (!/^[A-Za-z0-9._-]{1,96}$/.test(progressToken) || typeof opts.rawAmng === "string") {
+      if (window.console && typeof console.warn === "function") {
+        console.warn("[MVM] rejected invalid or incompatible progress token");
+      }
+      return false;
+    }
+    var progressPayload = {};
+    if (settingsObjOrNull && typeof settingsObjOrNull === "object" && !Array.isArray(settingsObjOrNull)) {
+      Object.keys(settingsObjOrNull).forEach(function(key) {
+        progressPayload[key] = settingsObjOrNull[key];
+      });
+    }
+    progressPayload.vlanmgr_progress_token = progressToken;
+    settingsObjOrNull = progressPayload;
+
+    // Encode the token in the action event as the authoritative transport.
+    // This avoids depending on custom_settings.txt write timing or a stale
+    // previous value. The payload field remains a compatibility breadcrumb.
+    if (typeof MVM_ALLOWED_ACTIONS !== "undefined" && MVM_ALLOWED_ACTIONS.has(actionScriptName)) {
+      var progressTokenHex = "";
+      for (var pti = 0; pti < progressToken.length; pti++) {
+        progressTokenHex += ("0" + progressToken.charCodeAt(pti).toString(16)).slice(-2);
+      }
+      actionScriptName = actionScriptName + "_pgt_" + progressTokenHex;
+    }
+  }
 
   var isEncodedUpdateRef = /^updateref_vlanmgr_(?:[kc]_)?[ht]_[0-9a-f]+$/.test(actionScriptName);
   var isMaintenanceAction = /^(backupinventory_vlanmgr|deleteallbackups_vlanmgr|undorestore_vlanmgr|undoupdate_vlanmgr)_[0-9a-f]+$/.test(actionScriptName) ||
@@ -129,7 +211,9 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     /^(deletebackup_vlanmgr|restorebackup_vlanmgr)_[0-9a-f]+_[am]\.[A-Za-z0-9._-]+$/.test(actionScriptName);
   var verifiedActionMatch = /^(.+)_vrt_([0-9a-f]+)$/.exec(actionScriptName);
   var isVerifiedAction = !!(verifiedActionMatch && MVM_ALLOWED_ACTIONS.has(verifiedActionMatch[1]));
-  if (!MVM_ALLOWED_ACTIONS.has(actionScriptName) && !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction) {
+  var progressActionMatch = /^(.+)_pgt_([0-9a-f]+)$/.exec(actionScriptName);
+  var isProgressAction = !!(progressActionMatch && MVM_ALLOWED_ACTIONS.has(progressActionMatch[1]));
+  if (!MVM_ALLOWED_ACTIONS.has(actionScriptName) && !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction) {
     if (window.console && typeof console.warn === "function") {
       console.warn("[MVM] blocked disallowed action", actionScriptName);
     }
@@ -178,13 +262,6 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   // Note: we no longer zero out action_wait when skipRefresh is true
   // This allows the loading overlay to show while still preventing page refresh
 
-  var orig = {
-    refresh_self: (typeof window.refreshpage !== "undefined") ? window.refreshpage : undefined,
-    redirect_self: (typeof window.redirect_page !== "undefined") ? window.redirect_page : undefined,
-    refresh_parent: (window.parent && window.parent !== window && typeof window.parent.refreshpage !== "undefined") ? window.parent.refreshpage : undefined,
-    redirect_parent: (window.parent && window.parent !== window && typeof window.parent.redirect_page !== "undefined") ? window.parent.redirect_page : undefined
-  };
-
   if (skipRefresh) {
     try {
       if (document.form.next_page) {
@@ -192,13 +269,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
       }
     } catch (e) {}
 
-    window.refreshpage = function() {};
-    window.redirect_page = function() {};
-
-    if (window.parent && window.parent !== window) {
-      try { window.parent.refreshpage = function() {}; } catch (e) {}
-      try { window.parent.redirect_page = function() {}; } catch (e2) {}
-    }
+    mvmAcquireRefreshGuard();
   }
 
   if (skipRefresh) {
@@ -237,6 +308,21 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     // If minLoadingMs > 0, the setTimeout above will handle hiding
   }
 
+  function notifyProgressFrameComplete() {
+    if (!progressToken) return;
+    try {
+      var progressFrame = document.getElementById("vlan_iframe");
+      if (progressFrame && progressFrame.contentWindow) {
+        progressFrame.contentWindow.postMessage({
+          source: "mervlan",
+          type: "mervlan-action-complete",
+          token: progressToken,
+          action: actionScriptName
+        }, "*");
+      }
+    } catch (e) {}
+  }
+
   // Keep overlay hidden if we opted out of loading feedback
   var targetFrameId = skipRefresh ? "mvm_sandbox_iframe" : (document.form.target || "hidden_frame");
   var tf = document.getElementById(targetFrameId);
@@ -248,36 +334,9 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
         tf.detachEvent("onload", oneShot);
       }
       hideLoadingIfNoMinTime();
+      notifyProgressFrameComplete();
       if (skipRefresh) {
-        if (typeof orig.refresh_self !== "undefined") {
-          window.refreshpage = orig.refresh_self;
-        } else {
-          try { delete window.refreshpage; } catch (e) { window.refreshpage = undefined; }
-        }
-
-        if (typeof orig.redirect_self !== "undefined") {
-          window.redirect_page = orig.redirect_self;
-        } else {
-          try { delete window.redirect_page; } catch (e2) { window.redirect_page = undefined; }
-        }
-
-        if (window.parent && window.parent !== window) {
-          try {
-            if (typeof orig.refresh_parent !== "undefined") {
-              window.parent.refreshpage = orig.refresh_parent;
-            } else {
-              window.parent.refreshpage = undefined;
-            }
-          } catch (e3) {}
-
-          try {
-            if (typeof orig.redirect_parent !== "undefined") {
-              window.parent.redirect_page = orig.redirect_parent;
-            } else {
-              window.parent.redirect_page = undefined;
-            }
-          } catch (e4) {}
-        }
+        mvmReleaseRefreshGuard();
         mvmRemoveSandboxFrame();
       } else if (!wantLoading) {
         hideLoadingSafe();
@@ -289,35 +348,7 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
       tf.attachEvent("onload", oneShot);
     }
   } else if (skipRefresh) {
-    if (typeof orig.refresh_self !== "undefined") {
-      window.refreshpage = orig.refresh_self;
-    } else {
-      try { delete window.refreshpage; } catch (e) { window.refreshpage = undefined; }
-    }
-
-    if (typeof orig.redirect_self !== "undefined") {
-      window.redirect_page = orig.redirect_self;
-    } else {
-      try { delete window.redirect_page; } catch (e2) { window.redirect_page = undefined; }
-    }
-
-    if (window.parent && window.parent !== window) {
-      try {
-        if (typeof orig.refresh_parent !== "undefined") {
-          window.parent.refreshpage = orig.refresh_parent;
-        } else {
-          window.parent.refreshpage = undefined;
-        }
-      } catch (e3) {}
-
-      try {
-        if (typeof orig.redirect_parent !== "undefined") {
-          window.parent.redirect_page = orig.redirect_parent;
-        } else {
-          window.parent.redirect_page = undefined;
-        }
-      } catch (e4) {}
-    }
+    mvmReleaseRefreshGuard();
     mvmRemoveSandboxFrame();
   }
 
@@ -379,8 +410,19 @@ const MVM_NO_REFRESH = new Set([
 
 const MVM_NO_LOADING = new Set([
   // Actions that should NOT show the loading overlay:
-  // "checkservice_vlanmgr",
-  // "collectclients_vlanmgr",
+  // Service status is a read-only diagnostic; keep the ASUS overlay hidden.
+  "checkservice_vlanmgr",
+  // The client refresh owns a MerVLAN panel, so suppress ASUS's overlay.
+  "collectclients_vlanmgr",
+  // MerVLAN owns the long-running progress panel for these actions.
+  "apply_vlanmgr",
+  "executenodes_vlanmgr",
+  "executenodesonly_vlanmgr",
+  "sync_vlanmgr",
+  "hwprobe_vlanmgr",
+  "macclientmeta_vlanmgr",
+  "macrefresh_vlanmgr",
+  "genkey_vlanmgr",
   "clearclilog_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr",
@@ -442,6 +484,7 @@ function mvmOptsFor(actionName, overrideOpts) {
     if ("minLoadingMs" in overrideOpts) opts.minLoadingMs = overrideOpts.minLoadingMs;
     if ("target" in overrideOpts)      opts.target = overrideOpts.target;
     if ("rawAmng" in overrideOpts)     opts.rawAmng = overrideOpts.rawAmng;
+    if ("progressToken" in overrideOpts) opts.progressToken = overrideOpts.progressToken;
   }
   return opts;
 }
@@ -595,7 +638,15 @@ function MVM_undoRestore(requestToken, opts) {
 function MVM_undoUpdate(requestToken, opts) {
   return MVM_maintenanceAction("undoupdate_vlanmgr", requestToken, null, opts);
 }
-function MVM_hwprobe(opts)                    { return MVM_exec("hwprobe_vlanmgr",       null,        mvmOptsFor("hwprobe_vlanmgr",       opts)); }
+function MVM_hwprobe(opts) {
+  opts = opts || {};
+  var payload = (opts.payload && typeof opts.payload === "object") ? opts.payload : null;
+  var execOpts = {};
+  Object.keys(opts).forEach(function(key) {
+    if (key !== "payload") execOpts[key] = opts[key];
+  });
+  return MVM_exec("hwprobe_vlanmgr", payload, mvmOptsFor("hwprobe_vlanmgr", execOpts));
+}
 function MVM_macRefresh(opts)                 { return MVM_exec("macrefresh_vlanmgr",    null,        mvmOptsFor("macrefresh_vlanmgr",    opts)); }
 function MVM_macClientMeta(opts)             { return MVM_exec("macclientmeta_vlanmgr", null,        mvmOptsFor("macclientmeta_vlanmgr", opts)); }
 
