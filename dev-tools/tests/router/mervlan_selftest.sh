@@ -9,6 +9,25 @@
 
 PATH="/sbin:/bin:/usr/sbin:/usr/bin:${PATH:-}"
 export PATH
+# Some WSL2 images provide the BusyBox usleep applet without installing a
+# standalone usleep command.  Expose that applet only inside this test
+# process so the production library sees the same fast-sleep capability as an
+# ASUSWRT router, without modifying the host or router environment.
+if ! type usleep >/dev/null 2>&1 &&
+   type busybox >/dev/null 2>&1 &&
+   busybox usleep 1 >/dev/null 2>&1; then
+  usleep() { busybox usleep "$@"; }
+fi
+# Some WSL2 images use uutils coreutils, whose mkdir does not reliably retain
+# mutual exclusion for simultaneous creators in this test environment.  Use
+# BusyBox only there, matching the router's mkdir/rmdir behavior.
+if type busybox >/dev/null 2>&1 &&
+   mkdir --version 2>&1 | grep -q 'uutils coreutils'; then
+  MERV_SELFTEST_BUSYBOX_FS=1
+  export MERV_SELFTEST_BUSYBOX_FS
+  mkdir() { busybox mkdir "$@"; }
+  rmdir() { busybox rmdir "$@"; }
+fi
 : "${DEV_TOOLS_ROOT:=$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd)}"
 : "${MERV_BASE:=${MERV_RUNTIME_BASE:-$(CDPATH= cd -- "$DEV_TOOLS_ROOT/.." 2>/dev/null && pwd)}}"
 : "${MERV_RUNTIME_BASE:=$MERV_BASE}"
@@ -150,6 +169,44 @@ exit 0
 FAKE_EBTABLES
 chmod 700 "$SELFTEST_FAKE_BIN" || exit 2
 
+# Use separate shell processes for concurrency tests.  A POSIX shell
+# subshell keeps the parent's $$, which would make two callers look like one
+# live process to the production lock protocol.
+SELFTEST_CONCURRENT_CHILD="$SELFTEST_ROOT/bin/concurrent-enforce-child"
+cat > "$SELFTEST_CONCURRENT_CHILD" <<'CONCURRENT_ENFORCE_CHILD'
+#!/bin/sh
+if ! type usleep >/dev/null 2>&1 &&
+   type busybox >/dev/null 2>&1 &&
+   busybox usleep 1 >/dev/null 2>&1; then
+  usleep() { busybox usleep "$@"; }
+fi
+if [ "${MERV_SELFTEST_BUSYBOX_FS:-0}" = 1 ] &&
+   type busybox >/dev/null 2>&1; then
+  mkdir() { busybox mkdir "$@"; }
+  rmdir() { busybox rmdir "$@"; }
+fi
+. "$MERV_BASE/settings/var_settings.sh" || exit 2
+. "$MERV_BASE/settings/lib_mervqt.sh" || exit 2
+if [ "$MERV_DHCP_HOLD_PROC_ROOT" != /proc ]; then
+  _cece_proc_dir="$MERV_DHCP_HOLD_PROC_ROOT/$$"
+  mkdir -p "$_cece_proc_dir" || exit 2
+  {
+    printf '%s (selftest concurrent child) S' "$$"
+    _cece_field=4
+    while [ "$_cece_field" -le 21 ]; do
+      printf ' 0'
+      _cece_field=$((_cece_field + 1))
+    done
+    printf ' 424242\n'
+  } > "$_cece_proc_dir/stat" || exit 2
+fi
+merv_dhcp_hold_enforce
+_cece_rc=$?
+printf '%s\n' "$_cece_rc" > "$CONCURRENT_ENFORCE_RC"
+exit "$_cece_rc"
+CONCURRENT_ENFORCE_CHILD
+chmod 700 "$SELFTEST_CONCURRENT_CHILD" || exit 2
+
 selftest_reset() {
   case "$SELFTEST_FAKE_STATE" in "$SELFTEST_ROOT"/*) ;; *) return 1 ;; esac
   rm -rf "$SELFTEST_FAKE_STATE" "$SELFTEST_STATE" 2>/dev/null || return 1
@@ -286,12 +343,13 @@ test_dhcp_rule_exactness() {
   assert_ok "repaired state is exact" merv_dhcp_hold_rules_present
 
   selftest_reset || return 1
+  _tdre_proc_root="$MERV_DHCP_HOLD_PROC_ROOT"
+  MERV_DHCP_HOLD_PROC_ROOT=/proc
+  export MERV_DHCP_HOLD_PROC_ROOT
   _tdre_i=1
   while [ "$_tdre_i" -le 2 ]; do
-    (
-      merv_dhcp_hold_enforce
-      printf '%s\n' "$?" > "$SELFTEST_ROOT/concurrent-enforce.$_tdre_i.rc"
-    ) &
+    CONCURRENT_ENFORCE_RC="$SELFTEST_ROOT/concurrent-enforce.$_tdre_i.rc" \
+      sh "$SELFTEST_CONCURRENT_CHILD" &
     _tdre_i=$((_tdre_i + 1))
   done
   wait
@@ -301,9 +359,29 @@ test_dhcp_rule_exactness() {
     [ "$(cat "$SELFTEST_ROOT/concurrent-enforce.$_tdre_i.rc" 2>/dev/null)" = 0 ] || _tdre_ok=0
     _tdre_i=$((_tdre_i + 1))
   done
+  if [ "$_tdre_ok" -ne 1 ]; then
+    printf 'diagnostic: concurrent return codes: ' >&2
+    printf '1=%s 2=%s\n' \
+      "$(cat "$SELFTEST_ROOT/concurrent-enforce.1.rc" 2>/dev/null || printf missing)" \
+      "$(cat "$SELFTEST_ROOT/concurrent-enforce.2.rc" 2>/dev/null || printf missing)" >&2
+    printf 'diagnostic: concurrent state lock:\n' >&2
+    ls -la "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" 2>&1 >&2 || :
+    for _tdre_file in pid proc_start_time created_epoch owner_nonce; do
+      printf '%s=' "$_tdre_file" >&2
+      cat "$MERV_DHCP_HOLD_STATE_ROOT/state.lock/$_tdre_file" 2>/dev/null || printf missing >&2
+      printf '\n' >&2
+    done
+    printf 'diagnostic: fake chains:\n' >&2
+    for _tdre_chain in FORWARD INPUT MERV_DHCP_HOLD; do
+      printf '%s:\n' "$_tdre_chain" >&2
+      cat "$SELFTEST_FAKE_STATE/chains/$_tdre_chain" 2>/dev/null || printf missing >&2
+    done
+  fi
   [ "$_tdre_ok" -eq 1 ] && pass "concurrent enforcement callers all succeed" ||
     fail "concurrent enforcement callers all succeed"
   assert_ok "concurrent enforcement leaves one exact rule set" merv_dhcp_hold_rules_present
+  MERV_DHCP_HOLD_PROC_ROOT="$_tdre_proc_root"
+  export MERV_DHCP_HOLD_PROC_ROOT
 }
 
 test_process_identity() {
@@ -1542,7 +1620,8 @@ test_apmo_completion_contract() {
 
   if grep -q 'async function runVerifiedHardwareProbe' "$_tapm_ui" &&
      grep -q 'waitForSettingsToMatch(expectedManaged' "$_tapm_ui" &&
-     grep -q 'MVM_triggerVerified("hwprobe_vlanmgr"' "$_tapm_ui" &&
+     grep -q 'waitForVerifiedActionResult' "$_tapm_ui" &&
+     grep -q 'vlanmgr_action_request_token' "$_tapm_ui" &&
      ! grep -q 'setTimeout.*8500' "$_tapm_ui" &&
      ! grep -q 'setTimeout.*16000' "$_tapm_ui"; then
     pass "APMO waits for persistence and verified HW probe completion"
@@ -1613,7 +1692,8 @@ test_failure_propagation_contract() {
   if grep -q 'isCancelled: () => loadingTask && !loadingTask.isRunning()' "$_tfpc_ui" &&
      grep -q 'isRunning: () => !!active' "$_tfpc_ui" &&
      grep -q 'passProgressToken: true' "$_tfpc_ui" &&
-     grep -q 'maintenancePollErrors' "$_tfpc_ui" &&
+     grep -q 'maintenanceLastPollError' "$_tfpc_ui" &&
+     grep -q 'Still waiting for the router to publish maintenance status' "$_tfpc_ui" &&
      grep -q 'Service status polling is temporarily unavailable' "$_tfpc_ui"; then
     pass "UI stops dependent polls on backend failure and logs repeated status errors"
   else

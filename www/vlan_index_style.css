@@ -269,6 +269,12 @@ body {
         max-width:none;
 }
 
+/* Keep addon-scoped overlays aligned with the wider Assign view. */
+.form-box--main.ssid-assign-view .mervlan-loading-backdrop,
+.form-box--main.ssid-assign-view #leftPanelOverlay {
+        right:calc(0px - var(--ssid-assign-extension));
+}
+
 .form-box--main.ssid-assign-view .cli-latch {
         transform:translateX(var(--ssid-assign-extension));
         transition:background-color 0.2s ease,

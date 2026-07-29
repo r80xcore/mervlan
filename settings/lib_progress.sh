@@ -231,4 +231,3 @@ merv_progress_prune() {
         -mmin "+$_mpp_minutes" -exec rm -f {} \; 2>/dev/null || :
     return 0
 }
-

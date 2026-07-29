@@ -1799,8 +1799,8 @@
         function showUnsupportedModelModal() {
           const modal = document.getElementById("unsupportedModelModal");
           if (!modal) return;
+          ensureConfigViewForModal();
           const overlay = document.getElementById("leftPanelOverlay");
-          const cliLatch = document.getElementById("cliLatch");
 
           modal.style.display = "block";
           anchorModalToForm(modal);
@@ -1809,12 +1809,7 @@
             overlay.style.display = "block";
             overlay.style.pointerEvents = "auto";
           }
-          if (cliLatch) {
-            if (cliLatch.dataset.prevDisplay === undefined) {
-              cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
-            }
-            cliLatch.style.display = "none";
-          }
+          syncInfoLatchVisibility();
         }
 
         async function loadHardwareProfiles() {
@@ -2612,6 +2607,50 @@ function showTooltip() {
 
     // SSID view toggle: "Config" (VLAN/APISO/Status) vs "Assign" (Node Assignment)
     let CURRENT_SSID_VIEW = "config";
+
+    const MVM_INFO_MODAL_IDS = [
+      "sshKeyModal",
+      "unsupportedModelModal",
+      "serviceSettingsModal",
+      "advancedOverrideModal",
+      "vlanManagerModal",
+      "versionModal"
+    ];
+    let MVM_INFO_LATCH_BASE_DISPLAY = null;
+
+    function mvmIsModalVisible(id) {
+      const modal = document.getElementById(id);
+      if (!modal) return false;
+      if (id === "maintenanceConfirmOverlay") {
+        return modal.classList.contains("is-visible");
+      }
+      if (!window.getComputedStyle) return modal.style.display !== "none";
+      return window.getComputedStyle(modal).display !== "none";
+    }
+
+    function ensureConfigViewForModal() {
+      if (CURRENT_SSID_VIEW === "assign") setSSIDView("config");
+    }
+
+    function syncInfoLatchVisibility() {
+      const info = document.getElementById("cliLatch");
+      if (!info) return;
+      if (MVM_INFO_LATCH_BASE_DISPLAY === null) {
+        MVM_INFO_LATCH_BASE_DISPLAY = info.style.display || "";
+      }
+
+      const loadingBackdrop = document.getElementById("mervlanLoadingBackdrop");
+      const loadingMini = document.getElementById("mervlanLoadingMini");
+      const loadingOpen = !!(loadingBackdrop && loadingBackdrop.classList.contains("is-open"));
+      const loadingMinimized = !!(loadingMini && loadingMini.classList.contains("is-visible"));
+      const modalOpen = MVM_INFO_MODAL_IDS.some(mvmIsModalVisible) ||
+        mvmIsModalVisible("maintenanceConfirmOverlay");
+
+      // A visible loading panel always owns the addon overlay. When it is
+      // minimized, INFO is intentionally available while the action continues.
+      const hidden = loadingOpen || (!loadingMinimized && modalOpen);
+      info.style.display = hidden ? "none" : MVM_INFO_LATCH_BASE_DISPLAY;
+    }
 
     function setSSIDView(view) {
       CURRENT_SSID_VIEW = view;
@@ -3835,6 +3874,7 @@ function showTooltip() {
       }
       // Ensure default collapsed visual
       setCliState(false);
+      syncInfoLatchVisibility();
       // Schedule one-time intro blink on first load
       scheduleLatchIntroBlink();
 
@@ -5531,32 +5571,11 @@ const MerVLANLoading = (() => {
     mini.setAttribute('aria-hidden', visible ? 'false' : 'true');
     if (slot) slot.setAttribute('aria-hidden', visible ? 'false' : 'true');
     if (row) row.classList.toggle('experimental-row--loading', !!visible);
+    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
   }
 
-  function setInfoVisible(visible) {
-    const info = el('cliLatch');
-    if (!info) return;
-    if (!visible) {
-      if (info.dataset.mervlanLoadingPrevDisplay === undefined) {
-        info.dataset.mervlanLoadingPrevDisplay = info.style.display || '';
-      }
-      info.style.display = 'none';
-      return;
-    }
-    const previous = info.dataset.mervlanLoadingPrevDisplay;
-    const sshModal = el('sshKeyModal');
-    const sshModalOpen = !!(sshModal && window.getComputedStyle &&
-      window.getComputedStyle(sshModal).display !== 'none');
-    // The SSH modal also hides INFO. If it was closed while loading was
-    // active, restore the modal's original display state instead of restoring
-    // the already-hidden value captured by the loading controller.
-    if (previous !== undefined && previous === 'none' && !sshModalOpen &&
-        info.dataset.prevDisplay !== undefined) {
-      info.style.display = info.dataset.prevDisplay;
-    } else {
-      info.style.display = previous !== undefined ? previous : '';
-    }
-    if (previous !== undefined) delete info.dataset.mervlanLoadingPrevDisplay;
+  function setInfoVisible() {
+    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
   }
 
   function setPanelOpen(open) {
@@ -5564,9 +5583,9 @@ const MerVLANLoading = (() => {
     if (!backdrop) return;
     backdrop.classList.toggle('is-open', !!open);
     backdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
-    // The INFO latch is unavailable while the full loading panel is open,
-    // and returns when the panel is minimized or closed.
-    setInfoVisible(!open);
+    // The shared coordinator hides INFO for the full panel, restores it for
+    // the minimized bar, and accounts for any other visible modal.
+    setInfoVisible();
   }
 
   function setNotice(text) {
@@ -6135,6 +6154,7 @@ function triggerAction(actionScriptName, button, description) {
     async function showServiceSettingsModal() {
       const modal = document.getElementById('serviceSettingsModal');
       if (!modal) return;
+      ensureConfigViewForModal();
 
       // Always do a fresh load so all toggles reflect the last saved state on disk.
       // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
@@ -6188,13 +6208,7 @@ function triggerAction(actionScriptName, button, description) {
         overlay.style.display = 'block';
         overlay.style.pointerEvents = 'auto';
       }
-      const cliLatch = document.getElementById('cliLatch');
-      if (cliLatch) {
-        if (cliLatch.dataset.prevDisplay === undefined) {
-          cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
-        }
-        cliLatch.style.display = 'none';
-      }
+      syncInfoLatchVisibility();
     }
 
     function closeServiceSettingsModal() {
@@ -6218,12 +6232,7 @@ function triggerAction(actionScriptName, button, description) {
           overlay.style.pointerEvents = 'none';
         }
       }
-      const cliLatch = document.getElementById('cliLatch');
-      if (cliLatch) {
-        const previous = cliLatch.dataset.prevDisplay;
-        cliLatch.style.display = previous !== undefined ? previous : '';
-        if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-      }
+      syncInfoLatchVisibility();
       scheduleHostIframeResize();
       _svcSnapshot = null;
     }
@@ -7123,18 +7132,7 @@ function closeSSHKeyModal() {
     overlay.style.display = 'none';
     overlay.style.pointerEvents = 'none';
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    const loadingBackdrop = document.getElementById('mervlanLoadingBackdrop');
-    const loadingOpen = !!(loadingBackdrop && loadingBackdrop.classList.contains('is-open'));
-    if (!loadingOpen) {
-      const previous = cliLatch.dataset.prevDisplay;
-      cliLatch.style.display = previous !== undefined ? previous : '';
-      if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-    } else {
-      cliLatch.style.display = 'none';
-    }
-  }
+  syncInfoLatchVisibility();
 }
 
 function closeUnsupportedModelModal() {
@@ -7155,12 +7153,7 @@ function closeUnsupportedModelModal() {
     }
   }
 
-  const cliLatch = document.getElementById("cliLatch");
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : "";
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 }
 
 function openSupportModelLink() {
@@ -7179,6 +7172,7 @@ function openSupportModelLink() {
 
 // Update the showSSHKeyModal function
 function showSSHKeyModal() {
+  ensureConfigViewForModal();
   // Ensure VLAN modal is closed before opening SSH modal
   const vlanModal = document.getElementById('vlanManagerModal');
   if (vlanModal) vlanModal.style.display = 'none';
@@ -7194,7 +7188,6 @@ function showSSHKeyModal() {
   }
 
   const overlay = document.getElementById('leftPanelOverlay');
-  const cliLatch = document.getElementById('cliLatch');
   const showModal = () => {
   modal.style.display = 'block';
   anchorModalToForm(modal);
@@ -7203,12 +7196,7 @@ function showSSHKeyModal() {
     overlay.style.display = 'block';
     overlay.style.pointerEvents = 'auto';
   }
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
-    }
-    cliLatch.style.display = 'none';
-  }
+  syncInfoLatchVisibility();
   };
 
   fetch('.ssh/vlan_manager.json?' + Date.now())
@@ -7228,6 +7216,7 @@ function showSSHKeyModal() {
 
 // Open VLAN Manager modal in top-level body to avoid being hidden by any parent
 function showVlanManagerModal() {
+  ensureConfigViewForModal();
   // Close SSH modal if open
   closeSSHKeyModal();
 
@@ -7248,13 +7237,7 @@ function showVlanManagerModal() {
     overlay.style.display = 'block';
     overlay.style.pointerEvents = 'auto';
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || '';
-    }
-    cliLatch.style.display = 'none';
-  }
+  syncInfoLatchVisibility();
 
   // Ensure height alignment after modal changes layout
   setTimeout(adjustClientsPanelHeight, 50);
@@ -7276,12 +7259,7 @@ function closeVlanManagerModal() {
       overlay.style.pointerEvents = 'none';
     }
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : '';
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 }
 
 
@@ -7303,6 +7281,7 @@ function settleMaintenanceConfirmation(accepted) {
     overlay.classList.remove("is-visible");
     overlay.setAttribute("aria-hidden", "true");
   }
+  syncInfoLatchVisibility();
   if (input) input.value = "";
   maintenanceConfirmationRequiredText = "";
   const resolve = maintenanceConfirmationResolve;
@@ -7333,6 +7312,7 @@ function handleMaintenanceConfirmationKey(event) {
 
 function showMaintenanceConfirmation(options) {
   options = options || {};
+  ensureConfigViewForModal();
   if (maintenanceConfirmationResolve) settleMaintenanceConfirmation(false);
   const overlay = document.getElementById("maintenanceConfirmOverlay");
   const title = document.getElementById("maintenanceConfirmTitle");
@@ -7362,6 +7342,7 @@ function showMaintenanceConfirmation(options) {
   positionMaintenanceConfirmationOverlay();
   overlay.classList.add("is-visible");
   overlay.setAttribute("aria-hidden", "false");
+  syncInfoLatchVisibility();
   return new Promise(resolve => {
     maintenanceConfirmationResolve = resolve;
     requestAnimationFrame(() => {
@@ -7808,12 +7789,12 @@ async function undoLastUpdate() {
 function openVersionModal() {
   const modal = document.getElementById("versionModal");
   if (!modal) return;
+  ensureConfigViewForModal();
   const retainedUpdateFlowState = updateFlowState;
   settleMaintenanceConfirmation(false);
   modal.scrollTop = 0;
 
   const overlay = document.getElementById("leftPanelOverlay");
-  const cliLatch = document.getElementById("cliLatch");
   const current = getIndexHtmlVersion();
   const currentText = document.getElementById("currentVersionText");
   if (currentText) {
@@ -7946,12 +7927,7 @@ function openVersionModal() {
     overlay.style.display = "block";
     overlay.style.pointerEvents = "auto";
   }
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
-    }
-    cliLatch.style.display = "none";
-  }
+  syncInfoLatchVisibility();
 }
 
 function closeVersionModal() {
@@ -7972,7 +7948,6 @@ function closeVersionModal() {
 
   const modal = document.getElementById("versionModal");
   const overlay = document.getElementById("leftPanelOverlay");
-  const cliLatch = document.getElementById("cliLatch");
 
   if (modal) {
     modal.style.display = "none";
@@ -7987,11 +7962,7 @@ function closeVersionModal() {
       overlay.style.pointerEvents = "none";
     }
   }
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : "";
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
 
   isUpdateInProgress = false;
   stopUpdateSpinner("");
@@ -8404,6 +8375,7 @@ function updateAdvOverrideTargetOptions(sel) {
 function showAdvancedOverrideModal() {
   const modal = document.getElementById("advancedOverrideModal");
   if (!modal) return;
+  ensureConfigViewForModal();
   const overlay = document.getElementById("leftPanelOverlay");
 
   fillAdvancedOverrideModalFromCache();
@@ -8430,13 +8402,7 @@ function showAdvancedOverrideModal() {
     overlay.style.pointerEvents = "auto";
   }
 
-  const cliLatch = document.getElementById("cliLatch");
-  if (cliLatch) {
-    if (cliLatch.dataset.prevDisplay === undefined) {
-      cliLatch.dataset.prevDisplay = cliLatch.style.display || "";
-    }
-    cliLatch.style.display = "none";
-  }
+  syncInfoLatchVisibility();
 }
 
 function hideAdvancedOverrideModal() {
@@ -8456,12 +8422,7 @@ function hideAdvancedOverrideModal() {
       overlay.style.pointerEvents = "none";
     }
   }
-  const cliLatch = document.getElementById('cliLatch');
-  if (cliLatch) {
-    const previous = cliLatch.dataset.prevDisplay;
-    cliLatch.style.display = previous !== undefined ? previous : '';
-    if (previous !== undefined) delete cliLatch.dataset.prevDisplay;
-  }
+  syncInfoLatchVisibility();
   scheduleHostIframeResize();
 }
 

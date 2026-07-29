@@ -2077,6 +2077,7 @@ verify_reinstall_projection() {
         "$PUBLIC_DIR/help.html" \
         "$PUBLIC_DIR/view_logs.html" \
         "$PUBLIC_DIR/settings/loading_actions.json" \
+        "$PUBLIC_DIR/settings/hardware_profiles.json" \
         "$PUBLIC_DIR/docs/HELP.json" \
         "$PUBLIC_DIR/vendor/marked.umd.js" \
         "$PUBLIC_DIR/vendor/github-markdown-dark.css" \
@@ -2379,6 +2380,17 @@ create_link "$MERV_BASE/settings/settings.json" "$PUBLIC_DIR/settings/settings.j
 # The SPA now reads the Hardware block from settings/settings.json directly;
 # keep the consolidated settings.json published for the UI.
 
+# Reinstall republishes the current source without running the full install
+# wizard. Refresh the generated public hardware catalog here so the APMO model
+# defaults always match the model definitions shipped by this source tree.
+if [ "$MODE" = "reinstall" ]; then
+    run_install_hardware_probe || {
+        RESULT_HARDWARE="FAIL - hardware profile refresh"
+        echo "[install] ERROR: Failed to refresh public hardware profiles" >&2
+        exit 1
+    }
+fi
+
 # 3c. Publish SSH public key for UI if it already exists (rename to .json for compatibility)
 if [ -f "$ADDON_DIR/$ADDON/.ssh/vlan_manager.pub" ]; then
     # Copy it to a .json filename so fetch('.ssh/vlan_manager.json') returns raw text
@@ -2579,7 +2591,7 @@ settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings va
 
 if [ "$WEBUI_ENABLED" = "1" ]; then
     [ -n "$am_webui_page" ] && [ -f "/www/user/$am_webui_page" ] || { RESULT_WEBUI="FAIL - published ASP missing"; FINAL_STATUS=1; }
-    for _public_req in index.html vlan_index_style.css vlan_form_style.css settings/loading_actions.json; do
+    for _public_req in index.html vlan_index_style.css vlan_form_style.css settings/loading_actions.json settings/hardware_profiles.json; do
         [ -f "$PUBLIC_DIR/$_public_req" ] || { RESULT_WEBUI="FAIL - public asset missing: $_public_req"; FINAL_STATUS=1; }
     done
     [ -L "$PUBLIC_DIR/settings/settings.json" ] || { RESULT_WEBUI="FAIL - settings link missing"; FINAL_STATUS=1; }

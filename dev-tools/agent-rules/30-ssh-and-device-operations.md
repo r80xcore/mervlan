@@ -97,6 +97,11 @@ that belongs in Authorized Keys. Never paste the private key, the contents of
 - Do not make divergent direct edits on router and node.
 - Manual SCP is emergency-only. ASUSWRT/Dropbear may require legacy SCP mode: `scp -O`.
 - Create the exact remote staging directory with SSH before copying files. Stage, validate with remote BusyBox `sh -n`, then copy approved runtime files into place; do not use an unverified upload as the live file.
+- For a full staged `mervlan_selftest.sh all` run, preserve its relative runtime
+  tree: `functions/`, every file in `settings/` (including `settings.json`),
+  `templates/`, `mervlan.asp`, `www/index.html`, and the matching test and
+  safety scripts. Preserve executable mode on shell scripts; do not treat a
+  partial library copy as a full-suite validation.
 - When building a remote command in PowerShell, do not put router-side `$(...)` or unescaped `$variables` inside an outer double-quoted PowerShell string. PowerShell can expand them locally. Prefer a single-quoted remote command or a prebuilt command variable.
 - When invoking router libraries directly over SSH, export `MERV_BASE` before
   sourcing `settings/var_settings.sh`; otherwise the settings loader can abort
@@ -145,3 +150,10 @@ that belongs in Authorized Keys. Never paste the private key, the contents of
 - Keep SSH commands noninteractive and bounded, and close/reap each command
   before opening another. Count validation, copy, and log-monitoring sessions
   toward the two-session maximum.
+- Separate the SSH connection timeout from the remote operation timeout:
+  `ConnectTimeout=10` is appropriate for establishing a connection, but it is
+  not an overall command limit.
+- Use an operation limit of at least 90 seconds for one focused self-test, up
+  to 3 minutes for a focused test group, and up to 10 minutes for the complete
+  `mervlan_selftest.sh all` suite. If a command exceeds its limit, isolate the
+  test cases before treating the timeout as a failure.
