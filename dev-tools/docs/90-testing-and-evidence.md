@@ -2,6 +2,21 @@
 
 ## Local validation
 
+On Windows, complete the WSL2 preflight before running POSIX shell tests:
+
+1. Verify `wsl.exe` exists and run `wsl.exe --version`.
+2. Run `wsl.exe --list --verbose` and confirm the exact Ubuntu distro reports
+   `VERSION 2`. A `Stopped` distro is installed and valid.
+3. Run a harmless command in that exact distro, such as
+   `wsl.exe -d <registered-distro-name> -- sh -lc 'uname -a; cat /etc/os-release'`.
+
+`wsl.exe --version` verifies only the client. If the normal agent runner
+returns `E_ACCESSDENIED` or `WSL/.../E_ACCESSDENIED`, classify that as
+`HOST_RUNNER_ACCESS_DENIED` and retry the read-only probe through the approved
+host/elevated execution path. Do not classify WSL2 as unavailable unless the
+host-level probe confirms that it is unavailable. If no approved host path can
+access WSL, mark POSIX results `INCONCLUSIVE`, not `PASS`.
+
 Run the narrow affected self-test first, then related contracts and shell
 syntax. The maintained suite is:
 
@@ -64,9 +79,9 @@ workflow note defines how to execute each safe test.
 
 ## Test selection policy
 
-Use this order: static inspection and local isolated harnesses; `sh -n` in a
-POSIX/BusyBox-capable shell; focused router selftests; Sync Nodes and focused
-node checks; non-disruptive UI/API validation; then human-controlled
+Use this order: static inspection and local isolated harnesses; WSL2 preflight;
+`sh -n` in a POSIX/BusyBox-capable shell; focused router selftests; Sync Nodes
+and focused node checks; non-disruptive UI/API validation; then human-controlled
 Apply/Restore/Update tests last, one action at a time, with preparation and
 recovery evidence.
 

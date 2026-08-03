@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_json.sh || version="0.54"                         #
+#                - File: lib_json.sh || version="0.55"                         #
 # ============================================================================ #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -444,7 +444,17 @@ json_get_section2_value() {
                 depth2 += gsub(/\{/, "&", tmp) - gsub(/\}/, "&", tmp)
 
                 if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
-                    if (match(line, "\""key"\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"", arr)) { print arr[1]; exit }
+                    # BusyBox awk implements the POSIX two-argument match()
+                    # form but not the gawk third capture-array argument. Keep
+                    # the match portable, then strip the JSON key/punctuation
+                    # from the matched token using POSIX substr()/sub().
+                    if (match(line, "\""key"\"[[:space:]]*:[[:space:]]*\"[^\"]*\"")) {
+                        value=substr(line, RSTART, RLENGTH)
+                        sub(/^[^:]*:[[:space:]]*"/, "", value)
+                        sub(/"[[:space:]]*$/, "", value)
+                        print value
+                        exit
+                    }
                 }
 
                 if (depth2 <= 0) exit
@@ -934,13 +944,15 @@ json_reset_trunks_section() {
 # IPv4. Self-contained: inline IPv4 validation + local MERV_MAX_NODES default so
 # it works even when var_settings.sh has not been sourced. Reads the structured
 # Nodes section first, then falls back to a flat top-level "NODEn" key for
-# pre-structured installs. Requires SETTINGS_FILE to be set by the caller.
+# pre-structured installs. An optional settings-file argument avoids changing
+# the read-only SETTINGS_FILE runtime path during staged maintenance checks.
 merv_node_list() {
+    _mnl_file="${1:-${SETTINGS_FILE:-}}"
     _mnl_max="${MERV_MAX_NODES:-10}"
     _mnl_i=1
     while [ "$_mnl_i" -le "$_mnl_max" ]; do
-        _mnl_val=$(json_get_section_value "Nodes" "NODE${_mnl_i}" "$SETTINGS_FILE" 2>/dev/null)
-        [ -n "$_mnl_val" ] || _mnl_val=$(json_get_flag "NODE${_mnl_i}" "" "$SETTINGS_FILE" 2>/dev/null)
+        _mnl_val=$(json_get_section_value "Nodes" "NODE${_mnl_i}" "$_mnl_file" 2>/dev/null)
+        [ -n "$_mnl_val" ] || _mnl_val=$(json_get_flag "NODE${_mnl_i}" "" "$_mnl_file" 2>/dev/null)
         if [ -n "$_mnl_val" ] && [ "$_mnl_val" != "none" ]; then
             case "$_mnl_val" in
                 *.*.*.*)
@@ -953,5 +965,321 @@ merv_node_list() {
         _mnl_i=$((_mnl_i + 1))
     done
 }
+
+# Return a stable, labelled digest for the canonical configured-node list.
+# BusyBox builds vary: some omit cksum while retaining md5sum or OpenSSL, so
+# callers must not make a security decision depend on one optional applet.
+merv_node_list_digest() {
+    _mnld_nodes=$(merv_node_list 2>/dev/null) || return 1
+
+    if type cksum >/dev/null 2>&1; then
+        _mnld_digest=$(printf '%s\n' "$_mnld_nodes" | cksum 2>/dev/null | awk '{print $1 "." $2}')
+        case "$_mnld_digest" in
+            [0-9]*.[0-9]*) printf 'cksum:%s\n' "$_mnld_digest"; return 0 ;;
+        esac
+    fi
+    if type md5sum >/dev/null 2>&1; then
+        _mnld_digest=$(printf '%s\n' "$_mnld_nodes" | md5sum 2>/dev/null | awk '{print $1}')
+        case "$_mnld_digest" in
+            [0-9A-Fa-f][0-9A-Fa-f]*) printf 'md5:%s\n' "$_mnld_digest"; return 0 ;;
+        esac
+    fi
+    if type openssl >/dev/null 2>&1; then
+        _mnld_digest=$(printf '%s\n' "$_mnld_nodes" | openssl dgst -md5 2>/dev/null | awk '{print $NF}')
+        case "$_mnld_digest" in
+            [0-9A-Fa-f][0-9A-Fa-f]*) printf 'md5:%s\n' "$_mnld_digest"; return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# Produce a stable digest of the persisted settings that can affect nodes.
+# The local-only keys are removed line-by-line before hashing. This is a
+# change-detection aid, not a security digest; prefer md5sum when available and
+# fall back to cksum on minimal BusyBox builds.
+merv_settings_node_sync_digest() {
+    _msnsd_file="${1:-${SETTINGS_FILE:-}}"
+    [ -f "$_msnsd_file" ] || return 1
+
+    if type md5sum >/dev/null 2>&1; then
+        _msnsd_hash=$(awk '
+            $0 !~ /"AUTO_SYNC_SETTINGS"[[:space:]]*:/ &&
+            $0 !~ /"HTML_CLIENT_REFRESH_MINUTES"[[:space:]]*:/ &&
+            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ { print }
+        ' "$_msnsd_file" | md5sum 2>/dev/null | awk '{print $1}')
+        case "$_msnsd_hash" in
+            [0-9A-Fa-f][0-9A-Fa-f]*) printf 'md5:%s\n' "$_msnsd_hash"; return 0 ;;
+        esac
+    fi
+
+    if type cksum >/dev/null 2>&1; then
+        _msnsd_hash=$(awk '
+            $0 !~ /"AUTO_SYNC_SETTINGS"[[:space:]]*:/ &&
+            $0 !~ /"HTML_CLIENT_REFRESH_MINUTES"[[:space:]]*:/ &&
+            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ { print }
+        ' "$_msnsd_file" | cksum 2>/dev/null | awk '{print $1 ":" $2}')
+        case "$_msnsd_hash" in
+            [0-9]*:[0-9]*) printf 'cksum:%s\n' "$_msnsd_hash"; return 0 ;;
+        esac
+    fi
+
+    return 1
+}
+
+# ============================================================================
+# Explicit JSON contracts
+# ============================================================================
+# The legacy helpers predate concurrent action handling and often use a
+# default-value/zero-output convention.  Security-sensitive callers use these
+# wrappers instead: getters distinguish missing data from an empty value and
+# setters render to a private sibling before a single rename commits the file.
+
+_json_contract_key_valid() {
+    case "${1:-}" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+}
+
+_json_contract_value_valid() {
+    [ "${#1}" -le 4096 ] 2>/dev/null || return 1
+    printf '%s' "${1:-}" | LC_ALL=C grep -q '[[:cntrl:]]' 2>/dev/null && return 1
+    return 0
+}
+
+_json_contract_validate_file() {
+    _jcv_file="$1"
+    [ -f "$_jcv_file" ] && [ -s "$_jcv_file" ] || return 1
+    awk '
+        function add(t, v) { tok[++nt]=t; val[nt]=v }
+        function parse_value( t ) {
+            t=tok[pos]
+            if (t=="{") return parse_object()
+            if (t=="[") return parse_array()
+            if (t=="S") { pos++; return 1 }
+            if (t=="W") {
+                if (val[pos] ~ /^(true|false|null)$/ || val[pos] ~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/) { pos++; return 1 }
+            }
+            bad=1; return 0
+        }
+        function parse_object( ok ) {
+            if (tok[pos]!="{") { bad=1; return 0 }
+            pos++
+            if (tok[pos]=="}") { pos++; return 1 }
+            while (1) {
+                if (tok[pos]!="S") { bad=1; return 0 }
+                pos++
+                if (tok[pos] != ":") { bad=1; return 0 }
+                pos++
+                if (!parse_value()) return 0
+                if (tok[pos]==",") {
+                    pos++
+                    if (tok[pos]=="}") { bad=1; return 0 }
+                    continue
+                }
+                if (tok[pos]=="}") { pos++; return 1 }
+                bad=1; return 0
+            }
+        }
+        function parse_array() {
+            if (tok[pos]!="[") { bad=1; return 0 }
+            pos++
+            if (tok[pos]=="]") { pos++; return 1 }
+            while (1) {
+                if (!parse_value()) return 0
+                if (tok[pos]==",") {
+                    pos++
+                    if (tok[pos]=="]") { bad=1; return 0 }
+                    continue
+                }
+                if (tok[pos]=="]") { pos++; return 1 }
+                bad=1; return 0
+            }
+        }
+        {
+            i=1
+            while (i<=length($0)) {
+                c=substr($0,i,1)
+                if (in_string) {
+                    if (unicode_left>0) {
+                        if (c !~ /^[0-9A-Fa-f]$/) bad=1
+                        unicode_left--
+                    } else if (escaped) {
+                        if (c=="u") unicode_left=4
+                        else if (c !~ /["\\\/bfnrt]/) bad=1
+                        escaped=0
+                    } else if (c=="\\") escaped=1
+                    else if (c=="\"") { in_string=0; add("S", "") }
+                    else if (c ~ /[[:cntrl:]]/) bad=1
+                    i++; continue
+                }
+                if (c ~ /[[:space:]]/) { i++; continue }
+                if (c=="\"") { in_string=1; i++; continue }
+                if (c ~ /^[{}\[\],:]$/) { add(c, c); i++; continue }
+                if (c ~ /[[:cntrl:]]/) { bad=1; i++; continue }
+                j=i
+                while (j<=length($0)) {
+                    d=substr($0,j,1)
+                    if (d ~ /[[:space:]]/ || d ~ /^[{}\[\],:"]$/) break
+                    if (d ~ /[[:cntrl:]]/) bad=1
+                    j++
+                }
+                if (j==i) { bad=1; i++; continue }
+                add("W", substr($0,i,j-i)); i=j
+            }
+        }
+        END {
+            if (in_string || escaped || unicode_left>0 || bad || nt<1 || tok[1]!="{") exit 1
+            pos=1
+            if (!parse_value() || bad || pos!=nt+1) exit 1
+            exit 0
+        }
+    ' "$_jcv_file" >/dev/null 2>&1
+}
+
+_json_contract_section_key_present() {
+    _jcsp_section="$1"; _jcsp_key="$2"; _jcsp_file="$3"
+    awk -v sec="$_jcsp_section" -v key="$_jcsp_key" '
+        function delta(s, t) { t=s; gsub(/[^{}]/,"",t); return gsub(/\{/ ,"&",t)-gsub(/\}/,"&",t) }
+        { line=$0
+          if (!inside && line ~ ("\"" sec "\"[[:space:]]*:[[:space:]]*\\{")) { inside=1; depth+=delta(line) }
+          else if (inside) { if (line ~ ("\"" key "\"[[:space:]]*:")) found=1; depth+=delta(line) }
+          if (inside && depth<=0) inside=0
+        }
+        END { exit !found }
+    ' "$_jcsp_file" >/dev/null 2>&1
+}
+
+_json_contract_section2_key_present() {
+    _jc2p_section="$1"; _jc2p_subsection="$2"; _jc2p_key="$3"; _jc2p_file="$4"
+    awk -v sec="$_jc2p_section" -v subsec="$_jc2p_subsection" -v key="$_jc2p_key" '
+        function delta(s, t) { t=s; gsub(/[^{}]/,"",t); return gsub(/\{/ ,"&",t)-gsub(/\}/,"&",t) }
+        { line=$0
+          if (!in1 && line ~ ("\"" sec "\"[[:space:]]*:[[:space:]]*\\{")) { in1=1; d1+=delta(line) }
+          else if (in1 && !in2) {
+              if (line ~ ("\"" subsec "\"[[:space:]]*:[[:space:]]*\\{")) { in2=1; d2+=delta(line) }
+              d1+=delta(line)
+          } else if (in2) {
+              if (line ~ ("\"" key "\"[[:space:]]*:")) found=1
+              d2+=delta(line)
+          }
+          if (in2 && d2<=0) in2=0
+          if (in1 && d1<=0) in1=0
+        }
+        END { exit !found }
+    ' "$_jc2p_file" >/dev/null 2>&1
+}
+
+_json_contract_prepare() {
+    _jcp_file="$1"; _jcp_defaults="${2:-}"
+    case "$_jcp_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 2 ;; esac
+    _jcp_dir=${_jcp_file%/*}; [ "$_jcp_dir" = "$_jcp_file" ] && _jcp_dir=.
+    mkdir -p "$_jcp_dir" 2>/dev/null || return 3
+    _jcp_tmp="$_jcp_file.contract.$$"
+    rm -f "$_jcp_tmp" 2>/dev/null || return 3
+    if [ -e "$_jcp_file" ]; then
+        [ -f "$_jcp_file" ] || return 3
+        _json_contract_validate_file "$_jcp_file" || { _jcp_rc=$?; return 2; }
+        cp -p "$_jcp_file" "$_jcp_tmp" 2>/dev/null || return 3
+    else
+        : > "$_jcp_tmp" || return 3
+    fi
+    ensure_json_store "$_jcp_tmp" "$_jcp_defaults" || { rm -f "$_jcp_tmp"; return 3; }
+    _json_contract_validate_file "$_jcp_tmp" || { rm -f "$_jcp_tmp"; return 3; }
+    return 0
+}
+
+_json_contract_commit() {
+    _jcc_file="$1"; _jcc_tmp="$2"
+    [ -s "$_jcc_tmp" ] || { rm -f "$_jcc_tmp"; return 3; }
+    _json_contract_validate_file "$_jcc_tmp" || { rm -f "$_jcc_tmp"; return 3; }
+    chmod 644 "$_jcc_tmp" 2>/dev/null || { rm -f "$_jcc_tmp"; return 3; }
+    mv -f "$_jcc_tmp" "$_jcc_file" 2>/dev/null || { rm -f "$_jcc_tmp"; return 3; }
+    _json_contract_validate_file "$_jcc_file" || return 3
+    return 0
+}
+
+json_get_scalar_ext() {
+    _jge_key="$1"; _jge_file="$2"
+    _json_contract_key_valid "$_jge_key" || return 2
+    [ -f "$_jge_file" ] || return 1
+    _json_contract_validate_file "$_jge_file" || return 2
+    grep -Eq "\"$_jge_key\"[[:space:]]*:" "$_jge_file" 2>/dev/null || return 1
+    json_get_scalar "$_jge_key" "$_jge_file"
+    return 0
+}
+
+json_get_section_value_ext() {
+    _jgse_section="$1"; _jgse_key="$2"; _jgse_file="$3"
+    _json_contract_key_valid "$_jgse_section" || return 2
+    _json_contract_key_valid "$_jgse_key" || return 2
+    [ -f "$_jgse_file" ] || return 1
+    _json_contract_validate_file "$_jgse_file" || return 2
+    _json_contract_section_key_present "$_jgse_section" "$_jgse_key" "$_jgse_file" || return 1
+    _jgse_value=$(json_get_section_value "$_jgse_section" "$_jgse_key" "$_jgse_file" 2>/dev/null) || return 3
+    printf '%s\n' "$_jgse_value"
+}
+
+json_get_section2_value_ext() {
+    _jg2_section="$1"; _jg2_subsection="$2"; _jg2_key="$3"; _jg2_file="$4"
+    _json_contract_key_valid "$_jg2_section" || return 2
+    _json_contract_key_valid "$_jg2_subsection" || return 2
+    _json_contract_key_valid "$_jg2_key" || return 2
+    [ -f "$_jg2_file" ] || return 1
+    _json_contract_validate_file "$_jg2_file" || return 2
+    _json_contract_section2_key_present "$_jg2_section" "$_jg2_subsection" "$_jg2_key" "$_jg2_file" || return 1
+    _jg2_value=$(json_get_section2_value "$_jg2_section" "$_jg2_subsection" "$_jg2_key" "$_jg2_file" 2>/dev/null) || return 3
+    printf '%s\n' "$_jg2_value"
+}
+
+json_set_flag_ext() {
+    _jsfe_key="$1"; _jsfe_value="$2"; _jsfe_file="${3:-$SETTINGS_FILE}"; _jsfe_defaults="${4:-}"
+    _json_contract_key_valid "$_jsfe_key" || return 2
+    _json_contract_value_valid "$_jsfe_value" || return 2
+    _json_contract_prepare "$_jsfe_file" "$_jsfe_defaults" || return $?
+    json_set_flag "$_jsfe_key" "$_jsfe_value" "$_jcp_tmp" "$_jsfe_defaults" || { rm -f "$_jcp_tmp"; return 3; }
+    grep -Eq "\"$_jsfe_key\"[[:space:]]*:" "$_jcp_tmp" 2>/dev/null || { rm -f "$_jcp_tmp"; return 3; }
+    _jsfe_observed=$(json_get_scalar "$_jsfe_key" "$_jcp_tmp" 2>/dev/null) || { rm -f "$_jcp_tmp"; return 3; }
+    [ "$_jsfe_observed" = "$_jsfe_value" ] || { rm -f "$_jcp_tmp"; return 3; }
+    _json_contract_commit "$_jsfe_file" "$_jcp_tmp"
+}
+
+json_set_section_value_ext() {
+    _jsse_section="$1"; _jsse_key="$2"; _jsse_value="$3"; _jsse_file="${4:-$SETTINGS_FILE}"
+    _json_contract_key_valid "$_jsse_section" || return 2
+    _json_contract_key_valid "$_jsse_key" || return 2
+    _json_contract_value_valid "$_jsse_value" || return 2
+    [ -f "$_jsse_file" ] || return 1
+    _json_contract_validate_file "$_jsse_file" || return 2
+    _json_contract_section_key_present "$_jsse_section" "$_jsse_key" "$_jsse_file" || return 1
+    _json_contract_prepare "$_jsse_file" || return $?
+    json_set_section_value "$_jsse_section" "$_jsse_key" "$_jsse_value" "$_jcp_tmp" || { rm -f "$_jcp_tmp"; return 3; }
+    _json_contract_section_key_present "$_jsse_section" "$_jsse_key" "$_jcp_tmp" || { rm -f "$_jcp_tmp"; return 3; }
+    _jsse_observed=$(json_get_section_value "$_jsse_section" "$_jsse_key" "$_jcp_tmp" 2>/dev/null) || { rm -f "$_jcp_tmp"; return 3; }
+    [ "$_jsse_observed" = "$_jsse_value" ] || { rm -f "$_jcp_tmp"; return 3; }
+    _json_contract_commit "$_jsse_file" "$_jcp_tmp"
+}
+
+json_set_section2_value_ext() {
+    _js2_section="$1"; _js2_subsection="$2"; _js2_key="$3"; _js2_value="$4"; _js2_file="${5:-$SETTINGS_FILE}"
+    _json_contract_key_valid "$_js2_section" || return 2
+    _json_contract_key_valid "$_js2_subsection" || return 2
+    _json_contract_key_valid "$_js2_key" || return 2
+    _json_contract_value_valid "$_js2_value" || return 2
+    [ -f "$_js2_file" ] || return 1
+    _json_contract_validate_file "$_js2_file" || return 2
+    _json_contract_section2_key_present "$_js2_section" "$_js2_subsection" "$_js2_key" "$_js2_file" || return 1
+    _json_contract_prepare "$_js2_file" || return $?
+    json_set_section2_value "$_js2_section" "$_js2_subsection" "$_js2_key" "$_js2_value" "$_jcp_tmp" || { rm -f "$_jcp_tmp"; return 3; }
+    _json_contract_section2_key_present "$_js2_section" "$_js2_subsection" "$_js2_key" "$_jcp_tmp" || { rm -f "$_jcp_tmp"; return 3; }
+    _js2_observed=$(json_get_section2_value "$_js2_section" "$_js2_subsection" "$_js2_key" "$_jcp_tmp" 2>/dev/null) || { rm -f "$_jcp_tmp"; return 3; }
+    [ "$_js2_observed" = "$_js2_value" ] || { rm -f "$_jcp_tmp"; return 3; }
+    _json_contract_commit "$_js2_file" "$_jcp_tmp"
+}
+
+# Strict aliases used by new code and by local contract tests.
+json_get_scalar_strict() { json_get_scalar_ext "$@"; }
+json_get_section_value_strict() { json_get_section_value_ext "$@"; }
+json_get_section2_value_strict() { json_get_section2_value_ext "$@"; }
+json_set_flag_strict() { json_set_flag_ext "$@"; }
+json_set_section_value_strict() { json_set_section_value_ext "$@"; }
+json_set_section2_value_strict() { json_set_section2_value_ext "$@"; }
 
 LIB_JSON_LOADED=1

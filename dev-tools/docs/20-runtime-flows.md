@@ -25,6 +25,17 @@ through the parent/service action path. The UI waits for acknowledged backend
 completion and, where applicable, verifies that persisted settings match the
 requested managed values before releasing the action state.
 
+When `AUTO_SYNC_SETTINGS` is enabled and a save changes node-relevant
+settings, the local save reaches a terminal acknowledgement first. The UI
+then starts a separate `syncsettings_vlanmgr` action, which owns its own
+progress panel and complete-set SSH preflight. If host-key trust is required,
+that settings-only action pauses for review and resumes as settings-only; it
+must not fall back to a full Sync Nodes deployment. Changes limited to
+`AUTO_SYNC_SETTINGS`, `HTML_CLIENT_REFRESH_MINUTES`, or `EXPERIMENTAL` remain
+local and do not start the node action. APMO uses the same settings-only
+follow-up after its override/probe sequence. Boot Enable retains its existing
+system-wide synchronization behavior.
+
 ## Sync Nodes
 
 `sync_nodes.sh` validates the node list, stages a curated runtime subset,
@@ -38,6 +49,19 @@ Manual and page-load refreshes request the observation coordinator. The worker
 serializes snapshot and collection generations, and the WebUI waits for fresh
 client data or a bounded, visible timeout. Health cron normally requests a
 snapshot only; it does not turn into a recurring client collection job.
+
+When a paused client refresh resumes after SSH trust enrollment, the resume
+action remains the browser-visible progress owner. Its nested host-key recheck
+uses an isolated child progress record, while the observation coordinator
+relays queued, configuration-wait, snapshot, and collection phases back to the
+resume action. This prevents a verified recheck from leaving a false running
+progress record or making queued snapshot work look like a stalled resume.
+
+For a normal progress-backed refresh, the browser owns the meaningful client
+stages and ignores transient nested SSH-probe progress. A verified parent
+preflight grants only the immediately spawned, unchanged node set a short-lived
+reuse token, avoiding a second full host-key probe before collection. Each
+node command still enforces its pinned host key independently.
 
 ## APMO, MAC Shield, and metadata
 

@@ -12,9 +12,15 @@
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
-[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing maintenance operation"
+  exit 1
+}
 
-cd /tmp 2>/dev/null || cd / || :
+cd /tmp 2>/dev/null || cd / 2>/dev/null || {
+  error -c cli,vlan "Unable to enter a safe temporary directory; refusing maintenance operation"
+  exit 1
+}
 [ -f /usr/sbin/helper.sh ] && . /usr/sbin/helper.sh
 
 readonly MB_TMP_ROOT="${MERVLAN_TMP_ROOT_OVERRIDE:-${TMPDIR:-/tmp/mervlan_tmp}}"
@@ -56,15 +62,18 @@ MB_RESTORE_ORIGINAL_BOOT=0
 
 mb_remove_jffs_stage() {
   _mb_stage_path="$1"
-  case "$_mb_stage_path" in
+    case "$_mb_stage_path" in
     "$MB_BACKUP_ROOT"/.mervlan.new.*|"$MB_BACKUP_ROOT"/.mervlan.old.*)
-      [ -e "$_mb_stage_path" ] && rm -rf "$_mb_stage_path" 2>/dev/null || :
+      [ -e "$_mb_stage_path" ] || return 0
+      rm -rf "$_mb_stage_path" 2>/dev/null
       ;;
+    *) return 1 ;;
   esac
 }
 
 mb_reconcile_stale_stages() {
   _mb_active_valid=1
+  _mb_stale_cleanup_failed=0
   for _mb_required in install.sh uninstall.sh changelog.txt mervlan.asp \
     functions/update_mervlan.sh functions/mervlan_boot.sh settings/settings.json www/index.html
   do
@@ -76,37 +85,47 @@ mb_reconcile_stale_stages() {
   fi
   for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.new.*; do
     [ -d "$_mb_stale" ] || continue
-    mb_remove_jffs_stage "$_mb_stale"
+    if ! mb_remove_jffs_stage "$_mb_stale"; then
+      warn -c cli,vlan "Could not remove stale restore stage $_mb_stale"
+      _mb_stale_cleanup_failed=1
+    fi
   done
   for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.old.*; do
     [ -d "$_mb_stale" ] || continue
-    mb_remove_jffs_stage "$_mb_stale"
+    if ! mb_remove_jffs_stage "$_mb_stale"; then
+      warn -c cli,vlan "Could not remove stale rollback tree $_mb_stale"
+      _mb_stale_cleanup_failed=1
+    fi
   done
+  [ "$_mb_stale_cleanup_failed" -eq 0 ]
 }
 
 mb_cleanup() {
+  _mb_cleanup_rc=$?
+  _mb_cleanup_failed=0
   if [ "$MB_PRESERVE_JFFS" != "1" ]; then
-    mb_remove_jffs_stage "$MB_JFFS_STAGE"
+    mb_remove_jffs_stage "$MB_JFFS_STAGE" || _mb_cleanup_failed=1
   fi
   if [ "$MB_PRESERVE_JFFS" != "1" ] && [ "$MB_ACTIVATION_STARTED" != "1" ]; then
-    mb_remove_jffs_stage "$MB_JFFS_OLD"
+    mb_remove_jffs_stage "$MB_JFFS_OLD" || _mb_cleanup_failed=1
   fi
   if [ "$MB_PRESERVE_WORK" != "1" ] && [ -d "$MB_WORK_ROOT" ]; then
-    rm -rf "$MB_WORK_ROOT" 2>/dev/null || :
+    rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
   fi
   if [ "$MB_LOCK_OWNED" = "1" ]; then
-    if type merv_lock_release >/dev/null 2>&1; then
-      merv_lock_release "$MB_LOCK" 2>/dev/null || :
+    if type merv_lock_release >/dev/null 2>&1 && merv_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
+      MB_LOCK_OWNED=0
     else
-      rm -f "$MB_LOCK/pid" "$MB_LOCK/created" 2>/dev/null || :
-      rmdir "$MB_LOCK" 2>/dev/null || :
+      _mb_cleanup_failed=1
+      error -c cli,vlan "Maintenance cleanup could not release its owner lock; recovery is required"
     fi
-    MB_LOCK_OWNED=0
   fi
   case "${MB_OPERATION:-}" in
     ""|backup_inventory) ;;
-    *) type log_maintain_all >/dev/null 2>&1 && log_maintain_all ;;
+    *) if type log_maintain_all >/dev/null 2>&1; then log_maintain_all || _mb_cleanup_failed=1; fi ;;
   esac
+  [ "$_mb_cleanup_failed" -eq 0 ] || _mb_cleanup_rc=1
+  return "$_mb_cleanup_rc"
 }
 
 mb_handle_signal() {
@@ -210,7 +229,7 @@ mb_prepare_archive_metadata() {
     printf 'checksum=%s\n' "$_mb_meta_checksum"
     printf 'created=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
   } > "$_mb_meta_output" 2>/dev/null || return 1
-  chmod 600 "$_mb_meta_output" 2>/dev/null || :
+  chmod 600 "$_mb_meta_output" 2>/dev/null || return 1
 }
 
 mb_metadata_value() {
@@ -239,13 +258,20 @@ mb_verify_archive_integrity() {
 mb_install_recovery_helper() {
   [ -f "$MB_RECOVERY_SOURCE" ] || return 1
   mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || return 1
-  chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || :
+  chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || return 1
   _mb_recovery_tmp="$MB_BACKUP_ROOT/.recover.sh.partial.$$"
-  rm -f "$_mb_recovery_tmp" 2>/dev/null || :
+  rm -f "$_mb_recovery_tmp" 2>/dev/null || return 1
   cp -p "$MB_RECOVERY_SOURCE" "$_mb_recovery_tmp" 2>/dev/null || return 1
-  chmod 700 "$_mb_recovery_tmp" 2>/dev/null || :
+  chmod 700 "$_mb_recovery_tmp" 2>/dev/null || {
+    if ! rm -f "$_mb_recovery_tmp" 2>/dev/null; then
+      warn -c cli,vlan "Recovery helper permission setup failed and its temporary file could not be removed"
+    fi
+    return 1
+  }
   mv -f "$_mb_recovery_tmp" "$MB_RECOVERY_SCRIPT" 2>/dev/null || {
-    rm -f "$_mb_recovery_tmp" 2>/dev/null || :
+    if ! rm -f "$_mb_recovery_tmp" 2>/dev/null; then
+      warn -c cli,vlan "Recovery helper publication failed and its temporary file could not be removed"
+    fi
     return 1
   }
 }
@@ -373,7 +399,7 @@ mb_write_result() {
   _mb_phase="$2"
   shift 2
   _mb_message="$*"
-  mkdir -p "$MB_PUBLIC_RESULTS" 2>/dev/null || return 0
+  mkdir -p "$MB_PUBLIC_RESULTS" 2>/dev/null || return 1
   _mb_tmp="$MB_RESULT_FILE.$$"
   printf '{"request_token":"%s","operation":"%s","state":"%s","phase":"%s","target":"%s","message":"%s","timestamp":%s}\n' \
     "$(mb_json_escape "$MB_REQUEST_TOKEN")" \
@@ -382,9 +408,18 @@ mb_write_result() {
     "$(mb_json_escape "$_mb_phase")" \
     "$(mb_json_escape "$MB_TARGET")" \
     "$(mb_json_escape "$_mb_message")" \
-    "$(date +%s 2>/dev/null || echo 0)" > "$_mb_tmp" 2>/dev/null || return 0
-  chmod 644 "$_mb_tmp" 2>/dev/null || :
-  mv -f "$_mb_tmp" "$MB_RESULT_FILE" 2>/dev/null || rm -f "$_mb_tmp" 2>/dev/null || :
+    "$(date +%s 2>/dev/null || echo 0)" > "$_mb_tmp" 2>/dev/null || return 1
+  if ! chmod 644 "$_mb_tmp" 2>/dev/null; then
+    rm -f "$_mb_tmp" 2>/dev/null
+    return 1
+  fi
+  if ! mv -f "$_mb_tmp" "$MB_RESULT_FILE" 2>/dev/null; then
+    if ! rm -f "$_mb_tmp" 2>/dev/null; then
+      warn -c cli,vlan "Maintenance result publication failed and its temporary file could not be removed"
+    fi
+    return 1
+  fi
+  return 0
 }
 
 mb_fail() {
@@ -392,23 +427,18 @@ mb_fail() {
   shift
   _mb_message="$*"
   error -c cli,vlan "$_mb_message"
-  mb_write_result error "$_mb_phase" "$_mb_message"
+  if ! mb_write_result error "$_mb_phase" "$_mb_message"; then
+    warn -c cli,vlan "Could not publish the maintenance failure result"
+  fi
   return 1
 }
 
 mb_acquire_lock() {
   mkdir -p "${MB_LOCK%/*}" 2>/dev/null || return 1
-  if type merv_lock_acquire >/dev/null 2>&1; then
-    if merv_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
-      MB_LOCK_OWNED=1
-      return 0
-    fi
-    return 1
-  fi
-  if mkdir "$MB_LOCK" 2>/dev/null; then
-    echo "$$" > "$MB_LOCK/pid" 2>/dev/null || :
-    date +%s > "$MB_LOCK/created" 2>/dev/null || :
+  type merv_lock_acquire >/dev/null 2>&1 || return 1
+  if merv_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
     MB_LOCK_OWNED=1
+    MB_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     return 0
   fi
   return 1
@@ -416,7 +446,15 @@ mb_acquire_lock() {
 
 mb_require_lock() {
   if mb_acquire_lock; then
-    mb_reconcile_stale_stages
+    if ! mb_reconcile_stale_stages; then
+      error -c cli,vlan "Stale restore or rollback trees could not be reconciled; maintenance is blocked"
+      if type merv_lock_release >/dev/null 2>&1 && merv_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
+        MB_LOCK_OWNED=0
+      else
+        error -c cli,vlan "Maintenance cleanup could not release its owner lock after stale-tree failure"
+      fi
+      return 1
+    fi
     return 0
   fi
   _mb_busy_message="Another MerVLAN update, backup, restore, or deletion is already running."
@@ -536,7 +574,7 @@ mb_archive_member_types_safe() {
 mb_archive_version() {
   _mb_archive="$1"
   mkdir -p "$MB_WORK_ROOT/version" 2>/dev/null || { printf 'unknown'; return; }
-  rm -rf "$MB_WORK_ROOT/version"/* 2>/dev/null || :
+  rm -rf "$MB_WORK_ROOT/version"/* 2>/dev/null || { printf 'unknown'; return; }
   mb_archive_member_types_safe "$_mb_archive" || { printf 'unknown'; return; }
   _mb_changelog=$(tar -tzf "$_mb_archive" 2>/dev/null | awk '/(^|\/)changelog\.txt$/ { print; exit }')
   case "$_mb_changelog" in ''|/*|*../*) printf 'unknown'; return ;; esac
@@ -584,7 +622,10 @@ mb_write_inventory() {
   _mb_undo_update_id=""
   _mb_undo_update_version=unknown
   _mb_undo_update_created=unknown
-  _mb_undo_update_archive=$(mb_update_undo_archive 2>/dev/null || :)
+  _mb_undo_update_archive=""
+  if ! _mb_undo_update_archive=$(mb_update_undo_archive 2>/dev/null); then
+    warn -c cli,vlan "The temporary Undo Update reference could not be read while refreshing inventory"
+  fi
   if [ -n "$_mb_undo_update_archive" ]; then
     _mb_undo_update_available=true
     _mb_undo_update_id=${_mb_undo_update_archive##*/}
@@ -625,9 +666,9 @@ mb_write_inventory() {
   done
   printf ']}\n' >> "$_mb_tmp"
   if [ "$_mb_output" = "-" ]; then
-    cat "$_mb_tmp"
+    cat "$_mb_tmp" || return 1
   else
-    chmod 644 "$_mb_tmp" 2>/dev/null || :
+    chmod 644 "$_mb_tmp" 2>/dev/null || return 1
     mv -f "$_mb_tmp" "$_mb_output" 2>/dev/null || return 1
   fi
   return 0
@@ -667,9 +708,10 @@ mb_update_legacy_metadata() {
   _mb_settings="$MERV_BASE/settings/settings.json"
   [ -f "$_mb_settings" ] || return 0
   type json_set_array >/dev/null 2>&1 || return 0
-  json_set_array BACKUP_1 "none none none" "$_mb_settings" 2>/dev/null || :
-  json_set_array BACKUP_2 "none none none" "$_mb_settings" 2>/dev/null || :
-  json_set_array BACKUP_3 "none none none" "$_mb_settings" 2>/dev/null || :
+  _mb_metadata_failed=0
+  if ! json_set_array BACKUP_1 "none none none" "$_mb_settings" 2>/dev/null; then _mb_metadata_failed=1; fi
+  if ! json_set_array BACKUP_2 "none none none" "$_mb_settings" 2>/dev/null; then _mb_metadata_failed=1; fi
+  if ! json_set_array BACKUP_3 "none none none" "$_mb_settings" 2>/dev/null; then _mb_metadata_failed=1; fi
   _mb_index=0
   for _mb_path in $(mb_list_paths); do
     [ "$(mb_archive_type "${_mb_path##*/}")" = automatic ] || continue
@@ -679,13 +721,27 @@ mb_update_legacy_metadata() {
     _mb_created=$(mb_timestamp_display "$(mb_archive_timestamp "${_mb_path##*/}")")
     _mb_date=${_mb_created% *}
     _mb_time=${_mb_created#* }
-    json_set_array "BACKUP_$_mb_index" "$_mb_version $_mb_date ${_mb_time%:*}" "$_mb_settings" 2>/dev/null || :
+    if ! json_set_array "BACKUP_$_mb_index" "$_mb_version $_mb_date ${_mb_time%:*}" "$_mb_settings" 2>/dev/null; then
+      _mb_metadata_failed=1
+    fi
   done
+  if [ "$_mb_metadata_failed" -ne 0 ]; then
+    warn -c cli,vlan "Legacy backup metadata could not be fully refreshed"
+    return 1
+  fi
+  return 0
 }
 
 mb_refresh_inventory() {
-  mb_write_inventory "$MB_INVENTORY_FILE" || warn -c cli,vlan "Could not refresh backup inventory JSON"
-  mb_update_legacy_metadata
+  _mb_inventory_failed=0
+  if ! mb_write_inventory "$MB_INVENTORY_FILE"; then
+    warn -c cli,vlan "Could not refresh backup inventory JSON"
+    _mb_inventory_failed=1
+  fi
+  if ! mb_update_legacy_metadata; then
+    _mb_inventory_failed=1
+  fi
+  [ "$_mb_inventory_failed" -eq 0 ]
 }
 
 mb_confirm() {
@@ -742,45 +798,71 @@ mb_create_manual() {
   mb_write_result running archiving "Creating manual backup $_mb_id."
   info -c cli,vlan "Creating manual backup $_mb_id"
   if ! tar -czf "$_mb_partial" -C "${MERV_BASE%/*}" "${MERV_BASE##*/}" 2>/dev/null; then
-    rm -f "$_mb_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Manual backup archiving failed and its partial archive could not be removed"
+    fi
     mb_fail archiving "Failed to create the manual backup archive. Check available flash space."
     return 1
   fi
   if ! tar -tzf "$_mb_partial" >/dev/null 2>&1; then
-    rm -f "$_mb_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Manual backup validation failed and its partial archive could not be removed"
+    fi
     mb_fail validation "The created manual backup failed archive validation."
     return 1
   fi
-  rm -rf "$MB_WORK_ROOT/manual-verify" 2>/dev/null || :
+  if ! rm -rf "$MB_WORK_ROOT/manual-verify" 2>/dev/null; then
+    MB_PRESERVE_WORK=1
+    mb_fail validation "Could not remove the previous manual-backup validation tree."
+    return 1
+  fi
   if ! mb_validate_archive_tree "$_mb_partial" "$MB_WORK_ROOT/manual-verify"; then
-    rm -f "$_mb_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Manual backup validation failed and its partial archive could not be removed"
+    fi
     mb_fail validation "The created manual backup is unsafe, incomplete, or contains invalid settings."
     return 1
   fi
   _mb_meta_final="${_mb_final}.meta"
   _mb_meta_partial="${_mb_meta_final}.partial.$$"
   if ! mb_prepare_archive_metadata "$_mb_partial" "$_mb_id" "$_mb_meta_partial"; then
-    rm -f "$_mb_partial" "$_mb_meta_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_partial" "$_mb_meta_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Manual backup metadata creation failed and its partial files could not be removed"
+    fi
     mb_fail validation "Could not calculate integrity metadata for the manual backup."
     return 1
   fi
   if ! mv -f "$_mb_meta_partial" "$_mb_meta_final" 2>/dev/null; then
-    rm -f "$_mb_partial" "$_mb_meta_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_partial" "$_mb_meta_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Manual backup metadata publication failed and its partial files could not be removed"
+    fi
     mb_fail publishing "Could not publish manual backup integrity metadata."
     return 1
   fi
   if ! mv -f "$_mb_partial" "$_mb_final" 2>/dev/null; then
-    rm -f "$_mb_partial" "$_mb_meta_final" 2>/dev/null || :
+    if ! rm -f "$_mb_partial" "$_mb_meta_final" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Manual backup publication failed and its partial files could not be removed"
+    fi
     mb_fail publishing "Could not publish the completed manual backup."
     return 1
   fi
   if ! mb_verify_archive_integrity "$_mb_final"; then
-    mb_remove_archive_artifacts "$_mb_final" 2>/dev/null || :
+    if ! mb_remove_archive_artifacts "$_mb_final" 2>/dev/null; then
+      warn -c cli,vlan "Manual backup integrity verification failed and the invalid archive could not be removed"
+    fi
     mb_fail validation "The published manual backup failed its integrity check."
     return 1
   fi
   mb_install_recovery_helper || warn -c cli,vlan "Backup created, but the emergency recovery helper could not be refreshed"
-  mb_refresh_inventory
+  if ! mb_refresh_inventory; then
+    warn -c cli,vlan "Manual backup was created, but backup inventory refresh reported errors"
+  fi
   # Inventory generation iterates archives with shared POSIX-shell variables.
   # MB_TARGET is the stable operation identifier and cannot be replaced by the
   # last archive visited while refreshing the UI inventory.
@@ -812,8 +894,15 @@ mb_delete_one() {
   mb_write_result running deleting "Deleting $_mb_id."
   mb_remove_archive_artifacts "$_mb_path" 2>/dev/null || { mb_fail deleting "Failed to delete $_mb_id."; return 1; }
   [ ! -e "$_mb_path" ] || { mb_fail deleting "Backup still exists after deletion attempt."; return 1; }
-  [ "$(mb_meta_line "$MB_UNDO_UPDATE_MARKER" 1)" = "$_mb_id" ] && rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null || :
-  mb_refresh_inventory
+  if [ "$(mb_meta_line "$MB_UNDO_UPDATE_MARKER" 1)" = "$_mb_id" ]; then
+    if ! rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null; then
+      mb_fail deleting "Backup was deleted, but its Undo Update marker could not be removed."
+      return 1
+    fi
+  fi
+  if ! mb_refresh_inventory; then
+    warn -c cli,vlan "Backup was deleted, but backup inventory refresh reported errors"
+  fi
   info -c cli,vlan "Backup deleted successfully: $MB_TARGET"
   mb_write_result success complete "Backup deleted successfully."
   return 0
@@ -832,15 +921,20 @@ mb_delete_all() {
   mb_require_lock || return 1
   mb_write_result running deleting "Deleting all persistent MerVLAN backups."
   mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail deleting "Backup directory is unavailable."; return 1; }
-  chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || :
+  chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail deleting "Could not secure the backup directory."; return 1; }
   _mb_delete_failed=0
   for _mb_delete_path in $(mb_list_paths); do
     mb_remove_archive_artifacts "$_mb_delete_path" 2>/dev/null || _mb_delete_failed=1
   done
   [ "$_mb_delete_failed" = "0" ] || { mb_fail deleting "One or more recognized backup files could not be deleted."; return 1; }
   mb_install_recovery_helper || warn -c cli,vlan "Persistent backups were deleted, but the emergency recovery helper could not be refreshed"
-  rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null || :
-  mb_refresh_inventory
+  if ! rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null; then
+    mb_fail deleting "Persistent backups were deleted, but the Undo Update marker could not be removed."
+    return 1
+  fi
+  if ! mb_refresh_inventory; then
+    warn -c cli,vlan "Persistent backups were deleted, but backup inventory refresh reported errors"
+  fi
   info -c cli,vlan "All persistent MerVLAN backups deleted successfully"
   mb_write_result success complete "All persistent backups deleted successfully. Temporary Undo Restore was retained."
   return 0
@@ -909,9 +1003,9 @@ mb_apply_boot_state() {
     fi
   else
     if [ "$_mb_skip_nodes" = "1" ]; then
-      MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot" disable >/dev/null 2>&1 || :
+      MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot" disable >/dev/null 2>&1 || return 1
     else
-      sh "$_mb_boot" disable >/dev/null 2>&1 || :
+      sh "$_mb_boot" disable >/dev/null 2>&1 || return 1
     fi
   fi
   return 0
@@ -951,7 +1045,7 @@ mb_apply_restored_node_boot_state() {
   while read -r _mb_node_id _mb_node_ip; do
     [ -n "$_mb_node_ip" ] || continue
     if merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" \
-         "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh $_mb_node_action" >/dev/null 2>&1; then
+         "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh $_mb_node_action" >/dev/null 2>&1; then
       info -c cli,vlan "Restored boot state '${_mb_node_action}' on NODE${_mb_node_id} ($_mb_node_ip)"
     else
       type merv_ssh_skip_log >/dev/null 2>&1 && \
@@ -996,12 +1090,18 @@ mb_verify_restored_runtime() {
   _mb_action=disable
   [ "$_mb_expected_boot" = "1" ] && _mb_action=enable
 
-  _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null || :)
+  _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null)
+  _mb_main_report_rc=$?
+  [ "$_mb_main_report_rc" -eq 0 ] || warn -c cli,vlan "Restored main runtime report command failed (rc=$_mb_main_report_rc)"
   if ! mb_runtime_report_matches "$_mb_main_report" main "$_mb_expected_boot"; then
     warn -c cli,vlan "Restored main runtime mismatch; retrying hook reconciliation"
-    MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot_script" setupenable >/dev/null 2>&1 || :
-    MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot_script" "$_mb_action" >/dev/null 2>&1 || :
-    _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null || :)
+    MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot_script" setupenable >/dev/null 2>&1 ||
+      warn -c cli,vlan "Restored main hook reconciliation setup failed"
+    MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot_script" "$_mb_action" >/dev/null 2>&1 ||
+      warn -c cli,vlan "Restored main boot-state reconciliation failed"
+    _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null)
+    _mb_main_report_rc=$?
+    [ "$_mb_main_report_rc" -eq 0 ] || warn -c cli,vlan "Restored main retry report command failed (rc=$_mb_main_report_rc)"
   fi
   if ! mb_runtime_report_matches "$_mb_main_report" main "$_mb_expected_boot"; then
     error -c cli,vlan "Restored main runtime verification failed after retry: ${_mb_main_report:-no report}"
@@ -1016,12 +1116,16 @@ mb_verify_restored_runtime() {
   fi
   while read -r _mb_node_id _mb_node_ip; do
     [ -n "$_mb_node_ip" ] || continue
-    _mb_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh report"
-    _mb_node_report=$(merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "$_mb_remote" 2>/dev/null || :)
+    _mb_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh report"
+    _mb_node_report=$(merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "$_mb_remote" 2>/dev/null)
+    _mb_node_report_rc=$?
+    [ "$_mb_node_report_rc" -eq 0 ] || warn -c cli,vlan "NODE${_mb_node_id} restored runtime report failed (rc=$_mb_node_report_rc)"
     if ! mb_runtime_report_matches "$_mb_node_report" node "$_mb_expected_boot"; then
       warn -c cli,vlan "NODE${_mb_node_id} ($_mb_node_ip) restored runtime mismatch; retrying reconciliation"
-      _mb_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$_mb_action' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh report"
-      _mb_node_report=$(merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "$_mb_remote" 2>/dev/null || :)
+      _mb_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh '$_mb_action' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh report"
+      _mb_node_report=$(merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "$_mb_remote" 2>/dev/null)
+      _mb_node_report_rc=$?
+      [ "$_mb_node_report_rc" -eq 0 ] || warn -c cli,vlan "NODE${_mb_node_id} restored retry report failed (rc=$_mb_node_report_rc)"
     fi
     if mb_runtime_report_matches "$_mb_node_report" node "$_mb_expected_boot"; then
       info -c cli,vlan "Verified restored NODE${_mb_node_id} ($_mb_node_ip): baseline active, BOOT_ENABLED=$_mb_expected_boot"
@@ -1039,32 +1143,70 @@ mb_rollback_restore() {
   _mb_old_tree="$1"
   _mb_old_boot="$2"
   warn -c cli,vlan "Restore failed after activation; rolling back the original installation"
+  _mb_rollback_failed=0
   if [ "$MB_TEST_MODE" != "1" ] && [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
     # Quiesce the failed target and remove its exact template generation before
     # the original source is put back.  Keep node teardown explicit so a local
     # setup action cannot hide or duplicate the remote lifecycle.
-    MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
-    MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1 || :
+    if ! MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1; then
+      error -c cli,vlan "Rollback could not disable the failed MerVLAN runtime"
+      _mb_rollback_failed=1
+    fi
+    if ! MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
+      error -c cli,vlan "Rollback could not remove the failed MerVLAN hooks"
+      _mb_rollback_failed=1
+    fi
   fi
-  mb_remove_jffs_stage "$MB_JFFS_STAGE"
+  if ! mb_remove_jffs_stage "$MB_JFFS_STAGE"; then
+    error -c cli,vlan "Rollback could not remove the failed activation stage"
+    _mb_rollback_failed=1
+  fi
   if [ -d "$MERV_BASE" ]; then
-    mv "$MERV_BASE" "$MB_JFFS_STAGE" 2>/dev/null || return 1
+    if ! mv "$MERV_BASE" "$MB_JFFS_STAGE" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      error -c cli,vlan "CRITICAL: rollback could not preserve the failed active installation"
+      return 1
+    fi
   fi
   if mv "$_mb_old_tree" "$MERV_BASE" 2>/dev/null; then
-    mb_remove_jffs_stage "$MB_JFFS_STAGE"
+    if ! mb_remove_jffs_stage "$MB_JFFS_STAGE"; then
+      error -c cli,vlan "Rollback restored the original tree but could not remove the failed tree"
+      _mb_rollback_failed=1
+    fi
     MB_ROLLBACK_DONE=1
     MB_ACTIVATION_STARTED=0
-    mb_refresh_public_tree "$MERV_BASE" >/dev/null 2>&1 || :
-    mb_apply_boot_state "$MERV_BASE" "$_mb_old_boot" 1 >/dev/null 2>&1 || :
-    _mb_rollback_nodes=$(mb_list_configured_nodes 2>/dev/null || :)
+    if ! mb_refresh_public_tree "$MERV_BASE" >/dev/null 2>&1; then
+      error -c cli,vlan "Rollback restored the original tree but could not refresh the public installation"
+      _mb_rollback_failed=1
+    fi
+    if ! mb_apply_boot_state "$MERV_BASE" "$_mb_old_boot" 1 >/dev/null 2>&1; then
+      error -c cli,vlan "Rollback restored the original tree but could not reapply its boot state"
+      _mb_rollback_failed=1
+    fi
+    _mb_rollback_nodes=""
+    if ! _mb_rollback_nodes=$(mb_list_configured_nodes 2>/dev/null); then
+      error -c cli,vlan "Rollback restored the original tree but could not read its configured nodes"
+      _mb_rollback_failed=1
+    fi
     if [ -n "$_mb_rollback_nodes" ] && type ssh_keys_effectively_installed >/dev/null 2>&1 && ssh_keys_effectively_installed; then
       if [ -x "$MERV_BASE/functions/sync_nodes.sh" ]; then
-        MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1 || :
+        if ! MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1; then
+          error -c cli,vlan "Rollback restored the original tree but node synchronization failed"
+          _mb_rollback_failed=1
+        fi
       fi
-      mb_apply_restored_node_boot_state "$_mb_rollback_nodes" "$_mb_old_boot" >/dev/null 2>&1 || :
+      if ! mb_apply_restored_node_boot_state "$_mb_rollback_nodes" "$_mb_old_boot" >/dev/null 2>&1; then
+        error -c cli,vlan "Rollback restored the original tree but node boot-state reconciliation failed"
+        _mb_rollback_failed=1
+      fi
     fi
-    error -c cli,vlan "Restore failed; original installation was restored"
-    return 0
+    if [ "$_mb_rollback_failed" -eq 0 ]; then
+      error -c cli,vlan "Restore failed; original installation was restored"
+      return 0
+    fi
+    MB_PRESERVE_WORK=1
+    error -c cli,vlan "CRITICAL: original installation was restored, but rollback reconciliation failed"
+    return 1
   fi
   MB_PRESERVE_WORK=1
   error -c cli,vlan "CRITICAL: restore and rollback both failed; temporary original remains at $_mb_old_tree"
@@ -1075,29 +1217,51 @@ mb_publish_restore_undo() {
   _mb_old_tree="$1"
   _mb_old_version="$2"
   mkdir -p "$MB_UNDO_ROOT" 2>/dev/null || return 1
-  chmod 700 "$MB_UNDO_ROOT" 2>/dev/null || :
+  chmod 700 "$MB_UNDO_ROOT" 2>/dev/null || return 1
   _mb_undo_partial="$MB_UNDO_RESTORE_ARCHIVE.partial.$$"
   _mb_meta_partial="$MB_UNDO_RESTORE_META.partial.$$"
-  rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || :
+  rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || return 1
   if ! tar -czf "$_mb_undo_partial" -C "${_mb_old_tree%/*}" "${_mb_old_tree##*/}" 2>/dev/null || \
      ! tar -tzf "$_mb_undo_partial" >/dev/null 2>&1; then
-    rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Undo Restore archive creation failed and its temporary files could not be removed"
+    fi
     return 1
   fi
   printf '%s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)" "${_mb_old_version:-unknown}" > "$_mb_meta_partial" 2>/dev/null || {
-    rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Undo Restore metadata creation failed and its temporary files could not be removed"
+    fi
     return 1
   }
-  chmod 600 "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || :
+  if ! chmod 600 "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null; then
+    if ! rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Undo Restore permission setup failed and its temporary files could not be removed"
+    fi
+    return 1
+  fi
   mv -f "$_mb_undo_partial" "$MB_UNDO_RESTORE_ARCHIVE" 2>/dev/null || {
-    rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || :
+    if ! rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Undo Restore publication failed and its temporary files could not be removed"
+    fi
     return 1
   }
   if ! mv -f "$_mb_meta_partial" "$MB_UNDO_RESTORE_META" 2>/dev/null; then
-    rm -f "$_mb_meta_partial" "$MB_UNDO_RESTORE_META" 2>/dev/null || :
+    if ! rm -f "$MB_UNDO_RESTORE_ARCHIVE" "$_mb_meta_partial" "$MB_UNDO_RESTORE_META" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Undo Restore metadata publication failed and its partial files could not be removed"
+    fi
+    return 1
   fi
   MB_UNDO_CLEANUP_WARNING=0
-  rm -rf "$_mb_old_tree" 2>/dev/null || :
+  if ! rm -rf "$_mb_old_tree" 2>/dev/null; then
+    MB_UNDO_CLEANUP_WARNING=1
+    warn -c cli,vlan "Undo Restore was published, but the displaced working tree could not be removed"
+  fi
   [ ! -e "$_mb_old_tree" ] || MB_UNDO_CLEANUP_WARNING=1
   return 0
 }
@@ -1131,7 +1295,10 @@ mb_restore() {
       ;;
     undo_update)
       MB_OPERATION=undo_update
-      _mb_archive=$(mb_update_undo_archive 2>/dev/null || :)
+      _mb_archive=""
+      if ! _mb_archive=$(mb_update_undo_archive 2>/dev/null); then
+        warn -c cli,vlan "The temporary Undo Update reference could not be read"
+      fi
       [ -n "$_mb_archive" ] || { MB_TARGET=undo_update; mb_fail selection "No temporary Undo Update reference is available."; return 1; }
       _mb_id=${_mb_archive##*/}
       _mb_prompt="Undo the last update?"
@@ -1150,7 +1317,11 @@ mb_restore() {
     restore) _mb_archive=$(mb_resolve_selection "$_mb_id") || { mb_fail selection "Selected backup no longer exists."; return 1; } ;;
     undo_restore) [ -f "$MB_UNDO_RESTORE_ARCHIVE" ] || { mb_fail selection "The temporary Undo Restore file is no longer available."; return 1; } ;;
     undo_update)
-      _mb_archive=$(mb_update_undo_archive 2>/dev/null || :)
+      _mb_archive=""
+      if ! _mb_archive=$(mb_update_undo_archive 2>/dev/null); then
+        mb_fail selection "The temporary Undo Update source could not be read."
+        return 1
+      fi
       [ -n "$_mb_archive" ] || { mb_fail selection "The Undo Update source is no longer available."; return 1; }
       ;;
   esac
@@ -1161,7 +1332,11 @@ mb_restore() {
   fi
   _mb_stage="$MB_WORK_ROOT/restore-stage"
   _mb_old="$MB_JFFS_OLD"
-  rm -rf "$_mb_stage" 2>/dev/null || :
+  if ! rm -rf "$_mb_stage" 2>/dev/null; then
+    MB_PRESERVE_WORK=1
+    mb_fail recovery "Could not remove the previous restore staging tree; no recovery data was removed."
+    return 1
+  fi
   if [ -e "$MB_JFFS_STAGE" ] || [ -e "$_mb_old" ]; then
     MB_PRESERVE_JFFS=1
     mb_fail recovery "A preserved activation tree uses this process slot. No recovery data was removed; run $MB_BACKUP_ROOT/recover.sh after inspection."
@@ -1178,17 +1353,43 @@ mb_restore() {
   mb_write_result running validating "Validating selected backup."
   info -c cli,vlan "Validating restore archive $_mb_id"
   if ! mb_validate_archive_tree "$_mb_archive" "$_mb_stage"; then
-    rm -rf "$_mb_stage" 2>/dev/null || :
+    if ! rm -rf "$_mb_stage" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "Restore validation failed and its staging tree could not be removed"
+    fi
     mb_fail validation "Backup archive is corrupt, unsafe, or missing required MerVLAN files."
     return 1
+  fi
+  # Both the currently active node set and the target archive's node set must
+  # be host-key verified before restore creates a stage, disables hooks, or
+  # swaps the live installation. This keeps restore all-or-nothing at the
+  # complete configured-node boundary.
+  if [ "$MB_TEST_MODE" != "1" ]; then
+    if ! merv_ssh_preflight_settings_file "$MERV_BASE/settings/settings.json" || \
+       ! merv_ssh_preflight_settings_file "$MB_RESTORE_TREE/settings/settings.json"; then
+      if ! rm -rf "$_mb_stage" 2>/dev/null; then
+        MB_PRESERVE_WORK=1
+        warn -c cli,vlan "Restore trust preflight failed and its staging tree could not be removed"
+      fi
+      mb_fail ssh_trust "Restore blocked: complete SSH trust preflight failed."
+      return 1
+    fi
   fi
   _mb_target_boot=$(mb_read_boot_state "$MB_RESTORE_TREE")
   _mb_current_boot=$(mb_read_boot_state "$MERV_BASE")
   _mb_current_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
   _mb_target_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MB_RESTORE_TREE/changelog.txt" 2>/dev/null)
-  mkdir -p "$MB_WORK_ROOT/preserve" 2>/dev/null || :
+  if ! mkdir -p "$MB_WORK_ROOT/preserve" 2>/dev/null; then
+    MB_PRESERVE_WORK=1
+    mb_fail preservation "Could not prepare the restore preservation area."
+    return 1
+  fi
   for _mb_db in mac_shield.db mac_shield_override.db client_name_override.db; do
-    [ -f "$MB_RESTORE_TREE/tmp/$_mb_db" ] && cp -p "$MB_RESTORE_TREE/tmp/$_mb_db" "$MB_WORK_ROOT/preserve/$_mb_db" 2>/dev/null || :
+    if [ -f "$MB_RESTORE_TREE/tmp/$_mb_db" ] && ! cp -p "$MB_RESTORE_TREE/tmp/$_mb_db" "$MB_WORK_ROOT/preserve/$_mb_db" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      mb_fail preservation "Could not preserve $_mb_db before restore activation."
+      return 1
+    fi
   done
   mb_write_result running preparing_activation "Creating the validated temporary JFFS activation stage."
   mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail preparing_activation "Could not prepare the persistent backup directory."; return 1; }
@@ -1203,7 +1404,10 @@ mb_restore() {
   fi
   if ! cp -pR "$MB_RESTORE_TREE" "$MB_JFFS_STAGE" 2>/dev/null || \
      ! mb_settings_file_valid "$MB_JFFS_STAGE/settings/settings.json"; then
-    mb_remove_jffs_stage "$MB_JFFS_STAGE"
+    if ! mb_remove_jffs_stage "$MB_JFFS_STAGE"; then
+      MB_PRESERVE_JFFS=1
+      warn -c cli,vlan "Restore activation-stage validation failed and its temporary tree could not be removed"
+    fi
     mb_fail preparing_activation "Could not create and validate the JFFS activation stage."
     return 1
   fi
@@ -1213,8 +1417,16 @@ mb_restore() {
   if [ "$MB_TEST_MODE" != "1" ] && [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
     # Stop active boot/cron work first, then remove old-version main and node
     # injections before any files are replaced.
-    MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
-    MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1 || :
+    if ! MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1; then
+      if ! mb_remove_jffs_stage "$MB_JFFS_STAGE"; then MB_PRESERVE_JFFS=1; fi
+      mb_fail disabling_hooks "Could not disable the current MerVLAN runtime; restore was not activated."
+      return 1
+    fi
+    if ! MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
+      if ! mb_remove_jffs_stage "$MB_JFFS_STAGE"; then MB_PRESERVE_JFFS=1; fi
+      mb_fail disabling_hooks "Could not remove the current MerVLAN hooks; restore was not activated."
+      return 1
+    fi
   fi
   mb_write_result running activating "Activating the selected backup."
   MB_ACTIVATION_STARTED=1
@@ -1229,17 +1441,30 @@ mb_restore() {
     return 1
   fi
   mb_test_pause target_active
-  rm -rf "$_mb_stage" 2>/dev/null || :
-  json_set_section_value General BOOT_ENABLED "$_mb_current_boot" "$_mb_old/settings/settings.json" >/dev/null 2>&1 || :
-  chmod 755 "$MERV_BASE"/*.sh "$MERV_BASE"/functions/*.sh 2>/dev/null || :
-  chmod 644 "$MERV_BASE"/settings/*.sh "$MERV_BASE"/www/*.css "$MERV_BASE"/www/*.html 2>/dev/null || :
+  _mb_partial=0
+  if ! rm -rf "$_mb_stage" 2>/dev/null; then
+    MB_PRESERVE_WORK=1
+    warn -c cli,vlan "Restore activated, but its validation staging tree could not be removed"
+    _mb_partial=1
+  fi
+  if ! json_set_section_value General BOOT_ENABLED "$_mb_current_boot" "$_mb_old/settings/settings.json" >/dev/null 2>&1; then
+    warn -c cli,vlan "Restored settings could not record the current main boot state"
+    _mb_partial=1
+  fi
+  if ! chmod 755 "$MERV_BASE"/*.sh "$MERV_BASE"/functions/*.sh 2>/dev/null; then
+    warn -c cli,vlan "Some restored executable files could not be assigned executable permissions"
+    _mb_partial=1
+  fi
+  if ! chmod 644 "$MERV_BASE"/settings/*.sh "$MERV_BASE"/www/*.css "$MERV_BASE"/www/*.html 2>/dev/null; then
+    warn -c cli,vlan "Some restored settings or web files could not be assigned safe permissions"
+    _mb_partial=1
+  fi
   mb_write_result running refreshing_public "Refreshing the public MerVLAN installation."
   if ! mb_refresh_public_tree "$MERV_BASE"; then
     mb_rollback_restore "$_mb_old" "$_mb_current_boot"
     mb_fail refreshing_public "Restore could not refresh the public installation; the original installation was restored."
     return 1
   fi
-  _mb_partial=0
   mkdir -p "$MERV_BASE/tmp" 2>/dev/null || _mb_partial=1
   for _mb_db in mac_shield.db mac_shield_override.db client_name_override.db; do
     if [ -f "$MB_WORK_ROOT/preserve/$_mb_db" ] && \
@@ -1264,7 +1489,12 @@ mb_restore() {
   if [ "$MB_TEST_MODE" != "1" ] && [ -x "$MERV_BASE/functions/hw_probe.sh" ]; then
     sh "$MERV_BASE/functions/hw_probe.sh" >/dev/null 2>&1 || { warn -c cli,vlan "Restored hardware probe reported errors"; _mb_partial=1; }
   fi
-  _mb_restored_nodes=$(mb_list_configured_nodes 2>/dev/null || :)
+  _mb_restored_nodes=""
+  if ! _mb_restored_nodes=$(mb_list_configured_nodes 2>/dev/null); then
+    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
+    mb_fail reconciliation "Restore could not read the restored configured-node set; the original installation was restored."
+    return 1
+  fi
   if [ "$MB_TEST_MODE" != "1" ] && [ -n "$_mb_restored_nodes" ]; then
     if ! type ssh_keys_effectively_installed >/dev/null 2>&1 || ! ssh_keys_effectively_installed; then
       warn -c cli,vlan "Restored settings contain nodes, but SSH keys are unavailable; node restore was skipped"
@@ -1298,15 +1528,32 @@ mb_restore() {
         _mb_partial=1
       fi
     else
-      rm -rf "$_mb_old" 2>/dev/null || :
+      if ! rm -rf "$_mb_old" 2>/dev/null; then
+        MB_PRESERVE_WORK=1
+        warn -c cli,vlan "Restore succeeded, but the displaced installation could not be removed"
+      fi
       warn -c cli,vlan "Restore succeeded, but the temporary Undo Restore file could not be created"
       _mb_partial=1
     fi
   else
-    rm -rf "$_mb_old" 2>/dev/null || :
+    if ! rm -rf "$_mb_old" 2>/dev/null; then
+      MB_PRESERVE_WORK=1
+      warn -c cli,vlan "The displaced installation could not be removed after restore"
+      _mb_partial=1
+    fi
     case "$_mb_mode" in
-      undo_restore) rm -f "$MB_UNDO_RESTORE_ARCHIVE" "$MB_UNDO_RESTORE_META" 2>/dev/null || : ;;
-      undo_update) rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null || : ;;
+      undo_restore)
+        if ! rm -f "$MB_UNDO_RESTORE_ARCHIVE" "$MB_UNDO_RESTORE_META" 2>/dev/null; then
+          warn -c cli,vlan "The temporary Undo Restore files could not be removed"
+          _mb_partial=1
+        fi
+        ;;
+      undo_update)
+        if ! rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null; then
+          warn -c cli,vlan "The temporary Undo Update marker could not be removed"
+          _mb_partial=1
+        fi
+        ;;
     esac
   fi
   mb_refresh_inventory

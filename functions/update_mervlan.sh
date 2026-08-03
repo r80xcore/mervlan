@@ -27,10 +27,19 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
-[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing update"
+  exit 1
+}
 # =========================================== End of MerVLAN environment setup #
-cd /tmp 2>/dev/null || cd / || :
-. /usr/sbin/helper.sh
+if ! cd /tmp 2>/dev/null && ! cd / 2>/dev/null; then
+  error -c cli,vlan "Unable to enter a safe temporary directory; refusing update"
+  exit 1
+fi
+if [ -f /usr/sbin/helper.sh ] && ! . /usr/sbin/helper.sh; then
+  error -c cli,vlan "Unable to load the router helper library; refusing update"
+  exit 1
+fi
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 
@@ -60,6 +69,7 @@ UPDATE_PARTIAL="0"
 # Serialize updates with manual backup, deletion, and restore operations.
 UPDATE_MAINTENANCE_LOCK="${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock"
 UPDATE_MAINTENANCE_LOCK_OWNED="0"
+UPDATE_MAINTENANCE_LOCK_NONCE=""
 UPDATE_SIGNAL_HANDLING="0"
 UPDATE_ACTIVATION_STARTED="0"
 UPDATE_PRESERVE_TMP="0"
@@ -73,31 +83,36 @@ restore_update_original_tree() {
 	if [ -n "${UPDATE_JFFS_OLD:-}" ] && [ -d "$UPDATE_JFFS_OLD" ]; then
 		if [ -d "$MERV_BASE" ]; then
 			[ -n "${UPDATE_JFFS_STAGE:-}" ] || return 1
-			rm -rf "$UPDATE_JFFS_STAGE" 2>/dev/null || return 1
+			if ! rm -rf "$UPDATE_JFFS_STAGE" 2>/dev/null; then return 1; fi
 			mv "$MERV_BASE" "$UPDATE_JFFS_STAGE" 2>/dev/null || return 1
 		fi
 		if ! mv "$UPDATE_JFFS_OLD" "$MERV_BASE" 2>/dev/null; then
-			[ -d "$UPDATE_JFFS_STAGE" ] && mv "$UPDATE_JFFS_STAGE" "$MERV_BASE" 2>/dev/null || :
+			if [ -d "$UPDATE_JFFS_STAGE" ] && ! mv "$UPDATE_JFFS_STAGE" "$MERV_BASE" 2>/dev/null; then
+				UPDATE_PRESERVE_JFFS="1"
+			fi
 			return 1
 		fi
-		rm -rf "$UPDATE_JFFS_STAGE" 2>/dev/null || :
+		if ! rm -rf "$UPDATE_JFFS_STAGE" 2>/dev/null; then
+			UPDATE_PRESERVE_JFFS="1"
+			return 1
+		fi
 	elif [ -n "${UPDATE_ORIGINAL_DIR:-}" ] && [ -d "$UPDATE_ORIGINAL_DIR" ]; then
-		[ -d "$MERV_BASE" ] && rm -rf "$MERV_BASE" 2>/dev/null || :
+		if [ -d "$MERV_BASE" ] && ! rm -rf "$MERV_BASE" 2>/dev/null; then return 1; fi
 		cp -pR "$UPDATE_ORIGINAL_DIR" "$MERV_BASE" 2>/dev/null || return 1
 	else
 		return 1
 	fi
 	[ -f "$MERV_BASE/settings/settings.json" ] || return 1
 	if [ -x "$MERV_BASE/uninstall.sh" ] && [ -x "$MERV_BASE/install.sh" ]; then
-		sh "$MERV_BASE/uninstall.sh" reinstall >/dev/null 2>&1 || :
+		sh "$MERV_BASE/uninstall.sh" reinstall >/dev/null 2>&1 || return 1
 		sh "$MERV_BASE/install.sh" reinstall >/dev/null 2>&1 || return 1
 	fi
 	if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-		MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1 || :
+		MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1 || return 1
 		if [ "${PRE_BOOT_ENABLED:-0}" = "1" ]; then
-			MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" enable >/dev/null 2>&1 || :
+			MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" enable >/dev/null 2>&1 || return 1
 		else
-			MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
+			MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || return 1
 		fi
 	fi
 	UPDATE_ACTIVATION_STARTED="0"
@@ -120,7 +135,7 @@ fail_update() {
 	if [ "$DESTRUCTIVE_TOUCHED" = "1" ] && [ "$BACKUP_READY" = "1" ] && \
 	   { { [ -n "${UPDATE_JFFS_OLD:-}" ] && [ -d "$UPDATE_JFFS_OLD" ]; } || \
 	     { [ -n "${UPDATE_ORIGINAL_DIR:-}" ] && [ -d "$UPDATE_ORIGINAL_DIR" ]; }; }; then
-		restore_attempted="1"
+	restore_attempted="1"
 		info -c cli,vlan "Restoring the pre-update MerVLAN installation"
 		if restore_update_original_tree; then
 			restored_tree="1"
@@ -130,7 +145,10 @@ fail_update() {
 	# Restore the main MAC DB if it was preserved before teardown.
 	# Do this before re-applying hooks so the DB exists when nodeenable runs.
 	if [ "${MAC_DB_BACKUP_PRESENT:-0}" = "1" ] && type restore_main_mac_db_after_update >/dev/null 2>&1; then
-		restore_main_mac_db_after_update
+		if ! restore_main_mac_db_after_update; then
+			UPDATE_PRESERVE_TMP="1"
+			error -c cli,vlan "Rollback could not restore the preserved main MAC Shield database"
+		fi
 	fi
 
 	# restore_update_original_tree performs the public/runtime reconciliation.
@@ -142,11 +160,20 @@ fail_update() {
 	if [ "$restored_tree" != "1" ] && [ "$TEARDOWN_DONE" = "1" ] && \
 	   [ -n "${BOOT_SCRIPT:-}" ] && [ -x "$BOOT_SCRIPT" ]; then
 		info -c cli,vlan "Re-applying MerVLAN hooks to original state"
-		MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1 || :
+		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
+			UPDATE_PRESERVE_TMP="1"
+			error -c cli,vlan "Rollback could not reapply the original main hooks"
+		fi
 		if [ "$PRE_BOOT_ENABLED" = "1" ]; then
-			MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable >/dev/null 2>&1 || :
+			if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
+				UPDATE_PRESERVE_TMP="1"
+				error -c cli,vlan "Rollback could not restore the original enabled boot state"
+			fi
 		else
-			MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1 || :
+			if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+				UPDATE_PRESERVE_TMP="1"
+				error -c cli,vlan "Rollback could not restore the original disabled boot state"
+			fi
 		fi
 	fi
 
@@ -156,16 +183,28 @@ fail_update() {
 	if [ "$restored_tree" = "1" ] && [ "$UPDATE_NODES_TOUCHED" = "1" ] && \
 	   ssh_keys_effectively_installed && has_configured_nodes && [ -x "$MERV_BASE/functions/sync_nodes.sh" ]; then
 		info -c cli,vlan "Rolling configured nodes back to the restored main-router version"
-		MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1 || :
+		if ! MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1; then
+			UPDATE_PRESERVE_TMP="1"
+			error -c cli,vlan "Rollback could not synchronize the restored tree to every configured node"
+		fi
 		if [ "$PRE_BOOT_ENABLED" = "1" ]; then
-			sh "$MERV_BASE/functions/mervlan_boot.sh" enable >/dev/null 2>&1 || :
+			if ! sh "$MERV_BASE/functions/mervlan_boot.sh" enable >/dev/null 2>&1; then
+				UPDATE_PRESERVE_TMP="1"
+				error -c cli,vlan "Rollback could not restore enabled boot state on every configured node"
+			fi
 		else
-			sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
+			if ! sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1; then
+				UPDATE_PRESERVE_TMP="1"
+				error -c cli,vlan "Rollback could not restore disabled boot state on every configured node"
+			fi
 		fi
 	fi
 
 	# Now safe to remove the temporary user-data backup
-	[ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] && rm -rf "$BACKUP_DIR" 2>/dev/null || :
+	if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] && ! rm -rf "$BACKUP_DIR" 2>/dev/null; then
+		UPDATE_PRESERVE_TMP="1"
+		error -c cli,vlan "Rollback could not remove the temporary user-data backup at $BACKUP_DIR"
+	fi
 
 	if [ "$restored_tree" = "1" ]; then
 		error -c cli,vlan "Update failed in stage: $block (backup restored)"
@@ -205,11 +244,38 @@ readonly UPDATE_UNDO_MARKER="$UPDATE_UNDO_ROOT/update.meta"
 
 update_remove_jffs_stage() {
 	_update_stage_path="$1"
+	[ -n "$_update_stage_path" ] || return 0
 	case "$_update_stage_path" in
 		"$MERVLAN_BACKUP_DIR"/.mervlan.new.*|"$MERVLAN_BACKUP_DIR"/.mervlan.old.*)
-			[ -e "$_update_stage_path" ] && rm -rf "$_update_stage_path" 2>/dev/null || :
+			[ -e "$_update_stage_path" ] || return 0
+			rm -rf "$_update_stage_path" 2>/dev/null
 			;;
+		*) return 1 ;;
 	esac
+}
+
+update_cleanup_files() {
+	_update_cleanup_file_failed=0
+	for _update_cleanup_file in "$@"; do
+		[ -n "$_update_cleanup_file" ] || continue
+		[ -e "$_update_cleanup_file" ] || continue
+		if ! rm -f "$_update_cleanup_file" 2>/dev/null; then
+			warn -c cli,vlan "Could not remove update temporary file $_update_cleanup_file"
+			_update_cleanup_file_failed=1
+		fi
+	done
+	[ "$_update_cleanup_file_failed" -eq 0 ]
+}
+
+update_cleanup_tree() {
+	_update_cleanup_tree_path="$1"
+	[ -n "$_update_cleanup_tree_path" ] || return 0
+	[ -e "$_update_cleanup_tree_path" ] || return 0
+	if ! rm -rf "$_update_cleanup_tree_path" 2>/dev/null; then
+		warn -c cli,vlan "Could not remove update temporary tree $_update_cleanup_tree_path"
+		return 1
+	fi
+	return 0
 }
 
 update_tree_valid() {
@@ -229,15 +295,22 @@ update_reconcile_stale_stages() {
 		warn -c cli,vlan "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees"
 		return 1
 	fi
+	_update_stale_failed=0
 	for _update_stale in "$MERVLAN_BACKUP_DIR"/.mervlan.new.*; do
 		[ -d "$_update_stale" ] || continue
-		update_remove_jffs_stage "$_update_stale"
+		if ! update_remove_jffs_stage "$_update_stale"; then
+			warn -c cli,vlan "Could not remove stale update stage $_update_stale"
+			_update_stale_failed=1
+		fi
 	done
 	for _update_stale in "$MERVLAN_BACKUP_DIR"/.mervlan.old.*; do
 		[ -d "$_update_stale" ] || continue
-		update_remove_jffs_stage "$_update_stale"
+		if ! update_remove_jffs_stage "$_update_stale"; then
+			warn -c cli,vlan "Could not remove stale rollback tree $_update_stale"
+			_update_stale_failed=1
+		fi
 	done
-	return 0
+	[ "$_update_stale_failed" -eq 0 ]
 }
 
 update_path_size_kb() {
@@ -291,7 +364,7 @@ update_prepare_archive_metadata() {
 		printf 'checksum=%s\n' "$_update_meta_checksum"
 		printf 'created=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
 	} > "$_update_meta_output" 2>/dev/null || return 1
-	chmod 600 "$_update_meta_output" 2>/dev/null || :
+	chmod 600 "$_update_meta_output" 2>/dev/null || return 1
 }
 
 create_durable_preupdate_backup() {
@@ -304,27 +377,39 @@ create_durable_preupdate_backup() {
 	UPDATE_BACKUP_META_FINAL="$UPDATE_BACKUP_FINAL.meta"
 	UPDATE_BACKUP_META_PARTIAL="$UPDATE_BACKUP_META_FINAL.partial.$$"
 	mkdir -p "$MERVLAN_BACKUP_DIR" 2>/dev/null || return 1
-	chmod 700 "$MERVLAN_BACKUP_DIR" 2>/dev/null || :
-	rm -f "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" 2>/dev/null || :
+	chmod 700 "$MERVLAN_BACKUP_DIR" 2>/dev/null || return 1
+	update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || return 1
 	[ ! -e "$UPDATE_BACKUP_FINAL" ] || return 1
 	info -c cli,vlan "Creating durable pre-update backup $UPDATE_BACKUP_ID"
-	tar -czf "$UPDATE_BACKUP_PARTIAL" -C "${MERV_BASE%/*}" "${MERV_BASE##*/}" 2>/dev/null || return 1
-	tar -tzf "$UPDATE_BACKUP_PARTIAL" >/dev/null 2>&1 || return 1
-	update_prepare_archive_metadata "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_ID" "$UPDATE_BACKUP_META_PARTIAL" || return 1
-	mv -f "$UPDATE_BACKUP_META_PARTIAL" "$UPDATE_BACKUP_META_FINAL" 2>/dev/null || return 1
+	if ! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "${MERV_BASE%/*}" "${MERV_BASE##*/}" 2>/dev/null; then
+		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	if ! tar -tzf "$UPDATE_BACKUP_PARTIAL" >/dev/null 2>&1; then
+		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	if ! update_prepare_archive_metadata "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_ID" "$UPDATE_BACKUP_META_PARTIAL"; then
+		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	if ! mv -f "$UPDATE_BACKUP_META_PARTIAL" "$UPDATE_BACKUP_META_FINAL" 2>/dev/null; then
+		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
 	if ! mv -f "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_FINAL" 2>/dev/null; then
-		rm -f "$UPDATE_BACKUP_META_FINAL" 2>/dev/null || :
+		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_FINAL" || UPDATE_PRESERVE_TMP="1"
 		return 1
 	fi
 	if [ -x "$MERV_BASE/functions/mervlan_recover.sh" ]; then
 		MERVLAN_RECOVERY_BACKUP_ROOT="$MERVLAN_BACKUP_DIR" \
 		MERVLAN_RECOVERY_TMP_ROOT="$TMP_BASE/recovery-check" \
 			sh "$MERV_BASE/functions/mervlan_recover.sh" check "$UPDATE_BACKUP_ID" >/dev/null 2>&1 || {
-				rm -f "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL" 2>/dev/null || :
+				update_cleanup_files "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL" || UPDATE_PRESERVE_TMP="1"
 				return 1
 			}
 	else
-		rm -f "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL" 2>/dev/null || :
+		update_cleanup_files "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL" || UPDATE_PRESERVE_TMP="1"
 		return 1
 	fi
 	UPDATE_BACKUP_ARCHIVE_OK=1
@@ -338,13 +423,19 @@ write_update_undo_marker() {
 	case "$_update_archive_id" in mervlan.backup.*.tar.gz) ;; *) return 1 ;; esac
 	[ -f "$MERVLAN_BACKUP_DIR/$_update_archive_id" ] || return 1
 	mkdir -p "$UPDATE_UNDO_ROOT" 2>/dev/null || return 1
-	chmod 700 "$UPDATE_UNDO_ROOT" 2>/dev/null || :
+	chmod 700 "$UPDATE_UNDO_ROOT" 2>/dev/null || return 1
 	_update_marker_tmp="$UPDATE_UNDO_MARKER.$$"
 	printf '%s\n%s\n%s\n%s\n' \
 		"$_update_archive_id" "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)" \
 		"${_update_from:-unknown}" "${_update_to:-unknown}" > "$_update_marker_tmp" 2>/dev/null || return 1
-	chmod 600 "$_update_marker_tmp" 2>/dev/null || :
-	mv -f "$_update_marker_tmp" "$UPDATE_UNDO_MARKER" 2>/dev/null
+	if ! chmod 600 "$_update_marker_tmp" 2>/dev/null; then
+		update_cleanup_files "$_update_marker_tmp" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	if ! mv -f "$_update_marker_tmp" "$UPDATE_UNDO_MARKER" 2>/dev/null; then
+		update_cleanup_files "$_update_marker_tmp" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
 }
 
 BACKUP_LIST="settings/settings.json
@@ -539,7 +630,7 @@ merge_settings_json() {
 		info -c cli,vlan "settings.json merge: extracted $cnt scalar values"
 	else
 		warn -c cli,vlan "settings.json merge: extracted 0 values (old file format mismatch?)"
-		rm -f "$tmp_kv" 2>/dev/null || :
+		update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
 		return 0
 	fi
 
@@ -547,13 +638,19 @@ merge_settings_json() {
 		[ -n "$section" ] || continue
 		[ -n "$key" ] || continue
 		if [ -n "$subsection" ]; then
-			json_set_section2_value "$section" "$subsection" "$key" "$value" "$new_file" || { rm -f "$tmp_kv" 2>/dev/null || :; return 1; }
+			if ! json_set_section2_value "$section" "$subsection" "$key" "$value" "$new_file"; then
+				update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
+				return 1
+			fi
 		else
-			json_set_section_value "$section" "$key" "$value" "$new_file" || { rm -f "$tmp_kv" 2>/dev/null || :; return 1; }
+			if ! json_set_section_value "$section" "$key" "$value" "$new_file"; then
+				update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
+				return 1
+			fi
 		fi
 	done < "$tmp_kv"
 
-	rm -f "$tmp_kv" 2>/dev/null || :
+	update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
 }
 
 # ========================================================================== #
@@ -566,20 +663,24 @@ merge_settings_json() {
 
 update_backup_metadata() {
     # Always reset all three slots so the JSON shape is stable
-    json_set_array "BACKUP_1" "none none none"
-    json_set_array "BACKUP_2" "none none none"
-    json_set_array "BACKUP_3" "none none none"
+    _update_metadata_failed=0
+    if ! json_set_array "BACKUP_1" "none none none"; then _update_metadata_failed=1; fi
+    if ! json_set_array "BACKUP_2" "none none none"; then _update_metadata_failed=1; fi
+    if ! json_set_array "BACKUP_3" "none none none"; then _update_metadata_failed=1; fi
 
     # No backup directory or no archives → nothing to record
-    [ -d "$MERVLAN_BACKUP_DIR" ] || return 0
+    [ -d "$MERVLAN_BACKUP_DIR" ] || { [ "$_update_metadata_failed" -eq 0 ]; return $?; }
     set -- "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz
-    [ -e "$1" ] || return 0
+    [ -e "$1" ] || { [ "$_update_metadata_failed" -eq 0 ]; return $?; }
 
     BACKUPS_LIST="$(ls "$MERVLAN_BACKUP_DIR"/mervlan.backup.*.tar.gz 2>/dev/null | sort -r)"
 
     # Temporary working directory for extracting changelog.txt only
     META_TMP="$TMP_DIR/backup_meta.$$"
-    mkdir -p "$META_TMP" 2>/dev/null || META_TMP=""
+    if ! mkdir -p "$META_TMP" 2>/dev/null; then
+        warn -c cli,vlan "Could not prepare backup metadata extraction workspace"
+        return 1
+    fi
 
     idx=0
     for b in $BACKUPS_LIST; do
@@ -616,10 +717,18 @@ update_backup_metadata() {
             if [ -n "$cl_path" ]; then
                 # Make sure directory exists for extraction
                 cl_dir="$META_TMP/$(dirname "$cl_path")"
-                mkdir -p "$cl_dir" 2>/dev/null || :
+                if ! mkdir -p "$cl_dir" 2>/dev/null; then
+                    warn -c cli,vlan "Could not prepare backup metadata path for $b"
+                    _update_metadata_failed=1
+                    continue
+                fi
 
                 # Extract ONLY changelog.txt into META_TMP
-                tar -xzf "$b" -C "$META_TMP" "$cl_path" >/dev/null 2>&1 || :
+                if ! tar -xzf "$b" -C "$META_TMP" "$cl_path" >/dev/null 2>&1; then
+                    warn -c cli,vlan "Could not read changelog metadata from $b"
+                    _update_metadata_failed=1
+                    continue
+                fi
 
                 if [ -f "$META_TMP/$cl_path" ]; then
                     # First non-empty line
@@ -643,14 +752,18 @@ update_backup_metadata() {
         fi
 
         case "$idx" in
-            1) json_set_array "BACKUP_1" "$version $date_fmt $time_fmt" ;;
-            2) json_set_array "BACKUP_2" "$version $date_fmt $time_fmt" ;;
-            3) json_set_array "BACKUP_3" "$version $date_fmt $time_fmt" ;;
+            1) json_set_array "BACKUP_1" "$version $date_fmt $time_fmt" || _update_metadata_failed=1 ;;
+            2) json_set_array "BACKUP_2" "$version $date_fmt $time_fmt" || _update_metadata_failed=1 ;;
+            3) json_set_array "BACKUP_3" "$version $date_fmt $time_fmt" || _update_metadata_failed=1 ;;
         esac
     done
 
     # Clean up extracted changelog files so nothing lingers
-    [ -n "$META_TMP" ] && [ -d "$META_TMP" ] && rm -rf "$META_TMP" 2>/dev/null || :
+    if [ -n "$META_TMP" ] && [ -d "$META_TMP" ] && ! rm -rf "$META_TMP" 2>/dev/null; then
+        warn -c cli,vlan "Could not remove backup metadata extraction workspace $META_TMP"
+        _update_metadata_failed=1
+    fi
+    [ "$_update_metadata_failed" -eq 0 ]
 }
 
 
@@ -659,27 +772,31 @@ update_backup_metadata() {
 # ========================================================================== #
 
 cleanup_tmp() {
+	_update_cleanup_rc=$?
+	_update_cleanup_failed=0
 	if [ "$UPDATE_PRESERVE_JFFS" != "1" ]; then
-		update_remove_jffs_stage "$UPDATE_JFFS_STAGE"
+		update_remove_jffs_stage "$UPDATE_JFFS_STAGE" || _update_cleanup_failed=1
 	fi
 	# UPDATE_JFFS_OLD is removed only after success or restored during rollback.
 	# Preserve it if activation failed so the administrator still has the exact
 	# pre-update tree beside the persistent backups.
 	if [ "$UPDATE_PRESERVE_JFFS" != "1" ] && [ "$UPDATE_ACTIVATION_STARTED" != "1" ]; then
-		update_remove_jffs_stage "$UPDATE_JFFS_OLD"
+		update_remove_jffs_stage "$UPDATE_JFFS_OLD" || _update_cleanup_failed=1
 	fi
 	if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ -n "$TMP_BASE" ] && [ -d "$TMP_BASE" ]; then
-		rm -rf "$TMP_BASE" 2>/dev/null || :
+		rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
 	fi
 	if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ]; then
-		if type merv_lock_release >/dev/null 2>&1; then
-			merv_lock_release "$UPDATE_MAINTENANCE_LOCK" 2>/dev/null || :
+		if type merv_lock_release >/dev/null 2>&1 &&
+		   merv_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" 2>/dev/null; then
+			UPDATE_MAINTENANCE_LOCK_OWNED="0"
 		else
-			rm -f "$UPDATE_MAINTENANCE_LOCK/pid" "$UPDATE_MAINTENANCE_LOCK/created" 2>/dev/null || :
-			rmdir "$UPDATE_MAINTENANCE_LOCK" 2>/dev/null || :
+			_update_cleanup_failed=1
+			error -c cli,vlan "Update cleanup could not release the maintenance owner lock; recovery is required"
 		fi
-		UPDATE_MAINTENANCE_LOCK_OWNED="0"
 	fi
+	[ "$_update_cleanup_failed" -eq 0 ] || _update_cleanup_rc=1
+	return "$_update_cleanup_rc"
 }
 
 handle_update_signal() {
@@ -739,6 +856,7 @@ esac
 MODE="update"
 CHANNEL="main"
 UPDATE_LOG_POLICY="keep"
+UPDATE_LEGACY_FALLBACK="0"
 
 set_update_log_policy() {
 	_update_policy_arg="$1"
@@ -759,8 +877,17 @@ case "$1" in
 		;;
 	update)
 		MODE="update"
-		CHANNEL="${2:-main}"
-		set_update_log_policy "${3:-}"
+		if [ "${2:-}" = "legacy" ]; then
+			# The legacy GUI event is only a compatibility transport. It may
+			# consult custom_settings.txt after the maintenance lock is owned;
+			# canonical encoded refs never use this fallback path.
+			CHANNEL="main"
+			UPDATE_LEGACY_FALLBACK="1"
+			set_update_log_policy "${3:-}"
+		else
+			CHANNEL="${2:-main}"
+			set_update_log_policy "${3:-}"
+		fi
 		;;
 	*)
 		echo "Usage: $0 [update [branch] [--logs=keep|--logs=clear]|backup|restore|main|dev|refs/<ref>]" >&2
@@ -779,16 +906,12 @@ consume_gui_update_ref() {
 
 	_gui_ref_raw=$(sed -n 's/^vlanmgr_update_ref=//p' "$_gui_ref_file" 2>/dev/null | tail -n 1 | tr -d '\r')
 	[ -n "$_gui_ref_raw" ] || return 1
-
-	_gui_ref_tmp="${_gui_ref_file}.update_ref.$$"
-	if ! sed '/^vlanmgr_update_ref=/d' "$_gui_ref_file" > "$_gui_ref_tmp" 2>/dev/null; then
-		rm -f "$_gui_ref_tmp" 2>/dev/null || :
-		return 2
-	fi
-	chmod 600 "$_gui_ref_tmp" 2>/dev/null || :
-	if ! mv -f "$_gui_ref_tmp" "$_gui_ref_file" 2>/dev/null; then
-		rm -f "$_gui_ref_tmp" 2>/dev/null || :
-		return 2
+	_gui_ref_mtime=$(stat -c %Y "$_gui_ref_file" 2>/dev/null || printf '0')
+	case "$_gui_ref_mtime" in ''|*[!0-9]*) _gui_ref_mtime=0 ;; esac
+	mkdir -p "$MERV_STATE_ROOT" 2>/dev/null || return 2
+	_gui_ref_ledger="$MERV_UPDATE_CONSUMED_FILE"
+	if [ -f "$_gui_ref_ledger" ] && grep -F -x -q "$_gui_ref_mtime|$_gui_ref_raw" "$_gui_ref_ledger" 2>/dev/null; then
+		return 1
 	fi
 
 	_gui_ref_clean=$(printf '%s' "$_gui_ref_raw" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-')
@@ -800,46 +923,47 @@ consume_gui_update_ref() {
 		refs/heads/?*|refs/tags/v[0-9]*) GUI_UPDATE_REF="$_gui_ref_clean" ;;
 		*) return 3 ;;
 	esac
+	_gui_ref_tmp="${_gui_ref_ledger}.tmp.$$"
+	( umask 077; { [ -f "$_gui_ref_ledger" ] && cat "$_gui_ref_ledger"; printf '%s|%s\n' "$_gui_ref_mtime" "$_gui_ref_raw"; } > "$_gui_ref_tmp" ) 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
+	chmod 600 "$_gui_ref_tmp" 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
+	mv -f "$_gui_ref_tmp" "$_gui_ref_ledger" 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
 	return 0
 }
-
-if [ "$MODE" = "update" ]; then
-	consume_gui_update_ref
-	_gui_ref_status=$?
-	case "$_gui_ref_status" in
-		0)
-			CHANNEL="$GUI_UPDATE_REF"
-			info -c cli,vlan "Using one-shot GUI update ref: $CHANNEL"
-			;;
-		1)
-			# No pending GUI ref: preserve normal main/dev/ref CLI behavior.
-			;;
-		2)
-			fail_update cli "Could not safely consume the pending GUI update ref"
-			;;
-		*)
-			fail_update cli "Rejected invalid pending GUI update ref"
-			;;
-	esac
-fi
 
 # Acquire the same maintenance lock used by backup/restore/delete operations.
 # The service-event handler locks individual event names, so it cannot by
 # itself prevent an update and a restore from running at the same time.
 mkdir -p "${UPDATE_MAINTENANCE_LOCK%/*}" 2>/dev/null || \
 	fail_update lock "Could not prepare the MerVLAN maintenance lock directory"
-if type merv_lock_acquire >/dev/null 2>&1; then
-	if merv_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenance"; then
-		UPDATE_MAINTENANCE_LOCK_OWNED="1"
-	else
-		fail_update busy "Another MerVLAN update, backup, restore, or deletion is already running"
-	fi
-elif mkdir "$UPDATE_MAINTENANCE_LOCK" 2>/dev/null; then
-	echo "$$" > "$UPDATE_MAINTENANCE_LOCK/pid" 2>/dev/null || :
-	date +%s > "$UPDATE_MAINTENANCE_LOCK/created" 2>/dev/null || :
+
+if ! type merv_lock_acquire >/dev/null 2>&1; then
+	fail_update lock "Owner-aware maintenance lock support is unavailable"
+fi
+if merv_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenance"; then
 	UPDATE_MAINTENANCE_LOCK_OWNED="1"
+	UPDATE_MAINTENANCE_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
 else
 	fail_update busy "Another MerVLAN update, backup, restore, or deletion is already running"
+fi
+
+# Read the external GUI ref only after the maintenance lock is owned.  The
+# helper records a private ledger entry instead of deleting/re-writing the
+# Merlin-owned custom_settings.txt transport file.
+if [ "$MODE" = "update" ] && [ "$UPDATE_LEGACY_FALLBACK" = "1" ]; then
+	consume_gui_update_ref
+	_gui_ref_status=$?
+	case "$_gui_ref_status" in
+		0) CHANNEL="$GUI_UPDATE_REF"; info -c cli,vlan "Using one-shot GUI update ref: $CHANNEL" ;;
+		1) ;;
+		2) fail_update cli "Could not safely consume the pending GUI update ref" ;;
+		*) fail_update cli "Rejected invalid pending GUI update ref" ;;
+	esac
+fi
+
+# Every configured node must be host-key verified before update log policy,
+# backup creation, hook teardown, or any other update mutation begins.
+if [ -f "$SETTINGS_FILE" ] && ! merv_ssh_preflight_configured_nodes; then
+	fail_update ssh_trust "Update blocked: complete SSH trust preflight failed"
 fi
 
 # Apply the selected policy only after the shared maintenance lock is owned, so
@@ -969,22 +1093,23 @@ backup_remote_node_dbs() {
 
     mkdir -p "$NODE_DB_STAGE" 2>/dev/null || {
         warn -c cli,vlan "Could not create node db staging dir; skipping MAC shield backup for nodes"
-        return 0
+        return 1
     }
 
     while read -r node_id node_ip; do
         [ -n "$node_ip" ] || continue
         local_file="$NODE_DB_STAGE/node${node_id}.db"
 
-        if _merv_timeout_run "$MERV_SSH_TIMEOUT" \
-            dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-            "${SSH_NODE_USER}@${node_ip}" \
+        if merv_ssh_exec "$node_id" "$node_ip" \
             "cat /tmp/mervlan_tmp/mac_shield.db 2>/dev/null || cat /jffs/addons/mervlan/tmp/mac_shield.db 2>/dev/null" \
             > "$local_file" 2>/dev/null && [ -s "$local_file" ]
         then
             info -c cli,vlan "MAC shield db backed up from NODE${node_id} ($node_ip)"
         else
-            rm -f "$local_file" 2>/dev/null || :
+            if ! update_cleanup_files "$local_file"; then
+                UPDATE_PRESERVE_TMP="1"
+                warn -c cli,vlan "MAC shield db backup failed and its local partial file could not be removed"
+            fi
             warn -c cli,vlan "MAC shield db not found or unreachable on NODE${node_id} ($node_ip); skipping"
         fi
     done <<EOF
@@ -997,11 +1122,11 @@ EOF
 restore_remote_node_dbs() {
     nodes=$(list_configured_nodes)
     if [ -z "$nodes" ]; then
-        rm -rf "$NODE_DB_STAGE" 2>/dev/null || :
+        if ! update_cleanup_tree "$NODE_DB_STAGE"; then UPDATE_PRESERVE_TMP="1"; return 1; fi
         return 0
     fi
     if ! ssh_keys_effectively_installed; then
-        rm -rf "$NODE_DB_STAGE" 2>/dev/null || :
+        if ! update_cleanup_tree "$NODE_DB_STAGE"; then UPDATE_PRESERVE_TMP="1"; return 1; fi
         return 0
     fi
 
@@ -1011,11 +1136,8 @@ restore_remote_node_dbs() {
 
         [ -s "$local_file" ] || continue
 
-        if _merv_timeout_run "$MERV_SSH_TIMEOUT" \
-            dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" \
-            "${SSH_NODE_USER}@${node_ip}" \
-            "mkdir -p /jffs/addons/mervlan/tmp && cat > /jffs/addons/mervlan/tmp/mac_shield.db" \
-            < "$local_file" 2>/dev/null
+        if merv_ssh_exec "$node_id" "$node_ip" "mkdir -p /jffs/addons/mervlan/tmp" >/dev/null 2>&1 &&
+           merv_ssh_stream_file "$node_id" "$node_ip" "$local_file" "/jffs/addons/mervlan/tmp/mac_shield.db" 2>/dev/null
         then
             info -c cli,vlan "MAC shield db restored to NODE${node_id} ($node_ip)"
         else
@@ -1025,7 +1147,7 @@ restore_remote_node_dbs() {
 $nodes
 EOF
 
-    rm -rf "$NODE_DB_STAGE" 2>/dev/null || :
+    if ! update_cleanup_tree "$NODE_DB_STAGE"; then UPDATE_PRESERVE_TMP="1"; return 1; fi
     return 0
 }
 
@@ -1038,7 +1160,7 @@ EOF
 # Uses -f (not -s) so an empty DB (no clients locked) is still preserved.
 backup_main_mac_db_for_update() {
     MAC_DB_BACKUP_PRESENT=0
-    mkdir -p "$BACKUP_DIR/tmp" 2>/dev/null || return 0
+    mkdir -p "$BACKUP_DIR/tmp" 2>/dev/null || return 1
 
     _msrc=""
     [ -f "$MERV_MAC_DB_ACTIVE" ] && _msrc="$MERV_MAC_DB_ACTIVE"
@@ -1074,15 +1196,21 @@ restore_main_mac_db_after_update() {
     _mactive_ok=0
     _mjffs_ok=0
 
-    mkdir -p "$(dirname "$MERV_MAC_DB_ACTIVE")" 2>/dev/null || :
-    if cp -p "$_msrc" "$MERV_MAC_DB_ACTIVE" 2>/dev/null; then
+    if ! mkdir -p "$(dirname "$MERV_MAC_DB_ACTIVE")" 2>/dev/null; then
+        warn -c cli,vlan "MERV_MAC: could not prepare the active db directory"
+        _mactive_ok=0
+    fi
+    if [ "$_mactive_ok" = "0" ] && cp -p "$_msrc" "$MERV_MAC_DB_ACTIVE" 2>/dev/null; then
         _mactive_ok=1
     else
         warn -c cli,vlan "MERV_MAC: active db restore failed"
     fi
 
-    mkdir -p "$(dirname "$MERV_MAC_DB_JFFS")" 2>/dev/null || :
-    if cp -p "$_msrc" "$MERV_MAC_DB_JFFS" 2>/dev/null; then
+    if ! mkdir -p "$(dirname "$MERV_MAC_DB_JFFS")" 2>/dev/null; then
+        warn -c cli,vlan "MERV_MAC: could not prepare the JFFS db directory"
+        _mjffs_ok=0
+    fi
+    if [ "$_mjffs_ok" = "0" ] && cp -p "$_msrc" "$MERV_MAC_DB_JFFS" 2>/dev/null; then
         _mjffs_ok=1
     else
         warn -c cli,vlan "MERV_MAC: JFFS checkpoint restore failed"
@@ -1196,23 +1324,28 @@ UPDATE_BACKUP_SOURCE_KB=$(update_path_size_kb "$MERV_BASE")
 update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_BACKUP_SOURCE_KB" "persistent backup"
 UPDATE_BACKUP_ARCHIVE_OK=0
 if ! create_durable_preupdate_backup; then
-	rm -f "${UPDATE_BACKUP_PARTIAL:-}" "${UPDATE_BACKUP_META_PARTIAL:-}" 2>/dev/null || :
+	if ! update_cleanup_files "${UPDATE_BACKUP_PARTIAL:-}" "${UPDATE_BACKUP_META_PARTIAL:-}"; then UPDATE_PRESERVE_TMP="1"; fi
 	fail_update backing_up "Failed to create and validate the durable pre-update backup"
 fi
 
 # Keep a full rollback copy in RAM. It is intentionally temporary and is not a
 # substitute for the durable archive above.
 update_require_space_kb "$TMP_DIR" "$UPDATE_BACKUP_SOURCE_KB" "temporary rollback"
-rm -rf "$UPDATE_ORIGINAL_DIR" 2>/dev/null || :
+if ! update_cleanup_tree "$UPDATE_ORIGINAL_DIR"; then
+	UPDATE_PRESERVE_TMP="1"
+	fail_update preparing_rollback "Could not remove the previous temporary rollback copy"
+fi
 if ! cp -pR "$MERV_BASE" "$UPDATE_ORIGINAL_DIR" 2>/dev/null || \
    [ ! -f "$UPDATE_ORIGINAL_DIR/settings/settings.json" ]; then
-	rm -rf "$UPDATE_ORIGINAL_DIR" 2>/dev/null || :
+	if ! update_cleanup_tree "$UPDATE_ORIGINAL_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
 	fail_update preparing_rollback "Failed to create and validate the temporary rollback copy"
 fi
 BACKUP_READY="1"
 
 # Preserve main MAC DB before teardown destroys it (setupdisable removes the DB)
-backup_main_mac_db_for_update
+if ! backup_main_mac_db_for_update; then
+	fail_update backing_up "Could not prepare the pre-update MAC Shield preservation area"
+fi
 
 # Temporarily quiesce runtime behavior, then remove old-version injections so
 # target templates can be installed cleanly after the swap.
@@ -1223,12 +1356,12 @@ if [ -x "$BOOT_SCRIPT" ]; then
 	# Stop active manager/cron behavior on the main router only. Nodes remain on
 	# their working installation until their replacement has been transferred.
 	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
-		warn -c cli,vlan "mervlan_boot.sh disable returned non-zero (continuing)"
+		fail_update teardown "Could not disable MerVLAN hooks before update activation"
 	fi
 	# Remove the main service/addon injections without a second implicit node
 	# sweep; nodedisable below owns node template teardown explicitly.
 	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupdisable >/dev/null 2>&1; then
-		warn -c cli,vlan "mervlan_boot.sh setupdisable returned non-zero (continuing)"
+		fail_update teardown "Could not remove MerVLAN hooks before update activation"
 	fi
 
 	info -c cli,vlan "Configured nodes remain active until staged replacement begins"
@@ -1243,7 +1376,10 @@ fi
 MERVLAN_UPDATED_TREE_DIR="$TMP_BASE/updated_tree"
 
 info -c cli,vlan "Building updated tree at $MERVLAN_UPDATED_TREE_DIR"
-rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then
+	UPDATE_PRESERVE_TMP="1"
+	fail_update building_tree "Could not remove the previous temporary updated tree"
+fi
 
 UPDATE_STAGE_KB=$(update_path_size_kb "$STAGE_DIR")
 update_require_space_kb "$TMP_DIR" "$UPDATE_STAGE_KB" "temporary updated-tree staging"
@@ -1251,7 +1387,7 @@ mkdir -p "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || \
 	fail_update building_tree "Failed to create temporary install directory"
 
 if ! cp -a "$STAGE_DIR"/. "$MERVLAN_UPDATED_TREE_DIR"/ 2>/dev/null; then
-	rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+	if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
 	fail_update building_tree "Failed to copy staged files into $MERVLAN_UPDATED_TREE_DIR"
 fi
 
@@ -1262,7 +1398,9 @@ info -c cli,vlan "Normalizing script permissions in new tree"
 for depth in "" "*/" "*/*/"; do
 	for f in "$MERVLAN_UPDATED_TREE_DIR"/${depth}*.sh; do
 		[ -f "$f" ] 2>/dev/null || continue
-		chmod 755 "$f" 2>/dev/null || :
+		if ! chmod 755 "$f" 2>/dev/null; then
+			fail_update permissions "Could not set executable permissions on $f"
+		fi
 	done
 done
 
@@ -1282,8 +1420,10 @@ for rel_path in \
 	"settings/mac_shield_snapshot.sh" \
 	"settings/lib_br0_guard.sh"
 do
-	target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
-	[ -f "$target" ] && chmod 644 "$target" 2>/dev/null || :
+target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
+	if [ -f "$target" ] && ! chmod 644 "$target" 2>/dev/null; then
+		fail_update permissions "Could not set safe permissions on $target"
+	fi
 done
 
 
@@ -1299,41 +1439,59 @@ for rel_path in $BACKUP_LIST; do
 		if [ "$rel_path" = "settings/settings.json" ]; then
 			info -c cli,vlan "Merging settings.json (preserve user keys, keep new defaults, skip Hardware)"
 			if ! merge_settings_json "$backup_file" "$target"; then
-				rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+				if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
 				fail_update restoring_user_data "Failed to merge settings.json"
 			fi
 			continue
 		fi
 		if ! mkdir -p "$(dirname "$target")" 2>/dev/null; then
-			rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+			if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
 			fail_update restoring_user_data "Failed to recreate directory for $rel_path"
 		fi
 		if ! cp -p "$backup_file" "$target" 2>/dev/null; then
-			rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+			if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
 			fail_update restoring_user_data "Failed to restore $rel_path"
 		fi
 		if [ -n "$SSH_KEY_RELATIVE" ] && [ "$rel_path" = "$SSH_KEY_RELATIVE" ]; then
-			chmod 600 "$target" 2>/dev/null || :
+			if ! chmod 600 "$target" 2>/dev/null; then
+				fail_update restoring_user_data "Could not secure the restored SSH private key"
+			fi
 		elif [ -n "$SSH_PUBKEY_RELATIVE" ] && [ "$rel_path" = "$SSH_PUBKEY_RELATIVE" ]; then
-			chmod 644 "$target" 2>/dev/null || :
+			if ! chmod 644 "$target" 2>/dev/null; then
+				fail_update restoring_user_data "Could not secure the restored SSH public key"
+			fi
 		fi
 	fi
 done
+
+# The downloaded tree may change node endpoints or MAC identity. Revalidate
+# the complete target settings before creating the activation stage or swapping
+# the live installation, so a bad update cannot leave the router ahead of its
+# node trust state.
+if ! merv_ssh_preflight_settings_file "$MERVLAN_UPDATED_TREE_DIR/settings/settings.json"; then
+	if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
+	fail_update ssh_trust "Update blocked: target settings failed complete SSH trust preflight"
+fi
 
 info -c cli,vlan "Preparing validated JFFS activation stage"
 mkdir -p "$MERVLAN_BACKUP_DIR" 2>/dev/null || \
 	fail_update preparing_activation "Failed to prepare $MERVLAN_BACKUP_DIR"
 update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_STAGE_KB" "temporary JFFS activation stage"
-update_remove_jffs_stage "$UPDATE_JFFS_STAGE"
-update_remove_jffs_stage "$UPDATE_JFFS_OLD"
+if ! update_remove_jffs_stage "$UPDATE_JFFS_STAGE" || ! update_remove_jffs_stage "$UPDATE_JFFS_OLD"; then
+	UPDATE_PRESERVE_JFFS="1"
+	fail_update preparing_activation "Could not clear the exact previous JFFS activation paths"
+fi
 if ! cp -pR "$MERVLAN_UPDATED_TREE_DIR" "$UPDATE_JFFS_STAGE" 2>/dev/null || \
    [ ! -f "$UPDATE_JFFS_STAGE/settings/settings.json" ] || \
    [ ! -x "$UPDATE_JFFS_STAGE/install.sh" ] || \
    [ ! -x "$UPDATE_JFFS_STAGE/functions/mervlan_boot.sh" ]; then
-	update_remove_jffs_stage "$UPDATE_JFFS_STAGE"
+	if ! update_remove_jffs_stage "$UPDATE_JFFS_STAGE"; then UPDATE_PRESERVE_JFFS="1"; fi
 	fail_update preparing_activation "Failed to create a complete activation stage at $UPDATE_JFFS_STAGE"
 fi
-rm -rf "$MERVLAN_UPDATED_TREE_DIR" 2>/dev/null || :
+if ! update_cleanup_tree "$MERVLAN_UPDATED_TREE_DIR"; then
+	UPDATE_PRESERVE_TMP="1"
+	fail_update preparing_activation "Validated JFFS stage was created, but its source tree could not be removed"
+fi
 
 info -c cli,vlan "Swapping active installation with same-filesystem renames"
 if ! mv "$MERV_BASE" "$UPDATE_JFFS_OLD" 2>/dev/null; then
@@ -1406,12 +1564,22 @@ verify_updated_runtime_state() {
 	_verify_action=disable
 	[ "$PRE_BOOT_ENABLED" = "1" ] && _verify_action=enable
 
-	_verify_main_report=$(sh "$BOOT_SCRIPT" report 2>/dev/null || :)
+	_verify_main_report=""
+	if ! _verify_main_report=$(sh "$BOOT_SCRIPT" report 2>/dev/null); then
+		warn -c cli,vlan "Main runtime report command failed during update verification"
+	fi
 	if ! runtime_report_matches "$_verify_main_report" main; then
 		warn -c cli,vlan "Main runtime verification mismatch; retrying target-version hook reconciliation"
-		MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1 || :
-		MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" "$_verify_action" >/dev/null 2>&1 || :
-		_verify_main_report=$(sh "$BOOT_SCRIPT" report 2>/dev/null || :)
+		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
+			warn -c cli,vlan "Main target-version hook reconciliation setup failed"
+		fi
+		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" "$_verify_action" >/dev/null 2>&1; then
+			warn -c cli,vlan "Main target-version boot-state reconciliation failed"
+		fi
+		_verify_main_report=""
+		if ! _verify_main_report=$(sh "$BOOT_SCRIPT" report 2>/dev/null); then
+			warn -c cli,vlan "Main runtime retry report command failed"
+		fi
 	fi
 	if ! runtime_report_matches "$_verify_main_report" main; then
 		error -c cli,vlan "Main runtime verification failed after retry: ${_verify_main_report:-no report}"
@@ -1420,7 +1588,11 @@ verify_updated_runtime_state() {
 	info -c cli,vlan "Verified main runtime: configured-node baseline active, BOOT_ENABLED=$PRE_BOOT_ENABLED"
 	[ "$_verify_scope" = "main" ] && return 0
 
-	_verify_nodes=$(list_configured_nodes 2>/dev/null || :)
+	_verify_nodes=""
+	if ! _verify_nodes=$(list_configured_nodes 2>/dev/null); then
+		error -c cli,vlan "Could not read the configured-node set during update verification"
+		return 1
+	fi
 	[ -n "$_verify_nodes" ] || return 0
 	if ! ssh_keys_effectively_installed; then
 		warn -c cli,vlan "Node runtime verification skipped because SSH keys are unavailable"
@@ -1430,12 +1602,18 @@ verify_updated_runtime_state() {
 
 	while read -r _verify_node_id _verify_node_ip; do
 		[ -n "$_verify_node_ip" ] || continue
-		_verify_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh report"
-		_verify_node_report=$(merv_ssh_exec "$_verify_node_id" "$_verify_node_ip" "$_verify_remote" 2>/dev/null || :)
+		_verify_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh report"
+		_verify_node_report=""
+		if ! _verify_node_report=$(merv_ssh_exec "$_verify_node_id" "$_verify_node_ip" "$_verify_remote" 2>/dev/null); then
+			warn -c cli,vlan "NODE${_verify_node_id} ($_verify_node_ip) runtime report command failed"
+		fi
 		if ! runtime_report_matches "$_verify_node_report" node; then
 			warn -c cli,vlan "NODE${_verify_node_id} ($_verify_node_ip) runtime mismatch; retrying target-version node reconciliation"
-			_verify_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$_verify_action' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh report"
-			_verify_node_report=$(merv_ssh_exec "$_verify_node_id" "$_verify_node_ip" "$_verify_remote" 2>/dev/null || :)
+			_verify_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh '$_verify_action' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh report"
+			_verify_node_report=""
+			if ! _verify_node_report=$(merv_ssh_exec "$_verify_node_id" "$_verify_node_ip" "$_verify_remote" 2>/dev/null); then
+				warn -c cli,vlan "NODE${_verify_node_id} ($_verify_node_ip) retry report command failed"
+			fi
 		fi
 		if runtime_report_matches "$_verify_node_report" node; then
 			info -c cli,vlan "Verified NODE${_verify_node_id} ($_verify_node_ip): baseline active, BOOT_ENABLED=$PRE_BOOT_ENABLED"
@@ -1596,7 +1774,10 @@ if [ -d "$MERVLAN_BACKUP_DIR" ]; then
 				continue
 			fi
 			info -c cli,vlan "Removing old backup: $b"
-			rm -f "$b" "$b.meta" 2>/dev/null || :
+			if ! update_cleanup_files "$b" "$b.meta"; then
+				warn -c cli,vlan "Could not remove old backup $b"
+				UPDATE_PARTIAL=1
+			fi
 		done
 	fi
 fi
@@ -1616,7 +1797,9 @@ if [ "$UPDATE_BACKUP_ARCHIVE_OK" = "1" ] && \
    write_update_undo_marker "$CURRENT_BACKUP_NAME.tar.gz" "$OLD_VERSION" "$NEW_VERSION"; then
 	info -c cli,vlan "Undo Update is available until the router reboots"
 else
-	rm -f "$UPDATE_UNDO_MARKER" 2>/dev/null || :
+	if ! update_cleanup_files "$UPDATE_UNDO_MARKER"; then
+		UPDATE_PRESERVE_TMP="1"
+	fi
 	warn -c cli,vlan "Update completed without a temporary Undo Update shortcut"
 	UPDATE_PARTIAL=1
 fi

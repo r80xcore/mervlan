@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.25-dev" -->
+  <!-- index.html version="0.53.26-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -413,6 +413,213 @@
     #unsupportedModelModal .support-thanks.is-visible {
       display: block;
     }
+
+    #sshKeyModal,
+    #sshTrustModal {
+      width: min(var(--form-pane-effective-width, var(--form-pane-width, 560px)), calc(100vw - 28px));
+      max-width: var(--form-pane-effective-width, var(--form-pane-width, 560px));
+    }
+    #sshKeyModal {
+      max-height: calc(100vh - 32px);
+      overflow: hidden;
+    }
+    #sshKeyModal .modal__title,
+    #sshTrustModal .modal__title {
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    #sshKeyModal .modal__body,
+    #sshTrustModal .modal__body {
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    #sshKeyModal .modal__section h4,
+    #sshKeyModal .ssh-trust-registry-group h4 {
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    #sshKeyModal.ssh-key-modal--open {
+      display: flex !important;
+      flex-direction: column;
+    }
+    #sshKeyModal.ssh-key-modal--open .modal__body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 3px;
+    }
+    .ssh-modal-tabs {
+      display: flex;
+      gap: 4px;
+      margin: 0 0 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .ssh-modal-tab {
+      min-width: 130px;
+      border-bottom-left-radius: 0 !important;
+      border-bottom-right-radius: 0 !important;
+      opacity: 0.72;
+    }
+    .ssh-modal-tab.is-active {
+      opacity: 1;
+      color: #fff !important;
+      border-color: #6cbaf5 !important;
+      background: rgba(108, 186, 245, 0.2) !important;
+    }
+    .ssh-trust-registry-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .ssh-trust-registry-group {
+      margin-top: 14px;
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+      padding-top: 8px;
+    }
+    .ssh-trust-registry-group h4 { margin: 0 0 7px; }
+    .ssh-trust-registry-list { display: grid; gap: 7px; min-width: 0; }
+    .ssh-trust-registry-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.14);
+    }
+    .ssh-trust-registry-copy { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+    .ssh-trust-registry-title { color: #fff; font-size: 12px; font-weight: 600; line-height: 1.35; }
+    .ssh-trust-registry-detail { color: #aaa; font-size: 11px; line-height: 1.35; }
+    .ssh-trust-registry-fingerprint {
+      display: block;
+      max-width: 100%;
+      color: #b9d8ea;
+      user-select: text;
+      font-size: 10px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: normal;
+    }
+    .ssh-trust-registry-row--warning { border-color: rgba(255, 179, 107, 0.45); }
+    .ssh-trust-registry-row--error { border-color: rgba(255, 102, 102, 0.45); }
+    .ssh-trust-registry-empty { color: #999; padding: 5px 0; }
+    .ssh-trust-registry-revoke { flex: 0 0 auto; }
+    .ssh-trust-registry-selection { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; color: #d8e8f2; font-size: 11px; white-space: nowrap; }
+    .ssh-trust-registry-selection input { margin: 0; }
+    #sshKeyModal.ssh-key-modal--open .modal__body,
+    #sshTrustNodes {
+      scrollbar-width: thin;
+      scrollbar-color: #569AC7 #1F2D35;
+    }
+    #sshKeyModal.ssh-key-modal--open .modal__body::-webkit-scrollbar,
+    #sshTrustNodes::-webkit-scrollbar { width: 10px; height: 10px; }
+    #sshKeyModal.ssh-key-modal--open .modal__body::-webkit-scrollbar-track,
+    #sshTrustNodes::-webkit-scrollbar-track { background: #1F2D35; }
+    #sshKeyModal.ssh-key-modal--open .modal__body::-webkit-scrollbar-thumb,
+    #sshTrustNodes::-webkit-scrollbar-thumb {
+      background: #569AC7;
+      border: 2px solid #1F2D35;
+      border-radius: 8px;
+    }
+    #sshKeyModal.ssh-key-modal--open .modal__body::-webkit-scrollbar-thumb:hover,
+    #sshTrustNodes::-webkit-scrollbar-thumb:hover { background: #77A5C6; }
+
+    .form-box--main .ssh-trust-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 1201;
+      display: none;
+      background: rgba(18, 30, 36, 0.82);
+      pointer-events: auto;
+    }
+    .form-box--main.ssid-assign-view .ssh-trust-overlay {
+      right: calc(0px - var(--ssid-assign-extension));
+    }
+    .ssh-trust-overlay.is-visible { display: block; }
+    #sshTrustModal {
+      z-index: 1301;
+      max-height: calc(100vh - 28px);
+      padding: 16px 18px;
+      overflow: hidden;
+      box-shadow: 0 12px 38px rgba(0, 0, 0, 0.55);
+    }
+    #sshTrustModal.ssh-trust-modal--open {
+      display: flex !important;
+      flex-direction: column;
+    }
+    #sshTrustModal .modal__header { flex: 0 0 auto; margin-bottom: 10px; }
+    #sshTrustModal .modal__body {
+      display: flex;
+      flex: 1 1 auto;
+      flex-direction: column;
+      min-height: 0;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    #sshTrustModal .modal__actions { flex: 0 0 auto; flex-wrap: wrap; gap: 8px; }
+    .ssh-trust-paused-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 0 0 10px;
+      padding: 7px 9px;
+      border: 1px solid rgba(255, 179, 107, 0.5);
+      border-radius: 4px;
+      background: rgba(255, 179, 107, 0.11);
+      color: #ffe1b1;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .ssh-trust-paused-banner strong { color: #fff0d0; }
+    .ssh-trust-countdown {
+      flex: 0 0 auto;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .ssh-trust-decision-list {
+      flex: 0 1 auto;
+      min-height: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+    .ssh-trust-decision-list .ssh-trust-registry-row { margin-bottom: 0; }
+    .ssh-trust-decision-warning {
+      margin-top: 5px;
+      color: #ffcf8b;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .ssh-trust-paused-tray {
+      position: absolute;
+      z-index: 1301;
+      top: 50%;
+      left: 50%;
+      display: none;
+      width: min(440px, calc(100vw - 28px));
+      box-sizing: border-box;
+      transform: translate(-50%, -50%);
+      padding: 15px 17px;
+      border: 1px solid #569AC7;
+      border-radius: 0 6px 6px 6px;
+      background: #2F3A3E;
+      color: #fff;
+      box-shadow: 0 12px 38px rgba(0, 0, 0, 0.55);
+    }
+    .ssh-trust-paused-tray.is-visible { display: block; }
+    .ssh-trust-paused-tray.modal--anchored { transform: translate(-50%, 0); }
+    .ssh-trust-paused-tray__title { margin: 0; color: #fff; font-size: 14px; line-height: 1.3; }
+    .ssh-trust-paused-tray__copy { margin: 7px 0 10px; color: #d7e0e5; font-size: 12px; line-height: 1.45; }
+    .ssh-trust-paused-tray__actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+    @media (max-width: 480px) {
+      #sshTrustModal { width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 13px; }
+      .ssh-trust-paused-banner { align-items: flex-start; flex-direction: column; gap: 4px; }
+    }
   </style>
 </head>
 <body>
@@ -685,6 +892,12 @@
           </div>
 
           <div class="modal__body">
+            <div class="ssh-modal-tabs" role="tablist" aria-label="SSH configuration">
+              <button type="button" id="sshKeyTab" class="button_gen ssh-modal-tab is-active" role="tab" aria-selected="true" aria-controls="sshKeyPanel" onclick="selectSshModalTab('key')">SSH key</button>
+              <button type="button" id="sshTrustRegistryTab" class="button_gen ssh-modal-tab" role="tab" aria-selected="false" aria-controls="sshTrustRegistryPanel" onclick="selectSshModalTab('trust')">Trusted devices</button>
+            </div>
+
+            <div id="sshKeyPanel" role="tabpanel" aria-labelledby="sshKeyTab">
             <div class="modal__section">
               <h4>Install via Merlin GUI</h4>
               <ol class="modal__list">
@@ -719,11 +932,63 @@
               </ol>
               <p>If new settings are saved, sync nodes <strong>before</strong> you apply VLAN.</p>
             </div>
+            </div>
+
+            <div id="sshTrustRegistryPanel" role="tabpanel" aria-labelledby="sshTrustRegistryTab" style="display:none;">
+              <p>Trusted devices are pinned by the router. Select the devices to verify before running a manual probe. SSH actions still require the router’s complete, current trust preflight.</p>
+              <div class="ssh-trust-registry-toolbar">
+                <button type="button" id="sshTrustRefreshBtn" class="button_gen" onclick="refreshSshTrustRegistry()">Refresh status</button>
+                <button type="button" id="sshTrustSelectAllBtn" class="button_gen" onclick="selectAllSshTrustRegistryNodes()">Select all</button>
+                <button type="button" id="sshTrustClearSelectionBtn" class="button_gen" onclick="clearSshTrustRegistryNodeSelection()">Clear selection</button>
+                <button type="button" id="sshTrustProbeBtn" class="button_gen" onclick="startSshTrustProbeFromModal()">Verify selected nodes</button>
+              </div>
+              <p id="sshTrustRegistryStatus" class="muted" aria-live="polite">Status has not been loaded yet.</p>
+              <div class="ssh-trust-registry-group">
+                <h4>Trusted devices</h4>
+                <div id="sshTrustRegistryTrusted" class="ssh-trust-registry-list"></div>
+              </div>
+              <div class="ssh-trust-registry-group">
+                <h4>Needs verification</h4>
+                <div id="sshTrustRegistryNeeds" class="ssh-trust-registry-list"></div>
+              </div>
+            </div>
           </div>
 
-          <div class="modal__actions">
+          <div id="sshKeyActions" class="modal__actions">
             <button class="button_gen" onclick="triggerAction('genkey_vlanmgr', this, 'Generate SSH keys')" title="Generate a pair of SSH keys">Generate Keys</button>
             <button class="button_gen" onclick="fetchSSHKey()" title="Load the generated key">Load</button>
+          </div>
+        </div>
+
+        <!-- Main-router-owned SSH host-key trust decision UI. The contents
+             are populated with textContent by openSshTrustDecision(); no
+             device-derived value is inserted as HTML. -->
+        <div id="sshTrustOverlay" class="ssh-trust-overlay" aria-hidden="true"></div>
+        <aside id="sshTrustPausedTray" class="ssh-trust-paused-tray" role="dialog" aria-modal="true" aria-labelledby="sshTrustPausedTrayTitle" aria-hidden="true">
+          <h3 id="sshTrustPausedTrayTitle" class="ssh-trust-paused-tray__title">MerVLAN loading paused</h3>
+          <p class="ssh-trust-paused-tray__copy">SSH host-key approval is still required before the stored action can continue. <span id="sshTrustPausedTrayCountdown" class="ssh-trust-countdown">Auto-abort in 5:00</span></p>
+          <div class="ssh-trust-paused-tray__actions">
+            <button id="sshTrustPausedResumeBtn" type="button" class="button_gen" onclick="resumeSshTrustReview()">Review nodes</button>
+            <button id="sshTrustPausedAbortBtn" type="button" class="button_gen" onclick="submitSshTrustAbort()">Abort action</button>
+          </div>
+        </aside>
+        <div id="sshTrustModal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="sshTrustTitle" aria-describedby="sshTrustIntro sshTrustMessage">
+          <div class="modal__header">
+            <h3 class="modal__title" id="sshTrustTitle">Verify node SSH host keys</h3>
+            <button class="modal__close" type="button" onclick="closeSshTrustModal()" aria-label="Keep SSH trust action paused">×</button>
+          </div>
+          <div class="modal__body">
+            <div class="ssh-trust-paused-banner">
+              <strong>MerVLAN loading paused</strong>
+              <span id="sshTrustModalCountdown" class="ssh-trust-countdown">Auto-abort in 5:00</span>
+            </div>
+            <p id="sshTrustIntro">MerVLAN received host keys that are not yet trusted by this router. Review the listed node(s) before continuing.</p>
+            <div id="sshTrustNodes" class="ssh-trust-registry-list ssh-trust-decision-list" role="list"></div>
+            <p id="sshTrustMessage" aria-live="polite"></p>
+          </div>
+          <div class="modal__actions">
+            <button id="sshTrustAcceptBtn" type="button" class="button_gen" onclick="submitSshTrustDecision()">Trust selected node(s)</button>
+            <button id="sshTrustAbortBtn" type="button" class="button_gen" onclick="submitSshTrustAbort()">Abort action</button>
           </div>
         </div>
 
@@ -1126,10 +1391,7 @@
         </label>
       </div>
       <div class="adv-override-auto-sync" style="margin-top:4px; margin-bottom:2px;">
-        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:0.92em; color:#ccc;">
-          <input type="checkbox" id="advOverrideAutoSyncNodes" onchange="toggleOverrideBtnText()">
-          <span title="When ticked, pressing Save will run Sync Nodes after the override settings are saved. This setting resets every time and is not saved.">Auto-sync Nodes</span>
-        </label>
+        <span class="svc-settings-hint" style="font-size:0.88em; color:#aaa;">Auto-sync settings to nodes is governed by the persistent Settings option.</span>
       </div>
     </div>
     <div class="modal__actions">
@@ -1272,6 +1534,34 @@
           <input type="checkbox" id="svcToggleBoot" onchange="markSvcSettingsDirty()">
           <span class="merv-toggle__track"></span>
         </label>
+      </div>
+
+      <!-- Automatically Sync Settings to Nodes -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Automatically sync settings to nodes <span style="color:#4caf50;font-size:11px;font-weight:bold;margin-left:4px;">(Recommended)</span></span>
+          <span class="svc-settings-hint" id="svcToggleAutoSyncHint">Keep node settings.json updated automatically on save. Requires configured nodes and SSH keys.</span>
+        </div>
+        <label class="merv-toggle" title="Automatically sync settings.json to nodes after save">
+          <input type="checkbox" id="svcToggleAutoSync" onchange="markSvcSettingsDirty()">
+          <span class="merv-toggle__track"></span>
+        </label>
+      </div>
+
+      <!-- Auto-refresh clients on page load -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Auto-refresh clients on page load</span>
+          <span class="svc-settings-hint">Refresh the VLAN client list in the background after loading the page. OFF disables this completely.</span>
+        </div>
+        <select id="svcClientRefreshSelect" class="input_option" onchange="markSvcSettingsDirty()" title="Choose the page-load client refresh interval">
+          <option value="0">OFF</option>
+          <option value="5">5m</option>
+          <option value="10">10m</option>
+          <option value="15">15m</option>
+          <option value="30">30m</option>
+          <option value="60">60m</option>
+        </select>
       </div>
 
       <!-- Pause Event Reactions -->
@@ -1465,7 +1755,11 @@
           flat.DRY_RUN = stringOrDefault(general.DRY_RUN, "yes");
           flat.EXPERIMENTAL = stringOrDefault(general.EXPERIMENTAL, "0");
           flat.ENABLE_NATIVE_SSID = stringOrDefault(general.ENABLE_NATIVE_SSID, "0");
-          flat.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(general.HTML_CLIENT_REFRESH_MINUTES, "15");
+          flat.AUTO_SYNC_SETTINGS = stringOrDefault(general.AUTO_SYNC_SETTINGS, "1");
+          flat.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(general.HTML_CLIENT_REFRESH_MINUTES, "30");
+
+          const ssh = ensurePlainObject(data.SSH);
+          flat.SSH_KEYS_INSTALLED = stringOrDefault(ssh.SSH_KEYS_INSTALLED, "0");
 
           const nodes = ensurePlainObject(data.Nodes);
           for (let i = 1; i <= MAX_NODES; i++) {
@@ -1640,7 +1934,8 @@
               ENABLE_STP: "0",
               EXPERIMENTAL: "0",
               ENABLE_NATIVE_SSID: "0",
-              HTML_CLIENT_REFRESH_MINUTES: "15"
+              AUTO_SYNC_SETTINGS: "1",
+              HTML_CLIENT_REFRESH_MINUTES: "30"
             },
             SSH: {
               _description: "SSH settings for main router and nodes",
@@ -1688,9 +1983,13 @@
           general.DRY_RUN = stringOrDefault(flat.DRY_RUN, general.DRY_RUN ?? "yes");
           general.EXPERIMENTAL = stringOrDefault(flat.EXPERIMENTAL, general.EXPERIMENTAL ?? "0");
           general.ENABLE_NATIVE_SSID = stringOrDefault(flat.ENABLE_NATIVE_SSID, general.ENABLE_NATIVE_SSID ?? "0");
+          general.AUTO_SYNC_SETTINGS = stringOrDefault(
+            flat.AUTO_SYNC_SETTINGS,
+            general.AUTO_SYNC_SETTINGS ?? "1"
+          );
           general.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(
             flat.HTML_CLIENT_REFRESH_MINUTES,
-            general.HTML_CLIENT_REFRESH_MINUTES ?? "15"
+            general.HTML_CLIENT_REFRESH_MINUTES ?? "30"
           );
 
           const nodes = target.Nodes = ensurePlainObject(target.Nodes);
@@ -2608,8 +2907,10 @@ function showTooltip() {
     // SSID view toggle: "Config" (VLAN/APISO/Status) vs "Assign" (Node Assignment)
     let CURRENT_SSID_VIEW = "config";
 
-    const MVM_INFO_MODAL_IDS = [
+      const MVM_INFO_MODAL_IDS = [
       "sshKeyModal",
+      "sshTrustModal",
+      "sshTrustPausedTray",
       "unsupportedModelModal",
       "serviceSettingsModal",
       "advancedOverrideModal",
@@ -4751,9 +5052,16 @@ function toggleClientsShowInactive(el){
 }
 
 // Parse the generated timestamp from a client JSON object to milliseconds.
-// Returns NaN if absent or unparseable.
+// Returns NaN if absent or unparseable. The run_id is preferred because its
+// leading value is router epoch time and does not depend on browser timezone.
 function clientGeneratedMs(data){
-  if (!data || !data.generated) return NaN;
+  if (!data) return NaN;
+  const runMatch = String(data.run_id || '').match(/^(\d{9,})(?:-|$)/);
+  if (runMatch) {
+    const runMs = Number(runMatch[1]) * 1000;
+    if (Number.isFinite(runMs)) return runMs;
+  }
+  if (!data.generated) return NaN;
   return Date.parse(String(data.generated).replace(' ','T'));
 }
 
@@ -5262,13 +5570,13 @@ function hasConfiguredVlans(){
   return false;
 }
 
-// Per-tab cooldown so auto-refresh runs at most once per session window.
-// The value is configured in General.HTML_CLIENT_REFRESH_MINUTES. sessionStorage
-// keeps tabs independent and resets naturally when the tab closes.
-const CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES = 15;
-const CLIENTS_AUTO_REFRESH_MINUTES_MIN = 1;
+// Router-cache freshness gate for page-load auto-refresh.
+// The value is configured in General.HTML_CLIENT_REFRESH_MINUTES. The client
+// snapshot is shared by all tabs and browsers, so the interval applies to the
+// router's last successful collection rather than to one browser session.
+const CLIENTS_AUTO_REFRESH_DEFAULT_MINUTES = 30;
+const CLIENTS_AUTO_REFRESH_MINUTES_MIN = 0;
 const CLIENTS_AUTO_REFRESH_MINUTES_MAX = 1440;
-const CLIENTS_AUTO_REFRESH_KEY = 'mervlan_clients_auto_refresh_last';
 
 function clientAutoRefreshCooldownMs(){
   const raw = String((CURRENT_SETTINGS_CACHE || {}).HTML_CLIENT_REFRESH_MINUTES ?? '').trim();
@@ -5281,21 +5589,22 @@ function clientAutoRefreshCooldownMs(){
   return minutes * 60 * 1000;
 }
 
-function canAutoRefreshClients(){
-  try {
-    const last = Number(sessionStorage.getItem(CLIENTS_AUTO_REFRESH_KEY) || 0);
-    return !last || Date.now() - last > clientAutoRefreshCooldownMs();
-  } catch(_){ return false; }
-}
+function canAutoRefreshClients(snapshot){
+  const cooldownMs = clientAutoRefreshCooldownMs();
+  if (cooldownMs <= 0) return false;
 
-function markAutoRefreshClients(){
-  try { sessionStorage.setItem(CLIENTS_AUTO_REFRESH_KEY, String(Date.now())); } catch(_){}
+  // No usable snapshot means there is nothing fresh to display, so allow the
+  // initial collection. A future router timestamp is treated as fresh until
+  // the clocks converge instead of causing repeated collections.
+  const generatedMs = clientGeneratedMs(snapshot);
+  if (!Number.isFinite(generatedMs)) return true;
+  return Date.now() - generatedMs >= cooldownMs;
 }
 
 // Main page-load entry point:
 //   1. Show any cached JSON immediately.
-//   2. If the addon is configured and the cooldown has expired, run one quiet
-//      backend refresh and poll only for that result.
+//   2. If the addon is configured and the shared router cache is stale, run
+//      one quiet backend refresh and poll only for that result.
 //   3. Never becomes a hidden polling loop.
 async function startClientsOnPageLoad(){
   // Step 1: render cached data right away so the panel is not blank.
@@ -5308,26 +5617,25 @@ async function startClientsOnPageLoad(){
     return;
   }
 
-  // Step 3: cooldown — another tab or a recent page reload already triggered one.
+  // Step 3: freshness — any successful collection from any caller keeps the
+  // shared router snapshot fresh for the configured interval.
   if (await refreshVlanApplyGuard()) return;
-  if (!canAutoRefreshClients()) return;
+  if (!canAutoRefreshClients(cached)) return;
 
   // Close the small race between the first status read and an apply event.
   if (await refreshVlanApplyGuard()) return;
 
-  // Step 4: mark *before* queueing so rapid reloads don't stack multiple jobs.
-  markAutoRefreshClients();
-
-    // Step 5: queue one quiet background refresh and poll only for its result.
-    // collectclients_vlanmgr intentionally uses the normal event transport;
-    // the service handler does not have a progress-token variant for this
-    // worker, and the MerVLAN panel is frontend-owned here.
+  // Step 4: queue one quiet background refresh and poll only for its result.
+  // The backend action lock remains the final guard against concurrent callers.
+  // collectclients_vlanmgr intentionally uses the normal event transport; the
+  // service handler does not have a progress-token variant for this worker,
+  // and the MerVLAN panel is frontend-owned here.
   const started = Date.now();
   queueServiceAction('collectclients_vlanmgr', {
     description: 'Auto-refresh VLAN clients',
     cooldownMs: 8000,
     loadingOptions: { progressBacked: true },
-    passProgressToken: false,
+    passProgressToken: true,
     quiet: true,
     afterSubmit: (loadingTask) => {
       pollForFreshClientData(started, {
@@ -5366,7 +5674,7 @@ async function refreshClients(btn){
     description: 'Collect VLAN clients',
     cooldownMs: 8000,
     loadingOptions: { progressBacked: true },
-    passProgressToken: false,
+    passProgressToken: true,
     afterSubmit: (loadingTask) => {
       // Poll until collect_clients.sh emits a JSON newer than this trigger,
       // rather than a fixed tick count, so node collection that runs long still
@@ -5387,6 +5695,20 @@ async function refreshClients(btn){
 /* ===== Per-action lock + optional button disable ===== */
 const actionLocks = new Map();
 const actionButtons = new Map();
+let trustDecisionPending = null;
+let sshTrustDecisionSelectedChallengeIds = new Set();
+let sshTrustCountdownTimer = null;
+let sshTrustRegistryRequestToken = '';
+let sshTrustRegistryRequestSequence = 0;
+let sshTrustRegistryNeeds = [];
+let sshTrustRegistrySelectedSlots = new Set();
+let sshTrustRegistrySelectionInitialized = false;
+let sshTrustRegistryBusy = false;
+let sshTrustProbeLastStartReason = '';
+
+function isMutatingActionLock(name) {
+    return !/^(?:status|service-status|read-only|logs|log-refresh)$/.test(String(name || ''));
+}
 
 function releaseActionLock(name) {
     if (!name) return;
@@ -5409,6 +5731,10 @@ function holdActionButton(name, button) {
 }
 
 function withActionLock(name, fn, cooldownMs = 8000, holdUntilReleased = false) {
+    if (trustDecisionPending && isMutatingActionLock(name)) {
+        appendCliText(`[Action skipped] ${name} - SSH trust decision pending\n`, { scroll: 'force' });
+        return Promise.resolve(false);
+    }
     if (actionLocks.has(name)) {
         appendCliText(`[Action skipped] ${name} - too recent\n`, { scroll: 'force' });
         return Promise.resolve();
@@ -5447,6 +5773,12 @@ function disableBtnTemporarily(btn, ms=5000) {
 const MVM_LOADING_DEFAULT_CONFIG = {
   sync_vlanmgr: {
     label: 'Sync Nodes',
+    display: 'panel',
+    mode: 'phase',
+    poll_ms: 1000
+  },
+  syncsettings_vlanmgr: {
+    label: 'Syncing settings to node(s)...',
     display: 'panel',
     mode: 'phase',
     poll_ms: 1000
@@ -5516,6 +5848,24 @@ const MVM_LOADING_DEFAULT_CONFIG = {
     mode: 'phase',
     poll_ms: 1000,
     notice: 'Configuration in progress: the node(s) may be momentarily unresponsive due to security policies preventing VLAN leaks and WiFi restarts. Please wait for the operation to finish.'
+  },
+  sshtrustprobe_vlanmgr: {
+    label: 'Verify SSH Host Keys', display: 'panel', mode: 'phase', poll_ms: 1000, timeout_ms: 90000
+  },
+  sshtrustenroll_vlanmgr: {
+    label: 'Enroll SSH Host Keys', display: 'panel', mode: 'phase', poll_ms: 1000, timeout_ms: 90000
+  },
+  sshtrustresume_vlanmgr: {
+    label: 'Resume MerVLAN Action', display: 'panel', mode: 'phase', poll_ms: 1000, timeout_ms: 600000
+  },
+  sshtruststatus_vlanmgr: {
+    label: 'Read SSH Trust Status', display: 'panel', mode: 'phase', poll_ms: 1000, timeout_ms: 30000
+  },
+  sshtrustrevoke_vlanmgr: {
+    label: 'Revoke SSH Trust', display: 'panel', mode: 'phase', poll_ms: 1000, timeout_ms: 90000
+  },
+  sshtrustabort_vlanmgr: {
+    label: 'Abort SSH Trust Action', display: 'panel', mode: 'phase', poll_ms: 1000, timeout_ms: 90000
   }
 };
 
@@ -5547,7 +5897,7 @@ function createMerVLANLoadingToken() {
 const MerVLANLoading = (() => {
   let active = null;
   let pollTimer = null;
-  let transportFallbackTimer = null;
+  let sequence = 0;
 
   const el = id => document.getElementById(id);
   const getConfig = actionName => {
@@ -5557,9 +5907,26 @@ const MerVLANLoading = (() => {
 
   function clearTimers() {
     if (pollTimer) clearInterval(pollTimer);
-    if (transportFallbackTimer) clearTimeout(transportFallbackTimer);
     pollTimer = null;
-    transportFallbackTimer = null;
+  }
+
+  async function fetchJsonBounded(url, timeoutMs = 2500) {
+    const controller = (typeof AbortController === 'function') ? new AbortController() : null;
+    const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const response = await fetch(url, {
+        cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        signal: controller ? controller.signal : undefined
+      });
+      if (!response.ok) return null;
+      const value = await response.json();
+      return value && typeof value === 'object' ? value : null;
+    } catch (_) {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   function setMiniVisible(visible) {
@@ -5642,9 +6009,23 @@ const MerVLANLoading = (() => {
     setPanelOpen(true);
   }
 
+  function waitsForSshTrustAck() {
+    return !!(active && (
+      /^sshtrust(?:probe|enroll|resume|status|revoke|abort)_vlanmgr$/.test(active.action) ||
+      (active.frontendOwned && active.action === 'collectclients_vlanmgr')
+    ));
+  }
+
   function applyStatus(status) {
     if (!active || !status || status.token !== active.token) return;
     active.statusSeen = true;
+    // Client refreshes own their meaningful 0-100 progress in the browser.
+    // A nested SSH trust probe is still polled for a terminal trust decision,
+    // but its transient “Probing” record must not replace collection stages.
+    if (active.frontendOwned &&
+        (status.state === 'starting' || status.state === 'running' || status.state === 'complete')) {
+      return;
+    }
     if (status.label) active.label = String(status.label);
     if (status.notice) active.notice = String(status.notice);
     const actionEl = el('mervlanLoadingAction');
@@ -5653,60 +6034,176 @@ const MerVLANLoading = (() => {
     setMessage(status.message || status.phase, active.label + ' is running...');
     setProgress(status.percent, status.mode || active.mode);
 
-    if (status.state === 'failed' || status.state === 'stale') {
-      fail(status.error || status.message || 'The action did not complete successfully.');
+    if ((status.state === 'failed' || status.state === 'stale') && waitsForSshTrustAck()) {
+      // Trust workers publish their durable action acknowledgement immediately
+      // after the terminal progress record. Keep polling briefly so a
+      // trust-required result can open its blocking review instead of racing
+      // the generic loader's 450 ms close animation.
+      active.progressTerminalState = status.state;
+      setMessage(status.error || status.message || 'Waiting for the router SSH trust result.');
+    } else if (status.state === 'complete' && waitsForSshTrustAck()) {
+      active.progressTerminalState = 'complete';
+      setMessage(status.message || 'Waiting for the router SSH trust result.');
+      setProgress(100, 'determinate');
+    } else if (status.state === 'failed' || status.state === 'stale') {
+      finalize('failed', status.error || status.message || 'The action did not complete successfully.');
     } else if (status.state === 'complete') {
-      complete(status.message || 'Complete');
+      finalize('complete', status.message || 'Complete');
     }
   }
 
-  function pollStatus() {
-    if (!active) return;
-    const token = active.token;
-    fetch('tmp/progress/' + encodeURIComponent(token) + '.json?_=' + Date.now(), { cache: 'no-store' })
-      .then(response => {
-        if (!response.ok) return null;
-        return response.json();
-      })
-      .then(status => {
-        if (status) applyStatus(status);
-      })
-      .catch(() => {
-        // A missing status file is expected during the staged rollout. The
-        // transport completion fallback handles the pilot until sync_nodes
-        // begins publishing its own status.
-      });
-  }
-
-  function complete(message) {
-    if (!active || active.state === 'complete') return;
-    active.state = 'complete';
-    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
+  function pauseForSshTrust() {
+    if (!active) return false;
+    const paused = active;
     clearTimers();
-    setMessage(message, 'Complete');
-    setProgress(100, 'determinate');
+    if (typeof releaseActionLock === 'function') releaseActionLock(paused.action);
+    setPanelOpen(false);
     setMiniVisible(false);
-    window.setTimeout(() => close(), 450);
+    active = null;
+    return true;
   }
 
-  function fail(message) {
-    if (!active) return;
-    active.state = 'failed';
-    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
+  function applyAck(ack) {
+    if (!active || !ack || ack.request_token !== active.token) return;
+    active.ackSeen = true;
+    const status = String(ack.status || '');
+    const message = String(ack.message || '');
+    if (active.action === 'sshtrustabort_vlanmgr' && (status === 'ok' || status === 'partial')) {
+      finalize(status === 'partial' ? 'partial' : 'complete', message || 'The stored SSH trust action was aborted.');
+      if (typeof clearSshTrustDecision === 'function') clearSshTrustDecision();
+      return;
+    }
+    if (active.action === 'sshtrustrevoke_vlanmgr' && (status === 'ok' || status === 'partial')) {
+      finalize(status === 'partial' ? 'partial' : 'complete', message || 'SSH trust revoked.');
+      window.setTimeout(() => { if (typeof refreshSshTrustRegistry === 'function') refreshSshTrustRegistry(); }, 550);
+      return;
+    }
+    if (active.action === 'sshtrustenroll_vlanmgr' && (status === 'ok' || status === 'partial')) {
+      const resumeId = ack.result && typeof ack.result === 'object' ? String(ack.result.resume_id || '') : '';
+      finalize(status === 'partial' ? 'partial' : 'complete', message || 'SSH trust records committed.');
+      if (trustDecisionPending) {
+        if (/^r\.[A-Za-z0-9._-]{3,160}$/.test(resumeId)) {
+          window.setTimeout(() => submitSshTrustResume(resumeId), 550);
+        } else {
+          window.setTimeout(clearSshTrustDecision, 550);
+        }
+      }
+      return;
+    }
+    if (status === 'ssh_trust_required') {
+      pauseForSshTrust();
+      let shown = false;
+      if (typeof openSshTrustDecision === 'function') shown = openSshTrustDecision(ack) === true;
+      if (!shown && typeof openSshTrustBlockedStatus === 'function') openSshTrustBlockedStatus(ack);
+      return;
+    }
+    if (status === 'ssh_trust_pending') {
+      pauseForSshTrust();
+      let shown = false;
+      if (typeof openSshTrustDecision === 'function') shown = openSshTrustDecision(ack) === true;
+      if (!shown && typeof openSshTrustBlockedStatus === 'function') openSshTrustBlockedStatus(ack);
+      return;
+    }
+    if (status === 'expired') {
+      finalize('expired', message || 'The SSH trust request expired; start a fresh probe.');
+      if (typeof clearSshTrustDecision === 'function') clearSshTrustDecision();
+      return;
+    }
+    if (status === 'ok' || status === 'partial') {
+      finalize(status === 'partial' ? 'partial' : 'complete', message || (status === 'partial' ? 'Complete with warnings.' : 'Complete'));
+      if (active.action === 'sshtrustresume_vlanmgr' && typeof clearSshTrustDecision === 'function') {
+        window.setTimeout(clearSshTrustDecision, 550);
+      }
+      return;
+    }
+    if (status === 'busy' || status === 'error') {
+      const failedAction = active.action;
+      finalize('failed', message || 'The backend action failed.');
+      if (failedAction === 'sshtrustabort_vlanmgr' && typeof restoreSshTrustDecisionAfterSubmissionFailure === 'function') {
+        window.setTimeout(() => restoreSshTrustDecisionAfterSubmissionFailure(message || 'The SSH trust abort did not complete. The action remains paused.'), 500);
+      } else if (failedAction === 'sshtrustenroll_vlanmgr' && typeof restoreSshTrustDecisionAfterSubmissionFailure === 'function') {
+        window.setTimeout(() => restoreSshTrustDecisionAfterSubmissionFailure(message || 'The selected SSH host keys could not be enrolled. The action remains paused.'), 500);
+      } else if (failedAction === 'sshtrustresume_vlanmgr') {
+        if (typeof clearSshTrustDecision === 'function') clearSshTrustDecision();
+      }
+    }
+  }
+
+  async function pollStatus() {
+    if (!active || active.terminal || active.fetchInFlight) return;
+    const current = active;
+    const currentSequence = current.sequence;
+    current.fetchInFlight = true;
+    const cacheBust = Date.now();
+    try {
+      const progress = await fetchJsonBounded('tmp/progress/' + encodeURIComponent(current.token) + '.json?_=' + cacheBust);
+      if (active !== current || current.sequence !== currentSequence) return;
+      if (progress) applyStatus(progress);
+      const ack = await fetchJsonBounded(PATHS.ACTION_RESULT + '?_=' + cacheBust);
+      if (active !== current || current.sequence !== currentSequence) return;
+      if (ack) applyAck(ack);
+      if (!current.terminal && Date.now() >= current.deadlineAt) {
+        finalize('transport-unknown', 'Backend completion is not confirmed yet. The action remains protected; wait for the router result.');
+      }
+    } finally {
+      if (active === current && current.sequence === currentSequence) current.fetchInFlight = false;
+    }
+  }
+
+  function finalize(kind, message) {
+    if (!active) return false;
+    if (kind === 'transport-unknown') {
+      if (active.transportUnknown) return false;
+      active.transportUnknown = true;
+      const unknown = el('mervlanLoadingError');
+      if (unknown) {
+        unknown.textContent = String(message || 'Backend completion is not confirmed yet.');
+        unknown.classList.add('is-visible');
+      }
+      setMessage('Transport status is unknown; waiting for the router result.');
+      setMiniVisible(true);
+      return true;
+    }
+    if (active.terminal) return false;
+    active.terminal = true;
+    active.state = kind === 'complete' || kind === 'partial' ? kind : 'failed';
     clearTimers();
+    if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
     const error = el('mervlanLoadingError');
     const closeButton = el('mervlanLoadingCloseBtn');
-    if (error) {
-      error.textContent = String(message || 'Action failed.');
-      error.classList.add('is-visible');
+    if (kind === 'complete' || kind === 'partial') {
+      if (error) {
+        error.textContent = '';
+        error.classList.remove('is-visible');
+      }
+      setMessage(message, 'Complete');
+      setProgress(100, 'determinate');
+      setMiniVisible(false);
+    } else {
+      if (error) {
+        error.textContent = String(message || 'Action failed.');
+        error.classList.add('is-visible');
+      }
+      if (closeButton) closeButton.style.display = '';
+      setMessage(kind === 'expired' ? 'Trust request expired.' : (kind === 'trust-required' ? 'SSH trust decision required.' : 'Action failed.'));
+      setMiniVisible(true);
     }
-    if (closeButton) closeButton.style.display = '';
-    setMessage('Action failed.');
-    setMiniVisible(true);
+    window.setTimeout(() => { if (active && active.terminal) close(); }, 450);
+    return true;
   }
 
+  function complete(message) { return finalize('complete', message); }
+  function fail(message) { return finalize('failed', message); }
+
   function close() {
-    if (!active || active.state === 'running') return;
+    if (!active) return;
+    if (!active.terminal) {
+      if (active.transportUnknown) {
+        setPanelOpen(false);
+        setMiniVisible(true);
+      }
+      return;
+    }
     clearTimers();
     setPanelOpen(false);
     setMiniVisible(false);
@@ -5741,7 +6238,14 @@ const MerVLANLoading = (() => {
       notice: String(options.notice || config.notice || ''),
       state: 'running',
       statusSeen: false,
+      ackSeen: false,
+      fetchInFlight: false,
+      transportUnknown: false,
+      terminal: false,
+      sequence: ++sequence,
+      deadlineAt: Date.now() + Math.min(Math.max(Number(options.timeoutMs || config.timeout_ms || 300000), 15000), 900000),
       progressBacked: options.progressBacked !== false,
+      frontendOwned: options.frontendOwned === true || config.frontend_owned === true,
       minimized: false
     };
     renderStart();
@@ -5782,17 +6286,8 @@ const MerVLANLoading = (() => {
 
   function transportComplete(token) {
     if (!active || active.token !== token || active.state !== 'running') return;
-    // For progress-backed actions the iframe event only confirms that the
-    // request was submitted. The backend owns completion and may continue
-    // running for several minutes, so never close this panel from the short
-    // transport fallback while progress status is authoritative.
-    if (active.progressBacked) return;
-    if (transportFallbackTimer) clearTimeout(transportFallbackTimer);
-    transportFallbackTimer = window.setTimeout(() => {
-      if (active && active.token === token && !active.statusSeen && active.state === 'running') {
-        complete('Action completed');
-      }
-    }, 1200);
+    active.transportSeen = true;
+    pollStatus();
   }
 
   const mini = el('mervlanLoadingMini');
@@ -5817,7 +6312,7 @@ const MerVLANLoading = (() => {
 window.MerVLANLoading = MerVLANLoading;
 window.addEventListener('message', event => {
   const data = event && event.data;
-  if (!data || data.source !== 'mervlan' || data.type !== 'mervlan-action-complete') return;
+  if (!data || data.source !== 'mervlan' || data.type !== 'mervlan-action-transport') return;
   MerVLANLoading.transportComplete(String(data.token || ''));
 });
 
@@ -5841,6 +6336,12 @@ function queueServiceAction(actionScriptName, opts = {}) {
         let actionParentOpts = parentOpts;
         if (typeof MerVLANLoading !== 'undefined') {
             loadingTask = MerVLANLoading.start(actionScriptName, description, loadingOptions);
+            if (!loadingTask && Object.prototype.hasOwnProperty.call(MVM_LOADING_DEFAULT_CONFIG, actionScriptName)) {
+                appendCliText(`[${new Date().toLocaleString()}] ${description} is already owned by another loading task.\n`, { scroll: 'force' });
+                releaseActionLock(actionScriptName);
+                startPolling();
+                return false;
+            }
             if (loadingTask && passProgressToken) {
                 const existingParentOpts = (parentOpts && typeof parentOpts === 'object') ? parentOpts : {};
                 actionParentOpts = Object.assign({}, existingParentOpts, { progressToken: loadingTask.token });
@@ -5939,6 +6440,22 @@ function triggerAction(actionScriptName, button, description) {
         }
       },
       {
+        key: 'AUTO_SYNC_SETTINGS', controlId: 'svcToggleAutoSync', hiddenControlId: 'autoSyncSettingsToggle', kind: 'setting', defaultValue: '1',
+        readControl: el => el.checked ? '1' : '0', writeControl: (el, value) => { el.checked = (value === '1' || value === 'true' || value === 'yes'); }
+      },
+      {
+        key: 'HTML_CLIENT_REFRESH_MINUTES', controlId: 'svcClientRefreshSelect', kind: 'setting', defaultValue: '30',
+        readControl: el => ['0', '5', '10', '15', '30', '60'].includes(String(el.value)) ? String(el.value) : '30',
+        writeControl: (el, value) => {
+          const normalized = ['0', '5', '10', '15', '30', '60'].includes(String(value)) ? String(value) : '30';
+          el.value = normalized;
+        },
+        validate: value => ({
+          ok: ['0', '5', '10', '15', '30', '60'].includes(String(value)),
+          message: 'Auto-refresh clients must be OFF, 5m, 10m, 15m, 30m, or 60m.'
+        })
+      },
+      {
         key: 'PAUSE', controlId: 'svcTogglePause', kind: 'setting', defaultValue: 'off',
         readControl: el => el.checked ? 'on' : 'off', writeControl: (el, value) => { el.checked = value === 'on'; }
       },
@@ -5973,13 +6490,57 @@ function triggerAction(actionScriptName, button, description) {
           if (hidden) hidden.value = value;
         }
       });
+
+      // Dynamic UI prerequisite check for AUTO_SYNC_SETTINGS
+      let hasNodes = false;
+      if (source) {
+        for (let i = 1; i <= MAX_NODES; i++) {
+          const ip = source[`NODE${i}`] ?? source[`NODE${i}_IP`];
+          if (ip && String(ip).trim() !== '' && String(ip).trim() !== 'none') {
+            hasNodes = true;
+            break;
+          }
+        }
+      }
+      const hasKeys = !!(source && (source['SSH_KEYS_INSTALLED'] === '1' || source['SSH_KEYS_INSTALLED'] === 'true' || source['SSH_KEYS_INSTALLED'] === 'yes'));
+      const hasTrust = typeof sshTrustRegistryNeeds !== 'undefined' && Array.isArray(sshTrustRegistryNeeds) ? (sshTrustRegistryNeeds.length === 0) : false;
+
+      const autoSyncInput = document.getElementById('svcToggleAutoSync');
+      const autoSyncHint = document.getElementById('svcToggleAutoSyncHint');
+      const autoSyncDefinition = SERVICE_SETTINGS_DEFINITIONS.find(definition => definition.key === 'AUTO_SYNC_SETTINGS');
+      const persistedAutoSyncValue = autoSyncDefinition ? getServiceSettingValue(autoSyncDefinition, source) : '1';
+
+      if (autoSyncInput) {
+        autoSyncInput.dataset.persistedValue = persistedAutoSyncValue;
+        if (!hasNodes) {
+          autoSyncInput.disabled = true;
+          autoSyncInput.checked = false;
+          if (autoSyncHint) autoSyncHint.textContent = 'Disabled: No nodes are configured.';
+        } else if (!hasKeys) {
+          autoSyncInput.disabled = true;
+          autoSyncInput.checked = false;
+          if (autoSyncHint) autoSyncHint.textContent = 'Disabled: SSH keys are not installed. Run SSH Key Install first.';
+        } else if (!hasTrust) {
+          autoSyncInput.disabled = true;
+          autoSyncInput.checked = false;
+          if (autoSyncHint) autoSyncHint.textContent = 'Disabled: Configured node host keys are not verified. Run Verify SSH Host Keys first.';
+        } else {
+          autoSyncInput.disabled = false;
+          if (autoSyncHint) autoSyncHint.textContent = 'Keep node settings.json updated automatically on save.';
+        }
+      }
     }
 
     function readServiceSettingsControls() {
       const values = {};
       SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
         const control = document.getElementById(definition.controlId);
-        values[definition.key] = control ? String(definition.readControl(control)) : getServiceSettingValue(definition);
+        if (definition.key === 'AUTO_SYNC_SETTINGS' && control && control.disabled &&
+            control.dataset && control.dataset.persistedValue !== undefined) {
+          values[definition.key] = String(control.dataset.persistedValue);
+        } else {
+          values[definition.key] = control ? String(definition.readControl(control)) : getServiceSettingValue(definition);
+        }
       });
       return values;
     }
@@ -6076,15 +6637,33 @@ function triggerAction(actionScriptName, button, description) {
 
     async function waitForVerifiedActionResult(requestToken, actionName, expectedResult, timeoutMs) {
       const deadline = Date.now() + timeoutMs;
+      let transportUnknown = false;
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 750));
         try {
-          const response = await fetch(PATHS.ACTION_RESULT + '?_=' + Date.now(), {
-            cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
-          });
-          if (!response.ok) continue;
-          const result = await response.json();
+          const controller = typeof AbortController === 'function' ? new AbortController() : null;
+          const timer = controller ? setTimeout(() => controller.abort(), 2500) : null;
+          let result = null;
+          try {
+            const response = await fetch(PATHS.ACTION_RESULT + '?_=' + Date.now(), {
+              cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+              signal: controller ? controller.signal : undefined
+            });
+            if (response.ok) {
+              const parsed = await response.json();
+              result = parsed && typeof parsed === 'object' ? parsed : null;
+            }
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+          if (!result) {
+            transportUnknown = true;
+            continue;
+          }
           if (result.request_token !== requestToken || result.action !== actionName) continue;
+          if (result.status === 'ssh_trust_required' || result.status === 'ssh_trust_pending' || result.status === 'expired') {
+            return { ok: false, status: result.status, message: result.message || 'SSH trust requires a fresh decision.', result };
+          }
           if (result.status === 'error') return { ok: false, status: 'error', message: result.message || 'Backend action failed.', result };
           const actual = result.result || {};
           const mismatch = Object.keys(expectedResult || {}).find(key => String(actual[key] ?? '') !== String(expectedResult[key] ?? ''));
@@ -6094,9 +6673,9 @@ function triggerAction(actionScriptName, button, description) {
             message: result.message || (result.status === 'partial' ? 'Action completed with warnings.' : 'Action completed.'),
             warnings: Array.isArray(result.warnings) ? result.warnings : [], result
           };
-        } catch (_) {}
+        } catch (_) { transportUnknown = true; }
       }
-      return { ok: false, status: 'error', message: 'Timed out waiting for router acknowledgement.' };
+      return { ok: false, status: transportUnknown ? 'transport-unknown' : 'error', message: 'Timed out waiting for an authoritative router acknowledgement.' };
     }
 
     async function executeVerifiedServiceAction(change) {
@@ -6269,6 +6848,7 @@ function triggerAction(actionScriptName, button, description) {
       }
       setServiceSettingsBusy(true);
       stopPolling();
+      const transactionWarnings = [];
       try {
         for (let index = 0; index < transaction.length; index++) {
           const stage = transaction[index];
@@ -6285,6 +6865,11 @@ function triggerAction(actionScriptName, button, description) {
             });
             if (!saveResult || !saveResult.ok) {
               throw new Error(saveResult?.error || 'Settings could not be confirmed on disk.');
+            }
+            if (saveResult.nodeSyncStatus === 'failed') {
+              transactionWarnings.push('Settings were saved locally, but node settings synchronization failed.');
+            } else if (saveResult.nodeSyncStatus === 'unknown') {
+              transactionWarnings.push('Settings were saved locally, but node synchronization could not be confirmed.');
             }
           } else if (stage.type === 'verified-action') {
             const actionSpec = stage.change.definition.action;
@@ -6308,7 +6893,13 @@ function triggerAction(actionScriptName, button, description) {
         updateBootStatusLineFromCache();
         setServiceSettingsBusy(false);
         markSvcSettingsDirty();
-        setServiceTransactionStatus('Settings Saved!', 'success');
+        setServiceTransactionStatus(
+          transactionWarnings.length ? 'Settings Saved locally with warnings.' : 'Settings Saved!',
+          transactionWarnings.length ? 'warning' : 'success'
+        );
+        if (transactionWarnings.length) {
+          appendCliText(transactionWarnings.join(' ') + '\n', { scroll: 'force' });
+        }
       } catch (error) {
         try { await refreshSettingsCacheFromDisk(); } catch (_) {}
         if (CURRENT_SETTINGS_CACHE) {
@@ -6403,27 +6994,34 @@ function triggerAction(actionScriptName, button, description) {
     }
 
     function renderServiceStatusHtml(data) {
+      const escapeHtml = value => String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      const escapeAttr = value => escapeHtml(value).replace(/`/g, '&#96;');
       function dot(val, on) {
-        return '<span class="' + (on ? 'svc-dot-on' : 'svc-dot-off') + '" title="' + val + '">'
-          + (on ? '\u25CF' : '\u25CB') + '\u202f' + val + '</span>';
+        const text = escapeHtml(val || '?');
+        return '<span class="' + (on ? 'svc-dot-on' : 'svc-dot-off') + '" title="' + escapeAttr(val || '') + '">'
+          + (on ? '\u25CF' : '\u25CB') + '\u202f' + text + '</span>';
       }
       function unitRow(label, ip, m) {
+        m = (m && typeof m === 'object') ? m : {};
         const bootOn  = m.boot  === 'enabled';
         const addonOn = m.addon === 'active' || m.addon === 'node-on' || m.addon === 'node-custom';
         const cronOn  = m.cron  === 'present';
         const macOn   = m.mac   && m.mac !== 'off';
         return '<div class="svc-status-row">'
-          + '<span class="svc-unit-label">' + label + '</span>'
-          + '<span class="svc-unit-hw">'   + (m.hw || '?') + '</span>'
-          + (ip ? '<span class="svc-unit-ip">@' + ip + '</span>' : '')
+          + '<span class="svc-unit-label">' + escapeHtml(label) + '</span>'
+          + '<span class="svc-unit-hw">'   + escapeHtml(m.hw || '?') + '</span>'
+          + (ip ? '<span class="svc-unit-ip">@' + escapeHtml(ip) + '</span>' : '')
           + dot(m.boot,  bootOn)
           + dot(m.addon, addonOn)
           + dot(m.cron,  cronOn)
-          + '<span class="svc-unit-mac ' + (macOn ? 'svc-dot-on' : 'svc-dot-off') + '">mac ' + (m.mac || 'off') + '</span>'
+          + '<span class="svc-unit-mac ' + (macOn ? 'svc-dot-on' : 'svc-dot-off') + '">mac ' + escapeHtml(m.mac || 'off') + '</span>'
           + '</div>';
       }
+      data = (data && typeof data === 'object') ? data : {};
       let html = data.ts
-        ? '<div class="svc-status-ts">Last checked: ' + data.ts + '</div>' : '';
+        ? '<div class="svc-status-ts">Last checked: ' + escapeHtml(data.ts) + '</div>' : '';
       if (data.main)  html += unitRow('Main', '', data.main);
       if (data.nodes) data.nodes.forEach(function(n, i) {
         html += unitRow('Node' + (i + 1), n.ip, n);
@@ -6761,6 +7359,8 @@ async function runMacRefresh() {
       out["vlanmgr_PAUSE"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["PAUSE"]) || "off";
       out["vlanmgr_BOOT_ENABLED"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["BOOT_ENABLED"]) || "0";
       out["vlanmgr_ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
+      out["vlanmgr_AUTO_SYNC_SETTINGS"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["AUTO_SYNC_SETTINGS"]) || "1";
+      out["vlanmgr_HTML_CLIENT_REFRESH_MINUTES"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["HTML_CLIENT_REFRESH_MINUTES"]) || "30";
 
       // Hardware_Override and ClientMeta keys are sent via their own scoped
       // payloads (buildOverridePayloadForMerlin / buildClientMetaPayloadForMerlin)
@@ -6925,6 +7525,8 @@ async function runMacRefresh() {
       flat["PAUSE"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["PAUSE"]) || "off";
       flat["BOOT_ENABLED"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["BOOT_ENABLED"]) || "0";
       flat["ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
+      flat["AUTO_SYNC_SETTINGS"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["AUTO_SYNC_SETTINGS"]) || "1";
+      flat["HTML_CLIENT_REFRESH_MINUTES"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["HTML_CLIENT_REFRESH_MINUTES"]) || "30";
 
       // Pull Hardware_Override flat keys from settings cache into flat object
       if (CURRENT_SETTINGS_CACHE) {
@@ -7032,8 +7634,12 @@ function anchorModalToForm(modal) {
     const scrollX = window.scrollX || document.documentElement.scrollLeft || 0;
     const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
 
+    const isSshTrustUi = modal.id === 'sshTrustModal' || modal.id === 'sshTrustPausedTray';
+    const assignExtension = isSshTrustUi && form.classList.contains('ssid-assign-view')
+      ? Math.max(0, Number.parseFloat(window.getComputedStyle(form).getPropertyValue('--ssid-assign-extension')) || 0)
+      : 0;
     let anchorOffset = 0;
-    if (modal.id === 'versionModal') {
+    if (modal.id === 'versionModal' || modal.id === 'sshKeyModal' || isSshTrustUi) {
       const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
       const visibleTop = Math.max(0, formRect.top);
       const visibleBottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;
@@ -7052,7 +7658,7 @@ function anchorModalToForm(modal) {
       anchorOffset = Math.max(0, (formRect.height - modalHeight) / 2);
     }
     modal.classList.add('modal--anchored');
-    modal.style.left = `${scrollX + formRect.left + formRect.width / 2}px`;
+    modal.style.left = `${scrollX + formRect.left + (formRect.width + assignExtension) / 2}px`;
     modal.style.top = `${scrollY + formRect.top + anchorOffset}px`;
   });
 }
@@ -7100,6 +7706,9 @@ window.addEventListener('resize', () => {
   if (anchoredModal) {
     anchorModalToForm(anchoredModal);
   }
+  if (trustDecisionPending) {
+    requestAnimationFrame(updateSshTrustModalLayout);
+  }
   const confirmationOverlay = document.getElementById('maintenanceConfirmOverlay');
   if (confirmationOverlay && confirmationOverlay.classList.contains('is-visible')) {
     positionMaintenanceConfirmationOverlay();
@@ -7122,6 +7731,7 @@ window.addEventListener('scroll', () => {
 function closeSSHKeyModal() {
   const modal = document.getElementById('sshKeyModal');
   if (modal) {
+    modal.classList.remove('ssh-key-modal--open');
     modal.style.display = 'none';
     releaseModalCentering(modal);
     releaseAnchoredModal(modal);
@@ -7133,6 +7743,728 @@ function closeSSHKeyModal() {
     overlay.style.pointerEvents = 'none';
   }
   syncInfoLatchVisibility();
+}
+
+function trustNodeForDisplay(node) {
+  if (!node || typeof node !== 'object') return null;
+  const slot = Number(node.slot);
+  const rawMac = String(node.mac || '').toUpperCase();
+  const mac = rawMac === 'NONE' ? 'none' : rawMac;
+  const host = String(node.host || '');
+  const port = Number(node.port);
+  const algorithm = String(node.algorithm || '');
+  const fingerprint = String(node.fingerprint || '');
+  const challengeId = String(node.challenge_id || '');
+  const oldFingerprint = String(node.old_fingerprint || '');
+  const status = String(node.status || '');
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_NODES) return null;
+  if (mac !== 'none' && !/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(mac)) return null;
+  if (!/^[A-Za-z0-9.:-]{1,253}$/.test(host)) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  if (!/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)$/.test(algorithm)) return null;
+  if (!/^SHA256:[A-Za-z0-9+/=]+$/.test(fingerprint)) return null;
+  if (!/^c\.[A-Za-z0-9._-]{3,160}$/.test(challengeId)) return null;
+  if (oldFingerprint && !/^SHA256:[A-Za-z0-9+/=]+$/.test(oldFingerprint)) return null;
+  if (status !== 'unverified' && status !== 'mismatch') return null;
+  return { slot, mac, host, port, algorithm, fingerprint, challengeId, oldFingerprint, status };
+}
+
+function trustBlockerForDisplay(node) {
+  if (!node || typeof node !== 'object') return null;
+  const slot = Number(node.slot);
+  const rawMac = String(node.mac || '').toUpperCase();
+  const mac = rawMac === 'NONE' ? 'none' : rawMac;
+  const host = String(node.host || '');
+  const port = Number(node.port);
+  const status = String(node.status || '');
+  const algorithm = String(node.algorithm || '');
+  const fingerprint = String(node.fingerprint || '');
+  const reason = String(node.reason || '');
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_NODES) return null;
+  if (mac !== 'none' && !/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(mac)) return null;
+  if (!/^[A-Za-z0-9.:-]{1,253}$/.test(host)) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  if (!/^(capability_unknown|probe_failed|auth_failed|unreachable|trust_store_error|endpoint_changed|expired|unverified)$/.test(status)) return null;
+  if (algorithm && !/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)$/.test(algorithm)) return null;
+  if (fingerprint && !/^SHA256:[A-Za-z0-9+/=]+$/.test(fingerprint)) return null;
+  if (!/^[A-Za-z0-9._:-]{0,96}$/.test(reason)) return null;
+  return { slot, mac, host, port, status, algorithm, fingerprint, reason };
+}
+
+function trustRegistryNodeForDisplay(node, group) {
+  if (!node || typeof node !== 'object') return null;
+  const slot = Number(node.slot);
+  const rawMac = String(node.mac || '').toUpperCase();
+  const mac = rawMac === 'NONE' ? 'none' : rawMac;
+  const host = String(node.host || '');
+  const port = Number(node.port);
+  const nodeId = String(node.node_id || '');
+  const status = String(node.status || '');
+  const algorithm = String(node.algorithm || '');
+  const fingerprint = String(node.fingerprint || '');
+  const reason = String(node.reason || '');
+  const updatedEpoch = Number(node.updated_epoch || 0);
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_NODES) return null;
+  if (mac !== 'none' && !/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(mac)) return null;
+  if (!/^[A-Za-z0-9.:-]{1,253}$/.test(host)) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  if (!/^NODE[1-9][0-9]*@[A-Za-z0-9.:-]+$/.test(nodeId)) return null;
+  const expectedNodeId = mac === 'none' ? `NODE${slot}@${host}:${port}` : `NODE${slot}@${mac}`;
+  if (nodeId !== expectedNodeId) return null;
+  if (group === 'trusted' && status !== 'verified' && status !== 'expired') return null;
+  if (group === 'needs' && !/^(unverified|expired|endpoint_changed|trust_store_error)$/.test(status)) return null;
+  if (algorithm && !/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)$/.test(algorithm)) return null;
+  if (fingerprint && !/^SHA256:[A-Za-z0-9+/=]+$/.test(fingerprint)) return null;
+  if (!Number.isInteger(updatedEpoch) || updatedEpoch < 0) return null;
+  if (!/^[A-Za-z0-9._:-]{0,96}$/.test(reason)) return null;
+  return { slot, mac, host, port, nodeId, status, algorithm, fingerprint, reason, updatedEpoch };
+}
+
+function sshTrustPendingIdIsValid(value) {
+  return /^p\.[A-Za-z0-9._-]{3,160}$/.test(String(value || ''));
+}
+
+function formatSshTrustCountdown(seconds) {
+  const total = Math.max(0, Math.ceil(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  const remainder = String(total % 60).padStart(2, '0');
+  return `Auto-abort in ${minutes}:${remainder}`;
+}
+
+function setSshTrustCountdownText(text) {
+  ['sshTrustModalCountdown', 'sshTrustPausedTrayCountdown'].forEach(id => {
+    const target = document.getElementById(id);
+    if (target) target.textContent = text;
+  });
+}
+
+function stopSshTrustCountdown() {
+  if (sshTrustCountdownTimer) window.clearInterval(sshTrustCountdownTimer);
+  sshTrustCountdownTimer = null;
+}
+
+function updateSshTrustCountdown() {
+  if (!trustDecisionPending || !Number.isFinite(trustDecisionPending.expiresAtMs)) {
+    stopSshTrustCountdown();
+    return;
+  }
+  const remainingSeconds = Math.max(0, Math.ceil((trustDecisionPending.expiresAtMs - Date.now()) / 1000));
+  setSshTrustCountdownText(formatSshTrustCountdown(remainingSeconds));
+  if (remainingSeconds > 0 || trustDecisionPending.phase !== 'decision' || trustDecisionPending.autoAbortStarted) return;
+  trustDecisionPending.autoAbortStarted = true;
+  submitSshTrustAbort({ automatic: true });
+}
+
+function startSshTrustCountdown() {
+  stopSshTrustCountdown();
+  updateSshTrustCountdown();
+  if (trustDecisionPending && trustDecisionPending.phase === 'decision') {
+    sshTrustCountdownTimer = window.setInterval(updateSshTrustCountdown, 250);
+  }
+}
+
+function mountSshTrustUi() {
+  const formPane = document.querySelector('.form-box--main');
+  const modalHost = document.querySelector('.container') || document.body;
+  const overlay = document.getElementById('sshTrustOverlay');
+  if (overlay && formPane && overlay.parentElement !== formPane) {
+    try { formPane.appendChild(overlay); } catch (_) {}
+  }
+  [document.getElementById('sshTrustPausedTray'), document.getElementById('sshTrustModal')].forEach(node => {
+    if (!node || node.parentElement === modalHost) return;
+    try { modalHost.appendChild(node); } catch (_) {}
+  });
+}
+
+function setSshTrustOverlayVisible(visible) {
+  const overlay = document.getElementById('sshTrustOverlay');
+  if (overlay) {
+    overlay.classList.toggle('is-visible', !!visible);
+    overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  }
+}
+
+function hideSshTrustModalElement() {
+  const modal = document.getElementById('sshTrustModal');
+  if (!modal) return;
+  modal.classList.remove('ssh-trust-modal--open');
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  releaseModalCentering(modal);
+  releaseAnchoredModal(modal);
+}
+
+function hideSshTrustPausedTray() {
+  const tray = document.getElementById('sshTrustPausedTray');
+  if (!tray) return;
+  tray.classList.remove('is-visible');
+  tray.setAttribute('aria-hidden', 'true');
+  releaseAnchoredModal(tray);
+}
+
+function hideSshTrustPauseUi() {
+  hideSshTrustModalElement();
+  hideSshTrustPausedTray();
+  setSshTrustOverlayVisible(false);
+}
+
+function updateSshTrustModalLayout() {
+  const modal = document.getElementById('sshTrustModal');
+  const list = document.getElementById('sshTrustNodes');
+  if (!modal || !list || !modal.classList.contains('ssh-trust-modal--open')) return;
+  list.style.maxHeight = '';
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const form = document.querySelector('.form-box--main');
+  let modalHeightBudget = Math.max(0, viewportHeight - 28);
+  if (form) {
+    const formRect = form.getBoundingClientRect();
+    const visibleTop = Math.max(0, formRect.top);
+    const visibleBottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;
+    modalHeightBudget = Math.min(modalHeightBudget, Math.max(0, visibleBottom - visibleTop));
+  }
+  const header = modal.querySelector('.modal__header');
+  const banner = modal.querySelector('.ssh-trust-paused-banner');
+  const intro = document.getElementById('sshTrustIntro');
+  const message = document.getElementById('sshTrustMessage');
+  const actions = modal.querySelector('.modal__actions');
+  const fixedHeight = [header, banner, intro, message, actions]
+    .filter(Boolean)
+    .reduce((total, node) => total + node.getBoundingClientRect().height, 0) + 86;
+  const available = Math.max(130, Math.floor(modalHeightBudget - fixedHeight));
+  list.style.maxHeight = `${available}px`;
+}
+
+function showSshTrustPausedTray() {
+  if (!trustDecisionPending || trustDecisionPending.phase !== 'decision') return false;
+  mountSshTrustUi();
+  hideSshTrustModalElement();
+  setSshTrustOverlayVisible(true);
+  const tray = document.getElementById('sshTrustPausedTray');
+  if (tray) {
+    tray.classList.add('is-visible');
+    tray.setAttribute('aria-hidden', 'false');
+    anchorModalToForm(tray);
+  }
+  syncInfoLatchVisibility();
+  window.setTimeout(() => {
+    const focusTarget = document.getElementById('sshTrustPausedResumeBtn');
+    if (focusTarget && !focusTarget.disabled) {
+      try { focusTarget.focus(); } catch (_) {}
+    }
+  }, 0);
+  return true;
+}
+
+function resumeSshTrustReview() {
+  if (!trustDecisionPending || trustDecisionPending.phase !== 'decision') return false;
+  return showSshTrustModalElement(document.getElementById('sshTrustModal'));
+}
+
+function sshTrustFocusRoot() {
+  const modal = document.getElementById('sshTrustModal');
+  if (modal && modal.classList.contains('ssh-trust-modal--open')) return modal;
+  const tray = document.getElementById('sshTrustPausedTray');
+  if (tray && tray.classList.contains('is-visible')) return tray;
+  return null;
+}
+
+function handleSshTrustDialogKeydown(event) {
+  const root = sshTrustFocusRoot();
+  if (!root || !trustDecisionPending) return;
+  if (event.key === 'Escape' && trustDecisionPending.phase === 'decision') {
+    event.preventDefault();
+    closeSshTrustModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = Array.from(root.querySelectorAll('button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+    .filter(node => node.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+document.addEventListener('keydown', handleSshTrustDialogKeydown);
+
+function clearSshTrustDecision() {
+  stopSshTrustCountdown();
+  trustDecisionPending = null;
+  sshTrustDecisionSelectedChallengeIds.clear();
+  hideSshTrustPauseUi();
+  syncInfoLatchVisibility();
+}
+
+function showSshTrustModalElement(modal) {
+  if (!modal) return false;
+  mountSshTrustUi();
+  hideSshTrustPausedTray();
+  setSshTrustOverlayVisible(true);
+  releaseModalCentering(modal);
+  releaseAnchoredModal(modal);
+  modal.classList.add('ssh-trust-modal--open');
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+  anchorModalToForm(modal);
+  requestAnimationFrame(updateSshTrustModalLayout);
+  syncInfoLatchVisibility();
+  window.setTimeout(() => {
+    const accept = document.getElementById('sshTrustAcceptBtn');
+    const focusTarget = accept && !accept.disabled && accept.offsetParent !== null
+      ? accept : modal.querySelector('.modal__close');
+    if (focusTarget && !focusTarget.disabled && focusTarget.offsetParent !== null) {
+      try { focusTarget.focus(); } catch (_) {}
+    }
+  }, 0);
+  return true;
+}
+
+function closeSshTrustModal() {
+  if (trustDecisionPending && trustDecisionPending.phase === 'decision') {
+    return showSshTrustPausedTray();
+  }
+  if (trustDecisionPending) return false;
+  clearSshTrustDecision();
+  return true;
+}
+
+/* Retired all-or-nothing renderer retained here temporarily for source-history clarity.
+function renderSshTrustDecisionNodesLegacy(container, nodes) {
+  container.replaceChildren();
+  nodes.forEach(node => {
+    const row = document.createElement('div');
+    row.className = 'modal__section';
+    const title = document.createElement('strong');
+    title.textContent = `Node ${node.slot} — ${node.status === 'mismatch' ? 'trusted key changed' : 'not yet trusted'}`;
+    row.appendChild(title);
+    const detail = document.createElement('div');
+    detail.textContent = `${node.mac === 'none' ? 'MAC unavailable' : `MAC ${node.mac}`} • ${node.host}:${node.port} • ${node.algorithm}`;
+    row.appendChild(detail);
+    const fingerprint = document.createElement('code');
+    fingerprint.textContent = `Presented fingerprint: ${node.fingerprint}`;
+    fingerprint.style.display = 'block';
+    fingerprint.style.userSelect = 'text';
+    row.appendChild(fingerprint);
+    if (node.oldFingerprint) {
+      const old = document.createElement('code');
+      old.textContent = `Previously trusted fingerprint: ${node.oldFingerprint}`;
+      old.style.display = 'block';
+      old.style.userSelect = 'text';
+      row.appendChild(old);
+      const warning = document.createElement('div');
+      warning.textContent = 'Warning: the key may have been rotated or intercepted. Choose “Trust all listed nodes” only after checking it.';
+      row.appendChild(warning);
+    }
+    container.appendChild(row);
+  });
+}
+
+*/
+function selectedSshTrustDecisionNodes() {
+  if (!trustDecisionPending || !Array.isArray(trustDecisionPending.nodes)) return [];
+  return trustDecisionPending.nodes.filter(node => sshTrustDecisionSelectedChallengeIds.has(node.challengeId));
+}
+
+function updateSshTrustDecisionButtonState() {
+  const selected = selectedSshTrustDecisionNodes();
+  const decisionOpen = !!(trustDecisionPending && trustDecisionPending.phase === 'decision');
+  const accept = document.getElementById('sshTrustAcceptBtn');
+  const abort = document.getElementById('sshTrustAbortBtn');
+  const trayAbort = document.getElementById('sshTrustPausedAbortBtn');
+  if (accept) {
+    accept.disabled = !decisionOpen || selected.length === 0;
+    accept.style.display = '';
+    accept.textContent = selected.length
+      ? `Trust ${selected.length} selected node${selected.length === 1 ? '' : 's'}`
+      : 'Select node(s) to trust';
+    accept.title = selected.length
+      ? 'Revalidate and pin only the selected host key(s). The action stays paused until every listed node is trusted.'
+      : 'Select at least one node after reviewing its fingerprint.';
+  }
+  [abort, trayAbort].forEach(button => {
+    if (!button) return;
+    button.disabled = !decisionOpen;
+    button.style.display = '';
+  });
+}
+
+function renderSshTrustDecisionNodes(container, nodes) {
+  container.replaceChildren();
+  nodes.forEach(node => {
+    const row = document.createElement('div');
+    row.className = 'ssh-trust-registry-row';
+    row.setAttribute('role', 'listitem');
+    row.classList.add(node.status === 'mismatch' ? 'ssh-trust-registry-row--error' : 'ssh-trust-registry-row--warning');
+
+    const copy = document.createElement('div');
+    copy.className = 'ssh-trust-registry-copy';
+    const title = document.createElement('div');
+    title.className = 'ssh-trust-registry-title';
+    title.textContent = `Node ${node.slot} — ${node.status === 'mismatch' ? 'trusted key changed' : 'not yet trusted'}`;
+    copy.appendChild(title);
+
+    const detail = document.createElement('div');
+    detail.className = 'ssh-trust-registry-detail';
+    detail.textContent = `${node.mac === 'none' ? 'MAC unavailable' : `MAC ${node.mac}`} • ${node.host}:${node.port} • ${node.algorithm}`;
+    copy.appendChild(detail);
+
+    const fingerprint = document.createElement('code');
+    fingerprint.className = 'ssh-trust-registry-fingerprint';
+    fingerprint.textContent = `Presented fingerprint: ${node.fingerprint}`;
+    copy.appendChild(fingerprint);
+
+    if (node.oldFingerprint) {
+      const old = document.createElement('code');
+      old.className = 'ssh-trust-registry-fingerprint';
+      old.textContent = `Previously trusted fingerprint: ${node.oldFingerprint}`;
+      copy.appendChild(old);
+      const warning = document.createElement('div');
+      warning.className = 'ssh-trust-decision-warning';
+      warning.textContent = 'Warning: the key changed. Check the device before selecting it for trust.';
+      copy.appendChild(warning);
+    }
+
+    const select = document.createElement('label');
+    select.className = 'ssh-trust-registry-selection';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = sshTrustDecisionSelectedChallengeIds.has(node.challengeId);
+    checkbox.setAttribute('aria-label', `Select Node ${node.slot} for SSH host-key trust`);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) sshTrustDecisionSelectedChallengeIds.add(node.challengeId);
+      else sshTrustDecisionSelectedChallengeIds.delete(node.challengeId);
+      updateSshTrustDecisionButtonState();
+    });
+    const label = document.createElement('span');
+    label.textContent = 'Trust';
+    select.appendChild(checkbox);
+    select.appendChild(label);
+
+    row.appendChild(copy);
+    row.appendChild(select);
+    container.appendChild(row);
+  });
+  updateSshTrustDecisionButtonState();
+  requestAnimationFrame(updateSshTrustModalLayout);
+}
+
+function openSshTrustBlockedStatus(ack) {
+  if (!ack || !ack.result || typeof ack.result !== 'object') return false;
+  const rawNodes = Array.isArray(ack.result.nodes) ? ack.result.nodes : [];
+  const nodes = rawNodes.map(trustBlockerForDisplay).filter(Boolean);
+  if (trustDecisionPending) {
+    appendCliText('SSH trust status ignored: another trust decision is already pending.\n', { scroll: 'force' });
+    return false;
+  }
+  const modal = document.getElementById('sshTrustModal');
+  const container = document.getElementById('sshTrustNodes');
+  const message = document.getElementById('sshTrustMessage');
+  const intro = document.getElementById('sshTrustIntro');
+  if (!modal || !container) return false;
+  stopSshTrustCountdown();
+  trustDecisionPending = null;
+  sshTrustDecisionSelectedChallengeIds.clear();
+  hideSshTrustPausedTray();
+  container.replaceChildren();
+  if (!nodes.length) {
+    const row = document.createElement('div');
+    row.className = 'modal__section';
+    row.textContent = 'The router could not obtain a safe node list. Resolve the SSH capability/setup issue, then run Verify configured nodes again.';
+    container.appendChild(row);
+  } else {
+    nodes.forEach(node => {
+      const row = document.createElement('div');
+      row.className = 'modal__section';
+      if (node.status === 'capability_unknown' || node.status === 'probe_failed' || node.status === 'trust_store_error') row.classList.add('ssh-trust-registry-row--error');
+      const title = document.createElement('strong');
+      const label = {
+        capability_unknown: 'SSH host-key capability unavailable',
+        probe_failed: 'host-key probe failed',
+        auth_failed: 'SSH authentication failed',
+        unreachable: 'node is unreachable',
+        trust_store_error: 'router trust store error',
+        endpoint_changed: 'node endpoint changed',
+        expired: 'trusted record expired',
+        unverified: 'not yet trusted'
+      }[node.status] || 'SSH verification blocked';
+      title.textContent = `Node ${node.slot} — ${label}`;
+      row.appendChild(title);
+      const detail = document.createElement('div');
+      detail.textContent = `${node.mac === 'none' ? 'MAC unavailable' : `MAC ${node.mac}`} • ${node.host}:${node.port}`;
+      row.appendChild(detail);
+      if (node.algorithm) {
+        const alg = document.createElement('div');
+        alg.textContent = `Host-key algorithm: ${node.algorithm}`;
+        row.appendChild(alg);
+      }
+      if (node.fingerprint) {
+        const fp = document.createElement('code');
+        fp.textContent = `Pinned fingerprint: ${node.fingerprint}`;
+        fp.style.display = 'block';
+        fp.style.userSelect = 'text';
+        row.appendChild(fp);
+      }
+      if (node.reason) {
+        const reason = document.createElement('div');
+        reason.textContent = `Reason: ${node.reason}`;
+        row.appendChild(reason);
+      }
+      container.appendChild(row);
+    });
+  }
+  if (intro) intro.textContent = 'Node actions are blocked until every listed SSH issue is resolved. This result does not accept a key and cannot be overridden from the browser.';
+  if (message) message.textContent = String(ack.message || 'Resolve the listed issue(s), then run a fresh verification probe.');
+  ['sshTrustAcceptBtn', 'sshTrustAbortBtn'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) { button.disabled = true; button.style.display = 'none'; }
+  });
+  showSshTrustModalElement(modal);
+  return true;
+}
+
+/* Retired all-or-nothing decision path. The active path below permits an
+ * explicit selection and leaves the original action paused until review ends.
+function openSshTrustDecisionLegacy(ack) {
+  if (!ack || ack.status !== 'ssh_trust_required' || !ack.result || typeof ack.result !== 'object') return false;
+  const pendingId = String(ack.result.pending_id || '');
+  if (!Array.isArray(ack.result.nodes)) return false;
+  const rawNodes = ack.result.nodes;
+  if (!/^p\.[A-Za-z0-9._-]{3,160}$/.test(pendingId)) return openSshTrustBlockedStatus(ack);
+  if (rawNodes.some(node => !node || !['verified', 'unverified', 'mismatch'].includes(String(node.status || '')))) return openSshTrustBlockedStatus(ack);
+  const affectedRaw = rawNodes.filter(node => node && String(node.status || '') !== 'verified');
+  const nodes = affectedRaw.map(trustNodeForDisplay).filter(Boolean);
+  if (!nodes.length || nodes.length !== affectedRaw.length) return false;
+  if (trustDecisionPending) {
+    if (trustDecisionPending.pendingId === pendingId) return true;
+    appendCliText('SSH trust decision ignored: another trust request is already pending.\n', { scroll: 'force' });
+    return false;
+  }
+  trustDecisionPending = {
+    pendingId,
+    nodes,
+    originalAction: String(ack.action || ''),
+    sourceToken: String(ack.request_token || ''),
+    used: false,
+    phase: 'decision'
+  };
+  const modal = document.getElementById('sshTrustModal');
+  const container = document.getElementById('sshTrustNodes');
+  const message = document.getElementById('sshTrustMessage');
+  if (!modal || !container) {
+    clearSshTrustDecision();
+    return false;
+  }
+  renderSshTrustDecisionNodes(container, nodes);
+  const intro = document.getElementById('sshTrustIntro');
+  if (intro) intro.textContent = 'MerVLAN received host keys that are not yet trusted by this router. Review every listed node before continuing.';
+  if (message) message.textContent = 'Review every listed node. A single No cancels the complete trust set.';
+  ['sshTrustAcceptBtn', 'sshTrustRejectBtn'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) { button.disabled = false; button.style.display = ''; }
+  });
+  showSshTrustModalElement(modal);
+  return true;
+}
+
+*/
+function openSshTrustDecision(ack) {
+  if (!ack || !['ssh_trust_required', 'ssh_trust_pending'].includes(String(ack.status || '')) || !ack.result || typeof ack.result !== 'object') return false;
+  const pendingId = String(ack.result.pending_id || '');
+  const expiresInSec = Number(ack.result.expires_in_sec);
+  if (!Array.isArray(ack.result.nodes) || !sshTrustPendingIdIsValid(pendingId) ||
+      !Number.isInteger(expiresInSec) || expiresInSec < 0 || expiresInSec > 300) {
+    return openSshTrustBlockedStatus(ack);
+  }
+  const rawNodes = ack.result.nodes;
+  if (rawNodes.some(node => !node || !['verified', 'unverified', 'mismatch'].includes(String(node.status || '')))) {
+    return openSshTrustBlockedStatus(ack);
+  }
+  const affectedRaw = rawNodes.filter(node => String(node.status || '') !== 'verified');
+  const nodes = affectedRaw.map(trustNodeForDisplay).filter(Boolean);
+  if (!nodes.length || nodes.length !== affectedRaw.length) return false;
+  if (trustDecisionPending && trustDecisionPending.pendingId !== pendingId) {
+    appendCliText('SSH trust decision ignored: another trust request is already pending.\n', { scroll: 'force' });
+    return false;
+  }
+  trustDecisionPending = Object.assign(trustDecisionPending || {}, {
+    pendingId,
+    nodes,
+    originalAction: String(ack.result.action || ack.action || ''),
+    sourceToken: String(ack.request_token || ''),
+    expiresAtMs: Date.now() + (expiresInSec * 1000),
+    used: false,
+    autoAbortStarted: false,
+    phase: 'decision'
+  });
+  sshTrustDecisionSelectedChallengeIds = new Set();
+  const modal = document.getElementById('sshTrustModal');
+  const container = document.getElementById('sshTrustNodes');
+  const message = document.getElementById('sshTrustMessage');
+  const intro = document.getElementById('sshTrustIntro');
+  if (!modal || !container) {
+    clearSshTrustDecision();
+    return false;
+  }
+  renderSshTrustDecisionNodes(container, nodes);
+  if (intro) intro.textContent = 'MerVLAN received host keys that are not yet trusted by this router. Review the listed node(s) before continuing.';
+  if (message) message.textContent = 'Select the node(s) you want to trust. The stored action stays paused until every listed node is trusted.';
+  ['sshTrustAcceptBtn', 'sshTrustAbortBtn'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.style.display = '';
+  });
+  updateSshTrustDecisionButtonState();
+  startSshTrustCountdown();
+  showSshTrustModalElement(modal);
+  return true;
+}
+
+/* Retired all-or-nothing submit path. Abort is now a separate explicit action.
+function submitSshTrustDecisionLegacy() {
+  if (!trustDecisionPending || trustDecisionPending.used) return false;
+  const accept = decision === 'accept';
+  if (!accept && decision !== 'reject') return false;
+  trustDecisionPending.used = true;
+  trustDecisionPending.phase = 'enrolling';
+  const buttons = ['sshTrustAcceptBtn', 'sshTrustRejectBtn'];
+  buttons.forEach(id => { const button = document.getElementById(id); if (button) button.disabled = true; });
+  const message = document.getElementById('sshTrustMessage');
+  if (message) message.textContent = accept ? 'Revalidating every presented key before commit...' : 'Cancelling the complete trust request...';
+  const task = (typeof MerVLANLoading !== 'undefined')
+    ? MerVLANLoading.start('sshtrustenroll_vlanmgr', 'Enroll SSH Host Keys', { progressBacked: true, timeoutMs: 90000 })
+    : null;
+  if (!task) {
+    appendCliText('SSH trust enrollment could not start because another task owns the loading state.\n', { scroll: 'force' });
+    clearSshTrustDecision();
+    return false;
+  }
+  const token = task.token;
+  trustDecisionPending.enrollToken = token;
+  const decisions = trustDecisionPending.nodes.map(node => `${node.challengeId}=${accept ? 'accept' : 'reject'}`).join(',');
+  const parentWin = window.parent;
+  const payload = {
+    vlanmgr_sshtrust_pending_id: trustDecisionPending.pendingId,
+    vlanmgr_sshtrust_decisions: decisions
+  };
+  const submitted = parentWin && typeof parentWin.MVM_triggerVerified === 'function'
+    ? parentWin.MVM_triggerVerified('sshtrustenroll_vlanmgr', token, payload, { loading: false, skipRefresh: true, waitSec: 0 })
+    : false;
+  if (submitted === false) {
+    task.fail('The SSH trust enrollment request was rejected.');
+    clearSshTrustDecision();
+    return false;
+  }
+  return true;
+}
+
+*/
+function restoreSshTrustDecisionAfterSubmissionFailure(message) {
+  if (!trustDecisionPending) return false;
+  trustDecisionPending.used = false;
+  trustDecisionPending.autoAbortStarted = false;
+  trustDecisionPending.phase = 'decision';
+  const status = document.getElementById('sshTrustMessage');
+  if (status) status.textContent = String(message || 'The SSH trust request could not be submitted. Review the nodes and try again.');
+  updateSshTrustDecisionButtonState();
+  startSshTrustCountdown();
+  return showSshTrustModalElement(document.getElementById('sshTrustModal'));
+}
+
+function submitSshTrustDecision() {
+  if (!trustDecisionPending || trustDecisionPending.used || trustDecisionPending.phase !== 'decision') return false;
+  const selected = selectedSshTrustDecisionNodes();
+  if (!selected.length) {
+    const message = document.getElementById('sshTrustMessage');
+    if (message) message.textContent = 'Select at least one node after reviewing its fingerprint.';
+    updateSshTrustDecisionButtonState();
+    return false;
+  }
+  trustDecisionPending.used = true;
+  trustDecisionPending.phase = 'enrolling';
+  stopSshTrustCountdown();
+  hideSshTrustPauseUi();
+  const task = (typeof MerVLANLoading !== 'undefined')
+    ? MerVLANLoading.start('sshtrustenroll_vlanmgr', 'Enroll SSH Host Keys', { progressBacked: true, timeoutMs: 90000 })
+    : null;
+  if (!task) {
+    appendCliText('SSH trust enrollment could not start because another task owns the loading state.\n', { scroll: 'force' });
+    return restoreSshTrustDecisionAfterSubmissionFailure('The SSH trust enrollment could not start. The action remains paused.');
+  }
+  const token = task.token;
+  trustDecisionPending.enrollToken = token;
+  const decisions = selected.map(node => `${node.challengeId}=accept`).join(',');
+  const parentWin = window.parent;
+  const payload = {
+    vlanmgr_sshtrust_pending_id: trustDecisionPending.pendingId,
+    vlanmgr_sshtrust_decisions: decisions
+  };
+  const submitted = parentWin && typeof parentWin.MVM_triggerVerified === 'function'
+    ? parentWin.MVM_triggerVerified('sshtrustenroll_vlanmgr', token, payload, { loading: false, skipRefresh: true, waitSec: 0 })
+    : false;
+  if (submitted === false) {
+    task.fail('The SSH trust enrollment request was rejected.');
+    if (typeof MerVLANLoading !== 'undefined') MerVLANLoading.close();
+    return restoreSshTrustDecisionAfterSubmissionFailure('The SSH trust enrollment request was rejected. The action remains paused.');
+  }
+  return true;
+}
+
+function submitSshTrustAbort(options = {}) {
+  if (!trustDecisionPending || trustDecisionPending.phase !== 'decision') return false;
+  const automatic = options && options.automatic === true;
+  trustDecisionPending.used = true;
+  trustDecisionPending.phase = 'aborting';
+  stopSshTrustCountdown();
+  hideSshTrustPauseUi();
+  const task = (typeof MerVLANLoading !== 'undefined')
+    ? MerVLANLoading.start('sshtrustabort_vlanmgr', automatic ? 'Auto-abort SSH Trust Action' : 'Abort SSH Trust Action', { progressBacked: true, timeoutMs: 90000 })
+    : null;
+  if (!task) {
+    appendCliText('SSH trust abort could not start because another task owns the loading state.\n', { scroll: 'force' });
+    return restoreSshTrustDecisionAfterSubmissionFailure('The SSH trust abort could not start. The action remains paused.');
+  }
+  trustDecisionPending.abortToken = task.token;
+  const parentWin = window.parent;
+  const payload = { vlanmgr_sshtrust_pending_id: trustDecisionPending.pendingId };
+  const submitted = parentWin && typeof parentWin.MVM_triggerVerified === 'function'
+    ? parentWin.MVM_triggerVerified('sshtrustabort_vlanmgr', task.token, payload, { loading: false, skipRefresh: true, waitSec: 0 })
+    : false;
+  if (submitted === false) {
+    task.fail('The SSH trust abort request was rejected.');
+    if (typeof MerVLANLoading !== 'undefined') MerVLANLoading.close();
+    return restoreSshTrustDecisionAfterSubmissionFailure('The SSH trust abort request was rejected. The action remains paused.');
+  }
+  return true;
+}
+
+function submitSshTrustResume(resumeId) {
+  if (!trustDecisionPending || trustDecisionPending.phase === 'resuming') return false;
+  if (!/^r\.[A-Za-z0-9._-]{3,160}$/.test(String(resumeId || ''))) return false;
+  trustDecisionPending.phase = 'resuming';
+  trustDecisionPending.resumeId = String(resumeId);
+  const task = (typeof MerVLANLoading !== 'undefined')
+    ? MerVLANLoading.start('sshtrustresume_vlanmgr', 'Resume MerVLAN Action', { progressBacked: true, timeoutMs: 600000 })
+    : null;
+  if (!task) {
+    appendCliText('The stored MerVLAN action could not resume because another task owns the loading state.\n', { scroll: 'force' });
+    clearSshTrustDecision();
+    return false;
+  }
+  const parentWin = window.parent;
+  const submitted = parentWin && typeof parentWin.MVM_triggerVerified === 'function'
+    ? parentWin.MVM_triggerVerified('sshtrustresume_vlanmgr', task.token, { vlanmgr_sshtrust_resume_id: String(resumeId) }, { loading: false, skipRefresh: true, waitSec: 0 })
+    : false;
+  if (submitted === false) {
+    task.fail('The stored MerVLAN action could not be resumed.');
+    clearSshTrustDecision();
+    return false;
+  }
+  return true;
 }
 
 function closeUnsupportedModelModal() {
@@ -7170,6 +8502,289 @@ function openSupportModelLink() {
   }
 }
 
+function selectSshModalTab(tab) {
+  const trustTab = String(tab || '') === 'trust';
+  const keyTab = document.getElementById('sshKeyTab');
+  const registryTab = document.getElementById('sshTrustRegistryTab');
+  const keyPanel = document.getElementById('sshKeyPanel');
+  const registryPanel = document.getElementById('sshTrustRegistryPanel');
+  const actions = document.getElementById('sshKeyActions');
+  if (keyTab) { keyTab.classList.toggle('is-active', !trustTab); keyTab.setAttribute('aria-selected', trustTab ? 'false' : 'true'); }
+  if (registryTab) { registryTab.classList.toggle('is-active', trustTab); registryTab.setAttribute('aria-selected', trustTab ? 'true' : 'false'); }
+  if (keyPanel) keyPanel.style.display = trustTab ? 'none' : '';
+  if (registryPanel) registryPanel.style.display = trustTab ? '' : 'none';
+  if (actions) actions.style.display = trustTab ? 'none' : '';
+  if (trustTab) refreshSshTrustRegistry();
+}
+
+function setSshTrustRegistryMessage(message, state) {
+  const status = document.getElementById('sshTrustRegistryStatus');
+  if (!status) return;
+  status.textContent = String(message || '');
+  status.classList.remove('is-success', 'is-warning', 'is-error');
+  if (state) status.classList.add('is-' + state);
+}
+
+function setSshTrustRegistryBusy(busy) {
+  sshTrustRegistryBusy = !!busy;
+  ['sshTrustRefreshBtn'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = !!busy;
+  });
+  updateSshTrustProbeButtonState();
+}
+
+function selectedSshTrustRegistrySlots() {
+  const available = new Set((sshTrustRegistryNeeds || []).map(node => Number(node.slot)));
+  return Array.from(sshTrustRegistrySelectedSlots)
+    .map(slot => Number(slot))
+    .filter(slot => available.has(slot))
+    .sort((a, b) => a - b);
+}
+
+function updateSshTrustProbeButtonState() {
+  const selected = selectedSshTrustRegistrySlots();
+  const hasNeeds = (sshTrustRegistryNeeds || []).length > 0;
+  const probe = document.getElementById('sshTrustProbeBtn');
+  const selectAll = document.getElementById('sshTrustSelectAllBtn');
+  const clear = document.getElementById('sshTrustClearSelectionBtn');
+  if (probe) {
+    probe.disabled = sshTrustRegistryBusy || selected.length === 0;
+    probe.textContent = selected.length
+      ? 'Verify ' + selected.length + ' selected node' + (selected.length === 1 ? '' : 's')
+      : 'Select nodes to verify';
+    probe.title = selected.length
+      ? 'Probe only the selected configured nodes and show their host keys for review'
+      : 'Select at least one configured node to verify';
+  }
+  if (selectAll) selectAll.disabled = sshTrustRegistryBusy || !hasNeeds;
+  if (clear) clear.disabled = sshTrustRegistryBusy || selected.length === 0;
+}
+
+function selectAllSshTrustRegistryNodes() {
+  sshTrustRegistrySelectedSlots = new Set((sshTrustRegistryNeeds || []).map(node => Number(node.slot)));
+  sshTrustRegistrySelectionInitialized = true;
+  renderSshTrustRegistryList(document.getElementById('sshTrustRegistryNeeds'), sshTrustRegistryNeeds, 'needs');
+  updateSshTrustProbeButtonState();
+}
+
+function clearSshTrustRegistryNodeSelection() {
+  sshTrustRegistrySelectedSlots.clear();
+  sshTrustRegistrySelectionInitialized = true;
+  renderSshTrustRegistryList(document.getElementById('sshTrustRegistryNeeds'), sshTrustRegistryNeeds, 'needs');
+  updateSshTrustProbeButtonState();
+}
+
+function trustRegistryStatusLabel(status) {
+  return ({
+    verified: 'verified',
+    expired: 'expired',
+    unverified: 'not yet verified',
+    endpoint_changed: 'endpoint changed',
+    trust_store_error: 'trust store error'
+  })[status] || status || 'unknown';
+}
+
+function renderSshTrustRegistryList(container, records, group) {
+  if (!container) return;
+  container.replaceChildren();
+  if (!records.length) {
+    const empty = document.createElement('div');
+    empty.className = 'ssh-trust-registry-empty';
+    empty.textContent = group === 'trusted' ? 'No trusted device records are stored.' : 'No configured devices are waiting for verification.';
+    container.appendChild(empty);
+    return;
+  }
+  records.forEach(node => {
+    const row = document.createElement('div');
+    row.className = 'ssh-trust-registry-row';
+    if (group === 'needs') row.classList.add(node.status === 'unverified' ? 'ssh-trust-registry-row--warning' : 'ssh-trust-registry-row--error');
+    const copy = document.createElement('div');
+    copy.className = 'ssh-trust-registry-copy';
+    const title = document.createElement('div');
+    title.className = 'ssh-trust-registry-title';
+    title.textContent = `Node ${node.slot} — ${trustRegistryStatusLabel(node.status)}`;
+    copy.appendChild(title);
+    const detail = document.createElement('div');
+    detail.className = 'ssh-trust-registry-detail';
+    detail.textContent = `${node.mac === 'none' ? 'MAC unavailable' : `MAC ${node.mac}`} • ${node.host}:${node.port}${node.algorithm ? ` • ${node.algorithm}` : ''}`;
+    copy.appendChild(detail);
+    if (node.fingerprint) {
+      const fingerprint = document.createElement('code');
+      fingerprint.className = 'ssh-trust-registry-fingerprint';
+      fingerprint.textContent = `Fingerprint: ${node.fingerprint}`;
+      copy.appendChild(fingerprint);
+    }
+    if (node.reason) {
+      const reason = document.createElement('div');
+      reason.className = 'ssh-trust-registry-detail';
+      reason.textContent = `Reason: ${node.reason}`;
+      copy.appendChild(reason);
+    }
+    row.appendChild(copy);
+    if (group === 'trusted') {
+      const revoke = document.createElement('button');
+      revoke.type = 'button';
+      revoke.className = 'button_gen ssh-trust-registry-revoke';
+      revoke.textContent = 'Revoke';
+      revoke.title = 'Remove this router-owned host-key pin so it can be verified again';
+      revoke.addEventListener('click', () => revokeSshTrustNode(node));
+      row.appendChild(revoke);
+    } else {
+      const select = document.createElement('label');
+      select.className = 'ssh-trust-registry-selection';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = sshTrustRegistrySelectedSlots.has(Number(node.slot));
+      checkbox.setAttribute('aria-label', 'Select Node ' + node.slot + ' for SSH host-key verification');
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) sshTrustRegistrySelectedSlots.add(Number(node.slot));
+        else sshTrustRegistrySelectedSlots.delete(Number(node.slot));
+        sshTrustRegistrySelectionInitialized = true;
+        updateSshTrustProbeButtonState();
+      });
+      const label = document.createElement('span');
+      label.textContent = 'Verify';
+      select.appendChild(checkbox);
+      select.appendChild(label);
+      row.appendChild(select);
+    }
+    container.appendChild(row);
+  });
+}
+
+function renderSshTrustRegistry(result) {
+  if (!result || typeof result !== 'object' || !Array.isArray(result.trusted) || !Array.isArray(result.needs_verification)) {
+    setSshTrustRegistryMessage('The router returned an invalid SSH trust status.', 'error');
+    return false;
+  }
+  const trusted = result.trusted.map(node => trustRegistryNodeForDisplay(node, 'trusted')).filter(Boolean);
+  const needs = result.needs_verification.map(node => trustRegistryNodeForDisplay(node, 'needs')).filter(Boolean);
+  if (trusted.length !== result.trusted.length || needs.length !== result.needs_verification.length) {
+    setSshTrustRegistryMessage('The router returned an unsafe or incomplete SSH trust list.', 'error');
+    return false;
+  }
+  const availableSlots = new Set(needs.map(node => Number(node.slot)));
+  if (!sshTrustRegistrySelectionInitialized) {
+    sshTrustRegistrySelectedSlots = new Set(availableSlots);
+    sshTrustRegistrySelectionInitialized = true;
+  } else {
+    sshTrustRegistrySelectedSlots = new Set(
+      Array.from(sshTrustRegistrySelectedSlots).filter(slot => availableSlots.has(Number(slot)))
+    );
+  }
+  sshTrustRegistryNeeds = needs;
+  renderSshTrustRegistryList(document.getElementById('sshTrustRegistryTrusted'), trusted, 'trusted');
+  renderSshTrustRegistryList(document.getElementById('sshTrustRegistryNeeds'), needs, 'needs');
+  updateSshTrustProbeButtonState();
+  setSshTrustRegistryMessage(`${trusted.length} trusted device record(s); ${needs.length} configured device(s) need verification.`, needs.length ? 'warning' : 'success');
+  return true;
+}
+
+function refreshSshTrustRegistry() {
+  const parentWin = window.parent;
+  if (!parentWin || typeof parentWin.MVM_trigger !== 'function') {
+    setSshTrustRegistryMessage('The router action handler is unavailable.', 'error');
+    return false;
+  }
+  const token = `${createMerVLANLoadingToken()}-s${++sshTrustRegistryRequestSequence}`;
+  sshTrustRegistryRequestToken = token;
+  setSshTrustRegistryBusy(true);
+  setSshTrustRegistryMessage('Loading router-owned SSH trust status…');
+  const submitted = parentWin.MVM_trigger('sshtruststatus_vlanmgr', {
+    progressToken: token,
+    loading: false,
+    skipRefresh: true,
+    waitSec: 0
+  });
+  if (submitted === false) {
+    if (sshTrustRegistryRequestToken === token) sshTrustRegistryRequestToken = '';
+    setSshTrustRegistryBusy(false);
+    setSshTrustRegistryMessage('The SSH trust status request was rejected or another action is running.', 'error');
+    return false;
+  }
+  const deadline = Date.now() + 30000;
+  const poll = async () => {
+    if (sshTrustRegistryRequestToken !== token) return;
+    if (Date.now() >= deadline) {
+      sshTrustRegistryRequestToken = '';
+      setSshTrustRegistryBusy(false);
+      setSshTrustRegistryMessage('Timed out waiting for the router SSH trust status.', 'error');
+      return;
+    }
+    try {
+      const response = await fetch(PATHS.ACTION_RESULT + '?_=' + Date.now(), {
+        cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
+      });
+      if (response.ok) {
+        const ack = await response.json();
+        if (ack && ack.request_token === token && ack.action === 'sshtruststatus_vlanmgr') {
+          sshTrustRegistryRequestToken = '';
+          setSshTrustRegistryBusy(false);
+          if (ack.status === 'ok' || ack.status === 'partial') {
+            renderSshTrustRegistry(ack.result);
+          } else {
+            setSshTrustRegistryMessage(String(ack.message || 'The router could not load SSH trust status.'), 'error');
+          }
+          return;
+        }
+      }
+    } catch (_) {}
+    window.setTimeout(poll, 700);
+  };
+  window.setTimeout(poll, 250);
+  return true;
+}
+
+function startSshTrustProbeFromModal() {
+  if (trustDecisionPending) return false;
+  if (typeof scheduleSshTrustProbe !== 'function') {
+    setSshTrustRegistryMessage('The SSH verification action is unavailable.', 'error');
+    return false;
+  }
+  const selectedNodeSlots = selectedSshTrustRegistrySlots();
+  if (!selectedNodeSlots.length) {
+    setSshTrustRegistryMessage('Select at least one configured node to verify.', 'warning');
+    return false;
+  }
+  const started = scheduleSshTrustProbe({ nodeSlots: selectedNodeSlots });
+  if (started && typeof started.then === 'function') {
+    started.then(ok => {
+      if (!ok) {
+        setSshTrustRegistryMessage(
+          sshTrustProbeLastStartReason || 'The SSH verification probe could not start. Finish the active action and try again.',
+          'warning'
+        );
+      }
+    });
+  }
+  return started;
+}
+
+function revokeSshTrustNode(node) {
+  const safeNode = trustRegistryNodeForDisplay(node, 'trusted');
+  if (!safeNode || (safeNode.status !== 'verified' && safeNode.status !== 'expired')) return false;
+  if (typeof window.confirm === 'function' && !window.confirm(`Revoke the SSH host-key pin for Node ${safeNode.slot}? The node must be verified again before the next SSH action.`)) return false;
+  const task = (typeof MerVLANLoading !== 'undefined')
+    ? MerVLANLoading.start('sshtrustrevoke_vlanmgr', 'Revoke SSH Trust', { progressBacked: true, timeoutMs: 90000 })
+    : null;
+  if (!task) {
+    setSshTrustRegistryMessage('The revocation could not start because another loading task is active.', 'error');
+    return false;
+  }
+  const parentWin = window.parent;
+  const payload = { vlanmgr_sshtrust_node_id: safeNode.nodeId };
+  const submitted = parentWin && typeof parentWin.MVM_triggerVerified === 'function'
+    ? parentWin.MVM_triggerVerified('sshtrustrevoke_vlanmgr', task.token, payload, { loading: false, skipRefresh: true, waitSec: 0 })
+    : false;
+  if (submitted === false) {
+    task.fail('The SSH trust revocation request was rejected.');
+    return false;
+  }
+  return true;
+}
+
 // Update the showSSHKeyModal function
 function showSSHKeyModal() {
   ensureConfigViewForModal();
@@ -7189,14 +8804,17 @@ function showSSHKeyModal() {
 
   const overlay = document.getElementById('leftPanelOverlay');
   const showModal = () => {
-  modal.style.display = 'block';
+  modal.classList.add('ssh-key-modal--open');
+  modal.style.display = 'flex';
   anchorModalToForm(modal);
+  selectSshModalTab('key');
   if (overlay) {
     overlay.classList.add('is-active');
     overlay.style.display = 'block';
     overlay.style.pointerEvents = 'auto';
   }
   syncInfoLatchVisibility();
+  window.setTimeout(() => refreshSshTrustRegistry(), 0);
   };
 
   fetch('.ssh/vlan_manager.json?' + Date.now())
@@ -8454,13 +10072,12 @@ function applyAdvancedOverride() {
   syncAdvancedOverrideToCache();
 
   const autoRefresh = document.getElementById("advOverrideAutoRefreshHw");
-  const autoSync = document.getElementById("advOverrideAutoSyncNodes");
   const wantHwProbe = !!(autoRefresh && autoRefresh.checked);
-  const wantAutoSync = !!(autoSync && autoSync.checked);
+  const autoSyncVal = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['AUTO_SYNC_SETTINGS'];
+  const wantAutoSync = autoSyncVal == null || autoSyncVal === '' || autoSyncVal === '1' || autoSyncVal === 'true' || autoSyncVal === 'yes';
 
   // Reset transient follow-up options (never persisted).
   if (autoRefresh) autoRefresh.checked = false;
-  if (autoSync) autoSync.checked = false;
   toggleOverrideBtnText();
 
   if (wantHwProbe) {
@@ -8472,23 +10089,45 @@ function applyAdvancedOverride() {
   }
 }
 
-async function autoSyncAdvancedOverrideNodes() {
-  const hasNodes = await checkForConfiguredNodes();
-  if (!hasNodes) {
-    appendCliText("Auto-sync skipped: no nodes are configured. Run Sync Nodes later after adding a node.\n", { scroll: "force" });
-    return false;
+async function waitForMerVLANLoadingIdle(timeoutMs = 10000) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 10000);
+  while (typeof MerVLANLoading !== 'undefined' && MerVLANLoading.active && Date.now() < deadline) {
+    await new Promise(resolve => window.setTimeout(resolve, 100));
+  }
+  return typeof MerVLANLoading === 'undefined' || !MerVLANLoading.active;
+}
+
+async function queueAutomaticNodeSettingsSync(options = {}) {
+  if (options.checkNodes !== false) {
+    const hasNodes = await checkForConfiguredNodes();
+    if (!hasNodes) {
+      if (options.announce !== false) {
+        appendCliText("Auto-sync skipped: no nodes are configured. Run Sync Nodes later after adding a node.\n", { scroll: "force" });
+      }
+      return false;
+    }
   }
 
-  // The APMO task closes shortly after completion. Let the shared loading
-  // controller release its panel before starting the normal Sync Nodes task.
+  // The preceding save/APMO task must close before the separate settings-only
+  // action owns preflight, trust review, and terminal progress.
   await new Promise(resolve => window.setTimeout(resolve, 550));
-  appendCliText("Auto-syncing node overrides...\n", { scroll: "force" });
-  return queueServiceAction('sync_vlanmgr', {
-    description: 'Sync Node Overrides',
+  if (!(await waitForMerVLANLoadingIdle())) {
+    appendCliText("Node settings sync is waiting for the active MerVLAN action to finish.\n", { scroll: "force" });
+    return false;
+  }
+  if (options.announce !== false) {
+    appendCliText("Syncing settings to node(s)...\n", { scroll: "force" });
+  }
+  return queueServiceAction('syncsettings_vlanmgr', {
+    description: options.description || 'Syncing settings to node(s)...',
     cooldownMs: 8000,
     loadingOptions: { progressBacked: true },
     passProgressToken: true
   });
+}
+
+async function autoSyncAdvancedOverrideNodes() {
+  return queueAutomaticNodeSettingsSync();
 }
 
 async function applyOverrideWithHwProbe(options = {}) {
@@ -9285,6 +10924,64 @@ function fetchSSHKey() {
         });
 }
 
+let sshTrustProbeScheduled = false;
+
+function normalizeSshTrustProbeNodeSlots(nodeSlots) {
+  if (nodeSlots == null) return '';
+  const raw = Array.isArray(nodeSlots) ? nodeSlots.join('.') : String(nodeSlots);
+  if (!/^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/.test(raw)) return null;
+  const seen = new Set();
+  const slots = raw.split('.').map(value => Number(value));
+  for (const slot of slots) {
+    if (!Number.isInteger(slot) || slot < 1 || slot > MAX_NODES || seen.has(slot)) return null;
+    seen.add(slot);
+  }
+  return slots.sort((a, b) => a - b).join('.');
+}
+
+async function scheduleSshTrustProbe(options = {}) {
+  sshTrustProbeLastStartReason = '';
+  if (sshTrustProbeScheduled) {
+    sshTrustProbeLastStartReason = 'An SSH verification probe is already starting. Wait for its result.';
+    return false;
+  }
+  if (trustDecisionPending) {
+    sshTrustProbeLastStartReason = 'Resolve the current SSH trust decision before starting another verification probe.';
+    return false;
+  }
+  if (typeof MerVLANLoading !== 'undefined' && MerVLANLoading.active) {
+    sshTrustProbeLastStartReason = 'Finish the active MerVLAN action before starting another SSH verification probe.';
+    return false;
+  }
+  const selectedNodeSlots = normalizeSshTrustProbeNodeSlots(options.nodeSlots);
+  if (selectedNodeSlots === null) {
+    sshTrustProbeLastStartReason = 'The selected node list is invalid. Refresh Trusted devices and try again.';
+    return false;
+  }
+  const parentWin = window.parent;
+  if (!parentWin || typeof parentWin.MVM_trigger !== 'function' || typeof MerVLANLoading === 'undefined') {
+    sshTrustProbeLastStartReason = 'The router action handler is unavailable.';
+    return false;
+  }
+  const task = MerVLANLoading.start('sshtrustprobe_vlanmgr', 'Verify SSH Host Keys', { progressBacked: true, timeoutMs: 90000 });
+  if (!task) {
+    sshTrustProbeLastStartReason = 'Another MerVLAN action owns the loading state.';
+    return false;
+  }
+  sshTrustProbeScheduled = true;
+  const parentOpts = { progressToken: task.token, loading: false, skipRefresh: true, waitSec: 0 };
+  if (selectedNodeSlots) parentOpts.nodeSlots = selectedNodeSlots;
+  const submitted = parentWin.MVM_trigger('sshtrustprobe_vlanmgr', parentOpts);
+  if (submitted === false) {
+    task.fail('The SSH trust probe could not be submitted.');
+    sshTrustProbeScheduled = false;
+    sshTrustProbeLastStartReason = 'The router rejected the SSH verification request.';
+    return false;
+  }
+  window.setTimeout(() => { sshTrustProbeScheduled = false; }, 120000);
+  return true;
+}
+
 
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -9314,7 +11011,7 @@ function isManagedNodeKey(k) {
 
 function extractManagedKeys(flat) {
   const out = {};
-  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
+  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
   Object.keys(flat || {}).forEach(k => {
     if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
   });
@@ -9341,7 +11038,7 @@ function extractManagedKeysForScope(flat, scope) {
   }
 
   // "normal": all managed keys except OVERRIDE_* and ClientMeta
-  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(all).forEach(k => {
     if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
     let m;
@@ -9501,6 +11198,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
         appendCliText('Save error: ' + error + '\n', { scroll: 'force' });
         return { ok: false, changed: false, error };
       }
+      const saveRequestToken = createActionRequestToken();
 
       const expectedManaged = extractManagedKeysForScope(normalizeToFlatSettings(newObj), 'normal');
       const useMerVLANLoading = loadingOverride !== false && lockName === 'save' && reloadAfterSave &&
@@ -9515,11 +11213,13 @@ async function uploadSettingsAndSave(btn, options = {}) {
         await new Promise(resolve => window.setTimeout(resolve, 300));
       }
       appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, { scroll: 'force' });
-      const submitted = loadingTask
-        ? parentWin.MVM_save(merlinPayload, { loading: false, skipRefresh: true, waitSec: 0 })
-        : parentWin.MVM_save(merlinPayload, loadingOverride === false
+      const saveOptions = loadingTask
+        ? { loading: false, skipRefresh: true, waitSec: 0 }
+        : (loadingOverride === false
             ? { loading: false, skipRefresh: true, waitSec: 0 }
             : { skipRefresh: true, waitSec: 0 });
+      saveOptions.progressToken = saveRequestToken;
+      const submitted = parentWin.MVM_save(merlinPayload, saveOptions);
       if (submitted === false) {
         const error = 'The settings save request was rejected or deduplicated.';
         if (loadingTask) loadingTask.fail(error);
@@ -9553,9 +11253,58 @@ async function uploadSettingsAndSave(btn, options = {}) {
         return { ok: false, changed: true, error };
       }
 
-      if (loadingTask) loadingTask.complete('Saved settings loaded');
+      let nodeSyncStatus = 'unknown';
+      let saveCompletionMessage = 'Saved settings loaded';
+      if (saveRequestToken) {
+        if (loadingTask) loadingTask.phase('Confirming node settings synchronization...', 90);
+        const saveAck = await waitForVerifiedActionResult(
+          saveRequestToken,
+          'save_vlanmgr',
+          { local_saved: '1' },
+          Math.max(timeoutMs, 120000)
+        );
+        if (saveAck.status === 'partial') {
+          nodeSyncStatus = 'failed';
+          saveCompletionMessage = 'Settings saved locally; node sync failed';
+          appendCliText('Settings saved locally, but node settings synchronization failed: ' +
+            (saveAck.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
+        } else if (!saveAck.ok) {
+          nodeSyncStatus = 'unknown';
+          saveCompletionMessage = 'Settings saved locally; node sync status unavailable';
+          appendCliText('Settings saved locally, but node synchronization could not be confirmed: ' +
+            (saveAck.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
+        } else {
+          nodeSyncStatus = saveAck.result && saveAck.result.node_sync
+            ? String(saveAck.result.node_sync) : 'ok';
+        }
+      }
+      if (nodeSyncStatus === 'pending') {
+        saveCompletionMessage = 'Settings saved locally; node synchronization queued';
+      }
+      if (loadingTask) loadingTask.complete(saveCompletionMessage);
       appendCliText('Save verification complete.\n', { scroll: 'force' });
-      return { ok: true, changed: true };
+
+      // Local persistence is terminal before node mutation begins.  Queue a
+      // separate settings-only action so its own loading task can pause for
+      // SSH trust review and resume the same settings-only action.
+      if (nodeSyncStatus === 'pending') {
+        appendCliText('Starting node settings synchronization...\n', { scroll: 'force' });
+        // The backend already confirmed configured nodes and node-relevant
+        // changes before returning `pending`. Do not let a stale/partial UI
+        // cache suppress the authoritative follow-up action; its backend
+        // preflight remains the final guard.
+        const queued = await queueAutomaticNodeSettingsSync({ announce: false, checkNodes: false });
+        if (queued === false) {
+          nodeSyncStatus = 'failed';
+          saveCompletionMessage = 'Settings saved locally; node synchronization could not start';
+          appendCliText(saveCompletionMessage + '.\n', { scroll: 'force' });
+        } else {
+          nodeSyncStatus = 'queued';
+          saveCompletionMessage = 'Settings saved locally; node synchronization queued';
+          appendCliText(saveCompletionMessage + '.\n', { scroll: 'force' });
+        }
+      }
+      return { ok: true, changed: true, nodeSyncStatus, nodeSyncMessage: saveCompletionMessage };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       if (loadingTask) loadingTask.fail(message);

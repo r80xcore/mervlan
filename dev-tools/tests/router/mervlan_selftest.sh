@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.2"                #
+#            - File: mervlan_selftest.sh || version="0.72.3"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -108,6 +108,17 @@ esac
 shift 2
 op="${1:-}"
 shift || :
+if [ "$op" = "-L" ] && [ "${1:-}" = "--Lx" ]; then
+  for file in "$state/chains/"*; do
+    [ -f "$file" ] || continue
+    list_chain=${file##*/}
+    printf 'ebtables -t filter -N %s\n' "$list_chain"
+    while IFS= read -r rule || [ -n "$rule" ]; do
+      [ -n "$rule" ] && printf 'ebtables -t filter -A %s %s\n' "$list_chain" "$rule"
+    done < "$file"
+  done
+  exit 0
+fi
 chain="${1:-}"
 case "$chain" in ''|*[!A-Za-z0-9_-]*) exit 64 ;; esac
 shift || :
@@ -382,6 +393,90 @@ test_dhcp_rule_exactness() {
   assert_ok "concurrent enforcement leaves one exact rule set" merv_dhcp_hold_rules_present
   MERV_DHCP_HOLD_PROC_ROOT="$_tdre_proc_root"
   export MERV_DHCP_HOLD_PROC_ROOT
+}
+
+test_l2_guard_dump_contract() {
+  _tlgd_human='Bridge chain: MERV_MAC, entries: 1, policy: ACCEPT
+-s 02:00:00:00:00:01 --logical-in br0 -j DROP
+Bridge chain: MERV_QT, entries: 1, policy: ACCEPT
+-i wl0.2 --logical-in br0 -j DROP
+Bridge chain: FORWARD, entries: 2, policy: ACCEPT
+-j MERV_MAC
+-j MERV_QT
+Bridge chain: INPUT, entries: 2, policy: ACCEPT
+-j MERV_MAC
+-j MERV_QT'
+  _tlgd_restore='ebtables -t filter -N MERV_MAC
+ebtables -t filter -N MERV_QT
+ebtables -t filter -A MERV_MAC -s 02:00:00:00:00:01 --logical-in br0 -j DROP
+ebtables -t filter -A MERV_QT -i wl0.2 --logical-in br0 -j DROP
+ebtables -t filter -A FORWARD -j MERV_MAC
+ebtables -t filter -A FORWARD -j MERV_QT
+ebtables -t filter -A INPUT -j MERV_MAC
+ebtables -t filter -A INPUT -j MERV_QT'
+  _tlgd_ok=1
+
+  for _tlgd_dump in "$_tlgd_human" "$_tlgd_restore"; do
+    if ! merv_ebtables_verify_parent_jumps "$_tlgd_dump" MERV_MAC ||
+       ! merv_ebtables_verify_parent_jumps "$_tlgd_dump" MERV_QT ||
+       [ "$(merv_ebtables_rule_count_exact "$_tlgd_dump" MERV_MAC '-s 02:00:00:00:00:01 --logical-in br0 -j DROP')" != 1 ] ||
+       [ "$(merv_ebtables_rule_count_exact "$_tlgd_dump" MERV_QT '-i wl0.2 --logical-in br0 -j DROP')" != 1 ] ||
+       [ "$(merv_ebtables_chain_rule_count "$_tlgd_dump" MERV_MAC)" != 1 ] ||
+       [ "$(merv_ebtables_chain_rule_count "$_tlgd_dump" MERV_QT)" != 1 ]; then
+      _tlgd_ok=0
+    fi
+  done
+
+  # ASUSWRT may print a valid MAC with one-digit octets (08:... as 8:...).
+  # The canonical verifier must still match it to the padded database form.
+  _tlgd_short_human='Bridge chain: MERV_MAC, entries: 1, policy: ACCEPT
+-s 8:95:42:19:53:b2 --logical-in br0 -j DROP'
+  _tlgd_short_restore='ebtables -t filter -N MERV_MAC
+ebtables -t filter -A MERV_MAC -s 8:95:42:19:53:b2 --logical-in br0 -j DROP'
+  for _tlgd_dump in "$_tlgd_short_human" "$_tlgd_short_restore"; do
+    [ "$(merv_ebtables_rule_count_exact "$_tlgd_dump" MERV_MAC '-s 08:95:42:19:53:b2 --logical-in br0 -j DROP')" = 1 ] ||
+      _tlgd_ok=0
+  done
+
+  if [ "$_tlgd_ok" = 1 ]; then
+    pass "L2 guard exact verifier accepts firmware MAC formatting in both ebtables dump styles"
+  else
+    fail "L2 guard exact verifier accepts firmware MAC formatting in both ebtables dump styles"
+  fi
+  return "$_tlgd_ok"
+}
+
+test_mac_shield_lifecycle() {
+  selftest_reset || return 1
+  _tms_old_active="$MERV_MAC_DB_ACTIVE"
+  _tms_old_jffs="$MERV_MAC_DB_JFFS"
+  _tms_old_override="$MERV_MAC_OVERRIDE_DB"
+  _tms_old_dry="${DRY_RUN:-no}"
+  _tms_db="$SELFTEST_ROOT/mac-shield.db"
+  MERV_MAC_DB_ACTIVE="$_tms_db"
+  MERV_MAC_DB_JFFS="$SELFTEST_ROOT/mac-shield.jffs.db"
+  MERV_MAC_OVERRIDE_DB="$SELFTEST_ROOT/mac-shield.override.db"
+  DRY_RUN=no
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  printf '1 02:00:00:00:00:01 wl0.2 187\n' > "$_tms_db" || return 1
+
+  # Keep the fake ebtables command scoped to this test. The strict lifecycle
+  # must create a missing chain before it tries to flush it.
+  ebtables() { "$SELFTEST_FAKE_BIN" "$@"; }
+  if ebt_mac_shield_init_and_apply "$_tms_db" && merv_mac_shield_verify_exact; then
+    pass "MAC shield initializes a missing owner chain before flushing and verifies exactly"
+    _tms_rc=0
+  else
+    fail "MAC shield initializes a missing owner chain before flushing and verifies exactly"
+    _tms_rc=1
+  fi
+  unset -f ebtables 2>/dev/null || :
+  MERV_MAC_DB_ACTIVE="$_tms_old_active"
+  MERV_MAC_DB_JFFS="$_tms_old_jffs"
+  MERV_MAC_OVERRIDE_DB="$_tms_old_override"
+  DRY_RUN="$_tms_old_dry"
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  return "$_tms_rc"
 }
 
 test_process_identity() {
@@ -1059,7 +1154,8 @@ test_post_apply() {
     pass "node collection uses the synced local observation backend" ||
     fail "node collection uses the synced local observation backend"
   if [ -f "$MERV_BASE/functions/collect_clients.sh" ]; then
-    grep -q 'post_apply_worker.sh run-wait' "$MERV_BASE/functions/collect_clients.sh" &&
+    { grep -Fq 'post_apply_worker.sh" run-wait' "$MERV_BASE/functions/collect_clients.sh" ||
+      grep -Fq "post_apply_worker.sh' run-wait" "$MERV_BASE/functions/collect_clients.sh"; } &&
       pass "cluster collection waits for the node coordinator generation" ||
       fail "cluster collection waits for the node coordinator generation"
   fi
@@ -1167,6 +1263,33 @@ test_observation_concurrency() {
     fail "reclaimed worker completes pending generation"
 }
 
+test_observation_resume_progress() {
+  selftest_reset || return 1
+  observation_reset || return 1
+  _torp_previous_root="${MERV_PROGRESS_ROOT:-}"
+  _torp_token="resume-progress-contract"
+  MERV_PROGRESS_ROOT="$SELFTEST_ROOT/resume-progress"
+  MERV_OBS_RESUME_PROGRESS_TOKEN="$_torp_token"
+  export MERV_PROGRESS_ROOT MERV_OBS_RESUME_PROGRESS_TOKEN
+  case "$MERV_PROGRESS_ROOT" in "$SELFTEST_ROOT"/*) ;; *) return 1 ;; esac
+  rm -rf "$MERV_PROGRESS_ROOT" 2>/dev/null || return 1
+  observation_worker request snapshot collect >/dev/null || return 1
+  assert_ok "resume observation worker drains queued work" observation_worker run
+  _torp_progress="$MERV_PROGRESS_ROOT/$_torp_token.json"
+  if [ -s "$_torp_progress" ] &&
+     grep -Fq '"action":"sshtrustresume_vlanmgr"' "$_torp_progress" &&
+     grep -Fq '"phase":"collect"' "$_torp_progress" &&
+     grep -Fq '"message":"Refreshing client inventory..."' "$_torp_progress"; then
+    pass "resume collection relays coordinator phases to its loading task"
+  else
+    fail "resume collection relays coordinator phases to its loading task"
+  fi
+  rm -rf "$MERV_PROGRESS_ROOT" 2>/dev/null || return 1
+  MERV_PROGRESS_ROOT="$_torp_previous_root"
+  unset MERV_OBS_RESUME_PROGRESS_TOKEN
+  export MERV_PROGRESS_ROOT
+}
+
 test_atomic_publication() {
   _tap_file="$MERV_BASE/functions/collect_clients.sh"
   if [ -f "$_tap_file" ]; then
@@ -1209,9 +1332,10 @@ test_client_refresh_contract() {
     pass "non-cron collection callers remain enabled" ||
     fail "non-cron collection callers remain enabled"
 
-  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "15"' "$_tcr_settings" &&
-    grep -q 'HTML_CLIENT_REFRESH_MINUTES: "15"' "$_tcr_html" &&
+  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "30"' "$_tcr_settings" &&
+    grep -q 'HTML_CLIENT_REFRESH_MINUTES: "30"' "$_tcr_html" &&
     grep -q 'clientAutoRefreshCooldownMs' "$_tcr_html" &&
+    grep -q 'clientGeneratedMs(snapshot)' "$_tcr_html" &&
     grep -q 'CLIENTS_AUTO_REFRESH_MINUTES_MAX = 1440' "$_tcr_html" &&
     pass "HTML client refresh setting has default and bounded parser" ||
     fail "HTML client refresh setting has default and bounded parser"
@@ -1328,6 +1452,10 @@ test_node_job_ssh_temp() {
   MERV_SSH_RETRIES=1
   MERV_SSH_TEST_PATHS="$_tnst_root/paths"
   merv_ssh_precheck() { return 0; }
+  # The production wrapper now requires a verified host-key record before it
+  # creates the client known_hosts file.  This test replaces that boundary
+  # because it exercises only worker-local stderr allocation and cleanup.
+  merv_ssh_prepare_known_host() { return 0; }
   get_node_ssh_port() { printf '22\n'; }
   get_node_ssh_user() { printf 'admin\n'; }
   _merv_timeout_run() { _tnst_sec="$1"; shift; "$@"; }
@@ -1543,6 +1671,7 @@ test_node_worker_timeout() {
 
 test_execute_node_runner_contract() {
   _tener_file="$MERV_BASE/functions/execute_nodes.sh"
+  _tener_verify=$(sed -n '/^verify_settings_conf_on_node() {/,/^sync_settings_conf_for_node() {/p' "$_tener_file" 2>/dev/null)
   grep -q 'MERV_EXEC_NODES_LOCK_STALE_SEC' "$_tener_file" &&
     grep -q 'mervlan_node_runner.sh' "$_tener_file" &&
     grep -q 'execute_status_valid' "$_tener_file" &&
@@ -1560,6 +1689,13 @@ test_execute_node_runner_contract() {
     ! grep -q '/tmp/mervlan_tmp/results/node_complete' "$_tener_file" &&
     pass "execute uses run-specific detached runner status" ||
     fail "execute uses run-specific detached runner status"
+  if printf '%s\n' "$_tener_verify" | grep -Fq 'type sha256sum >/dev/null 2>&1' &&
+     printf '%s\n' "$_tener_verify" | grep -Fq 'type md5sum >/dev/null 2>&1' &&
+     ! printf '%s\n' "$_tener_verify" | grep -Fq 'command -v'; then
+    pass "node Apply exact settings verification avoids the unavailable command builtin"
+  else
+    fail "node Apply exact settings verification avoids the unavailable command builtin"
+  fi
 }
 
 sync_job_test_handler() {
@@ -1597,6 +1733,8 @@ test_sync_node_pool() {
 
 test_sync_node_parallel_contract() {
   _tsnc_file="$MERV_BASE/functions/sync_nodes.sh"
+  _tsnc_verify=$(sed -n '/^sync_verify_batch_manifest()/,/^verify_batch_on_node()/p' "$_tsnc_file" 2>/dev/null)
+  _tsnc_worker=$(sed -n '/^sync_node_worker()/,/^sync_copy_worker_log_for_view()/p' "$_tsnc_file" 2>/dev/null)
   grep -q 'sync_node_worker()' "$_tsnc_file" &&
     grep -q 'mnj_nodes_validate' "$_tsnc_file" &&
     grep -q 'mnj_pool_run.*sync' "$_tsnc_file" &&
@@ -1610,6 +1748,26 @@ test_sync_node_parallel_contract() {
     ! grep -q 'for d in /jffs/addons/mervlan_backups/.mervlan.new' "$_tsnc_file" &&
     pass "sync uses isolated bounded staged workers" ||
     fail "sync uses isolated bounded staged workers"
+
+  if printf '%s\n' "$_tsnc_verify" | grep -Fq 'merv_ssh_stream_stdin "$_vbm_id" "$_vbm_ip" "$_vbm_cmd"' &&
+     printf '%s\n' "$_tsnc_verify" | grep -Fq '.sync-verify.${_vbm_tag}.manifest' &&
+     printf '%s\n' "$_tsnc_verify" | grep -Fq 'SYNC_BATCH_EXACT_OK|' &&
+     printf '%s\n' "$_tsnc_verify" | grep -Fq 'SYNC_BATCH_EXACT_FAIL|' &&
+     ! printf '%s\n' "$_tsnc_verify" | grep -Fq 'verify_file_on_node'; then
+    pass "sync streams exact staged-file verification through one bounded SSH command"
+  else
+    fail "sync streams exact staged-file verification through one bounded SSH command"
+  fi
+
+  if grep -Fq 'prepare_remote_sync_stage()' "$_tsnc_file" &&
+     grep -Fq 'MERV_SSH_SKIP_PING=1' "$_tsnc_file" &&
+     grep -Fq 'SYNC_STAGE_DIRS_PREPARED=1' "$_tsnc_file" &&
+     printf '%s\n' "$_tsnc_worker" | grep -Fq 'pull_node_hardware "$node_ip" "$node_id" "$SYNC_NODE_ACTIVATION_OUTPUT"' &&
+     grep -Fq 'SYNC_NODE_ACTIVATION_OUTPUT="$_asn_result"' "$_tsnc_file"; then
+    pass "sync combines staging and hardware metadata in bounded verified commands"
+  else
+    fail "sync combines staging and hardware metadata in bounded verified commands"
+  fi
 }
 
 test_apmo_completion_contract() {
@@ -1728,6 +1886,305 @@ test_failure_propagation_contract() {
   return "$_tfpc_ok"
 }
 
+test_ssh_outbound_contract() {
+  _tsoc_ssh="$MERV_BASE/settings/lib_ssh.sh"
+  _tsoc_probe="$MERV_BASE/functions/ssh_hostkey_probe.sh"
+  _tsoc_mac="$MERV_BASE/settings/mac_shield_snapshot.sh"
+  _tsoc_ok=1
+
+  # Commands and both stream variants must share the same verified precheck and
+  # private known_hosts hand-off.  This is the transport boundary for every
+  # router-to-node action; individual action code must never call dbclient.
+  if grep -Fq 'merv_ssh_require_verified_node' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_precheck "$_node_num" "$_node_ip"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_prepare_known_host "$_node_num" "$_node_ip" "$_port" "$_node_mac"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_precheck "$_mssf_node" "$_mssf_ip"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_prepare_known_host "$_mssf_node" "$_mssf_ip" "$_mssf_port" "$_mssf_mac"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_precheck "$_msss_node" "$_msss_ip"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_prepare_known_host "$_msss_node" "$_msss_ip" "$_msss_port" "$_msss_mac"' "$_tsoc_ssh" &&
+     grep -Fq 'MERV_SSH_KNOWN_HOME=' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_release_known_host' "$_tsoc_ssh"; then
+    pass "all outbound SSH transports require a pinned host-key precheck"
+  else
+    fail "all outbound SSH transports require a pinned host-key precheck"
+    _tsoc_ok=0
+  fi
+
+  # The only runtime client references are the common wrapper, the isolated
+  # first-contact probe, and MAC Shield's capability check.  A new action that
+  # invokes the client directly must make this test fail until it is routed
+  # through lib_ssh.sh instead.
+  _tsoc_client_refs=$(grep -rl '\${MERV_SSH_CLIENT:-dbclient}' \
+    "$MERV_BASE/functions" "$MERV_BASE/settings" 2>/dev/null || :)
+  _tsoc_bad_refs=""
+  for _tsoc_file in $_tsoc_client_refs; do
+    case "$_tsoc_file" in
+      "$_tsoc_ssh"|"$_tsoc_probe"|"$_tsoc_mac") ;;
+      *) _tsoc_bad_refs="$_tsoc_bad_refs ${_tsoc_file##*/}" ;;
+    esac
+  done
+  _tsoc_literal=$(grep -R -n -E '^[[:space:]]*(if[[:space:]]+|then[[:space:]]+|else[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)?dbclient[[:space:]]' \
+    "$MERV_BASE/functions" "$MERV_BASE/settings" 2>/dev/null || :)
+  if [ -z "$_tsoc_bad_refs" ] && [ -z "$_tsoc_literal" ] &&
+     grep -Fq 'merv_has "${MERV_SSH_CLIENT:-dbclient}"' "$_tsoc_mac"; then
+    pass "all action paths use the shared SSH client wrapper"
+  else
+    fail "all action paths use the shared SSH client wrapper"
+    _tsoc_ok=0
+  fi
+
+  # -y is confined to a no-command, temporary-home host-key discovery probe;
+  # normal action traffic consumes the pin through lib_ssh.sh.
+  if grep -Fq '"$_shkp_client_path" -y -N -p' "$_tsoc_probe" &&
+     ! grep -E -q '(^|[[:space:]])-y([[:space:]]|$)' "$_tsoc_ssh"; then
+    pass "first-contact SSH acceptance is isolated from action traffic"
+  else
+    fail "first-contact SSH acceptance is isolated from action traffic"
+    _tsoc_ok=0
+  fi
+
+  _tsoc_preflight_ok=1
+  for _tsoc_check in \
+    'functions/collect_clients.sh|merv_ssh_preflight_node_set' \
+    'functions/execute_nodes.sh|merv_ssh_preflight_node_set' \
+    'functions/sync_nodes.sh|merv_ssh_preflight_node_set' \
+    'functions/mervlan_boot.sh|merv_ssh_preflight_configured_nodes' \
+    'functions/mervlan_backup.sh|merv_ssh_preflight_settings_file' \
+    'functions/update_mervlan.sh|merv_ssh_preflight_settings_file' \
+    'uninstall.sh|merv_ssh_preflight_node_set' \
+    'settings/mac_shield_snapshot.sh|merv_ssh_preflight_node_lines'; do
+    _tsoc_path=${_tsoc_check%%|*}
+    _tsoc_need=${_tsoc_check#*|}
+    if [ ! -f "$MERV_BASE/$_tsoc_path" ] || ! grep -Fq "$_tsoc_need" "$MERV_BASE/$_tsoc_path"; then
+      _tsoc_preflight_ok=0
+    fi
+  done
+  if [ "$_tsoc_preflight_ok" = 1 ]; then
+    pass "every node-changing SSH action preflights the complete configured set"
+  else
+    fail "every node-changing SSH action preflights the complete configured set"
+    _tsoc_ok=0
+  fi
+
+  _tsoc_target_settings="$SELFTEST_ROOT/ssh-preflight-target.json"
+  {
+    printf '%s\n' '{'
+    printf '%s\n' '  "NODE1": "192.0.2.1"'
+    printf '%s\n' '}'
+  } > "$_tsoc_target_settings" || return 1
+  if (
+    unset LIB_SSH_TRUST_LOADED
+    MERV_SSH_TRUST_TEST_MODE=1
+    export MERV_SSH_TRUST_TEST_MODE
+    . "$MERV_BASE/settings/lib_json.sh" || exit 1
+    . "$MERV_BASE/settings/lib_ssh_trust.sh" || exit 1
+    # var_settings.sh deliberately makes this read-only on the router.  The
+    # staged preflight must pass its file explicitly instead of rebinding it.
+    readonly SETTINGS_FILE
+    merv_ssh_preflight_node_lines() {
+      [ "$1" = '1 192.0.2.1' ] && [ "$2" = "$_tsoc_target_settings" ]
+    }
+    merv_ssh_preflight_settings_file "$_tsoc_target_settings"
+  ); then
+    pass "staged SSH preflight works when SETTINGS_FILE is read-only"
+  else
+    fail "staged SSH preflight works when SETTINGS_FILE is read-only"
+    _tsoc_ok=0
+  fi
+  rm -f "$_tsoc_target_settings" 2>/dev/null || return 1
+
+  return "$_tsoc_ok"
+}
+
+test_ssh_trust_contract() {
+  _tst_ui="$MERV_BASE/www/index.html"
+  _tst_handler="$MERV_BASE/functions/service-event-handler.sh"
+  _tst_action="$MERV_BASE/functions/ssh_trust_action.sh"
+  _tst_ack="$MERV_BASE/settings/lib_action_ack.sh"
+  _tst_parent="$MERV_BASE/mervlan.asp"
+  _tst_collect="$MERV_BASE/functions/collect_clients.sh"
+  _tst_worker="$MERV_BASE/functions/post_apply_worker.sh"
+  _tst_sync="$MERV_BASE/functions/sync_nodes.sh"
+  _tst_ssh="$MERV_BASE/settings/lib_ssh.sh"
+  _tst_boot="$MERV_BASE/functions/mervlan_boot.sh"
+  _tst_lib="$MERV_BASE/settings/lib_mervqt.sh"
+  _tst_ok=1
+
+  if grep -q 'sshTrustRegistryTab' "$_tst_ui" &&
+     grep -q 'needs_verification' "$_tst_ui" &&
+     grep -q 'revokeSshTrustNode' "$_tst_ui" &&
+     grep -q 'sshTrustRegistrySelectedSlots' "$_tst_ui" &&
+     grep -q 'Verify selected nodes' "$_tst_ui" &&
+     grep -Fq 'openSshTrustDecision' "$_tst_ui" &&
+     grep -Fq 'sshTrustOverlay' "$_tst_ui" &&
+     grep -Fq 'sshTrustPausedTray' "$_tst_ui" &&
+     grep -Fq 'sshTrustModalCountdown' "$_tst_ui" &&
+     grep -Fq 'MerVLAN loading paused' "$_tst_ui" &&
+     grep -Fq 'submitSshTrustAbort' "$_tst_ui" &&
+     grep -Fq 'pauseForSshTrust' "$_tst_ui" &&
+     grep -Fq 'waitsForSshTrustAck' "$_tst_ui" &&
+     grep -Fq 'sshTrustDecisionSelectedChallengeIds' "$_tst_ui" &&
+     grep -Fq 'Auto-abort in' "$_tst_ui" &&
+     grep -Fq '#sshTrustModal {' "$_tst_ui" &&
+     grep -Fq 'max-height: calc(100vh - 28px);' "$_tst_ui" &&
+     grep -Fq 'formPane.appendChild(overlay)' "$_tst_ui" &&
+     grep -Fq 'form-box--main.ssid-assign-view .ssh-trust-overlay' "$_tst_ui" &&
+     grep -Fq 'anchorModalToForm(tray);' "$_tst_ui" &&
+     grep -Fq 'anchorModalToForm(modal);' "$_tst_ui" &&
+     grep -Fq 'ssh-trust-paused-tray.modal--anchored' "$_tst_ui" &&
+     ! grep -Fq "submitSshTrustDecision('reject')" "$_tst_ui" &&
+     ! grep -Fq 'localSshKeyPairReady' "$_tst_ui"; then
+    pass "SSH UI scopes trust review to the addon, supports Assign view, and exposes selected trust, pause, countdown, abort, and revoke controls"
+  else
+    fail "SSH UI exposes discovery, selected trust, pause, countdown, abort, and revoke controls"
+    _tst_ok=0
+  fi
+
+  if grep -q 'sshtruststatus_vlanmgr_pgt_\*' "$_tst_handler" &&
+     grep -q 'get_ssh_trust_probe_node_slots' "$_tst_handler" &&
+     grep -q 'sshtrustprobe_vlanmgr_pgt_\*_nsl_\*' "$_tst_handler" &&
+     grep -Fq "tr '.' ' '" "$_tst_handler" &&
+     grep -Fq 'MERV_SSH_TRUST_NODE_SLOTS' "$_tst_handler" &&
+     grep -q 'sshtrustrevoke_vlanmgr_vrt_\*' "$_tst_handler" &&
+     grep -q 'sshtrustabort_vlanmgr_vrt_\*' "$_tst_handler" &&
+     grep -Fq 'sshtrustabort_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN=' "$_tst_handler" &&
+     grep -q 'dispatch_if_executable.*ssh_trust_action.sh' "$_tst_handler" &&
+     grep -Fq 'sh "$SCRIPT_PATH" "$@"' "$_tst_handler"; then
+    pass "service handler carries dot-delimited selected trust nodes through BusyBox sh"
+  else
+    fail "service handler carries selected trust nodes through BusyBox sh"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'nodeSlots' "$_tst_parent" &&
+     grep -Fq 'selectedNodeSlots.split(".")' "$_tst_parent" &&
+     grep -Fq '_nsl_' "$_tst_parent" &&
+     grep -Fq "tr '.' ' '" "$_tst_action" &&
+     grep -Fq 'trust_probe_apply_selected_slots' "$_tst_action"; then
+    pass "SSH trust selection is encoded, validated, and router-derived"
+  else
+    fail "SSH trust selection is encoded, validated, and router-derived"
+    _tst_ok=0
+  fi
+
+  if ! grep -Fq 'CUSTOM_SETTINGS_FILE=' "$_tst_action" &&
+     grep -Fq 'MERV_ACTION_ACK_PUBLISHED=0' "$_tst_action" &&
+     grep -Fq 'trust_request_pending_count' "$_tst_action" &&
+     grep -Fq 'trust_request_pending_result' "$_tst_action" &&
+     grep -Fq 'trust_selected_challenge_ids' "$_tst_action" &&
+     grep -Fq 'trust_abort()' "$_tst_action" &&
+     grep -Fq 'sshtrustabort_vlanmgr' "$_tst_action" &&
+     grep -Fq 'expires_in_sec' "$_tst_action" &&
+     grep -Fq 'action_ack_error' "$_tst_action"; then
+    pass "SSH trust worker supports paused partial trust, expiry, abort, and terminal fallback ack"
+  else
+    fail "SSH trust worker lacks paused partial trust, expiry, abort, or terminal fallback ack"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'MERV_ACTION_ACK_PUBLISHED=1' "$_tst_ack"; then
+    pass "SSH trust acknowledgements use valid JSON-safe wrapper defaults"
+  else
+    fail "SSH trust acknowledgements use valid JSON-safe wrapper defaults"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'collectclients_vlanmgr_pgt_*' "$_tst_handler" &&
+     grep -Fq 'MERV_ACTION_LOCK_PARENT_HELD=0' "$_tst_handler" &&
+     grep -Fq 'obs_collection_trust_gate' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_SILENT_IF_VERIFIED=1' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_DECISION_EXIT=1' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_ORIGINAL_ACTION=collectclients_vlanmgr' "$_tst_collect" &&
+     grep -Fq 'collectclients_vlanmgr)' "$_tst_action" &&
+     grep -Fq 'SSH_TRUST_PROGRESS_TOKEN="${MERV_SSH_TRUST_PROGRESS_TOKEN:-$SSH_TRUST_TOKEN}"' "$_tst_action" &&
+     grep -Fq 'MERV_SSH_TRUST_PROGRESS_TOKEN="$_str_fresh"' "$_tst_action" &&
+     grep -Fq 'MERV_OBS_RESUME_PROGRESS_TOKEN="$SSH_TRUST_TOKEN"' "$_tst_action" &&
+     grep -Fq 'MERV_ACTION_ACK_PUBLISHED=1' "$_tst_action" &&
+     grep -Fq 'case "$_str_rc" in' "$_tst_action" &&
+     grep -Fq 'trust_mark_request "$_str_dir" failed' "$_tst_action" &&
+     grep -Fq 'obs_resume_progress_phase' "$_tst_worker" &&
+     grep -Fq 'merv_progress_phase "$_orpp_token" sshtrustresume_vlanmgr' "$_tst_worker" &&
+     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" request collect' "$_tst_action" &&
+     grep -Fq 'post_apply_worker.sh" run-wait "$_str_wait"' "$_tst_action"; then
+    pass "progress-backed client collection isolates verified probes and relays resume progress"
+  else
+    fail "progress-backed client collection isolates verified probes and relays resume progress"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'obs_trust_probe_progress_token()' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_PROGRESS_TOKEN="$_octg_progress_token"' "$_tst_worker" &&
+     grep -Fq 'obs_trust_gate_grant' "$_tst_worker" &&
+     grep -Fq 'merv_node_list_digest' "$MERV_BASE/settings/lib_json.sh" &&
+     grep -Fq 'type md5sum' "$MERV_BASE/settings/lib_json.sh" &&
+     grep -Fq 'merv_node_list_digest' "$_tst_ssh" &&
+     grep -Fq 'merv_ssh_preflight_grant_fresh' "$_tst_ssh" &&
+     grep -Fq 'merv_ssh_preflight_grant_fresh' "$_tst_collect" &&
+     grep -Fq 'Reusing the verified SSH host-key preflight for this client refresh' "$_tst_collect" &&
+     grep -Fq 'frontend_owned: true' "$_tst_ui" &&
+     grep -Fq 'active.frontendOwned' "$_tst_ui"; then
+    pass "client refresh keeps its own progress while reusing a portable immediate trust preflight"
+  else
+    fail "client refresh keeps its own progress while reusing a portable immediate trust preflight"
+    _tst_ok=0
+  fi
+
+  _tst_digest_fallback=$( (
+    . "$MERV_BASE/settings/lib_json.sh"
+    merv_node_list() { printf '1 192.0.2.1\n'; }
+    cksum() { return 127; }
+    merv_node_list_digest
+  ) 2>/dev/null )
+  case "$_tst_digest_fallback" in
+    md5:[0-9A-Fa-f][0-9A-Fa-f]*) pass "node-set trust digest falls back when cksum is unavailable" ;;
+    *) fail "node-set trust digest falls back when cksum is unavailable"; _tst_ok=0 ;;
+  esac
+
+  if grep -Fq 'merv_ssh_require_verified_node' "$_tst_ssh" &&
+     grep -Fq 'case "$MERV_SSH_SKIP_PING" in' "$_tst_ssh"; then
+    pass "worker SSH ping optimization retains the host-key trust requirement"
+  else
+    fail "worker SSH ping optimization retains the host-key trust requirement"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local' "$_tst_sync" &&
+     grep -Fq 'STAGED_NODE_FAIL' "$_tst_sync" &&
+     grep -Fq 'node-activation-failed' "$_tst_sync" &&
+     grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh' "$_tst_boot" &&
+     grep -Fq 'reconcile_legacy_boot_file_locks' "$_tst_boot" &&
+     grep -Fq 'merv_lock_quarantine_legacy_file' "$_tst_lib"; then
+    pass "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+  else
+    fail "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+    _tst_ok=0
+  fi
+
+  . "$_tst_lib"
+  _tst_legacy="$SELFTEST_ROOT/legacy-service-event.lock"
+  : > "$_tst_legacy"
+  MERV_LEGACY_LOCK_STALE_SEC=0
+  if merv_lock_quarantine_legacy_file "$_tst_legacy" boot-file &&
+     [ ! -e "$_tst_legacy" ] &&
+     find "$SELFTEST_ROOT" -name 'legacy-service-event.lock.legacy.quarantine.*' -print 2>/dev/null | grep -q .; then
+    pass "stale empty legacy lock is quarantined, not deleted"
+  else
+    fail "stale empty legacy lock is quarantined, not deleted"
+    _tst_ok=0
+  fi
+  _tst_legacy_nonempty="$SELFTEST_ROOT/legacy-nonempty.lock"
+  printf 'unknown\n' > "$_tst_legacy_nonempty"
+  if merv_lock_quarantine_legacy_file "$_tst_legacy_nonempty" boot-file; then
+    fail "non-empty legacy lock remains fail-closed"
+    _tst_ok=0
+  else
+    pass "non-empty legacy lock remains fail-closed"
+  fi
+  unset MERV_LEGACY_LOCK_STALE_SEC
+
+  return "$_tst_ok"
+}
+
 test_logging_polling_contract() {
   _tlpc_ui="$MERV_BASE/www/index.html"
   _tlpc_ok=1
@@ -1760,26 +2217,58 @@ test_logging_polling_contract() {
 test_apply_observation_contract() {
   _tao_exec="$MERV_BASE/functions/execute_nodes.sh"
   _tao_manager="$MERV_BASE/functions/mervlan_manager.sh"
+  _tao_worker="$MERV_BASE/functions/post_apply_worker.sh"
   _tao_ok=1
-  _tao_phase=$(sed -n '/# PHASE 4:/,/^fi$/p' "$_tao_exec" 2>/dev/null)
+  _tao_phase=$(sed -n '/# PHASE 4:/,/^echo ""$/p' "$_tao_exec" 2>/dev/null)
 
-  if printf '%s\n' "$_tao_phase" | grep -Fq 'if [ -x "$FUNCDIR/post_apply_worker.sh" ]; then' &&
+  if printf '%s\n' "$_tao_phase" | grep -Fq 'if [ -f "$FUNCDIR/post_apply_worker.sh" ]; then' &&
      ! printf '%s\n' "$_tao_phase" | grep -Fq 'MODE" != "nodesonly"' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq 'if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq 'Skipping post-apply observation until every node has reached terminal verified success' &&
      printf '%s\n' "$_tao_phase" | grep -Fq 'request snapshot collect' &&
      printf '%s\n' "$_tao_phase" | grep -Fq '"$FUNCDIR/post_apply_worker.sh" run-wait' &&
      printf '%s\n' "$_tao_phase" | grep -Fq 'overall_success=false'; then
-    pass "all node-runner Apply modes use one final client refresh phase"
+    pass "node Apply refreshes clients only after every node reaches terminal verified success"
   else
-    fail "all node-runner Apply modes use one final client refresh phase"
+    fail "node Apply refreshes clients only after every node reaches terminal verified success"
+    _tao_ok=0
+  fi
+
+  if grep -Fq '[ -f "$MERV_BASE/functions/collect_clients.sh" ]' "$_tao_worker" &&
+     grep -Fq 'sh "$MERV_BASE/functions/collect_clients.sh"' "$_tao_worker" &&
+     grep -Fq '[ -f "$MERV_BASE/functions/collect_local_clients.sh" ]' "$_tao_worker" &&
+     grep -Fq 'sh "$MERV_BASE/functions/collect_local_clients.sh"' "$_tao_worker"; then
+    pass "observation worker invokes shell collectors without relying on executable bits"
+  else
+    fail "observation worker invokes shell collectors without relying on executable bits"
+    _tao_ok=0
+  fi
+
+  if grep -Fq 'collect_execute_nodes_observation_grant_valid' "$MERV_BASE/functions/collect_clients.sh" &&
+     grep -Fq 'MERV_OBS_EXECUTE_NODES_OWNER_GRANT=1' "$_tao_exec" &&
+     grep -Fq 'MERV_OBS_EXECUTE_NODES_OWNER_NONCE' "$_tao_exec" &&
+     grep -Fq 'merv_process_identity_matches' "$MERV_BASE/functions/collect_clients.sh"; then
+    pass "node Apply final collection authenticates the exact execute_nodes owner"
+  else
+    fail "node Apply final collection authenticates the exact execute_nodes owner"
     _tao_ok=0
   fi
 
   if grep -Fq 'sh "$local_script" --no-collect' "$_tao_exec" &&
-     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" &&
+     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" &&
      grep -Fq '"$FUNCDIR/post_apply_worker.sh" run-wait' "$_tao_manager"; then
     pass "local and no-node combined Apply paths avoid duplicate collection"
   else
     fail "local and no-node combined Apply paths avoid duplicate collection"
+    _tao_ok=0
+  fi
+
+  if grep -Fq 'if ! merv_mac_boot_init; then' "$_tao_manager" &&
+     grep -Fq 'if ! cleanup_existing_config; then' "$_tao_manager" &&
+     grep -Fq 'post-restart shield reload failed' "$_tao_manager"; then
+    pass "manager fails closed when strict MERV_MAC lifecycle verification fails"
+  else
+    fail "manager fails closed when strict MERV_MAC lifecycle verification fails"
     _tao_ok=0
   fi
 
@@ -1832,7 +2321,7 @@ test_shell_syntax() {
   else
     pass "shell syntax sync_nodes.sh skipped on node-only installation"
   fi
-  for _tss_optional in collect_clients.sh collect_local_clients.sh mac_client_meta.sh mac_refresh.sh execute_nodes.sh update_mervlan.sh hw_probe.sh; do
+  for _tss_optional in collect_clients.sh collect_local_clients.sh mac_client_meta.sh mac_refresh.sh execute_nodes.sh update_mervlan.sh hw_probe.sh ssh_trust_action.sh; do
     if [ -f "$MERV_BASE/functions/$_tss_optional" ]; then
       if sh -n "$MERV_BASE/functions/$_tss_optional"; then
         pass "shell syntax $_tss_optional"
@@ -1877,6 +2366,8 @@ run_one() {
     dhcp-api) test_dhcp_api ;;
     dhcp-ebtables-failures) test_dhcp_ebtables_failures ;;
     dhcp-rule-exactness) test_dhcp_rule_exactness ;;
+    l2-guard-dump) test_l2_guard_dump_contract ;;
+    mac-shield-lifecycle) test_mac_shield_lifecycle ;;
     process-identity) test_process_identity ;;
     lock-reclaim) test_lock_reclaim ;;
     dhcp-owners) test_dhcp_owners ;;
@@ -1891,6 +2382,7 @@ run_one() {
     post-apply) test_post_apply ;;
     observation-timeouts) test_observation_timeouts ;;
     observation-concurrency) test_observation_concurrency ;;
+    observation-resume-progress) test_observation_resume_progress ;;
     observation-generations) test_observation_generations ;;
     atomic-publication) test_atomic_publication ;;
     client-refresh-contract) test_client_refresh_contract ;;
@@ -1906,6 +2398,8 @@ run_one() {
     apmo-completion) test_apmo_completion_contract ;;
     action-lifecycle) test_action_lifecycle_contract ;;
     failure-propagation) test_failure_propagation_contract ;;
+    ssh-outbound) test_ssh_outbound_contract ;;
+    ssh-trust) test_ssh_trust_contract ;;
     logging-polling) test_logging_polling_contract ;;
     apply-observation) test_apply_observation_contract ;;
     shell-syntax) test_shell_syntax ;;
@@ -1947,13 +2441,13 @@ if [ "$SELFTEST_ACTION" = "_fault-child" ]; then
 fi
 
 if [ "$SELFTEST_ACTION" = all ]; then
-  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness \
+  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness l2-guard-dump mac-shield-lifecycle \
     process-identity lock-reclaim dhcp-owners dhcp-phases dhcp-crash-points \
     heal-handoff boot-handoff duplicate-events manager-ownership \
     settle-watchdog recovery failsafe-status post-apply observation-concurrency \
-    observation-timeouts observation-generations atomic-publication client-refresh-contract \
+    observation-timeouts observation-generations observation-resume-progress atomic-publication client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle failure-propagation logging-polling apply-observation shell-syntax live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

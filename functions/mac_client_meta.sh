@@ -75,10 +75,23 @@ fi
 META_LOCK="$LOCKDIR/mac_client_meta.lock"
 META_LOCK_ACQUIRED=0
 if type merv_lock_acquire >/dev/null 2>&1; then
-  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  mkdir -p "$LOCKDIR" 2>/dev/null || { error -c cli,vlan "Client Metadata: lock directory unavailable"; exit 1; }
   if merv_lock_acquire "$META_LOCK" "${MERV_CLIENT_META_LOCK_STALE_SEC:-60}" 0 "mac_client_meta"; then
     META_LOCK_ACQUIRED=1
-    trap '[ "$META_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$META_LOCK" 2>/dev/null' EXIT INT TERM
+    META_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    meta_release_lock() {
+      _meta_exit_rc=$?
+      if [ "${META_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+        if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
+          META_LOCK_ACQUIRED=0
+        else
+          error -c cli,vlan "Client Metadata cleanup could not release its owner lock"
+          _meta_exit_rc=1
+        fi
+      fi
+      return "$_meta_exit_rc"
+    }
+    trap 'meta_release_lock' EXIT INT TERM
   else
     merv_action_progress_fail "Another client metadata save is already running"
     info -c cli,vlan "Client Metadata: another save is in progress — skipping"
@@ -194,8 +207,12 @@ fi
 # Release the metadata writer lock before entering the observation coordinator:
 # global ordering is observation lock before operation-specific locks.
 if [ "$META_LOCK_ACQUIRED" -eq 1 ]; then
-  merv_lock_release "$META_LOCK" 2>/dev/null || :
-  META_LOCK_ACQUIRED=0
+  if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
+    META_LOCK_ACQUIRED=0
+  else
+    error -c cli,vlan "Client Metadata: could not release its owner lock; observation refresh was not started"
+    exit 1
+  fi
 fi
 
 # Rebuild through the one generation coordinator. Foreground execution ensures
@@ -203,9 +220,9 @@ fi
 _collect=skip
 merv_action_progress_phase "Refreshing client inventory..."
 if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
-  if MERV_OBS_NO_AUTOSTART=1 "$MERV_BASE/functions/post_apply_worker.sh" \
+  if MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" \
        request collect >/dev/null 2>&1 &&
-     "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
+     sh "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
     _collect=ok
   else
     _collect=failed

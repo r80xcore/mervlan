@@ -17,6 +17,12 @@ backend rejection, malformed status, timeout, and exceptions. A button must not
 remain locked after a terminal failure, and it must not unlock while work is
 still active.
 
+The normal Save action is two-phase when automatic node synchronization is
+needed: it first completes the local `save_vlanmgr` acknowledgement, then
+queues `syncsettings_vlanmgr` as a separate progress-backed action. The second
+action owns node preflight, SSH trust pause/resume, and terminal reporting; a
+local-only settings change must not trigger an advisory SSH probe.
+
 ## Progress ownership
 
 - The backend owns the progress file and terminal state.

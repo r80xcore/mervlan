@@ -41,6 +41,9 @@ fi
 		. "$MERV_BASE/settings/lib_json.sh"
 	fi
 }
+if [ -z "${LIB_SSH_TRUST_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_ssh_trust.sh" ]; then
+  . "$MERV_BASE/settings/lib_ssh_trust.sh"
+fi
 [ -n "${LIB_SSH_LOADED:-}" ] && return 0 2>/dev/null
 [ -n "${SETTINGS_FILE:-}" ] || SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 # ========================================================================== #
@@ -216,7 +219,10 @@ auto_detect_nodes() {
     if [ ! -s "$tmp_selected" ]; then
         echo ""
         echo "[install] No nodes selected or added. Skipping JSON update."
-        rm -f "$tmp_candidates" "$tmp_selected" 2>/dev/null || :
+        if ! rm -f "$tmp_candidates" "$tmp_selected" 2>/dev/null; then
+            echo "[install] WARNING: Could not remove temporary node-selection files" >&2
+            return 1
+        fi
         return 0
     fi
 
@@ -243,7 +249,10 @@ auto_detect_nodes() {
 
     echo "[install] Stored $((idx-1)) node entries in $SETTINGS_FILE (AUTO_NODE*_IP/MAC)."
 
-    rm -f "$tmp_candidates" "$tmp_selected" 2>/dev/null || :
+    if ! rm -f "$tmp_candidates" "$tmp_selected" 2>/dev/null; then
+        echo "[install] WARNING: Could not remove temporary node-selection files" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -556,7 +565,9 @@ _merv_ssh_tmp_acquire() {
     if mkdir "$MERV_SSH_ERR_DIR" 2>/dev/null; then
       MERV_SSH_ERR_FILE="$MERV_SSH_ERR_DIR/stderr"
       : > "$MERV_SSH_ERR_FILE" 2>/dev/null || {
-        rmdir "$MERV_SSH_ERR_DIR" 2>/dev/null || :
+        if ! rmdir "$MERV_SSH_ERR_DIR" 2>/dev/null; then
+          _merv_log_err "Could not remove failed SSH stderr directory $MERV_SSH_ERR_DIR"
+        fi
         return 1
       }
       return 0
@@ -571,8 +582,14 @@ _merv_ssh_tmp_release() {
     "${MERV_SSH_TMP_ROOT:-}"/ssh_err.[0-9]*.[0-9]*) ;;
     *) return 1 ;;
   esac
-  rm -f "${MERV_SSH_ERR_FILE:-}" 2>/dev/null || :
-  rmdir "$MERV_SSH_ERR_DIR" 2>/dev/null || return 1
+  if ! rm -f "${MERV_SSH_ERR_FILE:-}" 2>/dev/null; then
+    _merv_log_err "Could not remove SSH stderr file ${MERV_SSH_ERR_FILE:-}"
+    return 1
+  fi
+  if ! rmdir "$MERV_SSH_ERR_DIR" 2>/dev/null; then
+    _merv_log_err "Could not remove SSH stderr directory $MERV_SSH_ERR_DIR"
+    return 1
+  fi
   MERV_SSH_ERR_FILE=""
   MERV_SSH_ERR_DIR=""
   return 0
@@ -617,15 +634,21 @@ _merv_timeout_collect_tree() {
 _merv_timeout_signal_tree() {
   _mtst_signal="$1"
   _mtst_root=""
+  _mtst_failed=0
   for _mtst_pid in $MERV_TIMEOUT_TREE_PIDS; do
     case "$_mtst_pid" in ''|*[!0-9]*) continue ;; esac
     if [ -z "$_mtst_root" ]; then
       _mtst_root="$_mtst_pid"
       continue
     fi
-    kill "$_mtst_signal" "$_mtst_pid" 2>/dev/null || :
+    if [ -d "/proc/$_mtst_pid" ] && ! kill "$_mtst_signal" "$_mtst_pid" 2>/dev/null; then
+      _mtst_failed=1
+    fi
   done
-  [ -n "$_mtst_root" ] && kill "$_mtst_signal" "$_mtst_root" 2>/dev/null || :
+  if [ -n "$_mtst_root" ] && [ -d "/proc/$_mtst_root" ] && ! kill "$_mtst_signal" "$_mtst_root" 2>/dev/null; then
+    _mtst_failed=1
+  fi
+  [ "$_mtst_failed" -eq 0 ]
 }
 
 _merv_timeout_run() {
@@ -658,14 +681,23 @@ _merv_timeout_run() {
   done
   _mtr_out="$_mtr_dir/stdout"
   _mtr_err="$_mtr_dir/stderr"
-  : > "$_mtr_out" 2>/dev/null || { rmdir "$_mtr_dir" 2>/dev/null || :; return 125; }
-  : > "$_mtr_err" 2>/dev/null || { rm -f "$_mtr_out"; rmdir "$_mtr_dir" 2>/dev/null || :; return 125; }
+  : > "$_mtr_out" 2>/dev/null || {
+    if ! rmdir "$_mtr_dir" 2>/dev/null; then _merv_log_err "Could not remove timeout directory $_mtr_dir"; fi
+    return 125
+  }
+  : > "$_mtr_err" 2>/dev/null || {
+    if ! rm -f "$_mtr_out"; then _merv_log_err "Could not remove timeout stdout file $_mtr_out"; fi
+    if ! rmdir "$_mtr_dir" 2>/dev/null; then _merv_log_err "Could not remove timeout directory $_mtr_dir"; fi
+    return 125
+  }
   "$@" <&9 >"$_mtr_out" 2>"$_mtr_err" &
   _mtr_pid=$!
   exec 9<&-
   (
     sleep "$seconds"
-    _merv_timeout_collect_tree "$_mtr_pid" || :
+    if ! _merv_timeout_collect_tree "$_mtr_pid"; then
+      _merv_timeout_collect_failed=1
+    fi
     _merv_timeout_signal_tree -TERM
     # The command has already exceeded its deadline; do not add another
     # full BusyBox sleep interval before force-cleaning its descendants.
@@ -674,13 +706,16 @@ _merv_timeout_run() {
   _mtr_watchdog=$!
   wait "$_mtr_pid"
   _mtr_rc=$?
-  kill "$_mtr_watchdog" 2>/dev/null || :
-  wait "$_mtr_watchdog" 2>/dev/null || :
-  cat "$_mtr_out" 2>/dev/null || :
-  cat "$_mtr_err" >&2 || :
-  rm -f "$_mtr_out" 2>/dev/null || :
-  rm -f "$_mtr_err" 2>/dev/null || :
-  rmdir "$_mtr_dir" 2>/dev/null || :
+  _mtr_cleanup_failed=0
+  if [ -d "/proc/$_mtr_watchdog" ] && ! kill "$_mtr_watchdog" 2>/dev/null; then _mtr_cleanup_failed=1; fi
+  if wait "$_mtr_watchdog" 2>/dev/null; then :; else _mtr_watchdog_rc=$?; fi
+  if ! cat "$_mtr_out" 2>/dev/null; then _mtr_cleanup_failed=1; fi
+  if ! cat "$_mtr_err" >&2; then _mtr_cleanup_failed=1; fi
+  if ! rm -f "$_mtr_out" 2>/dev/null; then _mtr_cleanup_failed=1; fi
+  if ! rm -f "$_mtr_err" 2>/dev/null; then _mtr_cleanup_failed=1; fi
+  if ! rmdir "$_mtr_dir" 2>/dev/null; then _mtr_cleanup_failed=1; fi
+  [ "$_mtr_cleanup_failed" -eq 0 ] || _merv_log_err "Timed SSH command cleanup failed in $_mtr_dir"
+  [ "$_mtr_cleanup_failed" -eq 0 ] || return 125
   case "$_mtr_rc" in
     137|143) return 124 ;;
     *) return "$_mtr_rc" ;;
@@ -702,6 +737,8 @@ merv_ssh_prepare_client_home() {
     *[!A-Za-z0-9_./-]*) return 1 ;;
   esac
   mkdir -p "$_mssh_home/.ssh" 2>/dev/null || return 1
+  MERV_SSH_BASE_HOME="$_mssh_home"
+  export MERV_SSH_BASE_HOME
   HOME="$_mssh_home"
   export HOME
   MERV_SSH_HOME="$_mssh_home"
@@ -709,7 +746,148 @@ merv_ssh_prepare_client_home() {
   return 0
 }
 
-merv_ssh_prepare_client_home || :
+if ! merv_ssh_prepare_client_home; then
+  MERV_SSH_HOME=""
+fi
+
+# Each outbound operation gets its own client HOME. A shared known_hosts file
+# is unsafe when node workers run in parallel: one worker can replace the
+# pinned record while another dbclient is between precheck and connect.
+MERV_SSH_KNOWN_HOME=""
+MERV_SSH_KNOWN_HOME_SEQ=0
+
+merv_ssh_node_mac() {
+  _msnm_node="$1"
+  if type json_get_flag >/dev/null 2>&1; then
+    _msnm_mac=$(json_get_flag "AUTO_NODE${_msnm_node}_MAC" "" "${SETTINGS_FILE:-}" 2>/dev/null)
+  fi
+  merv_ssh_trust_mac_or_none "${_msnm_mac:-}" 2>/dev/null
+}
+
+# One outbound operation calls merv_ssh_precheck and then immediately builds a
+# private known_hosts file.  Keep the checked identity and pinned record only
+# for that narrow hand-off.  prepare_known_host rechecks the trust-file digest
+# before reuse, so an enroll/revoke between the two calls falls back to a full
+# trust lookup rather than using the earlier record.
+merv_ssh_precheck_cache_clear() {
+  MERV_SSH_PRECHECK_SLOT=""; MERV_SSH_PRECHECK_HOST=""; MERV_SSH_PRECHECK_PORT=""; MERV_SSH_PRECHECK_MAC=""
+  MERV_SSH_PRECHECK_USER=""
+  MERV_SSH_PRECHECK_NODE=""; MERV_SSH_PRECHECK_TRUST_DIGEST=""
+  MERV_SSH_PRECHECK_TRUST_NODE=""; MERV_SSH_PRECHECK_TRUST_SLOT=""; MERV_SSH_PRECHECK_TRUST_MAC=""
+  MERV_SSH_PRECHECK_TRUST_HOST=""; MERV_SSH_PRECHECK_TRUST_PORT=""; MERV_SSH_PRECHECK_TRUST_ALGORITHM=""
+  MERV_SSH_PRECHECK_TRUST_PUBLIC_KEY=""; MERV_SSH_PRECHECK_TRUST_FINGERPRINT=""
+}
+
+merv_ssh_precheck_cache_matches() {
+  [ "${MERV_SSH_PRECHECK_SLOT:-}" = "$1" ] && [ "${MERV_SSH_PRECHECK_HOST:-}" = "$2" ]
+}
+
+merv_ssh_precheck_cache_store() {
+  _mspcs_slot="$1"; _mspcs_host="$2"; _mspcs_port="$3"; _mspcs_mac="$4"; _mspcs_user="$5"
+  _mspcs_node=$(merv_ssh_trust_node_id "$_mspcs_slot" "$_mspcs_mac" "$_mspcs_host" "$_mspcs_port") || return 1
+  [ "${SSH_TRUST_NODE:-}" = "$_mspcs_node" ] || return 1
+  [ "${SSH_TRUST_HOST:-}" = "$_mspcs_host" ] && [ "${SSH_TRUST_PORT:-}" = "$_mspcs_port" ] || return 1
+  [ -n "$_mspcs_user" ] || return 1
+  MERV_SSH_PRECHECK_SLOT="$_mspcs_slot"; MERV_SSH_PRECHECK_HOST="$_mspcs_host"; MERV_SSH_PRECHECK_PORT="$_mspcs_port"; MERV_SSH_PRECHECK_MAC="$_mspcs_mac"; MERV_SSH_PRECHECK_USER="$_mspcs_user"
+  MERV_SSH_PRECHECK_NODE="$_mspcs_node"; MERV_SSH_PRECHECK_TRUST_DIGEST="${MERV_SSH_TRUST_VALIDATION_DIGEST:-}"
+  MERV_SSH_PRECHECK_TRUST_NODE="$SSH_TRUST_NODE"; MERV_SSH_PRECHECK_TRUST_SLOT="$SSH_TRUST_SLOT"; MERV_SSH_PRECHECK_TRUST_MAC="$SSH_TRUST_MAC"
+  MERV_SSH_PRECHECK_TRUST_HOST="$SSH_TRUST_HOST"; MERV_SSH_PRECHECK_TRUST_PORT="$SSH_TRUST_PORT"; MERV_SSH_PRECHECK_TRUST_ALGORITHM="$SSH_TRUST_ALGORITHM"
+  MERV_SSH_PRECHECK_TRUST_PUBLIC_KEY="$SSH_TRUST_PUBLIC_KEY"; MERV_SSH_PRECHECK_TRUST_FINGERPRINT="$SSH_TRUST_FINGERPRINT"
+  return 0
+}
+
+merv_ssh_precheck_trust_current() {
+  _msptc_node="$1"; _msptc_host="$2"; _msptc_port="$3"; _msptc_mac="$4"
+  [ "${MERV_SSH_PRECHECK_HOST:-}" = "$_msptc_host" ] || return 1
+  [ "${MERV_SSH_PRECHECK_PORT:-}" = "$_msptc_port" ] && [ "${MERV_SSH_PRECHECK_MAC:-}" = "$_msptc_mac" ] || return 1
+  [ "${MERV_SSH_PRECHECK_NODE:-}" = "$_msptc_node" ] && [ "${MERV_SSH_PRECHECK_TRUST_NODE:-}" = "$_msptc_node" ] || return 1
+  [ "${MERV_SSH_PRECHECK_TRUST_HOST:-}" = "$_msptc_host" ] && [ "${MERV_SSH_PRECHECK_TRUST_PORT:-}" = "$_msptc_port" ] || return 1
+  [ -n "${MERV_SSH_PRECHECK_TRUST_ALGORITHM:-}" ] && [ -n "${MERV_SSH_PRECHECK_TRUST_PUBLIC_KEY:-}" ] || return 1
+  [ -n "${MERV_SSH_PRECHECK_TRUST_DIGEST:-}" ] || return 1
+  _msptc_digest=$(merv_ssh_trust_file_digest "${MERV_SSH_TRUST_FILE:-}" 2>/dev/null || printf '')
+  [ "$_msptc_digest" = "$MERV_SSH_PRECHECK_TRUST_DIGEST" ]
+}
+
+merv_ssh_precheck_trust_restore() {
+  SSH_TRUST_NODE="$MERV_SSH_PRECHECK_TRUST_NODE"; SSH_TRUST_SLOT="$MERV_SSH_PRECHECK_TRUST_SLOT"; SSH_TRUST_MAC="$MERV_SSH_PRECHECK_TRUST_MAC"
+  SSH_TRUST_HOST="$MERV_SSH_PRECHECK_TRUST_HOST"; SSH_TRUST_PORT="$MERV_SSH_PRECHECK_TRUST_PORT"; SSH_TRUST_ALGORITHM="$MERV_SSH_PRECHECK_TRUST_ALGORITHM"
+  SSH_TRUST_PUBLIC_KEY="$MERV_SSH_PRECHECK_TRUST_PUBLIC_KEY"; SSH_TRUST_FINGERPRINT="$MERV_SSH_PRECHECK_TRUST_FINGERPRINT"
+}
+
+merv_ssh_preflight_grant_fresh() {
+  _mspgf_epoch="${MERV_OBS_TRUST_GATE_EPOCH:-}"
+  _mspgf_expected="${MERV_OBS_TRUST_GATE_DIGEST:-}"
+  case "$_mspgf_epoch" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$_mspgf_expected" | grep -Eq '^cksum:[0-9]+\.[0-9]+$|^md5:[0-9A-Fa-f]{32}$' || return 1
+  _mspgf_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_mspgf_now" in ''|*[!0-9]*) return 1 ;; esac
+  _mspgf_max="${MERV_OBS_TRUST_GATE_MAX_AGE_SEC:-30}"
+  case "$_mspgf_max" in ''|*[!0-9]*) _mspgf_max=30 ;; esac
+  [ "$_mspgf_max" -ge 1 ] 2>/dev/null && [ "$_mspgf_max" -le 120 ] 2>/dev/null || _mspgf_max=30
+  [ "$_mspgf_now" -ge "$_mspgf_epoch" ] 2>/dev/null || return 1
+  _mspgf_age=$((_mspgf_now - _mspgf_epoch))
+  [ "$_mspgf_age" -le "$_mspgf_max" ] 2>/dev/null || return 1
+  type merv_node_list_digest >/dev/null 2>&1 || return 1
+  _mspgf_actual=$(merv_node_list_digest 2>/dev/null) || return 1
+  [ "$_mspgf_actual" = "$_mspgf_expected" ]
+}
+
+merv_ssh_release_known_host() {
+  _msrkh_home="${MERV_SSH_KNOWN_HOME:-}"
+  [ -n "$_msrkh_home" ] || return 0
+  _msrkh_base="${MERV_SSH_BASE_HOME:-}"
+  [ -n "$_msrkh_base" ] || return 1
+  case "$_msrkh_home" in
+    "$_msrkh_base"/ssh_op.*) ;;
+    *) return 1 ;;
+  esac
+  case "$_msrkh_home" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
+  rm -rf "$_msrkh_home" 2>/dev/null || return 1
+  MERV_SSH_KNOWN_HOME=""
+  MERV_SSH_HOME="$_msrkh_base"
+  HOME="$_msrkh_base"
+  export MERV_SSH_KNOWN_HOME MERV_SSH_HOME HOME
+  return 0
+}
+
+merv_ssh_prepare_known_host() {
+  _mskh_node="$1"; _mskh_host="$2"; _mskh_port="$3"; _mskh_mac="$4"
+  _mskh_node_id=$(merv_ssh_trust_node_id "$_mskh_node" "$_mskh_mac" "$_mskh_host" "$_mskh_port") || return 1
+  if merv_ssh_precheck_trust_current "$_mskh_node_id" "$_mskh_host" "$_mskh_port" "$_mskh_mac"; then
+    merv_ssh_precheck_trust_restore
+  else
+    merv_ssh_trust_find "$_mskh_node_id" || return 1
+  fi
+  [ -z "${MERV_SSH_KNOWN_HOME:-}" ] || merv_ssh_release_known_host || return 1
+  [ -n "${MERV_SSH_BASE_HOME:-}" ] || merv_ssh_prepare_client_home || return 1
+  _mskh_base="$MERV_SSH_BASE_HOME"
+  case "$_mskh_base" in /*) ;; *) return 1 ;; esac
+  case "$_mskh_base" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  case "${MERV_SSH_KNOWN_HOME_SEQ:-}" in ''|*[!0-9]*) MERV_SSH_KNOWN_HOME_SEQ=0 ;; esac
+  _mskh_try=0
+  while [ "$_mskh_try" -lt 100 ]; do
+    MERV_SSH_KNOWN_HOME_SEQ=$((MERV_SSH_KNOWN_HOME_SEQ + 1))
+    _mskh_home="$_mskh_base/ssh_op.$$.${MERV_SSH_KNOWN_HOME_SEQ}"
+    if mkdir "$_mskh_home" 2>/dev/null && mkdir "$_mskh_home/.ssh" 2>/dev/null; then
+      break
+    fi
+    rm -rf "$_mskh_home" 2>/dev/null || :
+    _mskh_try=$((_mskh_try + 1))
+  done
+  [ -d "$_mskh_home/.ssh" ] || return 1
+  chmod 700 "$_mskh_home" "$_mskh_home/.ssh" 2>/dev/null || { rm -rf "$_mskh_home" 2>/dev/null || :; return 1; }
+  _mskh_tmp="$_mskh_home/.ssh/known_hosts.tmp.$$.$MERV_SSH_KNOWN_HOME_SEQ"
+  _mskh_host_token="$_mskh_host"
+  [ "$_mskh_port" = 22 ] || _mskh_host_token="[$_mskh_host]:$_mskh_port"
+  ( umask 077; printf '%s %s %s\n' "$_mskh_host_token" "$SSH_TRUST_ALGORITHM" "$SSH_TRUST_PUBLIC_KEY" > "$_mskh_tmp" ) 2>/dev/null || { rm -rf "$_mskh_home" 2>/dev/null || :; return 1; }
+  chmod 600 "$_mskh_tmp" 2>/dev/null || { rm -rf "$_mskh_home" 2>/dev/null || :; return 1; }
+  mv -f "$_mskh_tmp" "$_mskh_home/.ssh/known_hosts" 2>/dev/null || { rm -rf "$_mskh_home" 2>/dev/null || :; return 1; }
+  MERV_SSH_KNOWN_HOME="$_mskh_home"
+  MERV_SSH_HOME="$_mskh_home"
+  HOME="$_mskh_home"
+  export MERV_SSH_KNOWN_HOME MERV_SSH_HOME HOME
+  return 0
+}
 
 merv_ssh_precheck() {
   # merv_ssh_precheck <node_num> <node_ip>
@@ -721,6 +899,7 @@ merv_ssh_precheck() {
   node_num="$1"
   node_ip="$2"
 
+  merv_ssh_precheck_cache_clear
   MERV_SSH_LAST_REASON=""
   MERV_SSH_LAST_DETAIL=""
 
@@ -728,6 +907,21 @@ merv_ssh_precheck() {
     MERV_SSH_LAST_REASON="invalid-ip"
     MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip'"
     return 3
+  fi
+
+  node_mac=$(merv_ssh_node_mac "$node_num" 2>/dev/null)
+  if [ -z "$node_mac" ]; then
+    MERV_SSH_LAST_REASON="node-mac-missing"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} has no canonical AUTO_NODE${node_num}_MAC identity"
+    return 6
+  fi
+  _node_port_for_trust="$(get_node_ssh_port 2>/dev/null || printf '22')"
+  merv_ssh_require_verified_node "$node_num" "$node_ip" "$_node_port_for_trust" "$node_mac"
+  _trust_rc=$?
+  if [ "$_trust_rc" -ne 0 ]; then
+    MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-ssh-trust-required}"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} host-key trust precondition failed"
+    return 6
   fi
 
   # Keys check (uses existing lib behavior)
@@ -743,6 +937,20 @@ merv_ssh_precheck() {
     return 2
   fi
 
+  _node_user_for_ssh="$(get_node_ssh_user 2>/dev/null || printf 'admin')"
+  [ -n "$_node_user_for_ssh" ] || _node_user_for_ssh="admin"
+
+  # A caller that has just completed a verified SSH connection may suppress
+  # only this redundant ICMP check for its short-lived follow-up sequence.
+  # Host-key, node-identity, and key-file checks above still run for every
+  # connection, and dbclient retains its bounded timeout/retry behavior.
+  case "$MERV_SSH_SKIP_PING" in
+    1|yes|on|true)
+      merv_ssh_precheck_cache_store "$node_num" "$node_ip" "$_node_port_for_trust" "$node_mac" "$_node_user_for_ssh" || merv_ssh_precheck_cache_clear
+      return 0
+      ;;
+  esac
+
   # Fast reachability check
   if ! _merv_ping_ok "$node_ip"; then
     MERV_SSH_LAST_REASON="unreachable"
@@ -750,6 +958,7 @@ merv_ssh_precheck() {
     return 4
   fi
 
+  merv_ssh_precheck_cache_store "$node_num" "$node_ip" "$_node_port_for_trust" "$node_mac" "$_node_user_for_ssh" || merv_ssh_precheck_cache_clear
   return 0
 }
 
@@ -776,7 +985,7 @@ merv_ssh_exec() {
   if [ "${MERV_NODE_CONTEXT:-0}" = "1" ]; then
     MERV_SSH_LAST_REASON="node-context"
     MERV_SSH_LAST_DETAIL="Refusing outbound SSH from node context"
-    return 0
+    return 5
   fi
 
   # Precheck once before retry loop; if unreachable, still retry (3 total) because LAN can be flaky
@@ -786,7 +995,7 @@ merv_ssh_exec() {
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
       # If invalid ip or keys missing → do not retry (it won't improve)
-      if [ "$_rc" -eq 2 ] || [ "$_rc" -eq 3 ]; then
+      if [ "$_rc" -eq 2 ] || [ "$_rc" -eq 3 ] || [ "$_rc" -eq 6 ] || [ "$_rc" -eq 7 ] || [ "$_rc" -eq 8 ]; then
         return "$_rc"
       fi
       # unreachable → retry up to 3 times
@@ -795,12 +1004,21 @@ merv_ssh_exec() {
         _attempt=$((_attempt + 1))
         continue
       fi
-      return 4
+      [ "$_rc" -eq 4 ] && return 4
+      return "$_rc"
     fi
 
-    # Build args (read fresh each time in case settings changed)
-    _port="$(get_node_ssh_port)"
-    _user="$(get_node_ssh_user)"
+    # Build args. The precheck just read and verified this node's identity;
+    # reuse that exact context for this connection instead of reparsing JSON.
+    if merv_ssh_precheck_cache_matches "$_node_num" "$_node_ip"; then
+      _port="$MERV_SSH_PRECHECK_PORT"
+      _node_mac="$MERV_SSH_PRECHECK_MAC"
+      _user="$MERV_SSH_PRECHECK_USER"
+    else
+      _port="$(get_node_ssh_port)"
+      _node_mac=$(merv_ssh_node_mac "$_node_num" 2>/dev/null) || _node_mac=""
+      _user="$(get_node_ssh_user)"
+    fi
     [ -n "$_port" ] || _port="22"
     [ -n "$_user" ] || _user="admin"
 
@@ -814,9 +1032,20 @@ merv_ssh_exec() {
     _tmp="$MERV_SSH_ERR_FILE"
 
     # Hard-timeout dbclient
+    merv_ssh_prepare_known_host "$_node_num" "$_node_ip" "$_port" "$_node_mac" || {
+      merv_ssh_release_known_host 2>/dev/null || :
+      if ! _merv_ssh_tmp_release; then
+        MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} private SSH stderr cleanup failed"
+        return 5
+      fi
+      MERV_SSH_LAST_REASON="known-host-publication-failed"
+      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} verified key could not be installed into the private client home"
+      return 5
+    }
     _out=$(
       _merv_timeout_run "$MERV_SSH_TIMEOUT" \
-        dbclient -p "$_port" -y -i "$SSH_KEY" \
+        "${MERV_SSH_CLIENT:-dbclient}" -p "$_port" -i "$SSH_KEY" \
         "$_user@$_node_ip" "$_remote_cmd" \
         </dev/null \
         2>"$_tmp"
@@ -824,11 +1053,18 @@ merv_ssh_exec() {
     _rc=$?
     _err=""
     _err=$(cat "$_tmp" 2>/dev/null)
+    _merv_ssh_known_release_rc=0
+    merv_ssh_release_known_host || _merv_ssh_known_release_rc=$?
     _merv_ssh_tmp_release || {
       MERV_SSH_LAST_REASON="ssh-tmp-cleanup-failed"
       MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} isolated SSH stderr cleanup failed"
       return 5
     }
+    if [ "$_merv_ssh_known_release_rc" -ne 0 ]; then
+      MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"
+      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} private SSH client home cleanup failed"
+      return 5
+    fi
 
     if [ "$_rc" -eq 0 ]; then
       MERV_SSH_LAST_REASON=""
@@ -876,6 +1112,61 @@ merv_ssh_exec() {
   done
 
   return 5
+}
+
+# merv_ssh_stream_file <node> <ip> <local-file> <remote-path>
+# Streams a verified local file to a node through the same host-key contract as
+# command execution.  The remote rename is atomic and the temporary path is
+# fixed by the caller, never derived from browser input.
+merv_ssh_stream_file() {
+  _mssf_node="$1"; _mssf_ip="$2"; _mssf_local="$3"; _mssf_remote="$4"
+  [ -f "$_mssf_local" ] || [ "$_mssf_local" = "/dev/null" ] || return 1
+  case "$_mssf_remote" in
+    /*) ;;
+    *) MERV_SSH_LAST_REASON="invalid-remote-path"; return 2 ;;
+  esac
+  case "$_mssf_remote" in *..*|*[!A-Za-z0-9_./-]*) MERV_SSH_LAST_REASON="invalid-remote-path"; return 2 ;; esac
+  merv_ssh_precheck "$_mssf_node" "$_mssf_ip" || return $?
+  if merv_ssh_precheck_cache_matches "$_mssf_node" "$_mssf_ip"; then
+    _mssf_mac="$MERV_SSH_PRECHECK_MAC"; _mssf_port="$MERV_SSH_PRECHECK_PORT"; _mssf_user="$MERV_SSH_PRECHECK_USER"
+  else
+    _mssf_mac=$(merv_ssh_node_mac "$_mssf_node" 2>/dev/null) || return 6
+    _mssf_port=$(get_node_ssh_port)
+    _mssf_user=$(get_node_ssh_user)
+  fi
+  merv_ssh_prepare_known_host "$_mssf_node" "$_mssf_ip" "$_mssf_port" "$_mssf_mac" || { merv_ssh_release_known_host 2>/dev/null || :; return 5; }
+  _mssf_rc=0
+  if cat "$_mssf_local" | _merv_timeout_run "$MERV_SSH_TIMEOUT" \
+      "${MERV_SSH_CLIENT:-dbclient}" -p "$_mssf_port" -i "$SSH_KEY" \
+      "$_mssf_user@$_mssf_ip" "cat > '${_mssf_remote}.tmp' && mv '${_mssf_remote}.tmp' '${_mssf_remote}'" 2>/dev/null; then
+    :
+  else
+    _mssf_rc=$?
+  fi
+  merv_ssh_release_known_host || { MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"; MERV_SSH_LAST_DETAIL="NODE${_mssf_node:-?} private SSH client home cleanup failed"; return 5; }
+  [ "$_mssf_rc" -eq 0 ] && return 0
+  MERV_SSH_LAST_REASON="stream-failed"
+  MERV_SSH_LAST_DETAIL="NODE${_mssf_node:-?} verified SSH stream failed"
+  return 5
+}
+
+merv_ssh_stream_stdin() {
+  _msss_node="$1"; _msss_ip="$2"; _msss_cmd="$3"
+  merv_ssh_precheck "$_msss_node" "$_msss_ip" || return $?
+  if merv_ssh_precheck_cache_matches "$_msss_node" "$_msss_ip"; then
+    _msss_mac="$MERV_SSH_PRECHECK_MAC"; _msss_port="$MERV_SSH_PRECHECK_PORT"; _msss_user="$MERV_SSH_PRECHECK_USER"
+  else
+    _msss_mac=$(merv_ssh_node_mac "$_msss_node" 2>/dev/null) || return 6
+    _msss_port=$(get_node_ssh_port)
+    _msss_user=$(get_node_ssh_user)
+  fi
+  merv_ssh_prepare_known_host "$_msss_node" "$_msss_ip" "$_msss_port" "$_msss_mac" || { merv_ssh_release_known_host 2>/dev/null || :; return 5; }
+  _msss_rc=0
+  _merv_timeout_run "$MERV_SSH_TIMEOUT" "${MERV_SSH_CLIENT:-dbclient}" \
+    -p "$_msss_port" -i "$SSH_KEY" "$_msss_user@$_msss_ip" "$_msss_cmd"
+  _msss_rc=$?
+  merv_ssh_release_known_host || { MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"; MERV_SSH_LAST_DETAIL="NODE${_msss_node:-?} private SSH client home cleanup failed"; return 5; }
+  return "$_msss_rc"
 }
 
 merv_ssh_test() {

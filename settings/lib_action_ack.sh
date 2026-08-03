@@ -7,6 +7,8 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 : "${PUBLIC_MERV_BASE:=/www/user/mervlan}"
 : "${ACTION_ACK_FILE:=${PUBLIC_MERV_BASE}/tmp/results/action_result.json}"
+: "${MERV_STATE_ROOT:=/jffs/addons/mervlan_state}"
+: "${ACTION_ACK_INTERNAL_FILE:=$MERV_STATE_ROOT/action_ack.latest.json}"
 
 action_ack_sanitize_token() {
   printf '%s' "$1" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-'
@@ -49,7 +51,9 @@ action_ack_write() {
   # result that could be mistaken for a correlated browser request.
   [ -n "$_aa_token" ] || return 0
   [ -n "$_aa_action" ] || _aa_action="unknown"
-  case "$_aa_status" in ok|partial|error) ;; *) _aa_status="error" ;; esac
+  case "$_aa_status" in ok|partial|busy|ssh_trust_required|ssh_trust_pending|expired|error) ;; *) return 2 ;; esac
+  case "$_aa_result" in \{*\}|\[*\]) ;; *) return 2 ;; esac
+  case "$_aa_warnings" in \[*\]) ;; *) return 2 ;; esac
 
   _aa_dir="${ACTION_ACK_FILE%/*}"
   mkdir -p "$_aa_dir" 2>/dev/null || return 1
@@ -69,11 +73,22 @@ action_ack_write() {
     printf '}\n'
   } > "$_aa_tmp" 2>/dev/null || { rm -f "$_aa_tmp" 2>/dev/null; return 1; }
 
-  chmod 644 "$_aa_tmp" 2>/dev/null || :
+  chmod 644 "$_aa_tmp" 2>/dev/null || { rm -f "$_aa_tmp" 2>/dev/null; return 1; }
   mv -f "$_aa_tmp" "$ACTION_ACK_FILE" 2>/dev/null || {
     rm -f "$_aa_tmp" 2>/dev/null
     return 1
   }
+  # Keep an audit copy outside the public symlink.  Failure to publish the
+  # internal copy is a hard publication failure, not a reason to claim success.
+  _aa_internal_dir="${ACTION_ACK_INTERNAL_FILE%/*}"
+  mkdir -p "$_aa_internal_dir" 2>/dev/null || return 1
+  _aa_internal_tmp="${ACTION_ACK_INTERNAL_FILE}.tmp.$$"
+  ( umask 077; cp "$ACTION_ACK_FILE" "$_aa_internal_tmp" ) 2>/dev/null || { rm -f "$_aa_internal_tmp" 2>/dev/null; return 1; }
+  chmod 600 "$_aa_internal_tmp" 2>/dev/null || { rm -f "$_aa_internal_tmp" 2>/dev/null; return 1; }
+  mv -f "$_aa_internal_tmp" "$ACTION_ACK_INTERNAL_FILE" 2>/dev/null || { rm -f "$_aa_internal_tmp" 2>/dev/null; return 1; }
+  # Let action workers distinguish a published terminal acknowledgement from
+  # an early failure that still needs a generic fallback result.
+  MERV_ACTION_ACK_PUBLISHED=1
   return 0
 }
 
@@ -99,6 +114,20 @@ action_ack_error() {
   [ -n "$_aa_wrapper_result" ] || _aa_wrapper_result='{}'
   [ -n "$_aa_wrapper_warnings" ] || _aa_wrapper_warnings='[]'
   action_ack_write "$1" "$2" error "$_aa_wrapper_result" "$4" "$_aa_wrapper_warnings" "$6"
+}
+
+action_ack_busy() {
+  _aa_wrapper_result="${3-}"; _aa_wrapper_warnings="${5-}"
+  [ -n "$_aa_wrapper_result" ] || _aa_wrapper_result='{}'
+  [ -n "$_aa_wrapper_warnings" ] || _aa_wrapper_warnings='[]'
+  action_ack_write "$1" "$2" busy "$_aa_wrapper_result" "${4:-Another action is already running.}" "$_aa_wrapper_warnings" busy
+}
+
+action_ack_ssh_trust_required() {
+  _aa_wrapper_result="${3-}"; _aa_wrapper_warnings="${5-}"
+  [ -n "$_aa_wrapper_result" ] || _aa_wrapper_result='{}'
+  [ -n "$_aa_wrapper_warnings" ] || _aa_wrapper_warnings='[]'
+  action_ack_write "$1" "$2" ssh_trust_required "$_aa_wrapper_result" "${4:-SSH host-key verification is required before node changes.}" "$_aa_wrapper_warnings" ssh-trust-required
 }
 
 LIB_ACTION_ACK_LOADED=1

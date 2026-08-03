@@ -364,7 +364,7 @@ merv_mac_build_snapshot() {
     # only — the ebtables rule keys on MAC + --logical-in br0, never on iface)
     # and only when the bridge has at least one wireless member, keeping
     # wired-only VLANs out of this version's wireless snapshot scope.
-    if [ -n "$rep_iface" ] && command -v brctl >/dev/null 2>&1; then
+    if [ -n "$rep_iface" ] && merv_has brctl; then
       brctl showmacs "$br_name" 2>/dev/null | while read -r _pno mac _islocal _rest; do
         case "$mac" in
           [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*) ;;
@@ -441,7 +441,7 @@ for b in /sys/class/net/br[1-9]*/brif; do
     done
   done
   [ -n "$rep" ] || continue
-  command -v brctl >/dev/null 2>&1 || continue
+  merv_has brctl || continue
   brctl showmacs "$n" 2>/dev/null | while read -r po m loc rest; do
     case "$m" in [0-9a-fA-F][0-9a-fA-F]:*) ;; *) continue ;; esac
     [ "$loc" = no ] || continue
@@ -482,10 +482,26 @@ merv_mac_push_db_to_nodes() {
   local nodes="$1"
   local nid nip port user _ovr_src
 
-  ssh_keys_effectively_installed                   || return 0
-  [ -n "${SSH_KEY:-}" ] && [ -f "${SSH_KEY}" ]       || return 0
-  merv_has dbclient                                 || return 0
+  ssh_keys_effectively_installed                   || return 1
+  [ -n "${SSH_KEY:-}" ] && [ -f "${SSH_KEY}" ]       || return 1
+  merv_has "${MERV_SSH_CLIENT:-dbclient}"          || return 1
   [ -f "$MERV_MAC_DB_ACTIVE" ] || return 0
+
+  # merv_mac_snapshot has already performed the complete-set gate before
+  # observing or mutating state. Reuse that result only when the canonical node
+  # list is unchanged; direct callers still get their own fail-closed gate.
+  _mmdp_preflight_ok=0
+  if [ -n "${MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST:-}" ] && type merv_node_list_digest >/dev/null 2>&1; then
+    _mmdp_current_digest=$(merv_node_list_digest 2>/dev/null || printf '')
+    [ "$_mmdp_current_digest" = "$MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST" ] && _mmdp_preflight_ok=1
+  fi
+  if [ "$_mmdp_preflight_ok" -ne 1 ]; then
+    if type merv_ssh_preflight_node_lines >/dev/null 2>&1; then
+      merv_ssh_preflight_node_lines "$nodes" "$SETTINGS_FILE" || return 1
+    else
+      return 1
+    fi
+  fi
 
   while read -r nid nip; do
     [ -n "$nip" ] || continue
@@ -497,16 +513,11 @@ merv_mac_push_db_to_nodes() {
       continue
     fi
 
-    port=$(get_node_ssh_port); [ -n "$port" ] || port=22
-    user=$(get_node_ssh_user); [ -n "$user" ] || user=admin
-
-    # Stream the db to the node and install it atomically (tmp + mv). The remote
-    # command is single-quoted past the MERV_MAC_DB_ACTIVE interpolation so $d,
-    # ${d%/*} and $$ all expand on the node.
-    if _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$port" -y -i "$SSH_KEY" \
-         "$user@$nip" \
-         "d='$MERV_MAC_DB_ACTIVE'; "'mkdir -p "${d%/*}" 2>/dev/null; cat > "$d.tmp.$$" && mv "$d.tmp.$$" "$d"' \
-         < "$MERV_MAC_DB_ACTIVE" 2>/dev/null; then
+    # Stream the db through the verified SSH contract and install atomically.
+    if ! merv_ssh_exec "$nid" "$nip" "mkdir -p '${MERV_MAC_DB_ACTIVE%/*}' '${MERV_MAC_OVERRIDE_DB%/*}'" >/dev/null 2>&1; then
+      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 )); continue
+    fi
+    if merv_ssh_stream_file "$nid" "$nip" "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_ACTIVE"; then
 
       # Push the override DB BEFORE the reload so the node enforces with the
       # current override set. The override DB is cluster-wide: an empty file is
@@ -515,15 +526,12 @@ merv_mac_push_db_to_nodes() {
       # override push is logged but does not abort the reload.
       _ovr_src="$MERV_MAC_OVERRIDE_DB"
       [ -f "$_ovr_src" ] || _ovr_src="/dev/null"
-      if ! _merv_timeout_run "$MERV_SSH_TIMEOUT" dbclient -p "$port" -y -i "$SSH_KEY" \
-             "$user@$nip" \
-             "d='$MERV_MAC_OVERRIDE_DB'; "'mkdir -p "${d%/*}" 2>/dev/null; cat > "$d.tmp.$$" && mv "$d.tmp.$$" "$d"' \
-             < "$_ovr_src" 2>/dev/null; then
+      if ! merv_ssh_stream_file "$nid" "$nip" "$_ovr_src" "$MERV_MAC_OVERRIDE_DB"; then
         _merv_mac_log warn "MERV_MAC: override db push failed to node ${nip} (reloading anyway)"
       fi
 
       # Reload the node's shield from the freshly pushed db (no remote snapshot).
-      # init_and_apply (flush → init → apply) so a node whose chain was lost to a
+      # init_and_apply (init → flush → apply) so a node whose chain was lost to a
       # reboot/teardown is repaired rather than silently no-op'd.
       if merv_ssh_exec "$nid" "$nip" \
            "MERV_BASE='$MERV_BASE'; MERV_NODE_CONTEXT=1; "'. "$MERV_BASE/settings/var_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null; ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"' \
@@ -650,7 +658,7 @@ merv_mac_maybe_trigger_heal_on_precondition_fail() {
   # lib_mervqt is somehow not loaded in this context.
   if type merv_lock_state >/dev/null 2>&1; then
     case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
-      active|unknown_recent)
+      active|unknown)
         info -c vlan "MERV_MAC: precondition fail — heal not queued (mervlan_manager active)"
         return 0
         ;;
@@ -684,7 +692,7 @@ merv_mac_maybe_trigger_heal_on_precondition_fail() {
 
   printf '%s\n' "$now" > "$stamp" 2>/dev/null || :
   info -c vlan "MERV_MAC: precondition fail — queueing heal_event [mac_precondition_orphan]"
-  ( "$MERV_BASE/functions/heal_event.sh" "mac_precondition_orphan" ) >/dev/null 2>&1 &
+  ( sh "$MERV_BASE/functions/heal_event.sh" "mac_precondition_orphan" ) >/dev/null 2>&1 &
   return 0
 }
 
@@ -751,9 +759,11 @@ merv_mac_snapshot() {
   # we proceed unguarded rather than block a security-relevant rebuild.
   local _snap_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/mac_snapshot.lock"
   local _snap_owned=0
+  local _snap_nonce=""
   if type merv_lock_acquire >/dev/null 2>&1; then
     if merv_lock_acquire "$_snap_lock" "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:-60}" 0 "mac_snapshot"; then
       _snap_owned=1
+      _snap_nonce="${MERV_LOCK_NONCE:-}"
     else
       # Pre-build return: counts legitimately stay at their zero-init values —
       # nothing was observed. Do NOT call _merv_mac_set_counts here.
@@ -767,6 +777,7 @@ merv_mac_snapshot() {
   MERV_MAC_LAST_STATUS="";  MERV_MAC_LAST_REASON=""
   MERV_MAC_LAST_LOCAL_COUNT=0; MERV_MAC_LAST_NODE_COUNT=0
   MERV_MAC_LAST_TOTAL_COUNT=0; MERV_MAC_LAST_DB_COUNT=0
+  MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST=""
   MERV_MAC_LAST_CHANGED=0
   MERV_MAC_LAST_NODES_TOTAL=0; MERV_MAC_LAST_NODES_OK=0; MERV_MAC_LAST_NODES_FAILED=0
   MERV_MAC_LAST_PUSH_TOTAL=0;  MERV_MAC_LAST_PUSH_OK=0;  MERV_MAC_LAST_PUSH_FAILED=0
@@ -791,8 +802,38 @@ merv_mac_snapshot() {
     MERV_MAC_LAST_REASON="interfaces_not_settled"
     _merv_mac_log warn "MERV_MAC: snapshot skipped — interfaces not fully settled (db unchanged)"
     merv_mac_maybe_trigger_heal_on_precondition_fail
-    [ "$_snap_owned" = 1 ] && merv_lock_release "$_snap_lock"
+    if [ "$_snap_owned" = 1 ]; then
+      merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+      _snap_owned=0
+    fi
     return 0
+  fi
+
+  # Resolve and verify the complete configured node set before capturing the
+  # local snapshot or changing local MAC-shield state. A node list that cannot
+  # be fully probed is a hard preflight failure, not an incomplete observation
+  # that can be silently merged.
+  local _nodes="" _nodes_total=0 _nodes_ok=0 _nodes_failed=0 _node_total=0
+  local _node_collect_incomplete=0
+  if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ] && merv_mac_is_main; then
+    _nodes=$(merv_mac_node_list)
+    if [ -n "$_nodes" ]; then
+      if type merv_ssh_preflight_grant_fresh >/dev/null 2>&1 && merv_ssh_preflight_grant_fresh; then
+        _merv_mac_logv info "MERV_MAC: reusing the current SSH host-key preflight"
+      elif ! merv_ssh_preflight_node_lines "$_nodes" "$SETTINGS_FILE"; then
+        MERV_MAC_LAST_STATUS="preflight_failed"
+        MERV_MAC_LAST_REASON="ssh_trust_required"
+        _merv_mac_log warn "MERV_MAC: snapshot blocked — complete SSH trust preflight failed"
+        if [ "$_snap_owned" = 1 ]; then
+          merv_lock_release "$_snap_lock" "$_snap_nonce" || :
+          _snap_owned=0
+        fi
+        return 1
+      fi
+      if type merv_node_list_digest >/dev/null 2>&1; then
+        MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST=$(merv_node_list_digest 2>/dev/null || printf '')
+      fi
+    fi
   fi
 
   local snap_tmp="${MERV_MAC_DB_ACTIVE}.snap.$$"
@@ -805,10 +846,7 @@ merv_mac_snapshot() {
   # every configured node and fold them into this snapshot. Node failures are
   # non-fatal for protection but DO mark the observation incomplete, which
   # blocks any destructive reset below.
-  local _nodes="" _nodes_total=0 _nodes_ok=0 _nodes_failed=0 _node_total=0
-  local _node_collect_incomplete=0
   if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ] && merv_mac_is_main; then
-    _nodes=$(merv_mac_node_list)
     if [ -n "$_nodes" ]; then
       # Nodes are configured (read from settings.json, no SSH needed). If the
       # SSH toolchain is unavailable we cannot observe them at all — treat that
@@ -911,7 +949,10 @@ _NODES_
       _merv_mac_log info "MERV_MAC: snapshot empty — preserving existing db (entries age out naturally)"
     fi
     rm -f "$snap_tmp" 2>/dev/null
-    [ "$_snap_owned" = 1 ] && merv_lock_release "$_snap_lock"
+    if [ "$_snap_owned" = 1 ]; then
+      merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+      _snap_owned=0
+    fi
     return 0
   fi
 
@@ -924,7 +965,10 @@ _NODES_
     MERV_MAC_LAST_STATUS="merge_failed"
     _merv_mac_set_counts
     rm -f "$snap_tmp" 2>/dev/null
-    [ "$_snap_owned" = 1 ] && merv_lock_release "$_snap_lock"
+    if [ "$_snap_owned" = 1 ]; then
+      merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+      _snap_owned=0
+    fi
     return 1
   }
   rm -f "$snap_tmp" 2>/dev/null
@@ -947,7 +991,7 @@ _NODES_
   if [ "$MERV_MAC_LAST_CHANGED" = "1" ] || [ "$_snap_force_reload" = "1" ]; then
     ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"
     if [ -n "$_nodes" ]; then
-      MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
+  MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
       merv_mac_push_db_to_nodes "$_nodes"
     fi
   else
@@ -966,7 +1010,10 @@ _NODES_
     _merv_mac_log info "MERV_MAC: snapshot ${MERV_MAC_LAST_STATUS} — local=${MERV_MAC_LAST_LOCAL_COUNT} node=${MERV_MAC_LAST_NODE_COUNT} total=${MERV_MAC_LAST_TOTAL_COUNT} db=${MERV_MAC_LAST_DB_COUNT} nodes=${MERV_MAC_LAST_NODES_OK}/${MERV_MAC_LAST_NODES_TOTAL} push=${MERV_MAC_LAST_PUSH_OK}/${MERV_MAC_LAST_PUSH_TOTAL}"
   fi
 
-  [ "$_snap_owned" = 1 ] && merv_lock_release "$_snap_lock"
+  if [ "$_snap_owned" = 1 ]; then
+    merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+    _snap_owned=0
+  fi
 }
 
 LIB_MAC_SHIELD_SNAPSHOT_LOADED=1

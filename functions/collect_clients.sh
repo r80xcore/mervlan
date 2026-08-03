@@ -39,6 +39,10 @@ fi
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
 
+if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ] && [ -z "$LIB_ACTION_ACK_LOADED" ]; then
+  . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || true
+fi
+
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 # =========================================== End of MerVLAN environment setup #
@@ -62,17 +66,29 @@ WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-90}"
 # second (skipped) collector must never delete the working dir out from under
 # the running owner. The lock itself is released here too.
 cleanup_collect() {
+  _collect_cleanup_rc=$?
+  _collect_cleanup_failed=0
   # Kill any remaining background collection jobs
   for pid in $BG_PIDS; do
-    kill "$pid" 2>/dev/null
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || _collect_cleanup_failed=1
+    fi
   done
   # Remove temporary collection directory only if we own the lock
   if [ "${COLLECT_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-    [ -d "$COLLECTDIR" ] && rm -rf "$COLLECTDIR" 2>/dev/null
-    if type merv_lock_release >/dev/null 2>&1; then
-      merv_lock_release "$COLLECT_LOCK" 2>/dev/null
+    if [ -d "$COLLECTDIR" ] && ! rm -rf "$COLLECTDIR" 2>/dev/null; then
+      _collect_cleanup_failed=1
+      error -c cli,vlan "Client collection cleanup could not remove its private workspace"
+    fi
+    if ! type merv_lock_release >/dev/null 2>&1 || ! merv_lock_release "$COLLECT_LOCK" "${COLLECT_LOCK_NONCE:-}" 2>/dev/null; then
+      _collect_cleanup_failed=1
+      error -c cli,vlan "Client collection cleanup could not release its owner lock"
+    else
+      COLLECT_LOCK_ACQUIRED=0
     fi
   fi
+  [ "$_collect_cleanup_failed" -eq 0 ] || _collect_cleanup_rc=1
+  return "$_collect_cleanup_rc"
 }
 trap 'cleanup_collect' EXIT INT TERM
 
@@ -87,29 +103,54 @@ BG_PIDS=""
 COLLECT_LOCK="$LOCKDIR/client_collect.lock"
 COLLECT_LOCK_ACQUIRED=0
 
+# execute_nodes retains its orchestration lock while publishing the final
+# observation. Permit that one parent-owned collection only after all node
+# workers have published terminal verified results, and authenticate the
+# exception against the live owner record rather than an unscoped flag.
+collect_execute_nodes_observation_grant_valid() {
+  [ "${MERV_OBS_EXECUTE_NODES_OWNER_GRANT:-0}" = 1 ] || return 1
+  case "${MERV_OBS_EXECUTE_NODES_OWNER_PID:-}:${MERV_OBS_EXECUTE_NODES_OWNER_START:-}:${MERV_OBS_EXECUTE_NODES_OWNER_NONCE:-}" in
+    ''|*[!0-9A-Za-z._:-]*|*::*|*::*) return 1 ;;
+  esac
+  _ceog_lock="$LOCKDIR/execute_nodes.lock"
+  [ -d "$_ceog_lock" ] || return 1
+  _ceog_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$_ceog_lock/owner" 2>/dev/null | head -n 1)
+  _ceog_start=$(sed -n 's/^proc_start_time=\([0-9][0-9]*\)$/\1/p' "$_ceog_lock/owner" 2>/dev/null | head -n 1)
+  _ceog_nonce=$(sed -n 's/^owner_nonce=\([A-Za-z0-9._:-][A-Za-z0-9._:-]*\)$/\1/p' "$_ceog_lock/owner" 2>/dev/null | head -n 1)
+  [ "$_ceog_pid" = "$MERV_OBS_EXECUTE_NODES_OWNER_PID" ] || return 1
+  [ "$_ceog_start" = "$MERV_OBS_EXECUTE_NODES_OWNER_START" ] || return 1
+  [ "$_ceog_nonce" = "$MERV_OBS_EXECUTE_NODES_OWNER_NONCE" ] || return 1
+  merv_process_identity_matches "$_ceog_pid" "$_ceog_start" 2>/dev/null
+}
+
 # An apply already requests its own post-apply collection. Do not let a page
 # load or manual refresh start a second collection while configuration is
 # mutating. post_apply_worker.sh retries pending generations after the manager
 # releases these locks, so this is safe for apply-owned collection too.
 if type merv_lock_state >/dev/null 2>&1; then
   case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
-    active|unknown_recent)
+    active|unknown)
       info -c cli,vlan "Client collection skipped while VLAN apply is active"
       exit 75
       ;;
   esac
   case "$(merv_lock_state "$LOCKDIR/execute_nodes.lock")" in
-    active|unknown_recent)
-      info -c cli,vlan "Client collection skipped while node apply is active"
-      exit 75
+    active|unknown)
+      if collect_execute_nodes_observation_grant_valid; then
+        info -c cli,vlan "Client collection authorized by the terminal node-apply owner"
+      else
+        info -c cli,vlan "Client collection skipped while node apply is active"
+        exit 75
+      fi
       ;;
   esac
 fi
 
 if type merv_lock_acquire >/dev/null 2>&1; then
-  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  mkdir -p "$LOCKDIR" 2>/dev/null || { error -c cli,vlan "Client collection: lock directory unavailable"; exit 1; }
   if merv_lock_acquire "$COLLECT_LOCK" "${COLLECT_STALE_SEC:-300}" 0 "client_collect"; then
     COLLECT_LOCK_ACQUIRED=1
+    COLLECT_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
   else
     info -c cli,vlan "Client collection already running — skipping"
     exit 75
@@ -153,6 +194,9 @@ collect_from_node() {
   node_id="$1"
   node_ip="$2"
   output_file="$3"
+  # This background worker must establish its own initial reachability proof.
+  # It may then avoid exactly one duplicate ICMP probe in merv_ssh_exec.
+  unset MERV_SSH_SKIP_PING
 
   info -c vlan "→ Collecting from node $node_ip (NODE${node_id})"
 
@@ -162,6 +206,8 @@ collect_from_node() {
     printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$MERV_SSH_LAST_REASON" > "$output_file"
     return 1
   fi
+  MERV_SSH_SKIP_PING=1
+  export MERV_SSH_SKIP_PING
 
   # Run remote collector and fetch JSON via SSH wrapper
   # Publish a node-local collection generation and wait for that exact target.
@@ -170,7 +216,7 @@ collect_from_node() {
   # Keep the remote artifact's router identity equal to the configured IP.
   # The environment is exported once for both request and run-wait because the
   # coordinator executes the local collector only during the latter command.
-  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 $MERV_BASE/functions/post_apply_worker.sh request collect >/dev/null 2>&1 && $MERV_BASE/functions/post_apply_worker.sh run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
+  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 sh '$MERV_BASE/functions/post_apply_worker.sh' request collect >/dev/null 2>&1 && sh '$MERV_BASE/functions/post_apply_worker.sh' run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
   
   _result_tmp="$COLLECTDIR/node_${node_ip}.out.$$"
   result=""
@@ -206,7 +252,7 @@ MAIN_JSON="$COLLECTDIR/main.json"
 MAIN_IP=$(nvram get lan_ipaddr 2>/dev/null | tr -d '\r\n')
 
 collect_from_main() {
-  if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1; then
+  if sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1; then
     info -c vlan "✓ Main router collection completed"
   else
     rc=$?
@@ -216,11 +262,6 @@ collect_from_main() {
     fi
   fi
 }
-
-# Start main collection in background so it runs while we check node config
-( trap - EXIT INT TERM; collect_from_main ) &
-MAIN_PID="$!"
-BG_PIDS="$BG_PIDS $MAIN_PID"
 
 # ============================================================================ #
 #                          NODE DISCOVERY & VALIDATION                         #
@@ -258,6 +299,55 @@ fi
 # parallel to minimize total time. Wait for all jobs to complete before        #
 # proceeding to result merging.                                                #
 # ============================================================================ #
+
+# A progress-backed collection must discover every untrusted node before
+# starting even the local inventory job.  This lets the common SSH trust modal
+# interrupt collection safely and keeps the original generation resumable.
+if [ "$NODES_ENABLED" = "true" ] && [ "$DRY_RUN" != yes ]; then
+  if type merv_ssh_preflight_grant_fresh >/dev/null 2>&1 && merv_ssh_preflight_grant_fresh; then
+    info -c vlan "Reusing the verified SSH host-key preflight for this client refresh"
+  else
+  _collect_trust_file="$TMPDIR/collect_trust.$$"
+  while IFS=' ' read -r _collect_slot _collect_ip _collect_extra || [ -n "$_collect_slot" ]; do
+    [ -z "$_collect_extra" ] || { rm -f "$_collect_trust_file"; exit 2; }
+    _collect_mac=$(json_get_flag "AUTO_NODE""$_collect_slot""_MAC" "" "$SETTINGS_FILE" 2>/dev/null)
+    printf '%s %s %s\n' "$_collect_slot" "$_collect_ip" "$_collect_mac" >> "$_collect_trust_file" || {
+      rm -f "$_collect_trust_file"
+      exit 1
+    }
+  done <<EOF
+$NODE_IPS
+EOF
+  merv_ssh_preflight_node_set "$_collect_trust_file"
+  _collect_trust_rc=$?
+  if [ "$_collect_trust_rc" -ne 0 ]; then
+    _collect_trust_worker_rc=1
+    _collect_trust_reason="$MERV_SSH_TRUST_LAST_REASON"
+    [ -n "$_collect_trust_reason" ] || _collect_trust_reason=unknown
+    warn -c cli,vlan "Collection refused before mutation: SSH host-key trust/capability preflight failed ($_collect_trust_reason)"
+    if [ -n "$MERV_PROGRESS_TOKEN" ] && [ -f "$MERV_BASE/functions/ssh_trust_action.sh" ]; then
+      MERV_SSH_TRUST_ORIGINAL_ACTION=collectclients_vlanmgr \
+      MERV_SSH_TRUST_ACK_ACTION=collectclients_vlanmgr \
+      sh "$MERV_BASE/functions/ssh_trust_action.sh" probe "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1
+      _collect_trust_worker_rc=$?
+    fi
+    if [ "$_collect_trust_worker_rc" -ne 0 ] && [ -n "$MERV_PROGRESS_TOKEN" ] &&
+       type action_ack_ssh_trust_required >/dev/null 2>&1; then
+      action_ack_ssh_trust_required "$MERV_PROGRESS_TOKEN" collectclients_vlanmgr \
+        '{"reason":"ssh-trust-required"}' \
+        "SSH host-key verification is required before client collection." '[]' >/dev/null 2>&1 || :
+    fi
+    rm -f "$_collect_trust_file" 2>/dev/null || :
+    exit "$_collect_trust_rc"
+  fi
+  rm -f "$_collect_trust_file" 2>/dev/null || exit 75
+  fi
+fi
+
+# Start main collection only after the complete node trust preflight passes.
+( trap - EXIT INT TERM; collect_from_main ) &
+MAIN_PID="$!"
+BG_PIDS="$BG_PIDS $MAIN_PID"
 
 if [ "$NODES_ENABLED" = "true" ]; then
   # Spawn collection background jobs for each node with PID tracking

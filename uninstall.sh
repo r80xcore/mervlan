@@ -26,7 +26,7 @@ MERV_BASE="/jffs/addons/mervlan"
 ADDON="Merlin_VLAN_Manager"
 LOGTAG="VLAN"
 ACTION="${1:-standard}"
-source /usr/sbin/helper.sh
+. /usr/sbin/helper.sh
 
 # ---- merv: portable `command -v` replacement ----
 if ! type merv_has >/dev/null 2>&1; then
@@ -51,6 +51,9 @@ SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 BOOT_SCRIPT="$MERV_BASE/functions/mervlan_boot.sh"
 SSH_KEY="$MERV_BASE/.ssh/vlan_manager"
 SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
+: "${MERV_STATE_ROOT:=/jffs/addons/mervlan_state}"
+if [ -f "$MERV_BASE/settings/var_settings.sh" ]; then . "$MERV_BASE/settings/var_settings.sh" 2>/dev/null || :; fi
+if [ -f "$MERV_BASE/settings/lib_ssh.sh" ]; then . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :; fi
 
 # ========================================================================== #
 # Helpers
@@ -715,47 +718,70 @@ has_configured_nodes() {
     [ -n "$nodes" ]
 }
 
-remove_nodes_full_install() {
-    local nodes user ssh_bin impl node port
-    nodes=$(list_configured_nodes)
-    [ -n "$nodes" ] || return 0
-
-    if merv_has dbclient; then
-        ssh_bin=$(merv_cmd dbclient) || ssh_bin=""
-        impl="dbclient"
-    elif merv_has ssh; then
-        ssh_bin=$(merv_cmd ssh) || ssh_bin=""
-        impl="ssh"
-    else
-        logger -t "$LOGTAG" "WARNING: No SSH client available; cannot clean nodes"
-        return 1
-    fi
-
-    if [ ! -f "$SSH_KEY" ]; then
-        logger -t "$LOGTAG" "WARNING: SSH key missing; skipping node cleanup"
-        return 1
-    fi
-
-    user=$(get_node_ssh_user)
-    port=$(get_node_ssh_port)
-    for node in $nodes; do
-        if [ "$impl" = "dbclient" ]; then
-            if "$ssh_bin" -p "$port" -y -i "$SSH_KEY" \
-                "$user@$node" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
-                logger -t "$LOGTAG" "Node cleanup success: $node"
-            else
-                logger -t "$LOGTAG" "WARNING: Node cleanup failed for $node"
-            fi
-        else
-            if "$ssh_bin" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                "$user@$node" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
-                logger -t "$LOGTAG" "Node cleanup success: $node"
-            else
-                logger -t "$LOGTAG" "WARNING: Node cleanup failed for $node"
-            fi
-        fi
-    done
+remove_nodes_full_install_legacy() {
+    # Retained as a named compatibility hook for callers from older releases.
+    # All current teardown routes use remove_nodes_full_install below, which
+    # requires the verified SSH trust contract.
+    return 1
 }
+
+remove_nodes_full_install() {
+    _rnf_nodes="$(merv_node_list 2>/dev/null || printf '')"
+    [ -n "$_rnf_nodes" ] || return 0
+    [ -f "$SSH_KEY" ] || return 1
+    preflight_full_uninstall_nodes || return 1
+    _rnf_ok=1
+    while IFS=' ' read -r _rnf_id _rnf_ip _rnf_extra || [ -n "$_rnf_id" ]; do
+        [ -n "$_rnf_id" ] || continue
+        [ -z "$_rnf_extra" ] || { _rnf_ok=0; continue; }
+        if merv_ssh_exec "$_rnf_id" "$_rnf_ip" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
+            logger -t "$LOGTAG" "Node cleanup success: $_rnf_ip"
+        else
+            logger -t "$LOGTAG" "WARNING: verified node cleanup failed for $_rnf_ip"
+            _rnf_ok=0
+        fi
+    done <<EOF
+$_rnf_nodes
+EOF
+    [ "$_rnf_ok" -eq 1 ]
+}
+
+# Full uninstall is a multi-node mutation. Resolve and verify the complete
+# configured set before disabling hooks or removing any local/runtime state.
+# A failed preflight leaves the durable trust database and active addon intact.
+preflight_full_uninstall_nodes() {
+    [ "$ACTION" = "full" ] || return 0
+    _puf_nodes="$(merv_node_list 2>/dev/null || printf '')"
+    [ -n "$_puf_nodes" ] || return 0
+    _puf_file="$TMPDIR/uninstall-trust-preflight.$$"
+    mkdir -p "$TMPDIR" 2>/dev/null || return 1
+    : > "$_puf_file" 2>/dev/null || return 1
+    _puf_old_port="${MERV_NODE_SSH_PORT:-}"
+    MERV_NODE_SSH_PORT="$(get_node_ssh_port 2>/dev/null || printf '22')"
+    while IFS=' ' read -r _puf_id _puf_ip _puf_extra || [ -n "$_puf_id" ]; do
+        [ -n "$_puf_id" ] || continue
+        [ -z "$_puf_extra" ] || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
+        _puf_mac="$(json_get_flag "AUTO_NODE${_puf_id}_MAC" "" "$SETTINGS_FILE" 2>/dev/null)"
+        [ -n "$_puf_mac" ] || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
+        printf '%s %s %s\n' "$_puf_id" "$_puf_ip" "$_puf_mac" >> "$_puf_file" || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
+    done <<EOF
+$_puf_nodes
+EOF
+    merv_ssh_preflight_node_set "$_puf_file"
+    _puf_rc=$?
+    rm -f "$_puf_file"
+    MERV_NODE_SSH_PORT="$_puf_old_port"
+    [ "$_puf_rc" -eq 0 ] || {
+        logger -t "$LOGTAG" "Full uninstall blocked: complete node SSH trust preflight failed"
+        echo "[uninstall] Full uninstall blocked: verify SSH trust for every configured node first" >&2
+        return "$_puf_rc"
+    }
+    return 0
+}
+
+if [ "$ACTION" = "full" ]; then
+    preflight_full_uninstall_nodes || exit 1
+fi
 
 # Reinstall is an internal public/runtime reprovisioning mode.  Its caller owns
 # the explicit old-template teardown and target-template reconciliation.  Keep
@@ -915,15 +941,26 @@ fi
 if [ "$ACTION" = "full" ]; then
     echo "[uninstall] Running full uninstall (removing all addon data)"
     logger -t "$LOGTAG" "Performing full uninstall (removing addon directories)"
-    if has_configured_nodes && ssh_keys_effectively_installed; then
+    FULL_NODE_CLEANUP_OK=1
+    if has_configured_nodes; then
         node_count=$(list_configured_nodes | wc -w)
         echo "[uninstall] Removing MerVLAN from $node_count configured node(s)"
-        remove_nodes_full_install
-        echo "[uninstall] Node cleanup completed"
+        if remove_nodes_full_install; then
+            echo "[uninstall] Verified node cleanup completed"
+        else
+            FULL_NODE_CLEANUP_OK=0
+            echo "[uninstall] WARNING: verified node cleanup failed; durable SSH trust state is preserved" >&2
+        fi
     fi
     rm -rf /jffs/addons/mervlan 2>/dev/null
     rm -rf /tmp/mervlan_tmp 2>/dev/null
     rm -rf /www/user/mervlan 2>/dev/null
+    if [ "$FULL_NODE_CLEANUP_OK" = "1" ]; then
+        case "$MERV_STATE_ROOT" in
+            /jffs/addons/mervlan_state) rm -rf "$MERV_STATE_ROOT" 2>/dev/null || FULL_NODE_CLEANUP_OK=0 ;;
+            *) echo "[uninstall] Preserving non-default durable state root: $MERV_STATE_ROOT" ;;
+        esac
+    fi
     echo "[uninstall] All addon files and data removed"
 fi
 exit 0

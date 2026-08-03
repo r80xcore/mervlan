@@ -1,0 +1,46 @@
+﻿deployed_at=20260801-003442
+router=updated_and_verified
+node=unchanged_after_backup
+backup_directory=C:\Users\r80xc\Documents\Coding\mervlan\branch\custom\mervlan_pre_v0.53.26-dev\dev-tools\backup\20260801-001558
+router_payload_files=37
+public_copies=3
+dev-tools/tests/router/mervlan_selftest.sh -> /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh md5=d52da89c672f4b4749b6bc2d217a95c1 mode=755
+functions/collect_clients.sh -> /jffs/addons/mervlan/functions/collect_clients.sh md5=e14c9d6dbf9ee085a518a8dc35c1f0ee mode=755
+functions/execute_nodes.sh -> /jffs/addons/mervlan/functions/execute_nodes.sh md5=f370fcf35d2d949f0591514deef2cbd6 mode=755
+functions/heal_event.sh -> /jffs/addons/mervlan/functions/heal_event.sh md5=76c339b39930c723913273651aa40236 mode=755
+functions/mac_client_meta.sh -> /jffs/addons/mervlan/functions/mac_client_meta.sh md5=4302aa38a8b13f1d140d766e3c7fe9e3 mode=755
+functions/mervlan_backup.sh -> /jffs/addons/mervlan/functions/mervlan_backup.sh md5=cf1f2598a44d7b6c5f9ffcfd816abb49 mode=755
+functions/mervlan_boot.sh -> /jffs/addons/mervlan/functions/mervlan_boot.sh md5=e311245c8ff09c30f38b6608c60b999f mode=755
+functions/mervlan_manager.sh -> /jffs/addons/mervlan/functions/mervlan_manager.sh md5=2e45c14686e5744c4303f29a66809bab mode=755
+functions/mervlan_recover.sh -> /jffs/addons/mervlan/functions/mervlan_recover.sh md5=a5764a43ac0d2a73c6552b9a16851d64 mode=755
+functions/post_apply_worker.sh -> /jffs/addons/mervlan/functions/post_apply_worker.sh md5=060e4b8c53bd81e32b5a898ea64bb332 mode=755
+functions/save_settings.sh -> /jffs/addons/mervlan/functions/save_settings.sh md5=82b815e81007f1c7e785bdccf71ab6b0 mode=755
+functions/service-event-handler.sh -> /jffs/addons/mervlan/functions/service-event-handler.sh md5=0ffafee79673abc36aec61c42fe60437 mode=755
+functions/ssh_trust_action.sh -> /jffs/addons/mervlan/functions/ssh_trust_action.sh md5=f183eed0082d5ccfc83b4ab0b0c498be mode=755
+functions/sync_nodes.sh -> /jffs/addons/mervlan/functions/sync_nodes.sh md5=7295cc15d0c8152f2ebe3e10b18c340f mode=755
+functions/update_mervlan.sh -> /jffs/addons/mervlan/functions/update_mervlan.sh md5=955b5c6c10d80ee06a981ddbefe10f5f mode=755
+install.sh -> /jffs/addons/mervlan/install.sh md5=be774cb6fb79fd6712c6d0ce3bf1651e mode=755
+mervlan.asp -> /jffs/addons/mervlan/mervlan.asp md5=64f6a5b5d4cbc67fb290656b9036fa93 mode=644
+settings/lib_action_ack.sh -> /jffs/addons/mervlan/settings/lib_action_ack.sh md5=f8e792ad6bd296f4c5040d23cfe70dd0 mode=755
+settings/lib_action_lock.sh -> /jffs/addons/mervlan/settings/lib_action_lock.sh md5=cee4fa9ba454cd02ea699fa9afa14fc3 mode=755
+settings/lib_action_progress.sh -> /jffs/addons/mervlan/settings/lib_action_progress.sh md5=ee68d10742ecdb8828472e67eddc3807 mode=755
+settings/lib_action_runtime.sh -> /jffs/addons/mervlan/settings/lib_action_runtime.sh md5=49f0107872086faf3a337a1260bfd0ed mode=755
+settings/lib_identity.sh -> /jffs/addons/mervlan/settings/lib_identity.sh md5=aa608c01a56c2f1e6a61e925682000f0 mode=755
+settings/lib_json.sh -> /jffs/addons/mervlan/settings/lib_json.sh md5=1377b46f18bbb59a3a2a5ce0915d4d9d mode=755
+settings/lib_mervqt.sh -> /jffs/addons/mervlan/settings/lib_mervqt.sh md5=5ed26de2ba3462f51c833bca9f2dfec0 mode=755
+settings/lib_node_jobs.sh -> /jffs/addons/mervlan/settings/lib_node_jobs.sh md5=a46b8985d0224dfb9ad027641fa77228 mode=755
+settings/lib_progress.sh -> /jffs/addons/mervlan/settings/lib_progress.sh md5=9ce4ef77692389f166257636e33f53f6 mode=755
+settings/lib_ssh.sh -> /jffs/addons/mervlan/settings/lib_ssh.sh md5=bfacc71451ccdecbe8e3feaf706e865d mode=755
+settings/lib_ssh_trust.sh -> /jffs/addons/mervlan/settings/lib_ssh_trust.sh md5=b5b844643817d88716ea9d6c39874c90 mode=755
+settings/log_settings.sh -> /jffs/addons/mervlan/settings/log_settings.sh md5=8985b0db00ed2d2fb105d7d1c18f8722 mode=755
+settings/mac_shield_snapshot.sh -> /jffs/addons/mervlan/settings/mac_shield_snapshot.sh md5=c94dda63ed0cb0a46f62b7763a0cfc44 mode=755
+settings/var_settings.sh -> /jffs/addons/mervlan/settings/var_settings.sh md5=9fcbe527d0db69699498bb6dcfa531fa mode=755
+uninstall.sh -> /jffs/addons/mervlan/uninstall.sh md5=299d7477a25e05a176bb07464b4763b5 mode=755
+www/index.html -> /jffs/addons/mervlan/www/index.html md5=00b7e2aa3f034027470f4886f7a8d8e5 mode=644
+www/settings/loading_actions.json -> /jffs/addons/mervlan/www/settings/loading_actions.json md5=d50fb900ef156525a4d669af1e51186c mode=644
+mervlan.asp -> /www/user/user1.asp md5=64f6a5b5d4cbc67fb290656b9036fa93 mode=644
+www/index.html -> /www/user/mervlan/index.html md5=00b7e2aa3f034027470f4886f7a8d8e5 mode=644
+www/settings/loading_actions.json -> /www/user/mervlan/settings/loading_actions.json md5=d50fb900ef156525a4d669af1e51186c mode=644
+mervlan.asp public copy verified
+www/index.html public copy verified
+www/settings/loading_actions.json public copy verified

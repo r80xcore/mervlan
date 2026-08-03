@@ -44,20 +44,20 @@ fi
 # snapshot/collection locks, preserving the global lock order.
 info -c cli,vlan "MAC Refresh: requesting reset snapshot and client collection"
 merv_action_progress_phase "Requesting snapshot reset and client collection..."
-if ! MERV_OBS_NO_AUTOSTART=1 "$WORKER" request snapshot-reset collect >/dev/null 2>&1; then
+if ! MERV_OBS_NO_AUTOSTART=1 sh "$WORKER" request snapshot-reset collect >/dev/null 2>&1; then
   error -c cli,vlan "MAC Refresh: failed to publish observation generations"
   exit 1
 fi
 
 merv_action_progress_phase "Rebuilding MAC shield and collecting clients..."
-if "$WORKER" run; then
-  _status=$("$WORKER" status 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
+if sh "$WORKER" run; then
+  _status=$(sh "$WORKER" status 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
   info -c cli,vlan "MAC Refresh: complete - ${_status:-observation generations complete}"
   exit 0
 else
   _rc=$?
 fi
 
-_status=$("$WORKER" status 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
+_status=$(sh "$WORKER" status 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
 warn -c cli,vlan "MAC Refresh: deferred/failed (rc=$_rc); pending generation retained - ${_status:-status unavailable}"
 exit "$_rc"

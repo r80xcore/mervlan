@@ -28,8 +28,15 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
-[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing node execution"
+  exit 1
+}
 [ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh"
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the action-lock library; refusing node execution"
+  exit 1
+}
 # Optional web progress publication. The parent orchestration script owns the
 # progress token; worker processes must never publish to the shared status file.
 merv_action_progress_init() { :; }
@@ -37,12 +44,29 @@ merv_action_progress_update() { :; }
 merv_action_progress_complete() { :; }
 merv_action_progress_fail() { :; }
 if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
-  . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+  if ! . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null; then
+    warn -c cli,vlan "Action progress publication is unavailable for node execution"
+  fi
 fi
 # Runtime marker used by the HTML to block redundant client refreshes during
 # node applies, including applies started by boot/event handlers.
 if [ -f "$MERV_BASE/settings/lib_action_runtime.sh" ]; then
-  . "$MERV_BASE/settings/lib_action_runtime.sh" 2>/dev/null || :
+  if ! . "$MERV_BASE/settings/lib_action_runtime.sh" 2>/dev/null; then
+    error -c cli,vlan "Unable to load the action-runtime library; refusing node execution"
+    exit 1
+  fi
+else
+  error -c cli,vlan "Action-runtime library is missing; refusing node execution"
+  exit 1
+fi
+if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
+  if ! . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null; then
+    error -c cli,vlan "Unable to load the action acknowledgement library; refusing node execution"
+    exit 1
+  fi
+else
+  error -c cli,vlan "Action acknowledgement library is missing; refusing node execution"
+  exit 1
 fi
 # =========================================== End of MerVLAN environment setup #
 SSH_NODE_USER=$(get_node_ssh_user)
@@ -50,6 +74,21 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 
 execute_nodes_progress_cleanup() {
   _enpc_rc=$?
+  _enpc_cleanup_rc=0
+  _enpc_runtime_rc=0
+  _enpc_nodes_lock_rc=0
+  _enpc_action_lock_rc=0
+  if [ "${EXEC_RUNTIME_OWNED:-0}" -eq 1 ]; then
+    merv_action_runtime_finish 2>/dev/null || { _enpc_runtime_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the action-runtime marker (rc=$_enpc_runtime_rc)"; }
+  fi
+  if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    merv_lock_release "$EXEC_NODES_LOCK" "${_exec_nodes_lock_nonce:-}" 2>/dev/null || { _enpc_nodes_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release its owner lock (rc=$_enpc_nodes_lock_rc)"; }
+  fi
+  if [ "${EXEC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_exec_action_lock_nonce" "$_exec_action_lock_start" >/dev/null 2>&1 || { _enpc_action_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the global action lock (rc=$_enpc_action_lock_rc)"; }
+    [ "$_enpc_action_lock_rc" -eq 0 ] && EXEC_ACTION_LOCK_ACQUIRED=0
+  fi
+  [ "$_enpc_cleanup_rc" -eq 0 ] || _enpc_rc=1
   if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
      [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
     if [ "$_enpc_rc" -eq 0 ]; then
@@ -66,9 +105,7 @@ execute_nodes_progress_cleanup() {
       fi
     fi
   fi
-  [ "${EXEC_RUNTIME_OWNED:-0}" -eq 1 ] &&
-    merv_action_runtime_finish 2>/dev/null || :
-  [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ] && merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null || :
+  return "$_enpc_rc"
 }
 
 # ----------------------------------------------------------- Concurrency lock --
@@ -79,16 +116,46 @@ execute_nodes_progress_cleanup() {
 # mac_refresh (no local config files are overwritten here), hence best-effort.
 EXEC_NODES_LOCK="$LOCKDIR/execute_nodes.lock"
 EXEC_NODES_LOCK_ACQUIRED=0
+EXEC_ACTION_LOCK_ACQUIRED=0
+EXEC_PHASE4_ACTION_LOCK_HELD=0
+if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ]; then
+  EXEC_PHASE4_ACTION_LOCK_HELD=1
+fi
+if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" != 1 ] && type merv_action_lock_acquire >/dev/null 2>&1; then
+  merv_action_lock_acquire "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" || exit 75
+  EXEC_ACTION_LOCK_ACQUIRED=1
+  EXEC_PHASE4_ACTION_LOCK_HELD=1
+  _exec_action_lock_nonce="$MERV_ACTION_LOCK_NONCE"
+  _exec_action_lock_start="$MERV_ACTION_LOCK_START"
+fi
 if type merv_lock_acquire >/dev/null 2>&1; then
-  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  mkdir -p "$LOCKDIR" 2>/dev/null || {
+    error -c cli,vlan "Execute: unable to prepare its lock directory"
+    if [ "$EXEC_ACTION_LOCK_ACQUIRED" -eq 1 ]; then
+      merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_exec_action_lock_nonce" "$_exec_action_lock_start" >/dev/null 2>&1 || error -c cli,vlan "Execute: global action-lock cleanup failed"
+      [ -d "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" ] && warn -c cli,vlan "Execute: global action lock was retained for recovery"
+    fi
+    exit 1
+  }
   if merv_lock_acquire "$EXEC_NODES_LOCK" "${MERV_EXEC_NODES_LOCK_STALE_SEC:-900}" 0 "execute_nodes"; then
     EXEC_NODES_LOCK_ACQUIRED=1
+    _exec_nodes_lock_nonce="$MERV_LOCK_NONCE"
+    _exec_nodes_owner_pid="$$"
+    _exec_nodes_owner_start="${MERV_LOCK_START:-}"
     trap 'execute_nodes_progress_cleanup' EXIT INT TERM
   else
+    if [ "$EXEC_ACTION_LOCK_ACQUIRED" -eq 1 ]; then
+      if merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_exec_action_lock_nonce" "$_exec_action_lock_start" >/dev/null 2>&1; then
+        EXEC_ACTION_LOCK_ACQUIRED=0
+      else
+        error -c cli,vlan "Execute: could not release the global action lock after contention; lock retained for recovery"
+      fi
+    fi
     warn -c cli,vlan "Execute: another execute_nodes run is in progress — skipping"
     exit 0
   fi
 fi
+export EXEC_PHASE4_ACTION_LOCK_HELD
 # ============================================================================ #
 #                          INITIALIZATION & LOGGING                            #
 # Display welcome message and prepare for node execution. Log script           #
@@ -217,6 +284,47 @@ fi
 info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' ' ')"
 echo ""
 EXEC_NODE_COUNT=$(printf '%s\n' "$NODE_IPS" | awk 'NF { count++ } END { print count + 0 }')
+
+# Parent transaction boundary: validate every configured node's canonical
+# identity, endpoint, pinned host key, and client capability before any JFFS
+# check, settings copy, or manager launch can mutate a node or the main router.
+_exec_trust_file="$TMPDIR/execute_nodes_trust.$APPLY_RUN_ID"
+MERV_NODE_SSH_PORT="$SSH_NODE_PORT"
+export MERV_NODE_SSH_PORT
+: > "$_exec_trust_file" || { error -c cli,vlan "Execute: unable to stage SSH trust preflight"; exit 1; }
+while IFS=' ' read -r _exec_trust_id _exec_trust_ip _exec_trust_extra || [ -n "$_exec_trust_id" ]; do
+    [ -n "$_exec_trust_id" ] || continue
+    _exec_trust_mac=""
+    if type json_get_flag >/dev/null 2>&1; then
+        _exec_trust_mac=$(json_get_flag "AUTO_NODE${_exec_trust_id}_MAC" "" "$SETTINGS_FILE" 2>/dev/null)
+    fi
+    printf '%s %s %s\n' "$_exec_trust_id" "$_exec_trust_ip" "$_exec_trust_mac" >> "$_exec_trust_file" || { error -c cli,vlan "Execute: unable to stage node identity"; exit 1; }
+done <<EOF
+$NODE_IPS
+EOF
+ merv_ssh_preflight_node_set "$_exec_trust_file"
+_exec_trust_rc=$?
+if [ "$_exec_trust_rc" -ne 0 ]; then
+    error -c cli,vlan "Execute: SSH trust preflight failed (${MERV_SSH_TRUST_LAST_REASON:-unverified-node})"
+    _exec_trust_worker_rc=1
+    if [ -f "$MERV_BASE/functions/ssh_trust_action.sh" ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+        MERV_SSH_TRUST_ORIGINAL_ACTION="${EXECUTE_PROGRESS_ACTION:-executenodes_vlanmgr}" \
+        MERV_SSH_TRUST_ACK_ACTION="${EXECUTE_PROGRESS_ACTION:-executenodes_vlanmgr}" \
+        MERV_ACTION_LOCK_PARENT_HELD=1 \
+        sh "$MERV_BASE/functions/ssh_trust_action.sh" probe "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1
+        _exec_trust_worker_rc=$?
+    fi
+    if [ "$_exec_trust_worker_rc" -ne 0 ] && type action_ack_ssh_trust_required >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+        if ! action_ack_ssh_trust_required "$MERV_PROGRESS_TOKEN" "${EXECUTE_PROGRESS_ACTION:-executenodes_vlanmgr}" '{"reason":"ssh-trust-required"}' "SSH host-key verification is required before node changes." '[]' >/dev/null 2>&1; then
+            error -c cli,vlan "Execute: SSH trust-required acknowledgement failed"
+        fi
+    fi
+    exit "${_exec_trust_rc:-6}"
+fi
+rm -f "$_exec_trust_file" 2>/dev/null || {
+    error -c cli,vlan "Execute: trust preflight temporary cleanup failed"
+    exit 75
+}
 merv_action_progress_update preflight 1 1 15 \
     "Validated settings, SSH, and $EXEC_NODE_COUNT configured node(s)..."
 
@@ -349,6 +457,28 @@ ensure_remote_settings_dir() {
 # section to avoid overwriting device-specific hardware detection values.      #
 # IS_NODE and NODE_ID are set separately by set_node_flags_remote().           #
 # ============================================================================ #
+execute_record_settings_expected() {
+    _erse_file="$1"
+    [ -f "$_erse_file" ] || return 1
+    _erse_size=$(wc -c < "$_erse_file" 2>/dev/null | tr -cd '0-9')
+    _erse_algo=""; _erse_digest=""
+    if merv_has sha256sum; then
+        _erse_algo=sha256
+        _erse_digest=$(sha256sum "$_erse_file" 2>/dev/null | awk '{print $1}')
+    elif merv_has md5sum; then
+        _erse_algo=md5
+        _erse_digest=$(md5sum "$_erse_file" 2>/dev/null | awk '{print $1}')
+    else
+        return 1
+    fi
+    case "$_erse_size:$_erse_digest" in *[!0-9A-Fa-f:]*|:*|*::*) return 1 ;; esac
+    _erse_expected="${MERV_NODE_JOB_DIR:-$TMPDIR}/settings.expected"
+    printf '%s\n%s\n%s\n' "$_erse_algo" "$_erse_size" "$_erse_digest" > "$_erse_expected" 2>/dev/null || return 1
+    chmod 600 "$_erse_expected" 2>/dev/null || return 1
+    EXEC_SETTINGS_EXPECTED_FILE="$_erse_expected"
+    return 0
+}
+
 copy_settings_conf_to_node() {
     node_id="$1"
     node_ip="$2"
@@ -362,10 +492,9 @@ copy_settings_conf_to_node() {
         return 1
     fi
 
-    # Fetch node's current Hardware section (if exists) to preserve it
-    # NOTE: We do NOT preserve IS_NODE/NODE_ID here - they are set by set_node_flags_remote()
-    _cstn_tmp="$TMPDIR/settings_merged_node${node_id}.$$"
+    _cstn_tmp="$TMPDIR/settings_prepared_node${node_id}.$$"
     _cstn_node_hw=""
+    _cstn_hw_file=""
 
     _cstn_node_hw=$(merv_ssh_exec "$node_id" "$node_ip" "
         if [ -f '$remote_path' ]; then
@@ -375,72 +504,24 @@ copy_settings_conf_to_node() {
     " 2>/dev/null)
 
     if [ -n "$_cstn_node_hw" ] && echo "$_cstn_node_hw" | grep -q '"Hardware"'; then
-        # Node has Hardware section - create merged file
-        cp "$SETTINGS_FILE" "$_cstn_tmp" 2>/dev/null || {
-            error -c cli,vlan "✗ Failed to create temp file for settings merge"
-            rm -f "$_cstn_tmp" 2>/dev/null
-            return 1
-        }
-
-        # Reset Trunks section to defaults (nodes should never trunk)
-        if ! json_reset_trunks_section "$_cstn_tmp"; then
-            warn -c cli,vlan "⚠️ Failed to reset trunks section, continuing anyway"
-        fi
-
-        # Write node's Hardware to temp file, then replace in the copy
         _cstn_hw_file="$TMPDIR/node_hw_${node_id}.$$"
         printf '%s\n' "$_cstn_node_hw" > "$_cstn_hw_file"
+    fi
 
-        if json_replace_hardware_section "$_cstn_hw_file" "$_cstn_tmp"; then
-            info -c cli,vlan "✓ Merged settings.json preserving NODE${node_id} Hardware section"
-            # Copy the merged file
-            if cat "$_cstn_tmp" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
-                info -c cli,vlan "✓ Copied $file_rel (merged) to $node_ip:$remote_path"
-                rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
-                return 0
-            else
-                error -c cli,vlan "✗ Failed to copy merged $file_rel to $node_ip:$remote_path"
-                rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
-                return 1
-            fi
-        else
-            warn -c cli,vlan "⚠️ Hardware merge failed, copying settings.json as-is"
-            rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
-        fi
+    if ! mnj_prepare_node_settings "$SETTINGS_FILE" "$node_id" "$_cstn_tmp" "$_cstn_hw_file"; then
+        error -c cli,vlan "✗ Failed to prepare node settings for NODE${node_id}"
         rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
-    fi
-
-    # No existing Hardware section on node, or merge wasn't needed - copy with trunk reset
-    # Create temp file with reset trunks
-    _cstn_tmp="$TMPDIR/settings_trunk_reset_node${node_id}.$$"
-    cp "$SETTINGS_FILE" "$_cstn_tmp" 2>/dev/null || {
-        error -c cli,vlan "✗ Failed to create temp file for trunk reset"
-        rm -f "$_cstn_tmp" 2>/dev/null
         return 1
-    }
-
-    # Reset Trunks section to defaults (nodes should never trunk)
-    if ! json_reset_trunks_section "$_cstn_tmp"; then
-        warn -c cli,vlan "⚠️ Failed to reset trunks section, copying original file"
-        rm -f "$_cstn_tmp" 2>/dev/null
-        # Fallback to original file
-        if cat "$SETTINGS_FILE" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
-            info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
-            return 0
-        else
-            error -c cli,vlan "✗ Failed to copy $file_rel to $node_ip:$remote_path"
-            return 1
-        fi
     fi
 
-    # Use cat pipe through SSH with atomic rename (write to .tmp then mv)
-    if cat "$_cstn_tmp" | _merv_timeout_run $MERV_SSH_TIMEOUT dbclient -p "$SSH_NODE_PORT" -y -i "$SSH_KEY" "$SSH_NODE_USER@$node_ip" "cat > '${remote_path}.tmp' && mv '${remote_path}.tmp' '${remote_path}'" 2>/dev/null; then
-        info -c cli,vlan "✓ Copied $file_rel (trunk-safe) to $node_ip:$remote_path"
-        rm -f "$_cstn_tmp" 2>/dev/null
+    if merv_ssh_stream_file "$node_id" "$node_ip" "$_cstn_tmp" "$remote_path"; then
+        execute_record_settings_expected "$_cstn_tmp" || { rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null; return 1; }
+        info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
+        rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
         return 0
     else
         error -c cli,vlan "✗ Failed to copy $file_rel to $node_ip:$remote_path"
-        rm -f "$_cstn_tmp" 2>/dev/null
+        rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
         return 1
     fi
 }
@@ -527,6 +608,30 @@ verify_settings_conf_on_node() {
 # Orchestrate settings synchronization for a single node. Check JFFS status,   #
 # copy settings.json, and verify successful transfer.                          #
 # ============================================================================ #
+verify_settings_conf_on_node() {
+    _vsc_id="$1"; _vsc_ip="$2"; _vsc_remote="$MERV_BASE/settings/settings.json"
+    _vsc_expected="${EXEC_SETTINGS_EXPECTED_FILE:-${MERV_NODE_JOB_DIR:-$TMPDIR}/settings.expected}"
+    [ -s "$_vsc_expected" ] || { error -c cli,vlan "✗ No exact settings digest recorded for NODE${_vsc_id}"; return 1; }
+    _vsc_algo=$(sed -n '1p' "$_vsc_expected" 2>/dev/null)
+    _vsc_size=$(sed -n '2p' "$_vsc_expected" 2>/dev/null)
+    _vsc_digest=$(sed -n '3p' "$_vsc_expected" 2>/dev/null)
+    case "$_vsc_algo:$_vsc_size:$_vsc_digest" in sha256:[0-9]*:[0-9A-Fa-f]*|md5:[0-9]*:[0-9A-Fa-f]*) ;; *) return 1 ;; esac
+    _vsc_remote_result=$(merv_ssh_exec "$_vsc_id" "$_vsc_ip" "
+        f='$_vsc_remote'; a='$_vsc_algo';
+        test -s \"\$f\" || { echo 'MISSING'; exit 1; };
+        s=\$(wc -c < \"\$f\" 2>/dev/null | tr -cd '0-9');
+        if [ \"\$a\" = sha256 ] && type sha256sum >/dev/null 2>&1; then d=\$(sha256sum \"\$f\" 2>/dev/null | awk '{print \$1}');
+        elif [ \"\$a\" = md5 ] && type md5sum >/dev/null 2>&1; then d=\$(md5sum \"\$f\" 2>/dev/null | awk '{print \$1}');
+        else echo 'NO_DIGEST'; exit 1; fi;
+        case \"\$s:\$d\" in *[!0-9A-Fa-f:]*|:*|*::*) echo 'BAD_DIGEST'; exit 1 ;; esac;
+        printf 'OK|%s|%s|%s\\n' \"\$a\" \"\$s\" \"\$d\"
+    " 2>/dev/null | tail -n 1 | tr -d '\r\n')
+    _vsc_expected_result="OK|$_vsc_algo|$_vsc_size|$_vsc_digest"
+    [ "$_vsc_remote_result" = "$_vsc_expected_result" ] || { error -c cli,vlan "✗ Exact settings verification failed on NODE${_vsc_id}"; return 1; }
+    info -c cli,vlan "✓ Exact settings digest verified on NODE${_vsc_id}"
+    return 0
+}
+
 sync_settings_conf_for_node() {
     node_id="$1"
     node_ip="$2"
@@ -709,7 +814,7 @@ execute_prepare_job() {
     merv_ssh_precheck "$_epj_id" "$_epj_ip" || return 1
     test_ssh_connection "$_epj_id" "$_epj_ip" || return 1
     sync_settings_conf_for_node "$_epj_id" "$_epj_ip" || return 1
-    set_node_flags_remote "$_epj_id" "$_epj_ip"
+    set_node_flags_remote "$_epj_id" "$_epj_ip" || return 1
 }
 execute_launch_job() { execute_vlan_manager_on_node "$1" "$2"; }
 execute_status_job() { verify_node_completion "$1" "$2"; }
@@ -772,6 +877,33 @@ execute_nodes_progress_hook() {
         "$_enph_percent" "$_enph_label: $_enph_done of $_enph_total complete..."
 }
 
+execute_supervise_local_manager() {
+    _eslm_pid="$1"; _eslm_start="$2"; _eslm_rc_file="$3"; _eslm_limit="$4"
+    case "$_eslm_pid:$_eslm_start:$_eslm_limit" in *[!0-9:]*|:*|*::*) return 125 ;; esac
+    _eslm_deadline=$(( $(date +%s 2>/dev/null || printf 0) + _eslm_limit ))
+    while merv_process_identity_matches "$_eslm_pid" "$_eslm_start" 2>/dev/null; do
+        _eslm_now=$(date +%s 2>/dev/null || printf 0)
+        [ "$_eslm_now" -lt "$_eslm_deadline" ] 2>/dev/null || break
+        sleep 1
+    done
+    if merv_process_identity_matches "$_eslm_pid" "$_eslm_start" 2>/dev/null; then
+        kill -TERM "$_eslm_pid" 2>/dev/null || return 124
+        _eslm_n=0
+        while [ "$_eslm_n" -lt 5 ] && merv_process_identity_matches "$_eslm_pid" "$_eslm_start" 2>/dev/null; do sleep 1; _eslm_n=$((_eslm_n + 1)); done
+        if merv_process_identity_matches "$_eslm_pid" "$_eslm_start" 2>/dev/null; then
+            kill -KILL "$_eslm_pid" 2>/dev/null || return 124
+            sleep 1
+        fi
+    fi
+    wait "$_eslm_pid" 2>/dev/null
+    _eslm_wait_rc=$?
+    [ "$_eslm_wait_rc" -eq 0 ] || info -c vlan "Execute: local manager wait returned rc=$_eslm_wait_rc; using its published result"
+    [ -f "$_eslm_rc_file" ] || return 125
+    _eslm_rc=$(sed -n '1p' "$_eslm_rc_file" 2>/dev/null)
+    case "$_eslm_rc" in ''|*[!0-9]*) return 125 ;; esac
+    return "$_eslm_rc"
+}
+
 # ============================================================================ #
 #                      MAIN NODE EXECUTION LOOP                                #
 # Phase 1: Prepare nodes (connectivity, sync settings, set flags)              #
@@ -815,7 +947,10 @@ _execute_ready_count=$(printf '%s\n' "$READY_NODES" | awk 'NF { count++ } END { 
 merv_action_progress_update node_prepare "$_execute_ready_count" "$EXEC_NODE_COUNT" 40 \
     "Nodes prepared: $_execute_ready_count of $EXEC_NODE_COUNT ready..."
 
-if [ -z "$READY_NODES" ]; then
+if [ "$_execute_ready_count" -ne "$EXEC_NODE_COUNT" ] 2>/dev/null; then
+    error -c cli,vlan "Node preparation was not complete for the configured set; refusing partial mutation"
+    overall_success=false
+elif [ -z "$READY_NODES" ]; then
     warn -c cli,vlan "No nodes ready for execution"
     
     # Still run main router if not in nodesonly mode
@@ -843,7 +978,7 @@ else
         merv_action_progress_update apply 0 "$EXEC_NODE_COUNT" 45 \
             "Starting VLAN configuration on router and $_execute_ready_count node(s)..."
     fi
-    if ! mnj_pool_run "$_exec_jobs_root/launch" launch "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_PREPARE_MAX_SEC:-180}" "$_exec_jobs_root/ready" execute_launch_job; then
+    if ! mnj_pool_run "$_exec_jobs_root/launch" launch "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_LAUNCH_MAX_SEC:-180}" "$_exec_jobs_root/ready" execute_launch_job; then
         overall_success=false
     fi
     execute_nodes_progress_hook "$_exec_jobs_root/launch" launch
@@ -863,8 +998,10 @@ else
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
             _main_rc_file="$TMPDIR/main_exec_rc.$$"
-            ( MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; echo $? > "$_main_rc_file" ) &
+            ( MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; _main_child_rc=$?; _main_rc_tmp="${_main_rc_file}.tmp.$$"; printf '%s\n' "$_main_child_rc" > "$_main_rc_tmp" && mv -f "$_main_rc_tmp" "$_main_rc_file" ) &
             main_pid=$!
+            main_start=$(merv_proc_start_time "$main_pid" 2>/dev/null || printf '')
+            case "$main_start" in ''|*[!0-9]*) error -c cli,vlan "âœ— Could not record local manager process identity"; kill "$main_pid" 2>/dev/null || :; wait "$main_pid" 2>/dev/null || :; local_success=false; main_pid="" ;; esac
         fi
     fi
     
@@ -878,7 +1015,9 @@ else
     fi
     info -c cli,vlan "Waiting for all executions to complete..."
     if [ -n "${main_pid:-}" ]; then
-        wait "$main_pid"
+        execute_supervise_local_manager "$main_pid" "$main_start" "$_main_rc_file" "${MERV_MAIN_MANAGER_MAX_SEC:-600}"
+        _main_supervise_rc=$?
+        [ "$_main_supervise_rc" -eq 0 ] || local_success=false
     fi
     if [ "$MODE" = "nodesonly" ]; then
         merv_action_progress_update wait 1 1 90 \
@@ -891,7 +1030,7 @@ else
     
     # Check if main router succeeded (if we ran it)
     if [ "$MODE" != "nodesonly" ]; then
-        if [ -n "${_main_rc_file:-}" ] && [ -f "$_main_rc_file" ]; then
+        if [ "${_main_supervise_rc:-125}" -eq 0 ] && [ -n "${_main_rc_file:-}" ] && [ -f "$_main_rc_file" ]; then
             _main_rc=$(cat "$_main_rc_file" 2>/dev/null)
             rm -f "$_main_rc_file" 2>/dev/null
             if [ "${_main_rc:-1}" = "0" ]; then
@@ -937,16 +1076,26 @@ else
     # ============================================================================ #
     # PHASE 4: Publish one cluster observation after all work is verified       #
     # ============================================================================ #
-    if [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
+    # A detached node manager must finish and publish a successful terminal
+    # marker before the router-owned snapshot can update its MAC-shield DB.
+    # Otherwise the node may verify against a DB that changed mid-apply.
+    if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then
+        if [ -f "$FUNCDIR/post_apply_worker.sh" ]; then
         merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
         info -c cli,vlan "--- Phase 4: Refreshing client inventory ---"
-        if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-            merv_lock_release "$EXEC_NODES_LOCK" 2>/dev/null || :
-            EXEC_NODES_LOCK_ACQUIRED=0
-        fi
-        if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
+        if MERV_OBS_EXECUTE_NODES_OWNER_GRANT=1 \
+           MERV_OBS_EXECUTE_NODES_OWNER_PID="$_exec_nodes_owner_pid" \
+           MERV_OBS_EXECUTE_NODES_OWNER_START="$_exec_nodes_owner_start" \
+           MERV_OBS_EXECUTE_NODES_OWNER_NONCE="$_exec_nodes_lock_nonce" \
+           MERV_ACTION_LOCK_PARENT_HELD="$EXEC_PHASE4_ACTION_LOCK_HELD" \
+           MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
              request snapshot collect >/dev/null 2>&1 &&
-           "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
+           MERV_OBS_EXECUTE_NODES_OWNER_GRANT=1 \
+           MERV_OBS_EXECUTE_NODES_OWNER_PID="$_exec_nodes_owner_pid" \
+           MERV_OBS_EXECUTE_NODES_OWNER_START="$_exec_nodes_owner_start" \
+           MERV_OBS_EXECUTE_NODES_OWNER_NONCE="$_exec_nodes_lock_nonce" \
+           MERV_ACTION_LOCK_PARENT_HELD="$EXEC_PHASE4_ACTION_LOCK_HELD" \
+           sh "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
             info -c cli,vlan "✓ VLAN client list refresh completed"
         else
             _exec_observation_rc=$?
@@ -956,6 +1105,9 @@ else
     else
         overall_success=false
         warn -c cli,vlan "✗ Post-apply observation unavailable; client inventory was not refreshed"
+        fi
+    else
+        warn -c cli,vlan "Skipping post-apply observation until every node has reached terminal verified success"
     fi
 fi
 

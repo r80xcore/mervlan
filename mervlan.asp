@@ -177,6 +177,29 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
   // backend action is submitted, and are never accepted from rawAmng because
   // raw payloads are used by compatibility/update paths.
   var progressToken = (typeof opts.progressToken === "string") ? opts.progressToken : "";
+  var selectedNodeSlots = "";
+  if (Object.prototype.hasOwnProperty.call(opts, "nodeSlots")) {
+    selectedNodeSlots = (typeof opts.nodeSlots === "string") ? opts.nodeSlots : "";
+    var slotParts = selectedNodeSlots.split(".");
+    var seenSlot = {};
+    var slotsValid = actionScriptName === "sshtrustprobe_vlanmgr" &&
+      !!progressToken &&
+      /^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/.test(selectedNodeSlots);
+    for (var slotIndex = 0; slotsValid && slotIndex < slotParts.length; slotIndex++) {
+      var slotNumber = Number(slotParts[slotIndex]);
+      if (!Number.isInteger(slotNumber) || slotNumber < 1 || slotNumber > 10 || seenSlot[slotNumber]) {
+        slotsValid = false;
+      } else {
+        seenSlot[slotNumber] = true;
+      }
+    }
+    if (!slotsValid) {
+      if (window.console && typeof console.warn === "function") {
+        console.warn("[MVM] rejected invalid SSH trust node selection");
+      }
+      return false;
+    }
+  }
   if (progressToken) {
     if (!/^[A-Za-z0-9._-]{1,96}$/.test(progressToken) || typeof opts.rawAmng === "string") {
       if (window.console && typeof console.warn === "function") {
@@ -202,6 +225,12 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
         progressTokenHex += ("0" + progressToken.charCodeAt(pti).toString(16)).slice(-2);
       }
       actionScriptName = actionScriptName + "_pgt_" + progressTokenHex;
+      if (selectedNodeSlots) {
+        // Node slot selection is part of the bounded action transport, not an
+        // asynchronous custom-settings value. The router derives every endpoint
+        // and host-key fact from its own configured node list.
+        actionScriptName = actionScriptName + "_nsl_" + selectedNodeSlots;
+      }
     }
   }
 
@@ -211,8 +240,14 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     /^(deletebackup_vlanmgr|restorebackup_vlanmgr)_[0-9a-f]+_[am]\.[A-Za-z0-9._-]+$/.test(actionScriptName);
   var verifiedActionMatch = /^(.+)_vrt_([0-9a-f]+)$/.exec(actionScriptName);
   var isVerifiedAction = !!(verifiedActionMatch && MVM_ALLOWED_ACTIONS.has(verifiedActionMatch[1]));
-  var progressActionMatch = /^(.+)_pgt_([0-9a-f]+)$/.exec(actionScriptName);
-  var isProgressAction = !!(progressActionMatch && MVM_ALLOWED_ACTIONS.has(progressActionMatch[1]));
+  var progressActionMatch = /^(.+)_pgt_([0-9a-f]+)(?:_nsl_([1-9][0-9]*(?:\.[1-9][0-9]*)*))?$/.exec(actionScriptName);
+  var isProgressAction = !!(progressActionMatch &&
+    MVM_ALLOWED_ACTIONS.has(progressActionMatch[1]) &&
+    (!progressActionMatch[3] || progressActionMatch[1] === "sshtrustprobe_vlanmgr"));
+  if (actionScriptName.length > 120) {
+    if (window.console && typeof console.warn === "function") console.warn("[MVM] blocked overlong action", actionScriptName);
+    return false;
+  }
   if (!MVM_ALLOWED_ACTIONS.has(actionScriptName) && !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction) {
     if (window.console && typeof console.warn === "function") {
       console.warn("[MVM] blocked disallowed action", actionScriptName);
@@ -308,52 +343,80 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
     // If minLoadingMs > 0, the setTimeout above will handle hiding
   }
 
-  function notifyProgressFrameComplete() {
+  function notifyProgressFrameTransport(state) {
     if (!progressToken) return;
     try {
       var progressFrame = document.getElementById("vlan_iframe");
       if (progressFrame && progressFrame.contentWindow) {
         progressFrame.contentWindow.postMessage({
           source: "mervlan",
-          type: "mervlan-action-complete",
+          type: "mervlan-action-transport",
           token: progressToken,
-          action: actionScriptName
+          action: actionScriptName,
+          state: state
         }, "*");
       }
     } catch (e) {}
   }
 
-  // Keep overlay hidden if we opted out of loading feedback
+  // A frame navigation is only a transport event.  Backend completion comes
+  // from the correlated progress/ack record, never from iframe load.
   var targetFrameId = skipRefresh ? "mvm_sandbox_iframe" : (document.form.target || "hidden_frame");
   var tf = document.getElementById(targetFrameId);
-  if (tf) {
-    var oneShot = function() {
-      if (tf.removeEventListener) {
-        tf.removeEventListener("load", oneShot);
-      } else if (tf.detachEvent) {
-        tf.detachEvent("onload", oneShot);
-      }
-      hideLoadingIfNoMinTime();
-      notifyProgressFrameComplete();
-      if (skipRefresh) {
-        mvmReleaseRefreshGuard();
-        mvmRemoveSandboxFrame();
-      } else if (!wantLoading) {
-        hideLoadingSafe();
-      }
-    };
-    if (tf.addEventListener) {
-      tf.addEventListener("load", oneShot);
-    } else if (tf.attachEvent) {
-      tf.attachEvent("onload", oneShot);
+  var frameFinalized = false;
+  var frameTimer = null;
+  var frameTimeoutMs = (opts && typeof opts.frameTimeoutMs === "number" && opts.frameTimeoutMs > 0)
+    ? Math.min(opts.frameTimeoutMs, 60000) : 15000;
+  function finalizeFrame(state) {
+    if (frameFinalized) return;
+    frameFinalized = true;
+    if (frameTimer !== null) {
+      clearTimeout(frameTimer);
+      frameTimer = null;
     }
-  } else if (skipRefresh) {
-    mvmReleaseRefreshGuard();
-    mvmRemoveSandboxFrame();
+    if (tf) {
+      if (tf.removeEventListener) {
+        tf.removeEventListener("load", onFrameLoad);
+        tf.removeEventListener("error", onFrameError);
+      } else if (tf.detachEvent) {
+        tf.detachEvent("onload", onFrameLoad);
+        tf.detachEvent("onerror", onFrameError);
+      }
+    }
+    if (state !== "load" && window.console && typeof console.warn === "function") {
+      console.warn("[MVM] action transport is unknown", actionScriptName, state);
+    }
+    hideLoadingIfNoMinTime();
+    notifyProgressFrameTransport(state);
+    if (skipRefresh) {
+      mvmReleaseRefreshGuard();
+      mvmRemoveSandboxFrame();
+    } else if (!wantLoading) {
+      hideLoadingSafe();
+    }
+  }
+  function onFrameLoad() { finalizeFrame("load"); }
+  function onFrameError() { finalizeFrame("error"); }
+  if (tf) {
+    if (tf.addEventListener) {
+      tf.addEventListener("load", onFrameLoad);
+      tf.addEventListener("error", onFrameError);
+    } else if (tf.attachEvent) {
+      tf.attachEvent("onload", onFrameLoad);
+      tf.attachEvent("onerror", onFrameError);
+    }
+    frameTimer = setTimeout(function() { finalizeFrame("timeout"); }, frameTimeoutMs);
+  } else {
+    finalizeFrame("missing-frame");
   }
 
-  document.form.submit();
-  return true;
+  try {
+    document.form.submit();
+    return true;
+  } catch (submitError) {
+    finalizeFrame("submit-error");
+    return false;
+  }
 }
 </script>
 
@@ -393,6 +456,7 @@ const MVM_NO_REFRESH = new Set([
   "collectclients_vlanmgr",
   "clearclilog_vlanmgr",
   "sync_vlanmgr",
+  "syncsettings_vlanmgr",
   "apply_vlanmgr",
   "executenodes_vlanmgr",
   "executenodesonly_vlanmgr",
@@ -405,7 +469,13 @@ const MVM_NO_REFRESH = new Set([
   "checkservice_vlanmgr",
   "hwprobe_vlanmgr",
   "macrefresh_vlanmgr",
-  "macclientmeta_vlanmgr"
+  "macclientmeta_vlanmgr",
+  "sshtrustprobe_vlanmgr",
+  "sshtrustenroll_vlanmgr",
+  "sshtrustresume_vlanmgr",
+  "sshtruststatus_vlanmgr",
+  "sshtrustrevoke_vlanmgr",
+  "sshtrustabort_vlanmgr"
 ]);
 
 const MVM_NO_LOADING = new Set([
@@ -419,6 +489,7 @@ const MVM_NO_LOADING = new Set([
   "executenodes_vlanmgr",
   "executenodesonly_vlanmgr",
   "sync_vlanmgr",
+  "syncsettings_vlanmgr",
   "hwprobe_vlanmgr",
   "macclientmeta_vlanmgr",
   "macrefresh_vlanmgr",
@@ -426,13 +497,20 @@ const MVM_NO_LOADING = new Set([
   "clearclilog_vlanmgr",
   "update_vlanmgr",
   "updatedev_vlanmgr",
-  "updaterelease_vlanmgr"
+  "updaterelease_vlanmgr",
+  "sshtrustprobe_vlanmgr",
+  "sshtrustenroll_vlanmgr",
+  "sshtrustresume_vlanmgr",
+  "sshtruststatus_vlanmgr",
+  "sshtrustrevoke_vlanmgr",
+  "sshtrustabort_vlanmgr"
 ]);
 
 const MVM_ALLOWED_ACTIONS = new Set([
   "save_vlanmgr",
   "apply_vlanmgr",
   "sync_vlanmgr",
+  "syncsettings_vlanmgr",
   "executenodes_vlanmgr",
   "executenodesonly_vlanmgr",
   "genkey_vlanmgr",
@@ -446,7 +524,13 @@ const MVM_ALLOWED_ACTIONS = new Set([
   "updaterelease_vlanmgr",
   "hwprobe_vlanmgr",
   "macrefresh_vlanmgr",
-  "macclientmeta_vlanmgr"
+  "macclientmeta_vlanmgr",
+  "sshtrustprobe_vlanmgr",
+  "sshtrustenroll_vlanmgr",
+  "sshtrustresume_vlanmgr",
+  "sshtruststatus_vlanmgr",
+  "sshtrustrevoke_vlanmgr",
+  "sshtrustabort_vlanmgr"
 ]);
 
 // Optional: actions that need a longer/shorter wait (seconds)
@@ -485,6 +569,7 @@ function mvmOptsFor(actionName, overrideOpts) {
     if ("target" in overrideOpts)      opts.target = overrideOpts.target;
     if ("rawAmng" in overrideOpts)     opts.rawAmng = overrideOpts.rawAmng;
     if ("progressToken" in overrideOpts) opts.progressToken = overrideOpts.progressToken;
+    if ("nodeSlots" in overrideOpts) opts.nodeSlots = overrideOpts.nodeSlots;
   }
   return opts;
 }
@@ -527,7 +612,7 @@ function MVM_updateDev(opts)                 { return MVM_exec("updatedev_vlanmg
 // Ref-based updates intentionally use the legacy development update event.
 // Older installed service-event handlers already understand this event; the
 // updater consumes vlanmgr_update_ref and replaces the fallback "dev" target.
-function MVM_updateRelease(ref, opts)        { return MVM_exec("updatedev_vlanmgr", { vlanmgr_update_ref: ref }, mvmOptsFor("updatedev_vlanmgr", opts)); }
+function MVM_updateRelease(ref, opts)        { return MVM_updateRef(ref, "keep", opts); }
 function MVM_updateRef(ref, logPolicy, opts) {
   // Backward-compatible two-argument form: MVM_updateRef(ref, opts).
   if (logPolicy && typeof logPolicy === "object") {
@@ -536,6 +621,7 @@ function MVM_updateRef(ref, logPolicy, opts) {
   }
   logPolicy = logPolicy === "clear" ? "clear" : "keep";
   var value = String(ref || "");
+  if (value.length > 80) return false;
   var kind = "";
   var name = "";
   if (value.indexOf("refs/heads/") === 0) {
@@ -551,6 +637,7 @@ function MVM_updateRef(ref, logPolicy, opts) {
   if (name.indexOf("//") !== -1 || name.indexOf("..") !== -1 || name.slice(-5) === ".lock") {
     return false;
   }
+  if (name.length > 40) return false;
   var hex = "";
   for (var i = 0; i < name.length; i++) {
     var code = name.charCodeAt(i);
@@ -558,6 +645,7 @@ function MVM_updateRef(ref, logPolicy, opts) {
     hex += ("0" + code.toString(16)).slice(-2);
   }
   var actionName = "updateref_vlanmgr_" + (logPolicy === "clear" ? "c" : "k") + "_" + kind + "_" + hex;
+  if (actionName.length > 120) return false;
   var actionOpts = { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0, target: "hidden_frame" };
   if (opts && typeof opts === "object") {
     Object.keys(opts).forEach(function(key) { actionOpts[key] = opts[key]; });

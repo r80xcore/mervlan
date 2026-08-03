@@ -34,17 +34,31 @@ Use for every task.
   Keep the note short and actionable. Do not turn a transient failure or an
   unverified assumption into a rule.
 - Separate portable project requirements from host-specific capabilities. Use
-  conditional wording and capability probes (`Get-Command`, `wsl -l -v`,
-  `ssh -V`, remote `command -v`, or an equivalent read-only check) before using
-  a host/device-specific tool. If the capability is absent, adapt to the
-  documented fallback instead of requiring installation or blocking the task.
+  conditional wording and capability probes (`Get-Command`, `wsl.exe
+  --version`, `wsl.exe --list --verbose`, `ssh -V`, remote `command -v`, or an
+  equivalent read-only check) before using a host/device-specific tool. If a
+  capability is absent, adapt to the documented fallback instead of requiring
+  installation or blocking the task.
 - When shell or router-runtime debugging is performed on Windows, recommend
-  WSL2 with Ubuntu for POSIX tests and local shell harnesses. Verify the distro
-  with `wsl.exe --list --verbose` and confirm `VERSION 2`; `Default Version: 2`
-  alone does not convert an existing distro. Use PowerShell for Windows-side
-  deployment/SSH workflows and WSL2 for POSIX checks. WSL2 does not replace
-  final ASUSWRT BusyBox validation on the router. If WSL2 is unavailable,
-  continue with static analysis and clearly mark POSIX tests as not run.
+  WSL2 with Ubuntu for POSIX tests and local shell harnesses. `wsl.exe
+  --version` verifies only the client. Confirm a registered distro with
+  `wsl.exe --list --verbose`, confirm `VERSION 2`, and run a harmless command
+  in the exact distro name returned by that listing. A `Stopped` distro is
+  installed and valid; it may be started for the probe. `Default Version: 2`
+  alone does not convert an existing distro.
+- If the normal agent runner returns `E_ACCESSDENIED` from WSL enumeration or
+  startup, classify it as `HOST_RUNNER_ACCESS_DENIED`, not as proof that WSL2
+  is unavailable. Retry the same read-only probe through the approved
+  host/elevated execution path when available. If the elevated probe works,
+  use WSL2 and record the runner permission limitation. If no approved host
+  path can access it, report WSL2 as present or unverified but inaccessible to
+  the runner, continue static analysis, and mark POSIX tests `INCONCLUSIVE`.
+  Do not report them as passed and do not claim Ubuntu is missing.
+- Use PowerShell for Windows-side deployment/SSH workflows and WSL2 for POSIX
+  checks. Treat WSL process exit status as authoritative and normalize
+  NUL-padded Windows output before parsing. Do not automatically install,
+  unregister, shut down, or reconfigure WSL while probing. WSL2 does not
+  replace final ASUSWRT BusyBox validation on the router.
 - Never generalize this host's WSL/virtualization, Windows tooling, network
   layout, SSH behavior, or installed utilities to another user's system. A
   different host must revalidate those facts and may keep the portable rule

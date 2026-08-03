@@ -18,7 +18,7 @@
 #                                                                              #
 # ============================================================================ #
 
-source /usr/sbin/helper.sh
+. /usr/sbin/helper.sh
 
 # ---- merv: portable `command -v` replacement ----
 if ! type merv_has >/dev/null 2>&1; then
@@ -124,6 +124,12 @@ else
     PUBLIC_DIR="/www/user/mervlan"
 fi
 
+if [ "$TEST_RUN" = "1" ]; then
+    MERV_STATE_ROOT="${MERV_STATE_ROOT_OVERRIDE:-/tmp/mervlan_tmp/test-run/state}"
+else
+    MERV_STATE_ROOT="${MERV_STATE_ROOT_OVERRIDE:-/jffs/addons/mervlan_state}"
+fi
+
 SOURCE_REF="refs/heads/${BRANCH}"
 SOURCE_DESCRIPTION="$BRANCH branch"
 GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/${SOURCE_REF}"
@@ -136,6 +142,7 @@ SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 INSTALL_PRESERVE_DIR=""
 INSTALL_ROLLBACK_DIR=""
 INSTALL_ROLLBACK_NEEDED=0
+INSTALL_FAILED_TREE=""
 INSTALL_FINISHED=0
 TEST_MENU_TREE_CREATED=0
 TEST_MENU_ENTRY_ADDED=0
@@ -1261,6 +1268,37 @@ prepare_install_target() {
     fi
 }
 
+ensure_durable_state_root() {
+    case "$MERV_STATE_ROOT" in
+        /jffs/addons/mervlan_state|/jffs/addons/mervlan_state/*|/tmp/mervlan_tmp/test-run/state|/tmp/mervlan_tmp/test-run/state/*) ;;
+        *) RESULT_DETAIL="refusing unsafe durable state root: $MERV_STATE_ROOT"; return 1 ;;
+    esac
+    mkdir -p "$MERV_STATE_ROOT/ssh_trust" "$MERV_STATE_ROOT/ssh_trust/pending" \
+        "$MERV_STATE_ROOT/ssh_trust/requests" "$MERV_STATE_ROOT/ssh_trust/staging" \
+        "$MERV_STATE_ROOT/ssh_trust/quarantine" "$MERV_STATE_ROOT/ledgers" 2>/dev/null || return 1
+    chmod 700 "$MERV_STATE_ROOT" "$MERV_STATE_ROOT/ssh_trust" \
+        "$MERV_STATE_ROOT/ssh_trust/pending" "$MERV_STATE_ROOT/ssh_trust/requests" \
+        "$MERV_STATE_ROOT/ssh_trust/staging" "$MERV_STATE_ROOT/ssh_trust/quarantine" \
+        "$MERV_STATE_ROOT/ledgers" 2>/dev/null || return 1
+    printf 'mervlan-state-v1\n' > "$MERV_STATE_ROOT/.format" 2>/dev/null || return 1
+    chmod 600 "$MERV_STATE_ROOT/.format" 2>/dev/null || return 1
+    return 0
+}
+
+install_tree_valid() {
+    local _itv_root="$1" _itv_required
+    [ -d "$_itv_root" ] || return 1
+    for _itv_required in \
+        install.sh uninstall.sh mervlan.asp www/index.html \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh \
+        settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
+        functions/ssh_trust_action.sh
+    do
+        [ -f "$_itv_root/$_itv_required" ] || return 1
+    done
+    settings_file_looks_valid "$_itv_root/settings/settings.json"
+}
+
 merge_preserved_settings() {
     local old_file="$1" new_file="$2" kv_file merged_file count_file extracted merged
     [ -f "$old_file" ] || return 0
@@ -1383,8 +1421,16 @@ rollback_active_installation() {
     [ "$INSTALL_ROLLBACK_NEEDED" = "1" ] || return 0
     case "$INSTALL_ROLLBACK_DIR" in "$ADDON_DIR"/.mervlan-install-rollback.[0-9]*) ;; *) return 1 ;; esac
     [ "$MERV_BASE" = "/jffs/addons/mervlan" ] || return 1
-    rm -rf "$MERV_BASE" 2>/dev/null || :
-    mv "$INSTALL_ROLLBACK_DIR" "$MERV_BASE" 2>/dev/null || return 1
+    if [ -e "$MERV_BASE" ]; then
+        INSTALL_FAILED_TREE="$ADDON_DIR/.mervlan-install-incomplete.$$"
+        [ ! -e "$INSTALL_FAILED_TREE" ] || return 1
+        mv "$MERV_BASE" "$INSTALL_FAILED_TREE" 2>/dev/null || return 1
+    fi
+    if ! mv "$INSTALL_ROLLBACK_DIR" "$MERV_BASE" 2>/dev/null; then
+        [ -n "$INSTALL_FAILED_TREE" ] && [ -e "$INSTALL_FAILED_TREE" ] && mv "$INSTALL_FAILED_TREE" "$MERV_BASE" 2>/dev/null || :
+        return 1
+    fi
+    install_tree_valid "$MERV_BASE" || return 1
     INSTALL_ROLLBACK_NEEDED=0
 }
 
@@ -1895,7 +1941,7 @@ download_mervlan() {
 
   if [ -n "$topdir" ]; then
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
-            functions/mervlan_boot.sh functions/hw_probe.sh settings/settings.json \
+            functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json \
             settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
@@ -2017,6 +2063,7 @@ create_dirs_first_install() {
             return 1
         }
     done
+    ensure_durable_state_root || return 1
 }
 
 # create_link — Idempotent symlink helper for exposing logs/results via UI
@@ -2197,6 +2244,7 @@ if [ "$MODE" = "full" ]; then
     fi
     installer_phase_begin "Preserving existing installation data"
     mkdir -p "$TMP_DIR" 2>/dev/null || { RESULT_DETAIL="cannot create runtime staging"; exit 1; }
+    ensure_durable_state_root || { RESULT_DETAIL="cannot preserve durable state root"; exit 1; }
     prepare_preserved_files || { RESULT_EXISTING="FAIL - could not preserve user data"; exit 1; }
     prepare_install_target || { RESULT_FILES="FAIL - could not prepare target"; exit 1; }
     installer_phase_end
@@ -2579,13 +2627,14 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/hw_probe.sh settings/settings.json settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do
     [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; }
 done
 settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings validation failed"; FINAL_STATUS=1; }
+[ -d "$MERV_STATE_ROOT/ssh_trust" ] || { RESULT_DETAIL="durable SSH trust state root missing"; FINAL_STATUS=1; }
 [ -f "$TMP_DIR/logs/cli_output.log" ] || { RESULT_DETAIL="runtime cli log missing"; FINAL_STATUS=1; }
 [ -f "$TMP_DIR/logs/vlan_manager.log" ] || { RESULT_DETAIL="runtime manager log missing"; FINAL_STATUS=1; }
 
