@@ -2377,6 +2377,12 @@ merv_lock_acquire() {
   [ -n "$_ml2_lock" ] || return 1
   case "$_ml2_max" in ''|*[!0-9]*) _ml2_max=30 ;; esac
   mkdir -p "${_ml2_lock%/*}" 2>/dev/null || return 1
+  # Older installations used an empty regular file for the same lock name.
+  # Migrate only a provably stale, empty legacy file; fresh, non-empty, or
+  # unreadable metadata remains fail-closed in merv_lock_state below.
+  if [ -f "$_ml2_lock" ] && [ ! -d "$_ml2_lock" ]; then
+    merv_lock_quarantine_legacy_file "$_ml2_lock" "$_ml2_label" || return 1
+  fi
   while ! mkdir "$_ml2_lock" 2>/dev/null; do
     _ml2_state=$(merv_lock_state "$_ml2_lock")
     case "$_ml2_state" in

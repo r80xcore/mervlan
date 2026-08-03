@@ -43,6 +43,43 @@ fi
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 
+# Run one update child with captured diagnostics while preserving its exact
+# return code.  The helper deliberately logs a stage label rather than the
+# full command line, so credentials or signed URLs passed as arguments are not
+# copied into the router log.  The child output itself is replayed because
+# install/rollback scripts often put the actionable reason on stderr.
+UPDATE_STEP_SEQ=0
+run_update_step() {
+	_update_step_name="$1"
+	shift
+	_update_step_dir="${MERV_UPDATE_STEP_DIR:-/tmp}"
+	_update_step_seq=$((UPDATE_STEP_SEQ + 1))
+	UPDATE_STEP_SEQ="$_update_step_seq"
+	_update_step_capture="$_update_step_dir/mervlan_update_step.${_update_step_seq}.$$"
+	mkdir -p "$_update_step_dir" 2>/dev/null || return 1
+	: > "$_update_step_capture" 2>/dev/null || return 1
+	info -c cli,vlan "Update step start: $_update_step_name"
+	"$@" >"$_update_step_capture" 2>&1
+	_update_step_rc=$?
+	if [ -s "$_update_step_capture" ]; then
+		while IFS= read -r _update_step_line; do
+			# Avoid replaying common inline credential fields if a child emits one.
+			_update_step_safe=$(printf '%s\n' "$_update_step_line" | sed \
+				-e 's/[Pp]assword=[^ ]*/password=<redacted>/g' \
+				-e 's/[Tt]oken=[^ ]*/token=<redacted>/g')
+			info -c cli,vlan "Update step [$_update_step_name]: $_update_step_safe"
+		done < "$_update_step_capture"
+	fi
+	rm -f "$_update_step_capture" 2>/dev/null || \
+		warn -c cli,vlan "Update step [$_update_step_name]: capture cleanup failed"
+	if [ "$_update_step_rc" -eq 0 ]; then
+		info -c cli,vlan "Update step complete: $_update_step_name rc=0"
+	else
+		error -c cli,vlan "Update step failed: $_update_step_name rc=$_update_step_rc"
+	fi
+	return "$_update_step_rc"
+}
+
 # ========================================================================== #
 # GLOBAL UPDATE STATE FLAGS                                                  #
 # ========================================================================== #
@@ -104,15 +141,15 @@ restore_update_original_tree() {
 	fi
 	[ -f "$MERV_BASE/settings/settings.json" ] || return 1
 	if [ -x "$MERV_BASE/uninstall.sh" ] && [ -x "$MERV_BASE/install.sh" ]; then
-		sh "$MERV_BASE/uninstall.sh" reinstall >/dev/null 2>&1 || return 1
-		sh "$MERV_BASE/install.sh" reinstall >/dev/null 2>&1 || return 1
+		run_update_step "rollback public uninstall" sh "$MERV_BASE/uninstall.sh" reinstall || return 1
+		run_update_step "rollback public install" sh "$MERV_BASE/install.sh" reinstall || return 1
 	fi
 	if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-		MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1 || return 1
+		run_update_step "rollback setupenable" env MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable || return 1
 		if [ "${PRE_BOOT_ENABLED:-0}" = "1" ]; then
-			MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" enable >/dev/null 2>&1 || return 1
+			run_update_step "rollback enable" env MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" enable || return 1
 		else
-			MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || return 1
+			run_update_step "rollback disable" env MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable || return 1
 		fi
 	fi
 	UPDATE_ACTIVATION_STARTED="0"
@@ -160,17 +197,17 @@ fail_update() {
 	if [ "$restored_tree" != "1" ] && [ "$TEARDOWN_DONE" = "1" ] && \
 	   [ -n "${BOOT_SCRIPT:-}" ] && [ -x "$BOOT_SCRIPT" ]; then
 		info -c cli,vlan "Re-applying MerVLAN hooks to original state"
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
+		if ! run_update_step "rollback main setupenable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable; then
 			UPDATE_PRESERVE_TMP="1"
 			error -c cli,vlan "Rollback could not reapply the original main hooks"
 		fi
 		if [ "$PRE_BOOT_ENABLED" = "1" ]; then
-			if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
+			if ! run_update_step "rollback main enable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable; then
 				UPDATE_PRESERVE_TMP="1"
 				error -c cli,vlan "Rollback could not restore the original enabled boot state"
 			fi
 		else
-			if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+			if ! run_update_step "rollback main disable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable; then
 				UPDATE_PRESERVE_TMP="1"
 				error -c cli,vlan "Rollback could not restore the original disabled boot state"
 			fi
@@ -183,17 +220,17 @@ fail_update() {
 	if [ "$restored_tree" = "1" ] && [ "$UPDATE_NODES_TOUCHED" = "1" ] && \
 	   ssh_keys_effectively_installed && has_configured_nodes && [ -x "$MERV_BASE/functions/sync_nodes.sh" ]; then
 		info -c cli,vlan "Rolling configured nodes back to the restored main-router version"
-		if ! MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" >/dev/null 2>&1; then
+		if ! run_update_step "rollback node synchronization" env MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh"; then
 			UPDATE_PRESERVE_TMP="1"
 			error -c cli,vlan "Rollback could not synchronize the restored tree to every configured node"
 		fi
 		if [ "$PRE_BOOT_ENABLED" = "1" ]; then
-			if ! sh "$MERV_BASE/functions/mervlan_boot.sh" enable >/dev/null 2>&1; then
+			if ! run_update_step "rollback node enable" sh "$MERV_BASE/functions/mervlan_boot.sh" enable; then
 				UPDATE_PRESERVE_TMP="1"
 				error -c cli,vlan "Rollback could not restore enabled boot state on every configured node"
 			fi
 		else
-			if ! sh "$MERV_BASE/functions/mervlan_boot.sh" disable >/dev/null 2>&1; then
+			if ! run_update_step "rollback node disable" sh "$MERV_BASE/functions/mervlan_boot.sh" disable; then
 				UPDATE_PRESERVE_TMP="1"
 				error -c cli,vlan "Rollback could not restore disabled boot state on every configured node"
 			fi
@@ -1355,12 +1392,12 @@ if [ -x "$BOOT_SCRIPT" ]; then
 
 	# Stop active manager/cron behavior on the main router only. Nodes remain on
 	# their working installation until their replacement has been transferred.
-	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+	if ! run_update_step "pre-update main disable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable; then
 		fail_update teardown "Could not disable MerVLAN hooks before update activation"
 	fi
 	# Remove the main service/addon injections without a second implicit node
 	# sweep; nodedisable below owns node template teardown explicitly.
-	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupdisable >/dev/null 2>&1; then
+	if ! run_update_step "pre-update main setupdisable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupdisable; then
 		fail_update teardown "Could not remove MerVLAN hooks before update activation"
 	fi
 
@@ -1522,17 +1559,18 @@ refresh_public_install() {
 		return 1
 	fi
 
-	if ! sh "$uninstall_script" reinstall >/dev/null 2>&1; then
+	if ! run_update_step "public uninstall" sh "$uninstall_script" reinstall; then
 		warn -c cli,vlan "Public uninstall failed; install may be stale"
 		return 1
 	fi
 
-	if ! sh "$install_script" reinstall >/dev/null 2>&1; then
+	if ! run_update_step "public install" sh "$install_script" reinstall; then
 		warn -c cli,vlan "Public install refresh failed"
 		return 1
 	fi
 
 	info -c cli,vlan "Public install refreshed"
+	return 0
 }
 
 runtime_report_matches() {
@@ -1570,10 +1608,10 @@ verify_updated_runtime_state() {
 	fi
 	if ! runtime_report_matches "$_verify_main_report" main; then
 		warn -c cli,vlan "Main runtime verification mismatch; retrying target-version hook reconciliation"
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
+		if ! run_update_step "runtime verification setupenable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable; then
 			warn -c cli,vlan "Main target-version hook reconciliation setup failed"
 		fi
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" "$_verify_action" >/dev/null 2>&1; then
+		if ! run_update_step "runtime verification boot state" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" "$_verify_action"; then
 			warn -c cli,vlan "Main target-version boot-state reconciliation failed"
 		fi
 		_verify_main_report=""
@@ -1631,7 +1669,7 @@ EOF
 # Optionally refresh hardware profile on the upgraded installation
 if [ -x "$HW_PROBE" ]; then
 	info -c cli,vlan "Refreshing hardware profile via hw_probe.sh"
-	if ! sh "$HW_PROBE" >/dev/null 2>&1; then
+	if ! run_update_step "hardware probe" sh "$HW_PROBE"; then
 		warn -c cli,vlan "hw_probe.sh reported errors; hardware profile may be stale"
 		UPDATE_PARTIAL=1
 	fi
@@ -1658,7 +1696,7 @@ if [ -x "$BOOT_SCRIPT" ]; then
 
 	# Main setup remains local until the target has been fully verified. Nodes
 	# continue running their previous working tree during this phase.
-	if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable >/dev/null 2>&1; then
+	if ! run_update_step "main setupenable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable; then
 		warn -c cli,vlan "mervlan_boot.sh setupenable returned non-zero (continuing)"
 		UPDATE_PARTIAL=1
 	fi
@@ -1667,13 +1705,13 @@ if [ -x "$BOOT_SCRIPT" ]; then
 	# absent instead of relying on pre-swap teardown side effects.
 	if [ "$PRE_BOOT_ENABLED" = "1" ]; then
 		info -c cli,vlan "PRE_BOOT_ENABLED=1; enabling MerVLAN boot on main router"
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable >/dev/null 2>&1; then
+		if ! run_update_step "main enable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" enable; then
 			warn -c cli,vlan "mervlan_boot.sh enable returned non-zero (continuing)"
 			UPDATE_PARTIAL=1
 		fi
 	else
 		info -c cli,vlan "PRE_BOOT_ENABLED=0; enforcing disabled boot state with target templates"
-		if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+		if ! run_update_step "main disable" env MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable; then
 			warn -c cli,vlan "mervlan_boot.sh disable returned non-zero (continuing)"
 			UPDATE_PARTIAL=1
 		fi
@@ -1694,7 +1732,7 @@ if ssh_keys_effectively_installed && has_configured_nodes; then
 	if [ -x "$SYNC_SCRIPT" ]; then
 		info -c cli,vlan "Synchronizing nodes with staged per-node activation"
 		UPDATE_NODES_TOUCHED="1"
-		if ! MERV_MAINTENANCE_SYNC=1 sh "$SYNC_SCRIPT"; then
+		if ! run_update_step "post-update node synchronization" env MERV_MAINTENANCE_SYNC=1 sh "$SYNC_SCRIPT"; then
 			warn -c cli,vlan "One or more nodes retained their previous installation"
 			UPDATE_PARTIAL=1
 		fi
@@ -1704,7 +1742,7 @@ if ssh_keys_effectively_installed && has_configured_nodes; then
 	fi
 	_node_boot_action=disable
 	[ "$PRE_BOOT_ENABLED" = "1" ] && _node_boot_action=enable
-	if ! sh "$BOOT_SCRIPT" "$_node_boot_action" >/dev/null 2>&1; then
+	if ! run_update_step "post-update node boot state" sh "$BOOT_SCRIPT" "$_node_boot_action"; then
 		warn -c cli,vlan "Could not apply the saved boot state to every configured node"
 		UPDATE_PARTIAL=1
 	fi
@@ -1808,7 +1846,7 @@ fi
 # the installed target contains the backup manager. Older downgrade targets do
 # not have this optional file and continue without GUI backup management.
 if [ -f "$MERV_BASE/functions/mervlan_backup.sh" ]; then
-	sh "$MERV_BASE/functions/mervlan_backup.sh" inventory "update-$$" >/dev/null 2>&1 || \
+	run_update_step "backup inventory refresh" sh "$MERV_BASE/functions/mervlan_backup.sh" inventory "update-$$" || \
 		{ warn -c cli,vlan "Could not refresh backup inventory after update"; UPDATE_PARTIAL=1; }
 fi
 

@@ -4,8 +4,17 @@
   <!-- index.html version="0.53.26-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
-  <link rel="stylesheet" href="vlan_form_style.css" />
-  <link rel="stylesheet" href="vlan_index_style.css" />
+  <script>
+    (function () {
+      var match = /(?:^|[?&])mvm_load=([^&]+)/.exec(window.location.search || '');
+      var nonce = '';
+      try { nonce = match ? decodeURIComponent(match[1]) : ''; } catch (_) { nonce = ''; }
+      var suffix = nonce ? '?mvm_load=' + encodeURIComponent(nonce) : '';
+      document.write('<link rel="stylesheet" href="vlan_form_style.css' + suffix + '" />');
+      document.write('<link rel="stylesheet" href="vlan_index_style.css' + suffix + '" />');
+      if (window.console && typeof console.log === 'function') console.log('[MerVLAN] Web load: ' + (nonce || 'direct'));
+    }());
+  </script>
   <style>
     .button_gen:disabled {
       opacity: 0.45;
@@ -4220,6 +4229,7 @@ function showTooltip() {
           SERVICE_STATUS: "tmp/results/service_status.json",
           // correlated completion result for verified backend actions
           ACTION_RESULT: "tmp/results/action_result.json",
+          ACTION_RESULTS_DIR: "tmp/results/actions/",
           // backup inventory and correlated backup/restore operation result
           BACKUP_INVENTORY: "tmp/results/backup_inventory.json",
           MAINTENANCE_RESULT: "tmp/results/maintenance_result.json"
@@ -6130,16 +6140,20 @@ const MerVLANLoading = (() => {
   }
 
   async function pollStatus() {
-    if (!active || active.terminal || active.fetchInFlight) return;
+    if (!active || active.terminal || active.fetchInFlight || !active.progressBacked) return;
     const current = active;
     const currentSequence = current.sequence;
     current.fetchInFlight = true;
     const cacheBust = Date.now();
     try {
-      const progress = await fetchJsonBounded('tmp/progress/' + encodeURIComponent(current.token) + '.json?_=' + cacheBust);
+      const progress = current.progressBacked
+        ? await fetchJsonBounded('tmp/progress/' + encodeURIComponent(current.token) + '.json?_=' + cacheBust)
+        : null;
       if (active !== current || current.sequence !== currentSequence) return;
       if (progress) applyStatus(progress);
-      const ack = await fetchJsonBounded(PATHS.ACTION_RESULT + '?_=' + cacheBust);
+      const ack = current.progressBacked
+        ? await fetchJsonBounded('tmp/results/actions/' + encodeURIComponent(current.token) + '.json?_=' + cacheBust)
+        : null;
       if (active !== current || current.sequence !== currentSequence) return;
       if (ack) applyAck(ack);
       if (!current.terminal && Date.now() >= current.deadlineAt) {
@@ -6169,6 +6183,15 @@ const MerVLANLoading = (() => {
     active.state = kind === 'complete' || kind === 'partial' ? kind : 'failed';
     clearTimers();
     if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
+    if (typeof active.completionResolve === 'function') {
+      active.completionResolve({
+        state: active.state,
+        action: active.action,
+        token: active.token,
+        message: String(message || '')
+      });
+      active.completionResolve = null;
+    }
     const error = el('mervlanLoadingError');
     const closeButton = el('mervlanLoadingCloseBtn');
     if (kind === 'complete' || kind === 'partial') {
@@ -6230,6 +6253,8 @@ const MerVLANLoading = (() => {
     if (active) return null;
 
     const token = createMerVLANLoadingToken();
+    let completionResolve;
+    const completion = new Promise(resolve => { completionResolve = resolve; });
     active = {
       token,
       action: actionName,
@@ -6246,18 +6271,22 @@ const MerVLANLoading = (() => {
       deadlineAt: Date.now() + Math.min(Math.max(Number(options.timeoutMs || config.timeout_ms || 300000), 15000), 900000),
       progressBacked: options.progressBacked !== false,
       frontendOwned: options.frontendOwned === true || config.frontend_owned === true,
+      completionResolve,
       minimized: false
     };
     renderStart();
     loadMerVLANLoadingConfig();
-    pollStatus();
-    pollTimer = window.setInterval(pollStatus, Math.max(500, Number(config.poll_ms) || 1000));
+    if (active.progressBacked) {
+      pollStatus();
+      pollTimer = window.setInterval(pollStatus, Math.max(500, Number(config.poll_ms) || 1000));
+    }
     return {
       token,
       action: actionName,
       phase: (message, percent) => updateTask(token, message, percent),
       complete: message => completeTask(token, message),
       fail: message => failTask(token, message),
+      completion,
       isRunning: () => !!active && active.token === token && active.state === 'running'
     };
   }
@@ -6356,7 +6385,11 @@ function queueServiceAction(actionScriptName, opts = {}) {
 
         const parentWin = window.parent;
         let submitted;
-        if (parentWin && typeof parentWin.MVM_trigger === "function") {
+        let transportPromise = null;
+        if (parentWin && typeof parentWin.MVM_triggerAsync === "function") {
+            transportPromise = parentWin.MVM_triggerAsync(actionScriptName, actionParentOpts);
+            submitted = transportPromise && transportPromise.accepted !== false;
+        } else if (parentWin && typeof parentWin.MVM_trigger === "function") {
             submitted = parentWin.MVM_trigger(actionScriptName, actionParentOpts);
         } else if (parentWin && typeof parentWin.MVM_exec === "function") {
             submitted = parentWin.MVM_exec(actionScriptName, null, actionParentOpts);
@@ -6388,6 +6421,12 @@ function queueServiceAction(actionScriptName, opts = {}) {
                 releaseActionLock(actionScriptName);
                 startPolling();
                 return false;
+            }
+        }
+        if (transportPromise && typeof transportPromise.then === "function") {
+            const transport = await transportPromise;
+            if (transport && transport.transportState !== 'load') {
+                appendCliText(`[${new Date().toLocaleString()}] ${description} transport state: ${transport.transportState}; backend completion will still be verified separately.\n`, { scroll: 'force' });
             }
         }
         startPolling();
@@ -6635,6 +6674,32 @@ function triggerAction(actionScriptName, button, description) {
       return `m${Date.now().toString(36)}${random.slice(0, 6)}`;
     }
 
+    function submitCorrelatedSettingsSave(parentWin, payload, requestToken, options = {}) {
+      const saveOptions = Object.assign({}, options, { progressToken: requestToken });
+      if (parentWin && typeof parentWin.MVM_saveAsync === 'function') {
+        const transportPromise = parentWin.MVM_saveAsync(payload, saveOptions);
+        return {
+          accepted: !transportPromise || transportPromise.accepted !== false,
+          requestToken,
+          transportPromise
+        };
+      }
+      if (parentWin && typeof parentWin.MVM_save === 'function') {
+        const accepted = parentWin.MVM_save(payload, saveOptions);
+        return { accepted: accepted !== false, requestToken, transportPromise: null };
+      }
+      return { accepted: false, requestToken, transportPromise: null, error: 'Parent page save handler is unavailable.' };
+    }
+
+    async function settleCorrelatedTransport(submission, description) {
+      if (!submission || !submission.transportPromise || typeof submission.transportPromise.then !== 'function') return null;
+      const result = await submission.transportPromise;
+      if (result && result.transportState !== 'load') {
+        appendCliText(`${description} transport state: ${result.transportState}; backend acknowledgement remains authoritative.\n`, { scroll: 'force' });
+      }
+      return result;
+    }
+
     async function waitForVerifiedActionResult(requestToken, actionName, expectedResult, timeoutMs) {
       const deadline = Date.now() + timeoutMs;
       let transportUnknown = false;
@@ -6645,7 +6710,7 @@ function triggerAction(actionScriptName, button, description) {
           const timer = controller ? setTimeout(() => controller.abort(), 2500) : null;
           let result = null;
           try {
-            const response = await fetch(PATHS.ACTION_RESULT + '?_=' + Date.now(), {
+            const response = await fetch('tmp/results/actions/' + encodeURIComponent(requestToken) + '.json?_=' + Date.now(), {
               cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
               signal: controller ? controller.signal : undefined
             });
@@ -8713,7 +8778,7 @@ function refreshSshTrustRegistry() {
       return;
     }
     try {
-      const response = await fetch(PATHS.ACTION_RESULT + '?_=' + Date.now(), {
+      const response = await fetch(PATHS.ACTION_RESULTS_DIR + encodeURIComponent(token) + '.json?_=' + Date.now(), {
         cache: 'no-store',
         headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
       });
@@ -10089,14 +10154,6 @@ function applyAdvancedOverride() {
   }
 }
 
-async function waitForMerVLANLoadingIdle(timeoutMs = 10000) {
-  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 10000);
-  while (typeof MerVLANLoading !== 'undefined' && MerVLANLoading.active && Date.now() < deadline) {
-    await new Promise(resolve => window.setTimeout(resolve, 100));
-  }
-  return typeof MerVLANLoading === 'undefined' || !MerVLANLoading.active;
-}
-
 async function queueAutomaticNodeSettingsSync(options = {}) {
   if (options.checkNodes !== false) {
     const hasNodes = await checkForConfiguredNodes();
@@ -10108,13 +10165,6 @@ async function queueAutomaticNodeSettingsSync(options = {}) {
     }
   }
 
-  // The preceding save/APMO task must close before the separate settings-only
-  // action owns preflight, trust review, and terminal progress.
-  await new Promise(resolve => window.setTimeout(resolve, 550));
-  if (!(await waitForMerVLANLoadingIdle())) {
-    appendCliText("Node settings sync is waiting for the active MerVLAN action to finish.\n", { scroll: "force" });
-    return false;
-  }
   if (options.announce !== false) {
     appendCliText("Syncing settings to node(s)...\n", { scroll: "force" });
   }
@@ -10137,7 +10187,8 @@ async function applyOverrideWithHwProbe(options = {}) {
     try {
       if (typeof MerVLANLoading !== 'undefined') {
         loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
-          progressBacked: true
+          progressBacked: false,
+          frontendOwned: true
         });
         if (loadingTask) loadingTask.phase('Preparing hardware override save...', 10);
       }
@@ -10161,10 +10212,11 @@ async function applyOverrideWithHwProbe(options = {}) {
 
       // Step 1: Save settings
       if (loadingTask) loadingTask.phase('Saving hardware overrides...', 25);
-      const saveSubmitted = window.parent.MVM_save(merlinPayload, {
+      const saveRequestToken = createActionRequestToken();
+      const saveSubmission = submitCorrelatedSettingsSave(window.parent, merlinPayload, saveRequestToken, {
         loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
       });
-      if (saveSubmitted === false) {
+      if (!saveSubmission.accepted) {
         appendCliText("Hardware override save was rejected or deduplicated.\n", { scroll: "force" });
         if (loadingTask) loadingTask.fail('Hardware override save was rejected.');
         return;
@@ -10182,6 +10234,13 @@ async function applyOverrideWithHwProbe(options = {}) {
         if (loadingTask) loadingTask.fail('Override settings did not persist in time.');
         return;
       }
+      const saveAck = await waitForVerifiedActionResult(saveRequestToken, 'save_vlanmgr', { local_saved: '1' }, 120000);
+      if (!saveAck.ok) {
+        appendCliText("Override save acknowledgement failed; HW profile refresh was skipped.\n", { scroll: "force" });
+        if (loadingTask) loadingTask.fail(saveAck.message || 'Override save was not confirmed by the router.');
+        return;
+      }
+      await settleCorrelatedTransport(saveSubmission, 'Override save');
       if (loadingTask) loadingTask.phase('Verifying saved overrides...', 45);
 
       appendCliText("Clearing form fields...\n", { scroll: "force" });
@@ -10202,6 +10261,7 @@ async function applyOverrideWithHwProbe(options = {}) {
       await loadSettings();
       appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
       if (loadingTask) loadingTask.complete('Hardware overrides saved and profile refreshed.');
+      if (loadingTask && loadingTask.completion) await loadingTask.completion;
       if (options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
@@ -10229,14 +10289,25 @@ async function runVerifiedHardwareProbe() {
   }
 
   const requestToken = createActionRequestToken();
-  const submitted = parentWin.MVM_hwprobe({
-    payload: { vlanmgr_action_request_token: requestToken },
+  const probeOptions = {
     loading: false,
     skipRefresh: true,
     waitSec: 0,
     minLoadingMs: 0
-  });
-  if (submitted === false) {
+  };
+  let probeTransport = null;
+  let submitted = false;
+  if (typeof parentWin.MVM_triggerVerifiedAsync === 'function') {
+    probeTransport = parentWin.MVM_triggerVerifiedAsync('hwprobe_vlanmgr', requestToken, {}, probeOptions);
+    submitted = !probeTransport || probeTransport.accepted !== false;
+  } else if (typeof parentWin.MVM_hwprobeAsync === 'function') {
+    probeTransport = parentWin.MVM_hwprobeAsync(Object.assign({}, probeOptions, {
+      payload: { vlanmgr_action_request_token: requestToken }
+    }));
+  } else {
+    submitted = parentWin.MVM_hwprobe(probeOptions);
+  }
+  if (!submitted) {
     const message = "HW profile refresh was rejected or deduplicated.";
     appendCliText(message + "\n", { scroll: "force" });
     return { ok: false, status: "error", message };
@@ -10251,6 +10322,7 @@ async function runVerifiedHardwareProbe() {
   if (!result.ok) {
     appendCliText("HW profile refresh failed: " + result.message + "\n", { scroll: "force" });
   }
+  if (probeTransport) await settleCorrelatedTransport({ transportPromise: probeTransport }, 'HW profile refresh');
   return result;
 }
 
@@ -10261,7 +10333,8 @@ async function applyOverrideSaveOnly(options = {}) {
     try {
       if (typeof MerVLANLoading !== 'undefined') {
         loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
-          progressBacked: true
+          progressBacked: false,
+          frontendOwned: true
         });
         if (loadingTask) loadingTask.phase('Preparing hardware override save...', 10);
       }
@@ -10283,10 +10356,11 @@ async function applyOverrideSaveOnly(options = {}) {
       }
 
       if (loadingTask) loadingTask.phase('Saving hardware overrides...', 25);
-      const saveSubmitted = window.parent.MVM_save(merlinPayload, {
+      const saveRequestToken = createActionRequestToken();
+      const saveSubmission = submitCorrelatedSettingsSave(window.parent, merlinPayload, saveRequestToken, {
         loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0
       });
-      if (saveSubmitted === false) {
+      if (!saveSubmission.accepted) {
         appendCliText("Override save was rejected or deduplicated.\n", { scroll: "force" });
         if (loadingTask) loadingTask.fail('Override save was rejected.');
         return;
@@ -10301,6 +10375,13 @@ async function applyOverrideSaveOnly(options = {}) {
         scope: "override",
         subset: true
       });
+      const saveAck = await waitForVerifiedActionResult(saveRequestToken, 'save_vlanmgr', { local_saved: '1' }, 120000);
+      if (!saveAck.ok) {
+        if (loadingTask) loadingTask.fail(saveAck.message || 'Override save was not confirmed by the router.');
+        appendCliText('Override save acknowledgement failed.\n', { scroll: 'force' });
+        return;
+      }
+      await settleCorrelatedTransport(saveSubmission, 'Override save');
       if (loadingTask) loadingTask.phase('Verifying saved overrides...', 65);
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
       if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
@@ -10314,6 +10395,7 @@ async function applyOverrideSaveOnly(options = {}) {
         if (ok) loadingTask.complete('Hardware overrides saved.');
         else loadingTask.fail('Override settings did not persist in time.');
       }
+      if (ok && loadingTask && loadingTask.completion) await loadingTask.completion;
       if (ok && options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
@@ -11219,8 +11301,8 @@ async function uploadSettingsAndSave(btn, options = {}) {
             ? { loading: false, skipRefresh: true, waitSec: 0 }
             : { skipRefresh: true, waitSec: 0 });
       saveOptions.progressToken = saveRequestToken;
-      const submitted = parentWin.MVM_save(merlinPayload, saveOptions);
-      if (submitted === false) {
+      const saveSubmission = submitCorrelatedSettingsSave(parentWin, merlinPayload, saveRequestToken, saveOptions);
+      if (!saveSubmission.accepted) {
         const error = 'The settings save request was rejected or deduplicated.';
         if (loadingTask) loadingTask.fail(error);
         return { ok: false, changed: true, error };
@@ -11277,11 +11359,13 @@ async function uploadSettingsAndSave(btn, options = {}) {
           nodeSyncStatus = saveAck.result && saveAck.result.node_sync
             ? String(saveAck.result.node_sync) : 'ok';
         }
+        await settleCorrelatedTransport(saveSubmission, 'Settings save');
       }
       if (nodeSyncStatus === 'pending') {
         saveCompletionMessage = 'Settings saved locally; node synchronization queued';
       }
       if (loadingTask) loadingTask.complete(saveCompletionMessage);
+      if (loadingTask && loadingTask.completion) await loadingTask.completion;
       appendCliText('Save verification complete.\n', { scroll: 'force' });
 
       // Local persistence is terminal before node mutation begins.  Queue a

@@ -46,6 +46,7 @@ function initial(){
 </script>
 <script type="text/javascript">
 var _mvmLast = { name: null, t: 0 };
+var MVM_WEB_LOAD_NONCE = (typeof Date.now === "function" ? Date.now().toString(36) : String(new Date().getTime())) + "-" + Math.random().toString(36).slice(2, 7);
 var _mvmRefreshGuard = {
   count: 0,
   refresh_self: undefined,
@@ -162,28 +163,60 @@ function showLoadingSafe(secHint) {
   } catch (e) {}
 }
 
-/**
- * Execute a backend action with optional UI and behavior controls.
- * @param {string} actionScriptName - backend script (e.g., "sync_vlanmgr")
- * @param {?object} settingsObjOrNull - JSON payload for amng_custom
- * @param {?object} opts - { loading?: boolean, waitSec?: number, target?: string,
- *                           skipRefresh?: boolean, progressToken?: string }
- */
-function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
-  opts = opts || {};
+</script>
 
-  // Progress tokens travel through the same Merlin custom-settings transport
-  // as existing vlanmgr_* request data. They are validated here, before any
-  // backend action is submitted, and are never accepted from rawAmng because
-  // raw payloads are used by compatibility/update paths.
+<script type="text/javascript">
+
+/* Request-owned ASUS start_apply transport.  A request owns its form, its
+ * response frame, its callbacks, and its cleanup.  The Promise settles on a
+ * transport event only; backend completion is reported separately by the
+ * correlated progress/ack files in the embedded WebUI. */
+function _mvmRequestId() {
+  var stamp = (typeof Date.now === "function") ? Date.now().toString(36) : String(new Date().getTime());
+  var random = Math.random().toString(36).slice(2, 8);
+  return "tx" + stamp + random;
+}
+
+function _mvmLog(requestId, message) {
+  if (window.console && typeof console.log === "function") {
+    console.log("[MVM tx " + requestId + "] " + message);
+  }
+}
+
+function _mvmCopyFormField(form, sourceField) {
+  if (!sourceField || !sourceField.name) return;
+  var field = document.createElement("input");
+  field.type = "hidden";
+  field.name = sourceField.name;
+  field.value = typeof sourceField.value === "string" ? sourceField.value : "";
+  form.appendChild(field);
+}
+
+function _mvmRequestField(form, name, value) {
+  var field = form.elements[name];
+  if (!field) {
+    field = document.createElement("input");
+    field.type = "hidden";
+    field.name = name;
+    form.appendChild(field);
+  }
+  field.value = String(value == null ? "" : value);
+  return field;
+}
+
+function _mvmPrepareAction(actionName, settingsObjOrNull, opts) {
+  opts = opts || {};
+  var baseAction = String(actionName || "");
+  var encodedAction = baseAction;
+  var payload = settingsObjOrNull;
   var progressToken = (typeof opts.progressToken === "string") ? opts.progressToken : "";
   var selectedNodeSlots = "";
+
   if (Object.prototype.hasOwnProperty.call(opts, "nodeSlots")) {
     selectedNodeSlots = (typeof opts.nodeSlots === "string") ? opts.nodeSlots : "";
     var slotParts = selectedNodeSlots.split(".");
     var seenSlot = {};
-    var slotsValid = actionScriptName === "sshtrustprobe_vlanmgr" &&
-      !!progressToken &&
+    var slotsValid = baseAction === "sshtrustprobe_vlanmgr" && !!progressToken &&
       /^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/.test(selectedNodeSlots);
     for (var slotIndex = 0; slotsValid && slotIndex < slotParts.length; slotIndex++) {
       var slotNumber = Number(slotParts[slotIndex]);
@@ -193,258 +226,169 @@ function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
         seenSlot[slotNumber] = true;
       }
     }
-    if (!slotsValid) {
-      if (window.console && typeof console.warn === "function") {
-        console.warn("[MVM] rejected invalid SSH trust node selection");
-      }
-      return false;
-    }
+    if (!slotsValid) return { accepted: false, transportState: "submit-error", error: "invalid-node-selection" };
   }
+
   if (progressToken) {
     if (!/^[A-Za-z0-9._-]{1,96}$/.test(progressToken) || typeof opts.rawAmng === "string") {
-      if (window.console && typeof console.warn === "function") {
-        console.warn("[MVM] rejected invalid or incompatible progress token");
-      }
-      return false;
+      return { accepted: false, transportState: "submit-error", error: "invalid-progress-token" };
     }
     var progressPayload = {};
-    if (settingsObjOrNull && typeof settingsObjOrNull === "object" && !Array.isArray(settingsObjOrNull)) {
-      Object.keys(settingsObjOrNull).forEach(function(key) {
-        progressPayload[key] = settingsObjOrNull[key];
-      });
+    if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+      Object.keys(payload).forEach(function(key) { progressPayload[key] = payload[key]; });
     }
     progressPayload.vlanmgr_progress_token = progressToken;
-    settingsObjOrNull = progressPayload;
-
-    // Encode the token in the action event as the authoritative transport.
-    // This avoids depending on custom_settings.txt write timing or a stale
-    // previous value. The payload field remains a compatibility breadcrumb.
-    if (typeof MVM_ALLOWED_ACTIONS !== "undefined" && MVM_ALLOWED_ACTIONS.has(actionScriptName)) {
+    payload = progressPayload;
+    if (typeof MVM_ALLOWED_ACTIONS !== "undefined" && MVM_ALLOWED_ACTIONS.has(baseAction)) {
       var progressTokenHex = "";
       for (var pti = 0; pti < progressToken.length; pti++) {
         progressTokenHex += ("0" + progressToken.charCodeAt(pti).toString(16)).slice(-2);
       }
-      actionScriptName = actionScriptName + "_pgt_" + progressTokenHex;
-      if (selectedNodeSlots) {
-        // Node slot selection is part of the bounded action transport, not an
-        // asynchronous custom-settings value. The router derives every endpoint
-        // and host-key fact from its own configured node list.
-        actionScriptName = actionScriptName + "_nsl_" + selectedNodeSlots;
-      }
+      encodedAction = baseAction + "_pgt_" + progressTokenHex;
+      if (selectedNodeSlots) encodedAction += "_nsl_" + selectedNodeSlots;
     }
   }
 
-  var isEncodedUpdateRef = /^updateref_vlanmgr_(?:[kc]_)?[ht]_[0-9a-f]+$/.test(actionScriptName);
-  var isMaintenanceAction = /^(backupinventory_vlanmgr|deleteallbackups_vlanmgr|undorestore_vlanmgr|undoupdate_vlanmgr)_[0-9a-f]+$/.test(actionScriptName) ||
-    /^manualbackup_vlanmgr_[0-9a-f]+_[0-9a-f]+$/.test(actionScriptName) ||
-    /^(deletebackup_vlanmgr|restorebackup_vlanmgr)_[0-9a-f]+_[am]\.[A-Za-z0-9._-]+$/.test(actionScriptName);
-  var verifiedActionMatch = /^(.+)_vrt_([0-9a-f]+)$/.exec(actionScriptName);
-  var isVerifiedAction = !!(verifiedActionMatch && MVM_ALLOWED_ACTIONS.has(verifiedActionMatch[1]));
-  var progressActionMatch = /^(.+)_pgt_([0-9a-f]+)(?:_nsl_([1-9][0-9]*(?:\.[1-9][0-9]*)*))?$/.exec(actionScriptName);
-  var isProgressAction = !!(progressActionMatch &&
+  var isEncodedUpdateRef = /^updateref_vlanmgr_(?:[kc]_)?[ht]_[0-9a-f]+$/.test(encodedAction);
+  var isMaintenanceAction = /^(backupinventory_vlanmgr|deleteallbackups_vlanmgr|undorestore_vlanmgr|undoupdate_vlanmgr)_[0-9a-f]+$/.test(encodedAction) ||
+    /^manualbackup_vlanmgr_[0-9a-f]+_[0-9a-f]+$/.test(encodedAction) ||
+    /^(deletebackup_vlanmgr|restorebackup_vlanmgr)_[0-9a-f]+_[am]\.[A-Za-z0-9._-]+$/.test(encodedAction);
+  var verifiedActionMatch = /^(.+)_vrt_([0-9a-f]+)$/.exec(encodedAction);
+  var isVerifiedAction = !!(verifiedActionMatch && typeof MVM_ALLOWED_ACTIONS !== "undefined" && MVM_ALLOWED_ACTIONS.has(verifiedActionMatch[1]));
+  var progressActionMatch = /^(.+)_pgt_([0-9a-f]+)(?:_nsl_([1-9][0-9]*(?:\.[1-9][0-9]*)*))?$/.exec(encodedAction);
+  var isProgressAction = !!(progressActionMatch && typeof MVM_ALLOWED_ACTIONS !== "undefined" &&
     MVM_ALLOWED_ACTIONS.has(progressActionMatch[1]) &&
     (!progressActionMatch[3] || progressActionMatch[1] === "sshtrustprobe_vlanmgr"));
-  if (actionScriptName.length > 120) {
-    if (window.console && typeof console.warn === "function") console.warn("[MVM] blocked overlong action", actionScriptName);
-    return false;
+  if (encodedAction.length > 120 ||
+      (typeof MVM_ALLOWED_ACTIONS !== "undefined" && !MVM_ALLOWED_ACTIONS.has(encodedAction) &&
+       !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction)) {
+    return { accepted: false, transportState: "submit-error", error: "disallowed-action" };
   }
-  if (!MVM_ALLOWED_ACTIONS.has(actionScriptName) && !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction) {
-    if (window.console && typeof console.warn === "function") {
-      console.warn("[MVM] blocked disallowed action", actionScriptName);
-    }
-    return false;
-  }
-
-  // Prevent rapid double-clicks from issuing duplicate requests
   var now = (typeof Date.now === "function") ? Date.now() : new Date().getTime();
-  if (_mvmLast.name === actionScriptName && (now - _mvmLast.t) < 2000) {
-    if (window.console && typeof console.log === "function") {
-      console.log("[MVM] deduped", actionScriptName);
-    }
-    return false;
+  if (_mvmLast.name === encodedAction && (now - _mvmLast.t) < 2000) {
+    return { accepted: false, transportState: "submit-error", error: "deduplicated" };
   }
-  _mvmLast = { name: actionScriptName, t: now };
-
-  // Write settings payload when provided; clear otherwise
-  var amng = document.getElementById("amng_custom");
-  var rawAmngValue = (opts && typeof opts.rawAmng === "string") ? opts.rawAmng : null;
-  if (rawAmngValue !== null) {
-    if (!amng) {
-      alert("amng_custom not found in parent form");
-      return false;
-    }
-    amng.value = rawAmngValue;
-  } else if (settingsObjOrNull != null) {
-    if (!amng) {
-      alert("amng_custom not found in parent form");
-      return false;
-    }
-    amng.value = JSON.stringify(settingsObjOrNull);
-  } else if (amng) {
-    amng.value = "";
-  }
-
-  // Populate the hidden Asuswrt form fields that trigger service-event
-  document.form.action_script.value = actionScriptName;
-  document.form.action_mode.value = "apply"; // required so service-event fires once
-  var actionWaitField = document.form.action_wait;
-  if (actionWaitField) {
-    actionWaitField.value = String((opts.waitSec != null) ? opts.waitSec : 5);
-    actionWaitField.setAttribute("value", actionWaitField.value);
-  }
-
-  var skipRefresh = !!opts.skipRefresh;
-  // Note: we no longer zero out action_wait when skipRefresh is true
-  // This allows the loading overlay to show while still preventing page refresh
-
-  if (skipRefresh) {
-    try {
-      if (document.form.next_page) {
-        document.form.next_page.value = "";
-      }
-    } catch (e) {}
-
-    mvmAcquireRefreshGuard();
-  }
-
-  if (skipRefresh) {
-    var sbox = mvmEnsureSandboxFrame();
-    document.form.target = sbox.name;
-    document.form.setAttribute("target", sbox.name);
-  } else {
-    document.form.target = opts.target || "hidden_frame";
-    document.form.setAttribute("target", document.form.target);
-  }
-
-  var wantLoading = (opts.loading !== false);
-  var minLoadingMs = (opts.minLoadingMs != null) ? opts.minLoadingMs : 0;
-
-  if (wantLoading) {
-    // Lock the loading overlay so ASUS firmware cannot dismiss it early
-    if (minLoadingMs > 0 && typeof window._mvmHoldLoadingFor === "function") {
-      window._mvmHoldLoadingFor(minLoadingMs);
-    }
-    // Pass duration hint to showLoadingSafe (converts ms to seconds)
-    var secHint = minLoadingMs > 0 ? Math.ceil(minLoadingMs / 1000) : 30;
-    showLoadingSafe(secHint);
-    // Hide after the minimum duration
-    if (minLoadingMs > 0) {
-      setTimeout(function() { hideLoadingSafe(); }, minLoadingMs);
-    }
-  } else {
-    hideLoadingSafe();
-  }
-
-  // Helper to hide loading (only if no minLoadingMs, otherwise the timeout handles it)
-  function hideLoadingIfNoMinTime() {
-    if (minLoadingMs <= 0) {
-      hideLoadingSafe();
-    }
-    // If minLoadingMs > 0, the setTimeout above will handle hiding
-  }
-
-  function notifyProgressFrameTransport(state) {
-    if (!progressToken) return;
-    try {
-      var progressFrame = document.getElementById("vlan_iframe");
-      if (progressFrame && progressFrame.contentWindow) {
-        progressFrame.contentWindow.postMessage({
-          source: "mervlan",
-          type: "mervlan-action-transport",
-          token: progressToken,
-          action: actionScriptName,
-          state: state
-        }, "*");
-      }
-    } catch (e) {}
-  }
-
-  // A frame navigation is only a transport event.  Backend completion comes
-  // from the correlated progress/ack record, never from iframe load.
-  var targetFrameId = skipRefresh ? "mvm_sandbox_iframe" : (document.form.target || "hidden_frame");
-  var tf = document.getElementById(targetFrameId);
-  var frameFinalized = false;
-  var frameTimer = null;
-  var frameTimeoutMs = (opts && typeof opts.frameTimeoutMs === "number" && opts.frameTimeoutMs > 0)
-    ? Math.min(opts.frameTimeoutMs, 60000) : 15000;
-  function finalizeFrame(state) {
-    if (frameFinalized) return;
-    frameFinalized = true;
-    if (frameTimer !== null) {
-      clearTimeout(frameTimer);
-      frameTimer = null;
-    }
-    if (tf) {
-      if (tf.removeEventListener) {
-        tf.removeEventListener("load", onFrameLoad);
-        tf.removeEventListener("error", onFrameError);
-      } else if (tf.detachEvent) {
-        tf.detachEvent("onload", onFrameLoad);
-        tf.detachEvent("onerror", onFrameError);
-      }
-    }
-    if (state !== "load" && window.console && typeof console.warn === "function") {
-      console.warn("[MVM] action transport is unknown", actionScriptName, state);
-    }
-    hideLoadingIfNoMinTime();
-    notifyProgressFrameTransport(state);
-    if (skipRefresh) {
-      mvmReleaseRefreshGuard();
-      mvmRemoveSandboxFrame();
-    } else if (!wantLoading) {
-      hideLoadingSafe();
-    }
-  }
-  function onFrameLoad() { finalizeFrame("load"); }
-  function onFrameError() { finalizeFrame("error"); }
-  if (tf) {
-    if (tf.addEventListener) {
-      tf.addEventListener("load", onFrameLoad);
-      tf.addEventListener("error", onFrameError);
-    } else if (tf.attachEvent) {
-      tf.attachEvent("onload", onFrameLoad);
-      tf.attachEvent("onerror", onFrameError);
-    }
-    frameTimer = setTimeout(function() { finalizeFrame("timeout"); }, frameTimeoutMs);
-  } else {
-    finalizeFrame("missing-frame");
-  }
-
-  try {
-    document.form.submit();
-    return true;
-  } catch (submitError) {
-    finalizeFrame("submit-error");
-    return false;
-  }
+  _mvmLast = { name: encodedAction, t: now };
+  return { accepted: true, action: baseAction, encodedAction: encodedAction, payload: payload, progressToken: progressToken };
 }
-</script>
 
-<script type="text/javascript">
-function mvmEnsureSandboxFrame() {
-  var id = "mvm_sandbox_iframe";
-  var s = document.getElementById(id);
-  if (s) {
-    return s;
-  }
+function MVM_execAsync(actionScriptName, settingsObjOrNull, opts) {
+  opts = opts || {};
+  var prepared = _mvmPrepareAction(actionScriptName, settingsObjOrNull, opts);
+  var requestId = _mvmRequestId();
+  var requestAccepted = !!prepared.accepted && !!document.body && !!(document.forms["form"] || document.form);
+  var promise = new Promise(function(resolve) {
+    if (!prepared.accepted) {
+      if (window.console && typeof console.warn === "function") console.warn("[MVM tx " + requestId + "] rejected " + prepared.error);
+      resolve({ accepted: false, requestId: requestId, action: String(actionScriptName || ""), encodedAction: String(actionScriptName || ""), transportState: prepared.transportState || "submit-error", error: prepared.error });
+      return;
+    }
+    var sourceForm = document.forms["form"] || document.form;
+    if (!sourceForm || !document.body) {
+      resolve({ accepted: false, requestId: requestId, action: prepared.action, encodedAction: prepared.encodedAction, transportState: "missing-frame", error: "missing-parent-form" });
+      return;
+    }
+    var frame = document.createElement("iframe");
+    var form = document.createElement("form");
+    var frameId = "mvm_action_frame_" + requestId;
+    var formId = "mvm_action_form_" + requestId;
+    frame.id = frameId; frame.name = frameId;
+    frame.width = "0"; frame.height = "0"; frame.frameBorder = "0";
+    frame.style.display = "none";
+    form.id = formId; form.name = formId; form.method = "post";
+    form.action = sourceForm.action || "start_apply.htm"; form.target = frameId;
+    form.style.display = "none";
+    for (var fieldIndex = 0; fieldIndex < sourceForm.elements.length; fieldIndex++) {
+      var sourceField = sourceForm.elements[fieldIndex];
+      if (sourceField.name === "amng_custom") continue;
+      _mvmCopyFormField(form, sourceField);
+    }
+    _mvmRequestField(form, "action_script", prepared.encodedAction);
+    _mvmRequestField(form, "action_mode", "apply");
+    _mvmRequestField(form, "action_wait", opts.waitSec != null ? opts.waitSec : 5);
+    var amng = _mvmRequestField(form, "amng_custom", "");
+    if (typeof opts.rawAmng === "string") amng.value = opts.rawAmng;
+    else if (prepared.payload != null) {
+      try { amng.value = JSON.stringify(prepared.payload); }
+      catch (payloadError) {
+        resolve({ accepted: false, requestId: requestId, action: prepared.action, encodedAction: prepared.encodedAction, transportState: "submit-error", error: "payload-encode-error" });
+        return;
+      }
+    }
+    var skipRefresh = !!opts.skipRefresh;
+    var wantLoading = opts.loading !== false;
+    var minLoadingMs = opts.minLoadingMs != null ? opts.minLoadingMs : 0;
+    var submitted = false;
+    var initialLoadPending = true;
+    var finalized = false;
+    var timer = null;
+    var initialLoadSeen = false;
+    var frameTimeoutMs = (typeof opts.frameTimeoutMs === "number" && opts.frameTimeoutMs > 0) ? Math.min(opts.frameTimeoutMs, 60000) : 15000;
 
-  s = document.createElement("iframe");
-  s.id = id;
-  s.name = id;
-  s.setAttribute("sandbox", "allow-forms allow-scripts");
-  s.style.width = "0";
-  s.style.height = "0";
-  s.style.border = "0";
-  s.style.position = "absolute";
-  s.style.left = "-99999px";
-  document.body.appendChild(s);
-  return s;
+    function cleanup() {
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      if (frame.removeEventListener) { frame.removeEventListener("load", onLoad); frame.removeEventListener("error", onError); }
+      if (frame.parentNode) frame.parentNode.removeChild(frame);
+      if (form.parentNode) form.parentNode.removeChild(form);
+      if (skipRefresh) mvmReleaseRefreshGuard();
+      _mvmLog(requestId, "cleanup form=" + formId + " frame=" + frameId);
+    }
+    function finalize(state) {
+      if (finalized) return;
+      finalized = true;
+      if (state !== "load" && window.console && typeof console.warn === "function") console.warn("[MVM tx " + requestId + "] transport=" + state);
+      if (minLoadingMs > 0 && typeof window._mvmHoldLoadingFor === "function") {
+        window._mvmHoldLoadingFor(minLoadingMs);
+        window.setTimeout(hideLoadingSafe, minLoadingMs);
+      } else {
+        hideLoadingSafe();
+      }
+      if (prepared.progressToken) {
+        try {
+          var progressFrame = document.getElementById("vlan_iframe");
+          if (progressFrame && progressFrame.contentWindow) progressFrame.contentWindow.postMessage({
+            source: "mervlan", type: "mervlan-action-transport", token: prepared.progressToken,
+            action: prepared.encodedAction, state: state, requestId: requestId
+          }, "*");
+        } catch (e) {}
+      }
+      _mvmLog(requestId, "transport=" + state + " action=" + prepared.action + " encoded=" + prepared.encodedAction);
+      cleanup();
+      resolve({ accepted: true, requestId: requestId, action: prepared.action, encodedAction: prepared.encodedAction, transportState: state });
+    }
+    function onLoad() {
+      if (!submitted) { initialLoadSeen = true; initialLoadPending = false; _mvmLog(requestId, "initial-about-blank-load"); return; }
+      if (initialLoadPending) { initialLoadPending = false; _mvmLog(requestId, "ignored-initial-load-after-submit"); return; }
+      finalize("load");
+    }
+    function onError() { finalize("error"); }
+    if (frame.addEventListener) { frame.addEventListener("load", onLoad); frame.addEventListener("error", onError); }
+    document.body.appendChild(frame);
+    frame.src = "about:blank";
+    document.body.appendChild(form);
+    _mvmLog(requestId, "create action=" + prepared.action + " encoded=" + prepared.encodedAction + " form=" + formId + " frame=" + frameId);
+    if (skipRefresh) mvmAcquireRefreshGuard();
+    if (minLoadingMs > 0 && typeof window._mvmHoldLoadingFor === "function") window._mvmHoldLoadingFor(minLoadingMs);
+    if (wantLoading) showLoadingSafe(minLoadingMs > 0 ? Math.ceil(minLoadingMs / 1000) : 30); else hideLoadingSafe();
+    window.setTimeout(function() {
+      if (finalized) return;
+      try {
+        submitted = true;
+        if (!initialLoadSeen) initialLoadPending = true;
+        _mvmLog(requestId, "submit frame=" + frameId);
+        form.submit();
+        timer = window.setTimeout(function() { finalize("timeout"); }, frameTimeoutMs);
+      } catch (submitError) { finalize("submit-error"); }
+    }, 0);
+  });
+  promise.accepted = requestAccepted;
+  promise.requestId = requestId;
+  return promise;
 }
-function mvmRemoveSandboxFrame() {
-  var s = document.getElementById("mvm_sandbox_iframe");
-  if (s && s.parentNode) {
-    s.parentNode.removeChild(s);
-  }
+
+function MVM_exec(actionScriptName, settingsObjOrNull, opts) {
+  var request = MVM_execAsync(actionScriptName, settingsObjOrNull, opts || {});
+  return request.accepted !== false;
 }
 </script>
 
@@ -578,7 +522,9 @@ function mvmOptsFor(actionName, overrideOpts) {
    You keep calling these from your buttons,
    and you ONLY edit the sets/maps above. */
 function MVM_save(settingsObj, opts)         { return MVM_exec("save_vlanmgr",          settingsObj, mvmOptsFor("save_vlanmgr",          opts)); }
+function MVM_saveAsync(settingsObj, opts)     { return MVM_execAsync("save_vlanmgr",      settingsObj, mvmOptsFor("save_vlanmgr",      opts)); }
 function MVM_trigger(actionScriptName, opts) { return MVM_exec(actionScriptName,        null,        mvmOptsFor(actionScriptName,        opts)); }
+function MVM_triggerAsync(actionScriptName, opts) { return MVM_execAsync(actionScriptName, null, mvmOptsFor(actionScriptName, opts)); }
 function MVM_triggerVerified(actionScriptName, requestToken, payload, opts) {
   var verifiedPayload = {};
   var sourcePayload = (payload && typeof payload === "object") ? payload : {};
@@ -596,6 +542,18 @@ function MVM_triggerVerified(actionScriptName, requestToken, payload, opts) {
   }
   var verifiedActionName = actionScriptName + "_vrt_" + tokenHex;
   return MVM_exec(verifiedActionName, verifiedPayload, mvmOptsFor(actionScriptName, opts));
+}
+function MVM_triggerVerifiedAsync(actionScriptName, requestToken, payload, opts) {
+  var verifiedPayload = {};
+  var sourcePayload = (payload && typeof payload === "object") ? payload : {};
+  Object.keys(sourcePayload).forEach(function(key) { verifiedPayload[key] = sourcePayload[key]; });
+  var safeToken = String(requestToken || "");
+  if (!safeToken || !/^[A-Za-z0-9._-]+$/.test(safeToken)) return Promise.resolve({ accepted: false, transportState: "submit-error", error: "invalid-request-token" });
+  verifiedPayload.vlanmgr_action_request_token = safeToken;
+  var tokenHex = "";
+  for (var i = 0; i < safeToken.length; i++) tokenHex += ("0" + safeToken.charCodeAt(i).toString(16)).slice(-2);
+  var verifiedActionName = actionScriptName + "_vrt_" + tokenHex;
+  return MVM_execAsync(verifiedActionName, verifiedPayload, mvmOptsFor(actionScriptName, opts));
 }
 function MVM_apply(opts)                     { return MVM_exec("apply_vlanmgr",         null,        mvmOptsFor("apply_vlanmgr",         opts)); }
 function MVM_sync(opts)                      { return MVM_exec("sync_vlanmgr",          null,        mvmOptsFor("sync_vlanmgr",          opts)); }
@@ -735,6 +693,13 @@ function MVM_hwprobe(opts) {
   });
   return MVM_exec("hwprobe_vlanmgr", payload, mvmOptsFor("hwprobe_vlanmgr", execOpts));
 }
+function MVM_hwprobeAsync(opts) {
+  opts = opts || {};
+  var payload = (opts.payload && typeof opts.payload === "object") ? opts.payload : null;
+  var execOpts = {};
+  Object.keys(opts).forEach(function(key) { if (key !== "payload") execOpts[key] = opts[key]; });
+  return MVM_execAsync("hwprobe_vlanmgr", payload, mvmOptsFor("hwprobe_vlanmgr", execOpts));
+}
 function MVM_macRefresh(opts)                 { return MVM_exec("macrefresh_vlanmgr",    null,        mvmOptsFor("macrefresh_vlanmgr",    opts)); }
 function MVM_macClientMeta(opts)             { return MVM_exec("macclientmeta_vlanmgr", null,        mvmOptsFor("macclientmeta_vlanmgr", opts)); }
 
@@ -796,7 +761,7 @@ function MVM_save_quiet(settingsObj) {
             <!-- THE IFRAME (AUTO-RESIZED BY JS; TALL VALUE IS EMERGENCY FALLBACK ONLY) -->
             <iframe
               id="vlan_iframe"
-              src="/user/mervlan/index.html"
+              src="about:blank"
               style="
                 width:100%;
                 height:1750px;
@@ -814,6 +779,9 @@ function MVM_save_quiet(settingsObj) {
             (function(){
               var f = document.getElementById("vlan_iframe");
               if(!f) return;
+
+              f.src = "/user/mervlan/index.html?mvm_load=" + encodeURIComponent(MVM_WEB_LOAD_NONCE);
+              if (window.console && typeof console.log === "function") console.log("[MerVLAN] Web load: " + MVM_WEB_LOAD_NONCE);
 
               function apply(){
                 try{

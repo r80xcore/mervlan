@@ -396,6 +396,7 @@ mkdir -p "$LOCKDIR" 2>/dev/null || {
 dispatch_if_executable() {
   local SCRIPT_PATH="$1"
   shift
+  logger -t "VLANMgr" "handler: dispatch raw=${RAW:-} script=${SCRIPT_PATH##*/}"
 
   # Only explicitly progress-enabled actions receive a progress token. This
   # prevents a stale custom-settings value from leaking into unrelated actions.
@@ -436,9 +437,10 @@ dispatch_if_executable() {
     return 0
   fi
   _se_event_nonce="$MERV_ACTION_LOCK_NONCE"; _se_event_start="$MERV_ACTION_LOCK_START"
+  logger -t "VLANMgr" "handler: event lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
   _se_global_needed=0
   case "$SCRIPT_PATH" in
-    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/update_mervlan.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh) _se_global_needed=1 ;;
+    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/hw_probe.sh|*/update_mervlan.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh) _se_global_needed=1 ;;
   esac
   _se_global_nonce=""; _se_global_start=""
   if [ "$_se_global_needed" -eq 1 ]; then
@@ -457,7 +459,14 @@ dispatch_if_executable() {
       return 0
     fi
     _se_global_nonce="$MERV_ACTION_LOCK_NONCE"; _se_global_start="$MERV_ACTION_LOCK_START"
+    logger -t "VLANMgr" "handler: global lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
   fi
+  _se_ack_stage=0
+  case "$SCRIPT_PATH" in
+    */save_settings.sh)
+      [ -n "${MERV_PROGRESS_TOKEN:-}" ] && _se_ack_stage=1
+      ;;
+  esac
   _se_release_owner_locks() {
     _se_release_rc=0
     if ! merv_action_lock_release "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" >/dev/null 2>&1; then
@@ -485,7 +494,9 @@ dispatch_if_executable() {
     else
       MERV_ACTION_LOCK_PARENT_HELD=0
     fi
-    export MERV_ACTION_LOCK_PARENT_HELD
+    MERV_ACTION_ACK_STAGE="$_se_ack_stage"
+    export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_ACK_STAGE
+    logger -t "VLANMgr" "handler: worker start action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} global=$_se_global_needed"
     sh "$SCRIPT_PATH" "$@"
   else
     logger -t "VLANMgr" "handler: missing script ${SCRIPT_PATH##*/}"
@@ -493,14 +504,46 @@ dispatch_if_executable() {
   fi
   _se_script_rc=${_se_script_rc:-$?}
   [ "$_se_script_rc" -eq 0 ] || logger -t "VLANMgr" "handler: $_se_key script failed (rc=$_se_script_rc)"
+  logger -t "VLANMgr" "handler: worker return action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} rc=$_se_script_rc"
   _se_release_owner_locks
   _se_release_rc=$?
   trap - EXIT INT TERM
+  logger -t "VLANMgr" "handler: locks released action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} rc=$_se_release_rc"
+  _se_ack_finalized=0
+  if [ "$_se_ack_stage" -eq 1 ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+    if [ "$_se_release_rc" -ne 0 ]; then
+      action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"1","node_sync":"unknown"}' \
+        "Settings were saved, but backend lock cleanup failed; recovery is required." \
+        '["action-lock-cleanup-failed"]' cleanup-failed >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
+      _se_ack_finalized=1
+    elif [ "$_se_script_rc" -ne 0 ]; then
+      action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"0","node_sync":"unknown"}' \
+        "Settings save worker failed before a terminal result was available." \
+        '["save-worker-failed"]' worker-failed >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: worker-failure acknowledgement could not be published"
+      _se_ack_finalized=1
+    elif action_ack_publish_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1; then
+      logger -t "VLANMgr" "handler: acknowledgement published action=save_vlanmgr token=${MERV_PROGRESS_TOKEN}"
+      _se_ack_finalized=1
+    else
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"1","node_sync":"unknown"}' \
+        "Settings were saved, but the correlated acknowledgement could not be published." \
+        '["ack-publication-failed"]' ack-publication-failed >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: staged Save acknowledgement publication failed"
+      _se_ack_finalized=1
+    fi
+  fi
   if [ "$_se_release_rc" -ne 0 ]; then
     logger -t "VLANMgr" "handler: $_se_key completed with cleanup failure; refusing success"
     if [ "$_se_script_rc" -eq 0 ]; then
       _se_script_rc=75
-      if type action_ack_error >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+      if [ "$_se_ack_finalized" -eq 0 ] && type action_ack_error >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
         action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
       fi
     fi

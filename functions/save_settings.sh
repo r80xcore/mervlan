@@ -902,21 +902,32 @@ if [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "client
     fi
 fi
 
+if [ "${SAVE_SCOPE:-full}" = "override" ]; then
+    # APMO owns the ordered follow-up (probe, reload, optional node sync).
+    _save_node_sync_status="deferred-apmo"
+fi
+
 # Publish a correlated terminal result when the browser supplied a save token.
 # A node-sync failure is partial: the local settings file is still valid and
 # must not be reported as a failed local save.
 if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 && type action_ack_ok >/dev/null 2>&1; then
+    _save_ack_partial=action_ack_partial
+    _save_ack_ok=action_ack_ok
+    if [ "${MERV_ACTION_ACK_STAGE:-0}" = "1" ] && type action_ack_stage_partial >/dev/null 2>&1 && type action_ack_stage_ok >/dev/null 2>&1; then
+        _save_ack_partial=action_ack_stage_partial
+        _save_ack_ok=action_ack_stage_ok
+    fi
     if [ "$_save_node_sync_status" = "failed" ]; then
-        action_ack_partial "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
             '{"local_saved":"1","node_sync":"failed"}' \
             "Settings saved locally; node settings synchronization failed." \
             '["node-settings-sync-failed"]' >/dev/null 2>&1 || :
     elif [ "$_save_node_sync_status" = "pending" ]; then
-        action_ack_ok "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
             '{"local_saved":"1","node_sync":"pending"}' \
             "Settings saved successfully; node settings synchronization is queued." '[]' >/dev/null 2>&1 || :
     else
-        action_ack_ok "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
             "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \
             "Settings saved successfully." '[]' >/dev/null 2>&1 || :
     fi
