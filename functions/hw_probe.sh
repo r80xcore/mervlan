@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: hw_probe.sh || version="0.59"                      #
+#                   - File: hw_probe.sh || version="0.60"                      #
 # ============================================================================ #
 # - Purpose:  Probe system hardware and record hardware keys in the central    #
 #             settings store (settings.json). Writes non-destructively via     #
@@ -31,6 +31,10 @@ fi
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
+    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
+fi
 # =========================================== End of MerVLAN environment setup #
 
 # APMO may pass a verified request token as the first argument. The normal
@@ -53,6 +57,13 @@ hw_probe_ack_exit() {
     exit "$_hp_rc"
 }
 trap 'hw_probe_ack_exit' EXIT
+
+if [ "${MERV_UPDATE_OWNER:-0}" != "1" ] &&
+   type merv_update_mutation_blocked >/dev/null 2>&1 &&
+   merv_update_mutation_blocked; then
+    error "Hardware profile refresh refused while Update maintenance is active"
+    exit 75
+fi
 
 # ============================================================================ #
 #                      HARDWARE DETECTION & PROBING                            #

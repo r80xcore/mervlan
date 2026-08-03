@@ -12,6 +12,7 @@ sh dev-tools/tests/local/loading_progress_test.sh
 sh dev-tools/tests/local/apmo_override_contract_test.sh
 sh dev-tools/tests/local/service_settings_contract_test.sh
 sh dev-tools/tests/local/save_local_only_sync_test.sh
+sh dev-tools/tests/local/update_lifecycle_contract_test.sh
 ```
 
 Each script derives `MERV_BASE` from its own location unless it is explicitly

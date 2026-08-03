@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.54"                      #
+#                  - File: lib_mervqt.sh || version="0.55"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -1855,6 +1855,14 @@ _merv_dhcp_reconcile_handoffs_locked() {
           heal:acknowledged|heal:completed|boot-watchdog:completed)
             _mdrh_parent_dir="$MERV_DHCP_HOLD_STATE_ROOT/owners/$_mdrh_parent_token"
             if [ -d "$_mdrh_parent_dir" ] && [ -f "$_mdrh_parent_dir/ready" ]; then
+              if [ "$_mdrh_parent_type" = "boot-watchdog" ] && [ "$_mdrh_state" = "completed" ]; then
+                _mdrh_pid=$(cat "$_mdrh_parent_dir/pid" 2>/dev/null || printf '')
+                _mdrh_start=$(cat "$_mdrh_parent_dir/proc_start_time" 2>/dev/null || printf '')
+                if merv_process_identity_matches "$_mdrh_pid" "$_mdrh_start" "$_mdrh_proc" 2>/dev/null; then
+                  _merv_dhcp_log info "completed boot handoff parent still alive; retaining ownership id=$_mdrh_id"
+                  continue
+                fi
+              fi
               _merv_dhcp_record_remove_locked owners "$_mdrh_parent_token" || :
               _mdrh_now=$(date +%s 2>/dev/null || printf '0')
               _merv_dhcp_atomic_field "$_mdrh_dir" parent_retired_epoch "$_mdrh_now" || :

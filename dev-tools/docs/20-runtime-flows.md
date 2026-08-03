@@ -75,9 +75,21 @@ node command still enforces its pinned host key independently.
 ## Update, restore, keys, and service actions
 
 Maintenance actions use the shared loading/progress lifecycle and bounded
-polling. Update/restore activation is staged and validated; SSH key generation
-and service checks report explicit terminal success or failure. Restore, undo,
-and other disruptive actions require the appropriate human-controlled gate.
+polling. Update/restore activation is staged and validated; Update records a
+durable phase journal, performs a measured RAM/tmp-space check, enters an
+explicit maintenance-quiesce state before extraction, and keeps the manager,
+healer, boot wrapper, Save/APMO, Apply, and ordinary node-sync workers from
+starting new mutations during that window. The normal addon backup/archive and
+activation recovery paths remain the only router-side copies owned by the
+addon; lifecycle journals and retry markers contain metadata only.
+
+Update retries transient node reachability failures within a bounded
+pre-mutation window and reports trust, authentication, malformed configuration,
+and remote-runtime failures separately. A boot-time node outage creates one
+owned delayed reconciliation marker for the health cron; it does not create an
+untracked background sleep or retry indefinitely. SSH key generation and
+service checks report explicit terminal success or failure. Restore, undo, and
+other disruptive actions require the appropriate human-controlled gate.
 
 ## UI action matrix
 

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: execute_nodes.sh || version="0.72.2"                  #
+#              - File: execute_nodes.sh || version="0.72.3"                  #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -36,6 +36,10 @@ fi
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the action-lock library; refusing node execution"
   exit 1
+}
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the Update lifecycle state library; refusing node execution"
+  exit 75
 }
 # Optional web progress publication. The parent orchestration script owns the
 # progress token; worker processes must never publish to the shared status file.
@@ -191,6 +195,12 @@ else
 fi
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$EXECUTE_PROGRESS_ACTION" \
     "$EXECUTE_PROGRESS_LABEL" "$EXECUTE_PROGRESS_START"
+
+if merv_update_mutation_blocked; then
+  warn -c cli,vlan "Execute refused: Update maintenance is active"
+  merv_action_progress_fail "Apply refused while Update maintenance is active"
+  exit 75
+fi
 
 EXEC_RUNTIME_OWNED=0
 if type merv_action_runtime_start >/dev/null 2>&1 &&

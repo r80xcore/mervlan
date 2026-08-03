@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.2"                #
+#             - File: mervlan_manager.sh || version="0.72.3"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -31,6 +31,7 @@ fi
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
@@ -79,6 +80,12 @@ done
 
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "apply_vlanmgr" "Apply VLAN" \
   "Preparing VLAN apply..."
+
+if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
+  info -c cli,vlan "Manager refused: Update maintenance is active"
+  merv_action_progress_fail "Apply refused while Update maintenance is active"
+  exit 75
+fi
 
 # Boot mode: ensure log directories and files exist before any logging
 # This is critical because install.sh may not have run yet on first boot

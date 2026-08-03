@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.3"                #
+#            - File: mervlan_selftest.sh || version="0.72.4"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -849,6 +849,25 @@ test_boot_handoff() {
   assert_ok "healthy boot completion clears exact hold" merv_dhcp_hold_rules_absent
 
   selftest_reset || return 1
+  assert_ok "live completed boot parent acquires" merv_dhcp_hold_acquire boot-watchdog boot-live-parent
+  _tbh_live_parent="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "live completed boot handoff publishes" merv_dhcp_handoff_request "$_tbh_live_parent" manager boot-live-handoff
+  assert_ok "live completed boot parent waits" merv_dhcp_hold_mark_handoff_wait "$_tbh_live_parent" boot-live-handoff
+  assert_ok "live completed boot successor acquires" merv_dhcp_hold_acquire manager boot-live-child boot-live-parent
+  _tbh_live_child="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "live completed boot successor acknowledges" merv_dhcp_handoff_ack boot-live-handoff boot-live-parent "$_tbh_live_child"
+  assert_ok "live completed boot successor mutates" merv_dhcp_hold_mark_mutating "$_tbh_live_child" bridge-cleanup
+  assert_ok "live completed boot successor verifies" merv_dhcp_hold_mark_verified "$_tbh_live_child" boot-live-verification
+  assert_ok "live completed boot handoff completes" merv_dhcp_handoff_child_verified boot-live-handoff "$_tbh_live_child" boot-live-verification
+  assert_ok "live completed boot reconciliation is idempotent" merv_dhcp_hold_reconcile boot-live-reconcile
+  [ -d "$SELFTEST_STATE/owners/$_tbh_live_parent" ] &&
+    pass "live completed boot parent remains owned until process exits" ||
+    fail "live completed boot parent remains owned until process exits"
+  assert_ok "live completed boot parent releases explicitly" merv_dhcp_handoff_parent_release "$_tbh_live_parent" boot-live-handoff
+  assert_ok "live completed boot successor releases explicitly" merv_dhcp_hold_release "$_tbh_live_child"
+  assert_ok "live completed boot reconciliation clears exact hold" merv_dhcp_hold_rules_absent
+
+  selftest_reset || return 1
   assert_ok "unsafe-timeout boot watchdog acquires" merv_dhcp_hold_acquire boot-watchdog boot-timeout
   _tbh_timeout="$MERV_DHCP_HOLD_TOKEN"
   assert_ok "unsafe-timeout request publishes" merv_dhcp_handoff_request "$_tbh_timeout" manager boot-timeout-1
@@ -1391,7 +1410,11 @@ test_manager_ownership() {
   fi
   _tmo_acquire=$(grep -n 'merv_dhcp_hold_acquire manager' "$_tmo_file" | head -n1 | cut -d: -f1)
   _tmo_mutate=$(grep -n 'merv_dhcp_hold_mark_mutating.*MANAGER_DHCP_TOKEN' "$_tmo_file" | head -n1 | cut -d: -f1)
-  _tmo_cleanup=$(grep -n '^[[:space:]]*cleanup_existing_config[[:space:]]*$' "$_tmo_file" | head -n1 | cut -d: -f1)
+  # The production caller intentionally checks the cleanup return status with
+  # `if ! cleanup_existing_config`; match the call rather than only a bare
+  # command so this ordering contract remains valid after error handling is
+  # made explicit.
+  _tmo_cleanup=$(grep -n 'if ! cleanup_existing_config' "$_tmo_file" | head -n1 | cut -d: -f1)
   case "$_tmo_acquire:$_tmo_mutate:$_tmo_cleanup" in *[!0-9:]*|'::'|*::*)
     fail "manager lease ordering locations found"
     ;;

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: mervlan_boot.sh || version="0.72.0"                  #
+#              - File: mervlan_boot.sh || version="0.72.1"                  #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -34,6 +34,8 @@ fi
   error -c vlan,cli "Unable to load the DHCP/L2 safety library; refusing boot action"
   exit 1
 }
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
+[ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
 if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
   [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh"
 fi
@@ -103,6 +105,75 @@ boot_action_ack_complete() {
       ;;
   esac
 }
+
+node_preflight_failure_is_transient() {
+  case "${MERV_SSH_LAST_REASON:-${MERV_SSH_TRUST_LAST_REASON:-}}" in
+    unreachable|timeout|refused|no-route) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+schedule_node_reconcile() {
+  _snr_action="$1"
+  _snr_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_snr_now" in ''|*[!0-9]*) _snr_now=0 ;; esac
+  _snr_delay="${MERV_NODE_RECONCILE_DELAY_SEC:-300}"
+  case "$_snr_delay" in ''|*[!0-9]*) _snr_delay=300 ;; esac
+  _snr_next=$((_snr_now + _snr_delay))
+  _snr_detail=$(printf '%s' "${MERV_SSH_LAST_DETAIL:-node temporarily unavailable}" | tr ' ' '_' | tr -cd 'A-Za-z0-9._:/-')
+  _snr_digest="unknown"
+  if type merv_node_list_digest >/dev/null 2>&1; then
+    _snr_digest=$(merv_node_list_digest 2>/dev/null || printf 'unknown')
+  fi
+  if type merv_node_reconcile_write >/dev/null 2>&1 &&
+     merv_node_reconcile_write "$_snr_action" "${MERV_SSH_LAST_REASON:-unreachable}" \
+       "${_snr_detail:-node-unavailable}" 0 "$_snr_next" "$_snr_digest"; then
+    info -c vlan,cli "Node action '$_snr_action' deferred: a bounded retry is scheduled in ${_snr_delay}s"
+    return 0
+  fi
+  warn -c vlan,cli "Node action '$_snr_action' could not publish its bounded retry marker"
+  return 1
+}
+
+process_pending_node_reconcile() {
+  type merv_node_reconcile_active >/dev/null 2>&1 && merv_node_reconcile_active || return 0
+  _pnr_action=$(merv_node_reconcile_get action '')
+  _pnr_next=$(merv_node_reconcile_get next_epoch 0)
+  case "$_pnr_action" in
+    enable|disable|setupenable|setupdisable|nodeenable|nodedisable) ;;
+    *) merv_node_reconcile_clear || :; return 1 ;;
+  esac
+  case "$_pnr_next" in ''|*[!0-9]*) merv_node_reconcile_clear || :; return 1 ;; esac
+  _pnr_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_pnr_now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_pnr_now" -ge "$_pnr_next" ] 2>/dev/null || return 0
+  info -c vlan,cli "Retrying deferred node action '$_pnr_action' after the bounded recovery delay"
+  MERV_NODE_RECONCILE_SUPPRESS_SCHEDULE=1 sh "$0" "$_pnr_action"
+  _pnr_rc=$?
+  if [ "$_pnr_rc" -eq 0 ]; then
+    merv_node_reconcile_clear || warn -c vlan,cli "Deferred node action succeeded but its retry marker could not be cleared"
+    return 0
+  fi
+  if node_preflight_failure_is_transient; then
+    warn -c vlan,cli "Deferred node action '$_pnr_action' still cannot reach a node after the bounded retry; manual action is required"
+  else
+    warn -c vlan,cli "Deferred node action '$_pnr_action' ended with a non-retryable result: ${MERV_SSH_LAST_REASON:-action-failed}"
+  fi
+  merv_node_reconcile_clear || warn -c vlan,cli "Could not clear the completed deferred node retry marker"
+  return "$_pnr_rc"
+}
+
+case "$ACTION" in
+  enable|disable|setupenable|setupdisable|nodeenable|nodedisable)
+    if [ "${MERV_UPDATE_OWNER:-0}" != "1" ] &&
+       type merv_update_mutation_blocked >/dev/null 2>&1 &&
+       merv_update_mutation_blocked; then
+      boot_action_ack_error "Boot action blocked: Update maintenance is active" '{}' "UPDATE_MAINTENANCE_ACTIVE"
+      error -c vlan,cli "Boot action '$ACTION' refused while Update maintenance is active"
+      exit 75
+    fi
+    ;;
+esac
 
 persist_boot_enabled_state() {
   _pbes_value="$1"
@@ -706,8 +777,18 @@ case "$ACTION" in
   enable|disable|setupenable|setupdisable|nodeenable|nodedisable)
     if [ "${MERV_NODE_CONTEXT:-0}" != "1" ] && [ "${MERV_SKIP_NODE_SYNC:-0}" != "1" ]; then
       if ! merv_ssh_preflight_configured_nodes; then
-        boot_action_ack_error "Boot action blocked: complete SSH trust preflight failed" "SSH_TRUST_REQUIRED"
-        error -c vlan,cli "Boot action '$ACTION' refused before local mutation: SSH trust preflight failed"
+        if node_preflight_failure_is_transient; then
+          if [ "${MERV_NODE_RECONCILE_SUPPRESS_SCHEDULE:-0}" != "1" ]; then
+            schedule_node_reconcile "$ACTION" || :
+          fi
+          boot_action_ack_error "Boot action deferred: configured node is temporarily unreachable; retry is scheduled" \
+            '{"reason":"node-unreachable"}' "NODE_UNREACHABLE"
+          error -c vlan,cli "Boot action '$ACTION' deferred before local mutation: ${MERV_SSH_LAST_DETAIL:-node temporarily unreachable}"
+        else
+          boot_action_ack_error "Boot action blocked: complete SSH trust preflight failed" \
+            '{"reason":"ssh-trust-required"}' "SSH_TRUST_REQUIRED"
+          error -c vlan,cli "Boot action '$ACTION' refused before local mutation: ${MERV_SSH_LAST_DETAIL:-SSH trust preflight failed}"
+        fi
         exit 1
       fi
     fi
@@ -715,6 +796,10 @@ case "$ACTION" in
 esac
 
 case "$ACTION" in
+  reconcile-pending)
+    process_pending_node_reconcile
+    exit $?
+    ;;
   # =========================================================================== #
   # enable — Boot MerVLAN at router startup; enable mervlan.asp auto-load       #
   # =========================================================================== #

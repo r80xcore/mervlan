@@ -18,6 +18,7 @@ the required human test approval.
 | 2 | [Action serialization and liveness](02-action-serialization-and-liveness.md) | #7, #9, #10, #15 | Required before relying on long-running or concurrent actions. |
 | 3 | [BusyBox compatibility and state durability](03-busybox-compatibility-and-state-durability.md) | #6, #8, #11, #13, #17 | Required for the supported firmware/platform matrix. |
 | 4 | [UI, installer recovery, and cleanup](04-ui-installer-recovery-and-cleanup.md) | #14, #16, #18, #19, #20 | Post-Plan-3 implementation phase; required before release. |
+| 5 | [Update safety, space, and recovery](05-update-safety-space-and-recovery.md) | Update extraction, runtime quiesce, node availability, hardware-profile recovery, DHCP handoff, and power-loss evidence | Required before another live Update test. |
 
 Plan 04 is later in implementation order, not post-release work. Its
 update-reference, installer-recovery, loading-cleanup, and output-escaping

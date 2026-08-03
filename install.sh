@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.60"                      #
+#                    - File: install.sh || version="0.61"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -953,7 +953,7 @@ detect_existing_installation() {
     local required marker
     INSTALL_STATE="absent"
     if settings_file_looks_valid "$ACTIVE_MERV_BASE/settings/settings.json"; then
-        for required in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh; do
+        for required in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh; do
             [ -f "$ACTIVE_MERV_BASE/$required" ] || { INSTALL_STATE="partial"; return 0; }
         done
         INSTALL_STATE="valid"
@@ -1290,7 +1290,7 @@ install_tree_valid() {
     [ -d "$_itv_root" ] || return 1
     for _itv_required in \
         install.sh uninstall.sh mervlan.asp www/index.html \
-        settings/settings.json settings/var_settings.sh settings/lib_json.sh \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh \
         settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
         functions/ssh_trust_action.sh
     do
@@ -1942,7 +1942,7 @@ download_mervlan() {
   if [ -n "$topdir" ]; then
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
             functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json \
-            settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
@@ -2395,7 +2395,6 @@ fi
 if [ "$MODE" = "tarball" ]; then
     prompt_ssh_user_override
     prompt_ssh_port_override
-    run_install_hardware_probe || exit 1
 fi
 
 # 3b. Copy Static assets to Public Dir
@@ -2428,15 +2427,20 @@ create_link "$MERV_BASE/settings/settings.json" "$PUBLIC_DIR/settings/settings.j
 # The SPA now reads the Hardware block from settings/settings.json directly;
 # keep the consolidated settings.json published for the UI.
 
-# Reinstall republishes the current source without running the full install
-# wizard. Refresh the generated public hardware catalog here so the APMO model
-# defaults always match the model definitions shipped by this source tree.
-if [ "$MODE" = "reinstall" ]; then
-    run_install_hardware_probe || {
-        RESULT_HARDWARE="FAIL - hardware profile refresh"
-        echo "[install] ERROR: Failed to refresh public hardware profiles" >&2
-        exit 1
-    }
+# Every real installation/recovery path must publish the generated hardware
+# catalog before final verification. It is not a static source asset and must
+# not be skipped by normal boot recovery after an interrupted update.
+if [ "$TEST_RUN" != "1" ]; then
+    case "$RESULT_HARDWARE" in
+        PASS*) : ;;
+        *)
+            run_install_hardware_probe || {
+                RESULT_HARDWARE="FAIL - hardware profile refresh"
+                echo "[install] ERROR: Failed to refresh public hardware profiles" >&2
+                exit 1
+            }
+            ;;
+    esac
 fi
 
 # 3c. Publish SSH public key for UI if it already exists (rename to .json for compatibility)
@@ -2627,7 +2631,7 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do

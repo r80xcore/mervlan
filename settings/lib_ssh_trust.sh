@@ -762,7 +762,14 @@ merv_ssh_hostkey_probe() {
     else
       _mshkp_probe=$($MERV_SSH_HOSTKEY_PROBE_CMD "$_mshkp_node" "$_mshkp_host" "$_mshkp_port" 2>/dev/null)
     fi
-    [ "$?" -eq 0 ] || { MERV_SSH_TRUST_LAST_REASON=probe-failed; return 7; }
+    _mshkp_probe_rc=$?
+    if [ "$_mshkp_probe_rc" -ne 0 ]; then
+      case "$_mshkp_probe_rc" in
+        10) MERV_SSH_TRUST_LAST_REASON=unreachable; MERV_SSH_TRUST_LAST_STATUS=unreachable; return 10 ;;
+        11) MERV_SSH_TRUST_LAST_REASON=refused; MERV_SSH_TRUST_LAST_STATUS=unreachable; return 11 ;;
+        *) MERV_SSH_TRUST_LAST_REASON=probe-failed; MERV_SSH_TRUST_LAST_STATUS=probe-failed; return 7 ;;
+      esac
+    fi
     _mshkp_tab=$(printf '\t'); OLDIFS=$IFS; IFS="$_mshkp_tab"; set -- $_mshkp_probe; IFS=$OLDIFS
     [ "$#" -ge 2 ] || { MERV_SSH_TRUST_LAST_REASON=probe-malformed; return 7; }
     _mshkp_alg="$1"; _mshkp_key="$2"; _mshkp_fp="${3:-}"
@@ -853,9 +860,29 @@ merv_ssh_preflight_node_set() {
     [ -z "$_msp_extra" ] || return 2
     merv_ssh_hostkey_probe "$_msp_slot" "$_msp_host" "${MERV_NODE_SSH_PORT:-22}" "$_msp_mac"
     _msp_probe_rc=$?
-    [ "$_msp_probe_rc" -eq 0 ] || return "$_msp_probe_rc"
+    if [ "$_msp_probe_rc" -ne 0 ]; then
+      case "$_msp_probe_rc:${MERV_SSH_TRUST_LAST_REASON:-}" in
+        10:*|11:*|*:unreachable|*:timeout|*:refused|*:no-route)
+          MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-unreachable}"
+          MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key probe could not reach the node"
+          return 4
+          ;;
+      esac
+      MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-probe-failed}"
+      MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key preflight failed"
+      return "$_msp_probe_rc"
+    fi
     [ "$MERV_SSH_TRUST_LAST_STATUS" = verified ] || {
       [ -n "${MERV_SSH_TRUST_LAST_REASON:-}" ] || MERV_SSH_TRUST_LAST_REASON=ssh-trust-required
+      case "${MERV_SSH_TRUST_LAST_REASON:-}" in
+        unreachable|timeout|refused|no-route)
+          MERV_SSH_LAST_REASON="$MERV_SSH_TRUST_LAST_REASON"
+          MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key probe could not reach the node"
+          return 4
+          ;;
+      esac
+      MERV_SSH_LAST_REASON="$MERV_SSH_TRUST_LAST_REASON"
+      MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key trust precondition failed"
       return 6
     }
   done < "$_msp_file"

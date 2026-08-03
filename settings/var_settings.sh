@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: var_settings.sh || version="0.72.0"                  #
+#              - File: var_settings.sh || version="0.72.1"                  #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -32,6 +32,17 @@
 : "${MERV_SSH_TRUST_QUARANTINE_ROOT:=$MERV_SSH_TRUST_ROOT/quarantine}"
 : "${MERV_SSH_TRUST_LOCK_PATH:=$MERV_SSH_TRUST_ROOT/state.lock}"
 : "${MERV_UPDATE_CONSUMED_FILE:=$MERV_STATE_ROOT/update_refs.consumed}"
+# Update lifecycle state is a small durable journal, not a backup archive. It
+# lets boot distinguish an interrupted update from a normal reboot without
+# copying any source tree onto the router outside the addon's real backup
+# mechanism.
+: "${MERV_UPDATE_JOURNAL:=$MERV_STATE_ROOT/update.journal}"
+: "${MERV_UPDATE_QUIESCE_FILE:=$MERV_STATE_ROOT/update.quiesce}"
+: "${MERV_UPDATE_NODE_RETRY_MAX_SEC:=300}"
+: "${MERV_UPDATE_NODE_RETRY_INTERVAL_SEC:=15}"
+: "${MERV_UPDATE_QUIESCE_WAIT_SEC:=180}"
+: "${MERV_NODE_RECONCILE_FILE:=$MERV_STATE_ROOT/node_reconcile.pending}"
+: "${MERV_NODE_RECONCILE_DELAY_SEC:=300}"
 
 # ---- merv: portable `command -v` replacement ----
 # merv_has <name> : true if <name> exists as function/builtin/external

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.53"                     #
+#               - File: save_settings.sh || version="0.54"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -31,6 +31,14 @@ fi
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
+    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
+fi
+if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
+    error -c vlan "save_settings.sh: Update maintenance is active; refusing a concurrent settings mutation"
+    exit 75
+fi
 merv_action_progress_init() { :; }
 merv_action_progress_complete() { :; }
 if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then

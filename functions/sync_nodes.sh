@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: sync_nodes.sh || version="0.72.2"                     #
+#             - File: sync_nodes.sh || version="0.72.3"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -258,6 +258,8 @@ settings/lib_mervqt.sh
 settings/lib_node_jobs.sh
 settings/lib_action_ack.sh
 settings/lib_radio.sh
+settings/lib_update_state.sh
+settings/lib_node_reconcile.sh
 settings/lib_progress.sh
 settings/lib_action_progress.sh
 settings/mac_shield_snapshot.sh
@@ -324,6 +326,8 @@ settings/lib_mervqt.sh
 settings/lib_node_jobs.sh
 settings/lib_action_ack.sh
 settings/lib_radio.sh
+settings/lib_update_state.sh
+settings/lib_node_reconcile.sh
 settings/lib_progress.sh
 settings/lib_action_progress.sh
 settings/mac_shield_snapshot.sh

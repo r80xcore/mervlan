@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: mervlan_boot_wrap.sh || version="0.72.2"                  #
+#          - File: mervlan_boot_wrap.sh || version="0.72.3"                  #
 # ============================================================================ #
 # - Purpose:    Boot-time wrapper that gates install/manager/cron execution.   #
 #               All ordering and flag logic lives here — core scripts are      #
@@ -38,6 +38,7 @@ mkdir -p /tmp/mervlan_tmp/logs 2>/dev/null || :
 # modes never abort if a lib is temporarily missing.
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"   2>/dev/null || true
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 
 # Route "boot" channel to boot_wrap.log
@@ -285,6 +286,15 @@ _mode_shield() {
   local _max="${MERV_BOOT_SHIELD_MAX_SEC:-480}" _oldpid _oldstart _shield_pid _shield_start _ready_pid _ready_start _wait=0
   case "$_max" in ''|*[!0-9]*) _max=480 ;; esac
 
+  if type merv_update_quiesce_active >/dev/null 2>&1 && merv_update_quiesce_active; then
+    info -c boot,vlan "Shield suppressed: Update maintenance quiesce is active"
+    return 0
+  fi
+  if type merv_update_journal_requires_safe_boot >/dev/null 2>&1 && merv_update_journal_requires_safe_boot; then
+    warn -c boot,vlan "Shield suppressed: interrupted Update requires safe recovery"
+    return 0
+  fi
+
   [ "${DRY_RUN:-no}" != yes ] || return 0
   type ebtables >/dev/null 2>&1 || return 0
   type merv_dhcp_hold_acquire >/dev/null 2>&1 || return 1
@@ -343,14 +353,40 @@ _mode_shield() {
 # MODE: install                                                                #
 # ============================================================================ #
 _mode_install() {
-  if _flag_exists; then
-    info -c boot "install.sh already executed (flag present). Skipped."
-    return 0
-  fi
-
   if _is_node_runtime; then
     info -c boot "Node runtime detected — installer bootstrap is not required"
     _write_flag
+    return 0
+  fi
+
+  if type merv_update_journal_requires_safe_boot >/dev/null 2>&1 && merv_update_journal_requires_safe_boot; then
+    if [ -f "$LOCKDIR/mervlan_maintenance.lock" ] && type merv_lock_state >/dev/null 2>&1 &&
+       [ "$(merv_lock_state "$LOCKDIR/mervlan_maintenance.lock" 2>/dev/null)" = active ]; then
+      warn -c boot "Incomplete Update state detected while the Update owner is still active; deferring recovery"
+      return 75
+    fi
+    warn -c boot "Incomplete Update journal detected; running installer projection recovery without starting the manager"
+    if MERV_UPDATE_OWNER=1 MERV_UPDATE_RECOVERY=1 "$MERV_BASE/install.sh" reinstall >> "$LOG_chan_boot" 2>&1; then
+      if type merv_update_journal_active >/dev/null 2>&1 && merv_update_journal_active; then
+        if [ "$(merv_update_journal_get activation_started 0)" != "1" ]; then
+          merv_update_journal_clear || warn -c boot "Projection recovery succeeded but the pre-activation Update journal could not be cleared"
+          merv_update_quiesce_clear || warn -c boot "Projection recovery succeeded but the Update quiesce marker could not be cleared"
+          info -c boot "Interrupted Update was before activation; safe recovery state cleared"
+        else
+          info -c boot "Installer projection recovery completed; activation journal remains pending verification"
+        fi
+      else
+        merv_update_quiesce_clear || warn -c boot "Projection recovery succeeded but the Update quiesce marker could not be cleared"
+        info -c boot "Interrupted Update projection recovery completed"
+      fi
+    else
+      warn -c boot "Installer projection recovery failed; manager startup remains suppressed"
+    fi
+    return 0
+  fi
+
+  if _flag_exists; then
+    info -c boot "install.sh already executed (flag present). Skipped."
     return 0
   fi
 
@@ -371,6 +407,11 @@ _mode_install() {
 _mode_manager() {
   local _boot_context="$LOCKDIR/merv_boot_shield.handoff"
   local _boot_parent_run="" _boot_handoff=""
+  if type merv_update_quiesce_active >/dev/null 2>&1 && merv_update_quiesce_active ||
+     type merv_update_journal_requires_safe_boot >/dev/null 2>&1 && merv_update_journal_requires_safe_boot; then
+    warn -c boot "Manager startup suppressed: Update recovery/quiesce state is active"
+    return 75
+  fi
   # ======================================================================== #
   # PAUSE CLEAR — A reboot is always a clean slate. Clear any stale PAUSE   #
   # flag left from the previous session before the manager runs.            #
@@ -436,6 +477,11 @@ _mode_manager() {
 # MODE: cron                                                                   #
 # ============================================================================ #
 _mode_cron() {
+  if type merv_update_quiesce_active >/dev/null 2>&1 && merv_update_quiesce_active ||
+     type merv_update_journal_requires_safe_boot >/dev/null 2>&1 && merv_update_journal_requires_safe_boot; then
+    warn -c boot "Cron enable suppressed: Update recovery/quiesce state is active"
+    return 75
+  fi
   info -c boot "Running mervlan_boot.sh cronenable"
   if "$BOOT_SCRIPT" cronenable >> "$LOG_chan_boot" 2>&1; then
     info -c boot "mervlan_boot.sh cronenable completed (rc=0)"

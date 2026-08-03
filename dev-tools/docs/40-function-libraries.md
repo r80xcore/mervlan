@@ -19,6 +19,8 @@ avoid sourcing the same library repeatedly.
 | `mac_shield_snapshot.sh` | Snapshot generation, MAC Shield database state, and observation identity. |
 | `lib_stp.sh` | Bridge/STP policy and stable bridge identity. |
 | `lib_radio.sh` | Radio/interface readiness and restart-related helpers. |
+| `lib_update_state.sh` | Durable Update phase journal and explicit maintenance-quiesce state. |
+| `lib_node_reconcile.sh` | Atomic, bounded node-action retry marker used by boot/health reconciliation. |
 
 ## Load-order rules
 

@@ -68,7 +68,15 @@ while [ "$_shkp_tick" -lt "$_shkp_wait" ]; do
   sleep 1
   _shkp_tick=$((_shkp_tick + 1))
 done
-[ -s "$_shkp_root/.ssh/known_hosts" ] || exit 5
+if [ ! -s "$_shkp_root/.ssh/known_hosts" ]; then
+  if grep -qi "Connection refused" "$_shkp_root/client.stderr" 2>/dev/null; then
+    exit 11
+  fi
+  if grep -qi "No route to host\|Network is unreachable\|timed out\|Connection timed out" "$_shkp_root/client.stderr" 2>/dev/null; then
+    exit 10
+  fi
+  exit 5
+fi
 
 _shkp_host_token="$_shkp_host"
 [ "$_shkp_port" = 22 ] || _shkp_host_token="[$_shkp_host]:$_shkp_port"

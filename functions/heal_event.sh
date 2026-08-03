@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.69"                     #
+#                  - File: heal_event.sh || version="0.70"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -32,11 +32,18 @@ fi
 # Graceful-degradation: load MERV_MAC enforcement libs if present.
 # heal_event.sh degrades safely if the files are missing (partial install).
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
+[ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
+
+if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
+  info -c vlan "Heal deferred: Update maintenance is active"
+  exit 0
+fi
 
 # Every event and health-cron entry reconciles interrupted token owners before
 # observing or mutating bridge state. Compatibility heal ownership remains in
@@ -1091,6 +1098,12 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ] &&
+     type merv_node_reconcile_active >/dev/null 2>&1 && merv_node_reconcile_active; then
+    sh "$MERV_BASE/functions/mervlan_boot.sh" reconcile-pending >/dev/null 2>&1 ||
+      warn -c vlan "Cron: deferred node reconciliation did not complete"
+  fi
+
   # Central helper owns trimming policy; the five-minute health cron only runs
   # its cheap due gate.  Actual maintenance occurs at most once per 24 hours.
   type log_maintenance_due >/dev/null 2>&1 && log_maintenance_due
