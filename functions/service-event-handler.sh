@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.63"                  #
+#          - File: service-event-handler.sh || version="0.64"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -491,11 +491,19 @@ dispatch_if_executable() {
     # must let a nested SSH trust probe acquire it itself.
     if [ "$_se_global_needed" -eq 1 ]; then
       MERV_ACTION_LOCK_PARENT_HELD=1
+      MERV_ACTION_LOCK_PARENT_PID="$$"
+      MERV_ACTION_LOCK_PARENT_START="$_se_global_start"
+      MERV_ACTION_LOCK_PARENT_NONCE="$_se_global_nonce"
     else
       MERV_ACTION_LOCK_PARENT_HELD=0
+      MERV_ACTION_LOCK_PARENT_PID=""
+      MERV_ACTION_LOCK_PARENT_START=""
+      MERV_ACTION_LOCK_PARENT_NONCE=""
     fi
     MERV_ACTION_ACK_STAGE="$_se_ack_stage"
-    export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_ACK_STAGE
+    export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+      MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
+      MERV_ACTION_ACK_STAGE
     logger -t "VLANMgr" "handler: worker start action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} global=$_se_global_needed"
     sh "$SCRIPT_PATH" "$@"
   else

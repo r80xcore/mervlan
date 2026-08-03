@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.55"                      #
+#                  - File: lib_mervqt.sh || version="0.56"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -2422,20 +2422,33 @@ merv_lock_heartbeat() {
   _ml2_now=$(merv_lock_now); _ml2_tmp="$_ml2_lock/.owner.tmp.$$"
   sed "s/^heartbeat=.*/heartbeat=$_ml2_now/" "$_ml2_lock/owner" > "$_ml2_tmp" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
   chmod 600 "$_ml2_tmp" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  mv -f "$_ml2_tmp" "$_ml2_lock/owner" 2>/dev/null || return 1
+  mv -f "$_ml2_tmp" "$_ml2_lock/owner" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
   printf '%s\n' "$_ml2_now" > "$_ml2_lock/heartbeat" 2>/dev/null
 }
 
 merv_lock_release() {
   _ml2_lock="$1"; _ml2_nonce="${2:-${MERV_LOCK_NONCE:-}}"
+  _ml2_restore="${_ml2_lock%/*}/.${_ml2_lock##*/}.owner.restore.$$"
   [ -n "$_ml2_lock" ] || return 0
   [ -d "$_ml2_lock" ] || return 0
   _merv_lock_v2_read "$_ml2_lock" 2>/dev/null || return 1
   [ "$MERV_LOCK_OWNER_PID" = "$$" ] && [ "$MERV_LOCK_OWNER_START" = "$(merv_proc_start_time "$$" 2>/dev/null)" ] &&
     [ "$MERV_LOCK_OWNER_NONCE" = "$_ml2_nonce" ] || return 1
+  cp -p "$_ml2_lock/owner" "$_ml2_restore" 2>/dev/null || return 1
+  rm -f "$_ml2_lock"/.owner.tmp.* 2>/dev/null || { rm -f "$_ml2_restore" 2>/dev/null; return 1; }
   rm -f "$_ml2_lock/owner" "$_ml2_lock/pid" "$_ml2_lock/proc_start_time" "$_ml2_lock/owner_nonce" \
-    "$_ml2_lock/created" "$_ml2_lock/heartbeat" 2>/dev/null || return 1
-  rmdir "$_ml2_lock" 2>/dev/null || return 1
+    "$_ml2_lock/created" "$_ml2_lock/heartbeat" 2>/dev/null || {
+      mv -f "$_ml2_restore" "$_ml2_lock/owner" 2>/dev/null || :
+      return 1
+    }
+  if ! rmdir "$_ml2_lock" 2>/dev/null; then
+    if ! mv -f "$_ml2_restore" "$_ml2_lock/owner" 2>/dev/null; then
+      return 1
+    fi
+    chmod 600 "$_ml2_lock/owner" 2>/dev/null || :
+    return 1
+  fi
+  rm -f "$_ml2_restore" 2>/dev/null || :
   return 0
 }
 

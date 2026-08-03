@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#                - File: mervlan_backup.sh || version="0.2"                   #
+#                - File: mervlan_backup.sh || version="0.3"                   #
 # ============================================================================ #
 # Backup inventory, manual backup, deletion, and transactional restore engine. #
 # Public CLI entry remains functions/update_mervlan.sh.                        #
@@ -43,6 +43,10 @@ readonly MB_JFFS_OLD="$MB_BACKUP_ROOT/.mervlan.old.$$"
 readonly MB_MANUAL_LIMIT=3
 readonly MB_AUTO_LIMIT=3
 readonly MB_TEST_MODE="${MERVLAN_BACKUP_TEST_MODE:-0}"
+MB_JFFS_RESERVE_KB="${MERV_BACKUP_JFFS_RESERVE_KB:-5120}"
+case "$MB_JFFS_RESERVE_KB" in
+  ''|*[!0-9]*|0) MB_JFFS_RESERVE_KB="5120" ;;
+esac
 readonly MB_TEST_FAIL_PHASE="${MERVLAN_BACKUP_TEST_FAIL_PHASE:-}"
 readonly MB_TEST_PAUSE_PHASE="${MERVLAN_BACKUP_TEST_PAUSE_PHASE:-}"
 readonly MB_TEST_PAUSE_SECONDS="${MERVLAN_BACKUP_TEST_PAUSE_SECONDS:-5}"
@@ -364,11 +368,16 @@ mb_require_space_kb() {
   _mb_space_available=${_mb_space_stats#*|}
   case "$_mb_space_total" in ''|*[!0-9]*) MB_SPACE_MESSAGE="Could not determine total space for $_mb_space_label."; return 1 ;; esac
   case "$_mb_space_available" in ''|*[!0-9]*) MB_SPACE_MESSAGE="Could not determine available space for $_mb_space_label."; return 1 ;; esac
-  _mb_space_reserve=$((_mb_space_total / 20))
-  [ "$_mb_space_reserve" -ge 2048 ] || _mb_space_reserve=2048
+  case "$_mb_space_path" in
+    /jffs|/jffs/*) _mb_space_reserve="$MB_JFFS_RESERVE_KB" ;;
+    *)
+      _mb_space_reserve=$((_mb_space_total / 20))
+      [ "$_mb_space_reserve" -ge 2048 ] || _mb_space_reserve=2048
+      ;;
+  esac
   _mb_space_needed=$((_mb_space_required + _mb_space_reserve))
   if [ "$_mb_space_available" -lt "$_mb_space_needed" ]; then
-    MB_SPACE_MESSAGE="Insufficient $_mb_space_label space: need ${_mb_space_needed} KB including reserve, available ${_mb_space_available} KB."
+    MB_SPACE_MESSAGE="Insufficient $_mb_space_label space: need ${_mb_space_needed} KB including reserve ${_mb_space_reserve} KB, available ${_mb_space_available} KB."
     return 1
   fi
   return 0

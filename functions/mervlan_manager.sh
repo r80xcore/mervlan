@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.4"                #
+#             - File: mervlan_manager.sh || version="0.72.5"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -2440,7 +2440,20 @@ main() {
   elif [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
     merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
     info -c cli,vlan "Refreshing client inventory after apply..."
-    if MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
+    if [ "$MERV_MANAGER_MODE" = "boot" ]; then
+      # Queue boot observation without starting its worker. The boot wrapper
+      # retires the shield/handoff after this process exits, then runs the
+      # bounded worker so it cannot wait behind its own boot protection.
+      if MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
+           request snapshot collect >/dev/null 2>&1; then
+        info -c cli,vlan "VLAN client list refresh queued for post-shield boot work"
+      else
+        _manager_observation_rc=$?
+        warn -c cli,vlan "Post-apply observation request failed in boot mode (rc=$_manager_observation_rc)"
+        MANAGER_EXIT_REASON="post-apply-observation-request-failed"
+        return 1
+      fi
+    elif MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
          request snapshot collect >/dev/null 2>&1 &&
        sh "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
       info -c cli,vlan "✓ VLAN client list refresh completed"

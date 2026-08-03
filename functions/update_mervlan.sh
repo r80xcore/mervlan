@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.65"                   #
+#                - File: update_mervlan.sh || version="0.67"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -25,6 +25,10 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the action-lock classifier; refusing update"
+  exit 1
+}
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
@@ -121,6 +125,10 @@ UPDATE_JFFS_STAGE=""
 UPDATE_JFFS_OLD=""
 UPDATE_RUN_ID="update-$(date +%s 2>/dev/null || echo 0)-$$"
 UPDATE_QUIESCE_ACTIVE="0"
+UPDATE_JFFS_RESERVE_KB="${MERV_UPDATE_JFFS_RESERVE_KB:-5120}"
+case "$UPDATE_JFFS_RESERVE_KB" in
+	''|*[!0-9]*|0) UPDATE_JFFS_RESERVE_KB="5120" ;;
+esac
 
 update_record_phase() {
 	_update_phase="$1"
@@ -176,7 +184,10 @@ update_wait_for_runtime_idle() {
 		# metadata schema from merv_lock_state. Presence is therefore treated as
 		# busy and allowed to drain, while malformed/stale state cannot be
 		# mistaken for an idle runtime.
-		[ -e "$LOCKDIR/mervlan_action.lock" ] && _update_busy="1"
+		if [ -e "$LOCKDIR/mervlan_action.lock" ] &&
+		   ! merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"; then
+			_update_busy="1"
+		fi
 		if ! merv_observation_wait_idle 0 >/dev/null 2>&1; then
 			_update_busy="1"
 		fi
@@ -374,7 +385,17 @@ fail_update() {
 	if [ "$restored_tree" = "1" ] || [ "$TEARDOWN_DONE" != "1" ] || [ "$UPDATE_RUNTIME_RESTORED" = "1" ]; then
 		if merv_update_quiesce_clear; then
 			UPDATE_QUIESCE_ACTIVE="0"
-			update_record_phase "failed-${block}-recovered" "${detail:-rollback_recovered}" || UPDATE_PRESERVE_JFFS="1"
+			# A recovered failure must not depend on another JFFS write. When the
+			# original failure was low space, rewriting a recovered phase can fail
+			# and leave the previous active journal blocking heal forever. The
+			# completed rollback is the durable recovery fact; remove the journal
+			# directly and retain it only if that removal itself fails.
+			if merv_update_journal_clear; then
+				info -c cli,vlan "Update recovery completed; lifecycle journal cleared"
+			else
+				UPDATE_PRESERVE_JFFS="1"
+				error -c cli,vlan "Update recovery completed but lifecycle journal cleanup failed"
+			fi
 		else
 			UPDATE_PRESERVE_JFFS="1"
 			error -c cli,vlan "Update failure left the maintenance-quiesce marker in place"
@@ -405,6 +426,7 @@ readonly RAW_ARCHIVE="$TMP_BASE/mervlan.tar"
 readonly STAGE_DIR="$TMP_BASE/stage"
 readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly UPDATE_ORIGINAL_DIR="$TMP_BASE/original"
+readonly UPDATE_BACKUP_SOURCE_DIR="$TMP_BASE/preupdate-source"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
 
 # Staging directory for node MAC shield db files during node updates (RAM)
@@ -451,6 +473,45 @@ update_cleanup_tree() {
 		warn -c cli,vlan "Could not remove update temporary tree $_update_cleanup_tree_path"
 		return 1
 	fi
+	return 0
+}
+
+# Keep the downloaded source snapshot separate from the addon payload.  Git
+# branches contain developer documentation, test fixtures, evidence, and
+# historical archives that must never become part of the JFFS activation tree.
+# Development refs may carry only the two executable router-side tools used by
+# the explicit development Sync Nodes workflow.
+update_filter_source_tree() {
+	_update_payload_root="$1"
+	_update_payload_keep="$TMP_BASE/.dev-tools-keep.$$"
+	[ -d "$_update_payload_root" ] || return 1
+	UPDATE_PAYLOAD_DEV_TOOLS="0"
+	if [ "${GITHUB_REF:-}" != "refs/heads/main" ] &&
+	   [ "${GITHUB_REF#refs/tags/}" = "${GITHUB_REF}" ]; then
+		mkdir -p "$_update_payload_keep/dev-tools/tests/router" \
+			"$_update_payload_keep/dev-tools/safety" 2>/dev/null || return 1
+		if [ -f "$_update_payload_root/dev-tools/tests/router/mervlan_selftest.sh" ]; then
+			cp -p "$_update_payload_root/dev-tools/tests/router/mervlan_selftest.sh" \
+				"$_update_payload_keep/dev-tools/tests/router/mervlan_selftest.sh" 2>/dev/null || return 1
+			UPDATE_PAYLOAD_DEV_TOOLS="1"
+		fi
+		if [ -f "$_update_payload_root/dev-tools/safety/mervlan_live_test_guard.sh" ]; then
+			cp -p "$_update_payload_root/dev-tools/safety/mervlan_live_test_guard.sh" \
+				"$_update_payload_keep/dev-tools/safety/mervlan_live_test_guard.sh" 2>/dev/null || return 1
+			UPDATE_PAYLOAD_DEV_TOOLS="1"
+		fi
+	fi
+	rm -rf "$_update_payload_root/dev-tools" \
+		"$_update_payload_root/.agent" "$_update_payload_root/.agents" \
+		"$_update_payload_root/.github/copilot-instructions.md" \
+		"$_update_payload_root/functions/sync_nodes.sh.bak" \
+		"$_update_payload_root/functions/wireless_backhaul.sh" \
+		"$_update_payload_root/roadmap.txt" \
+		"$_update_payload_root/puppeteer-config.json" 2>/dev/null || return 1
+	if [ "$UPDATE_PAYLOAD_DEV_TOOLS" = "1" ]; then
+		cp -pR "$_update_payload_keep/dev-tools" "$_update_payload_root/dev-tools" 2>/dev/null || return 1
+	fi
+	rm -rf "$_update_payload_keep" 2>/dev/null || return 1
 	return 0
 }
 
@@ -508,16 +569,24 @@ update_require_space_kb() {
 	_update_path="$1"
 	_update_required="$2"
 	_update_label="$3"
+	_update_reserve="${4:-}"
 	_update_stats=$(update_fs_stats_kb "$_update_path")
 	_update_total=${_update_stats%%|*}
 	_update_available=${_update_stats#*|}
 	case "$_update_total" in ''|*[!0-9]*) fail_update space "Could not determine total space for $_update_label" ;; esac
 	case "$_update_available" in ''|*[!0-9]*) fail_update space "Could not determine available space for $_update_label" ;; esac
-	_update_reserve=$((_update_total / 20))
-	[ "$_update_reserve" -ge 2048 ] || _update_reserve=2048
+	if [ -z "$_update_reserve" ]; then
+		case "$_update_path" in
+			/jffs|/jffs/*) _update_reserve="$UPDATE_JFFS_RESERVE_KB" ;;
+			*)
+				_update_reserve=$((_update_total / 20))
+				[ "$_update_reserve" -ge 2048 ] || _update_reserve=2048
+				;;
+		esac
+	fi
 	_update_needed=$((_update_required + _update_reserve))
 	[ "$_update_available" -ge "$_update_needed" ] || \
-		fail_update space "Insufficient $_update_label space: need ${_update_needed} KB including reserve, available ${_update_available} KB"
+		fail_update space "Insufficient $_update_label space: need ${_update_needed} KB including reserve ${_update_reserve} KB, available ${_update_available} KB"
 }
 
 update_check_jffs_health() {
@@ -570,6 +639,12 @@ update_prepare_archive_metadata() {
 }
 
 create_durable_preupdate_backup() {
+	_update_backup_source="${1:-$MERV_BASE}"
+	case "$_update_backup_source" in
+		"$MERV_BASE"|"$TMP_BASE"/*) ;;
+		*) return 1 ;;
+	esac
+	[ -d "$_update_backup_source" ] || return 1
 	timestamp="$(date +%Y%m%d-%H%M%S 2>/dev/null | tr -d '\n')"
 	[ -n "$timestamp" ] || return 1
 	CURRENT_BACKUP_NAME="mervlan.backup.$timestamp"
@@ -583,7 +658,7 @@ create_durable_preupdate_backup() {
 	update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || return 1
 	[ ! -e "$UPDATE_BACKUP_FINAL" ] || return 1
 	info -c cli,vlan "Creating durable pre-update backup $UPDATE_BACKUP_ID"
-	if ! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "${MERV_BASE%/*}" "${MERV_BASE##*/}" 2>/dev/null; then
+	if ! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "${_update_backup_source%/*}" "${_update_backup_source##*/}" 2>/dev/null; then
 		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
 		return 1
 	fi
@@ -1513,7 +1588,10 @@ if [ -z "$topdir" ]; then
 	fail_update extracting "Unable to determine extracted directory"
 fi
 
-UPDATE_EXTRACTED_KB=$(update_path_size_kb "$topdir")
+	update_filter_source_tree "$topdir" || \
+		fail_update extracting "Could not filter developer-only files from the update payload"
+	info -c cli,vlan "Update payload filtered: dev-tools=${UPDATE_PAYLOAD_DEV_TOOLS:-0}"
+	UPDATE_EXTRACTED_KB=$(update_path_size_kb "$topdir")
 update_require_space_kb "$TMP_DIR" "$UPDATE_EXTRACTED_KB" "temporary update staging"
 cp -a "$topdir"/. "$STAGE_DIR"/ 2>/dev/null || \
 	fail_update extracting "Failed to copy extracted files into staging"
@@ -1565,26 +1643,35 @@ info -c cli,vlan "Staged content validated successfully"
 update_record_phase staged || fail_update journal "Could not persist the staged Update journal"
 
 # Complete and validate the durable pre-update archive before hooks are disabled
-# or the active installation is touched. The temporary original below is the
-# fast rollback source; the archive is the reboot/power-loss recovery source.
-UPDATE_BACKUP_SOURCE_KB=$(update_path_size_kb "$MERV_BASE")
-update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_BACKUP_SOURCE_KB" "persistent backup"
+# or the active installation is touched. Build its source in RAM and apply the
+# same payload filter as the incoming tree first. Developer archives, evidence,
+# and other non-runtime files are not needed to recover the addon and must not
+# make a first cleanup update fail its JFFS check.
+if ! update_cleanup_tree "$UPDATE_BACKUP_SOURCE_DIR" ||
+   ! cp -pR "$MERV_BASE" "$UPDATE_BACKUP_SOURCE_DIR" 2>/dev/null ||
+   ! update_filter_source_tree "$UPDATE_BACKUP_SOURCE_DIR"; then
+	UPDATE_PRESERVE_TMP="1"
+	fail_update backing_up "Could not prepare the filtered pre-update rollback source"
+fi
+UPDATE_BACKUP_SOURCE_KB=$(update_path_size_kb "$UPDATE_BACKUP_SOURCE_DIR")
+info -c cli,vlan "Pre-update rollback payload filtered to ${UPDATE_BACKUP_SOURCE_KB} KB"
+update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_BACKUP_SOURCE_KB" "persistent backup" "$UPDATE_JFFS_RESERVE_KB"
 UPDATE_BACKUP_ARCHIVE_OK=0
-if ! create_durable_preupdate_backup; then
+if ! create_durable_preupdate_backup "$UPDATE_BACKUP_SOURCE_DIR"; then
 	if ! update_cleanup_files "${UPDATE_BACKUP_PARTIAL:-}" "${UPDATE_BACKUP_META_PARTIAL:-}"; then UPDATE_PRESERVE_TMP="1"; fi
 	fail_update backing_up "Failed to create and validate the durable pre-update backup"
 fi
 
 update_record_phase durable-backup || fail_update journal "Could not persist the durable-backup Update journal"
 
-# Keep a full rollback copy in RAM. It is intentionally temporary and is not a
-# substitute for the durable archive above.
+# Keep the filtered rollback copy in RAM. It is intentionally temporary and is
+# not a substitute for the durable archive above.
 update_require_space_kb "$TMP_DIR" "$UPDATE_BACKUP_SOURCE_KB" "temporary rollback"
 if ! update_cleanup_tree "$UPDATE_ORIGINAL_DIR"; then
 	UPDATE_PRESERVE_TMP="1"
 	fail_update preparing_rollback "Could not remove the previous temporary rollback copy"
 fi
-if ! cp -pR "$MERV_BASE" "$UPDATE_ORIGINAL_DIR" 2>/dev/null || \
+if ! mv "$UPDATE_BACKUP_SOURCE_DIR" "$UPDATE_ORIGINAL_DIR" 2>/dev/null || \
 	[ ! -f "$UPDATE_ORIGINAL_DIR/settings/settings.json" ]; then
 	if ! update_cleanup_tree "$UPDATE_ORIGINAL_DIR"; then UPDATE_PRESERVE_TMP="1"; fi
 	fail_update preparing_rollback "Failed to create and validate the temporary rollback copy"
@@ -1751,7 +1838,7 @@ fi
 info -c cli,vlan "Preparing validated JFFS activation stage"
 mkdir -p "$MERVLAN_BACKUP_DIR" 2>/dev/null || \
 	fail_update preparing_activation "Failed to prepare $MERVLAN_BACKUP_DIR"
-update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_STAGE_KB" "temporary JFFS activation stage"
+update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_STAGE_KB" "temporary JFFS activation stage" "$UPDATE_JFFS_RESERVE_KB"
 if ! update_remove_jffs_stage "$UPDATE_JFFS_STAGE" || ! update_remove_jffs_stage "$UPDATE_JFFS_OLD"; then
 	UPDATE_PRESERVE_JFFS="1"
 	fail_update preparing_activation "Could not clear the exact previous JFFS activation paths"

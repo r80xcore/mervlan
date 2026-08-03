@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: mervlan_boot_wrap.sh || version="0.72.3"                  #
+#          - File: mervlan_boot_wrap.sh || version="0.72.4"                  #
 # ============================================================================ #
 # - Purpose:    Boot-time wrapper that gates install/manager/cron execution.   #
 #               All ordering and flag logic lives here — core scripts are      #
@@ -469,6 +469,20 @@ _mode_manager() {
   # merv_dhcp_hold.active marker, in which case the watchdog leaves the hold
   # in place to avoid disrupting an in-flight critical section.
   rm -f "$LOCKDIR/merv_boot_shield.active" 2>/dev/null || :
+
+  # Boot mode queues observation before returning. Start its bounded worker
+  # only after the shield marker is gone so the boot handoff can retire first.
+  if [ "$_manager_rc" -eq 0 ] && [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+    info -c boot "Running queued post-apply observation after boot shield teardown"
+    MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" \
+      run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}" >> "$LOG_chan_boot" 2>&1
+    _boot_observation_rc=$?
+    case "$_boot_observation_rc" in
+      0) info -c boot "Queued post-apply observation completed (rc=0)" ;;
+      75) warn -c boot "Queued post-apply observation remains pending (rc=75)" ;;
+      *) warn -c boot "Queued post-apply observation failed (rc=$_boot_observation_rc)" ;;
+    esac
+  fi
 
   return 0
 }

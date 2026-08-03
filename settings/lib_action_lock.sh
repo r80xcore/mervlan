@@ -106,13 +106,44 @@ merv_action_lock_acquire() {
 
 merv_action_lock_release() {
   _mal_lock="${1:-$MERV_ACTION_LOCK_PATH}"; _mal_expected_nonce="${2:-${MERV_ACTION_LOCK_EXPECTED_NONCE:-}}"; _mal_expected_start="${3:-${MERV_ACTION_LOCK_EXPECTED_START:-}}"
+  _mal_restore="${_mal_lock%/*}/.${_mal_lock##*/}.owner.restore.$$"
   merv_action_lock_read "$_mal_lock" 2>/dev/null || return 1
   [ -n "$_mal_expected_nonce" ] && [ -n "$_mal_expected_start" ] || return 1
   [ "$MERV_ACTION_LOCK_PID" = "$$" ] && [ "$MERV_ACTION_LOCK_START" = "$_mal_expected_start" ] &&
     [ "$MERV_ACTION_LOCK_NONCE" = "$_mal_expected_nonce" ] || return 1
   merv_identity_matches "$$" "$_mal_expected_start" 2>/dev/null || return 1
-  rm -f "$_mal_lock/owner" 2>/dev/null || return 1
-  rmdir "$_mal_lock" 2>/dev/null || return 1
+  cp -p "$_mal_lock/owner" "$_mal_restore" 2>/dev/null || return 1
+  rm -f "$_mal_lock"/.owner.tmp.* 2>/dev/null || { rm -f "$_mal_restore" 2>/dev/null; return 1; }
+  rm -f "$_mal_lock/owner" 2>/dev/null || {
+    rm -f "$_mal_restore" 2>/dev/null
+    return 1
+  }
+  if ! rmdir "$_mal_lock" 2>/dev/null; then
+    if ! mv -f "$_mal_restore" "$_mal_lock/owner" 2>/dev/null; then
+      return 1
+    fi
+    chmod 600 "$_mal_lock/owner" 2>/dev/null || :
+    return 1
+  fi
+  rm -f "$_mal_restore" 2>/dev/null || :
   MERV_ACTION_LOCK_OWNED=0
   return 0
+}
+
+# The service dispatcher keeps the global action lock in the parent shell while
+# running a mutating child such as Update. The child may ignore only that exact,
+# authenticated parent-owned lock; every other owner, malformed record, or
+# missing identity remains blocking.
+merv_action_lock_parent_owned() {
+  _mal_lock="${1:-$MERV_ACTION_LOCK_PATH}"
+  [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ] || return 1
+  [ -n "${MERV_ACTION_LOCK_PARENT_PID:-}" ] &&
+    [ -n "${MERV_ACTION_LOCK_PARENT_START:-}" ] &&
+    [ -n "${MERV_ACTION_LOCK_PARENT_NONCE:-}" ] || return 1
+  merv_action_lock_read "$_mal_lock" 2>/dev/null || return 1
+  [ "$MERV_ACTION_LOCK_PID" = "$MERV_ACTION_LOCK_PARENT_PID" ] || return 1
+  [ "$MERV_ACTION_LOCK_START" = "$MERV_ACTION_LOCK_PARENT_START" ] || return 1
+  [ "$MERV_ACTION_LOCK_NONCE" = "$MERV_ACTION_LOCK_PARENT_NONCE" ] || return 1
+  merv_identity_matches "$MERV_ACTION_LOCK_PARENT_PID" \
+    "$MERV_ACTION_LOCK_PARENT_START" 2>/dev/null
 }

@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.4"                #
+#            - File: mervlan_selftest.sh || version="0.72.5"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -1904,6 +1904,89 @@ test_action_lifecycle_contract() {
   return "$_talc_ok"
 }
 
+test_update_lock_ownership() {
+  _tulo_update="$MERV_BASE/functions/update_mervlan.sh"
+  _tulo_handler="$MERV_BASE/functions/service-event-handler.sh"
+  _tulo_lock="$SELFTEST_ROOT/update-parent-action.lock"
+  _tulo_v2_lock="$SELFTEST_ROOT/update-v2.lock"
+  _tulo_ok=1
+
+  if grep -Fq 'merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"' "$_tulo_update" &&
+     grep -Fq 'MERV_ACTION_LOCK_PARENT_PID="$$"' "$_tulo_handler" &&
+     grep -Fq 'MERV_ACTION_LOCK_PARENT_NONCE' "$_tulo_handler"; then
+    pass "Update ignores only the dispatcher-owned global action lock"
+  else
+    fail "Update ignores only the dispatcher-owned global action lock"
+    _tulo_ok=0
+  fi
+
+  if (
+    MERV_ACTION_LOCK_PATH="$_tulo_lock"
+    . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+    merv_action_lock_acquire "$_tulo_lock" || exit 1
+    MERV_ACTION_LOCK_PARENT_HELD=1
+    MERV_ACTION_LOCK_PARENT_PID="$$"
+    MERV_ACTION_LOCK_PARENT_START="$MERV_ACTION_LOCK_START"
+    MERV_ACTION_LOCK_PARENT_NONCE="$MERV_ACTION_LOCK_NONCE"
+    export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID
+    export MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+    merv_action_lock_parent_owned "$_tulo_lock" || exit 1
+    MERV_ACTION_LOCK_PARENT_NONCE=wrong
+    if merv_action_lock_parent_owned "$_tulo_lock"; then exit 1; fi
+    MERV_ACTION_LOCK_PARENT_NONCE="$MERV_ACTION_LOCK_NONCE"
+    : > "$_tulo_lock/.owner.tmp.crash" || exit 1
+    merv_action_lock_release "$_tulo_lock" "$MERV_ACTION_LOCK_NONCE" "$MERV_ACTION_LOCK_START" || exit 1
+    [ ! -e "$_tulo_lock" ] || exit 1
+  ); then
+    pass "Update parent-lock exemption requires matching identity and nonce"
+  else
+    fail "Update parent-lock exemption requires matching identity and nonce"
+    _tulo_ok=0
+  fi
+
+  if (
+    merv_lock_acquire "$_tulo_v2_lock" 60 1 update-v2-test || exit 1
+    _tulo_v2_nonce="$MERV_LOCK_NONCE"
+    : > "$_tulo_v2_lock/.owner.tmp.crash" || exit 1
+    merv_lock_release "$_tulo_v2_lock" "$_tulo_v2_nonce" || exit 1
+    [ ! -e "$_tulo_v2_lock" ]
+  ); then
+    pass "Owner-lock release removes interrupted owner temp files"
+  else
+    fail "Owner-lock release removes interrupted owner temp files"
+    _tulo_ok=0
+  fi
+
+  return "$_tulo_ok"
+}
+
+test_payload_contract() {
+  _tpc_update="$MERV_BASE/functions/update_mervlan.sh"
+  _tpc_install="$MERV_BASE/install.sh"
+  _tpc_sync="$MERV_BASE/functions/sync_nodes.sh"
+  _tpc_ok=1
+  if grep -Fq 'update_filter_source_tree "$topdir"' "$_tpc_update" &&
+     grep -Fq 'install_filter_source_tree "$topdir" "$work_dir"' "$_tpc_install" &&
+     grep -Fq 'UPDATE_BACKUP_SOURCE_DIR' "$_tpc_update"; then
+    pass "Install and Update filter source payloads before persistent staging"
+  else
+    fail "Install and Update filter source payloads before persistent staging"
+    _tpc_ok=0
+  fi
+  if grep -Fq 'dev-tools/tests/router/mervlan_selftest.sh' "$_tpc_update" &&
+     grep -Fq 'dev-tools/safety/mervlan_live_test_guard.sh' "$_tpc_update" &&
+     grep -Fq 'dev-tools/tests/router/mervlan_selftest.sh' "$_tpc_install" &&
+     grep -Fq 'dev-tools/safety/mervlan_live_test_guard.sh' "$_tpc_install" &&
+     grep -Fq 'dev-tools/tests/router/mervlan_selftest.sh' "$_tpc_sync" &&
+     grep -Fq 'dev-tools/safety/mervlan_live_test_guard.sh' "$_tpc_sync"; then
+    pass "Only approved executable router development tools are retained"
+  else
+    fail "Only approved executable router development tools are retained"
+    _tpc_ok=0
+  fi
+  return "$_tpc_ok"
+}
+
 test_failure_propagation_contract() {
   _tfpc_ui="$MERV_BASE/www/index.html"
   _tfpc_handler="$MERV_BASE/functions/service-event-handler.sh"
@@ -2364,6 +2447,19 @@ test_apply_observation_contract() {
       ;;
   esac
 
+  _tao_wrap="$MERV_BASE/functions/mervlan_boot_wrap.sh"
+  _tao_shield_clear=$(grep -n 'rm -f "$LOCKDIR/merv_boot_shield.active"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_boot_wait=$(grep -n 'run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  if grep -Fq 'if [ "$MERV_MANAGER_MODE" = "boot" ]' "$_tao_manager" &&
+     grep -Fq 'request snapshot collect' "$_tao_manager" &&
+     [ -n "$_tao_shield_clear" ] && [ -n "$_tao_boot_wait" ] &&
+     [ "$_tao_shield_clear" -lt "$_tao_boot_wait" ]; then
+    pass "Boot queues observation, tears down the shield, then runs the worker"
+  else
+    fail "Boot queues observation, tears down the shield, then runs the worker"
+    _tao_ok=0
+  fi
+
   return "$_tao_ok"
 }
 
@@ -2479,6 +2575,8 @@ run_one() {
     sync-node-parallel) test_sync_node_parallel_contract ;;
     apmo-completion) test_apmo_completion_contract ;;
     action-lifecycle) test_action_lifecycle_contract ;;
+    update-lock-ownership) test_update_lock_ownership ;;
+    payload-contract) test_payload_contract ;;
     failure-propagation) test_failure_propagation_contract ;;
     ssh-outbound) test_ssh_outbound_contract ;;
     ssh-trust) test_ssh_trust_contract ;;
@@ -2529,7 +2627,7 @@ if [ "$SELFTEST_ACTION" = all ]; then
     settle-watchdog recovery failsafe-status post-apply observation-concurrency \
     observation-timeouts observation-generations observation-resume-progress atomic-publication json-validation client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle update-lock-ownership payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

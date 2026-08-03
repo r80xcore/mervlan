@@ -1,6 +1,0 @@
-﻿created=20260801-001558
-router_archive=router/mervlan-files.tar.gz
-node1_archive=node1/mervlan-files.tar.gz
-router_paths=/jffs/addons/mervlan,/www/user/mervlan,/www/user/user1.asp
-node1_paths=/jffs/addons/mervlan,/www/user/mervlan
-durable_state=/jffs/addons/mervlan_state absent on both targets at probe time

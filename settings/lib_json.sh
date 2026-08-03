@@ -1112,12 +1112,14 @@ _json_contract_validate_file() {
                 }
                 if (c ~ /[[:space:]]/) { i++; continue }
                 if (c=="\"") { in_string=1; i++; continue }
-                if (c ~ /^[{}\[\],:]$/) { add(c, c); i++; continue }
+                # BusyBox awk does not interpret the escaped bracket class
+                # consistently, so keep JSON punctuation as explicit tests.
+                if (c=="{" || c=="}" || c=="[" || c=="]" || c=="," || c==":") { add(c, c); i++; continue }
                 if (c ~ /[[:cntrl:]]/) { bad=1; i++; continue }
                 j=i
                 while (j<=length($0)) {
                     d=substr($0,j,1)
-                    if (d ~ /[[:space:]]/ || d ~ /^[{}\[\],:"]$/) break
+                    if (d ~ /[[:space:]]/ || d=="{" || d=="}" || d=="[" || d=="]" || d=="," || d==":" || d=="\"") break
                     if (d ~ /[[:cntrl:]]/) bad=1
                     j++
                 }

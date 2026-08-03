@@ -31,7 +31,14 @@ Maintenance: Regression coverage for the remediation
 Fixed: Manager observation deadlock and client inventory publication
 - The VLAN manager now releases its configuration owner lock before waiting for post-apply observation, preventing the manager/worker lock cycle that caused quiesce timeouts and blocked client refresh.
 - Local, node, and aggregate client JSON artifacts are validated before publication; invalid output preserves the last known-good inventory and uses valid error artifacts for failed sources.
-- Added regression coverage for the lock handoff and realistic nested client inventory JSON.
+- The shared JSON validator now uses BusyBox-compatible punctuation tokenization; router-generated inventories no longer fail validation solely because of the router's awk implementation.
+- Updates now ignore only the exact dispatcher-owned global action lock while retaining the lock against every unrelated or malformed action owner.
+- Boot apply now queues observation, retires the boot shield, and only then starts the bounded observation worker, removing the boot shield/observation handoff cycle.
+- Owner-lock release removes abandoned owner temp files and restores an authenticated owner record if directory cleanup fails, preventing normal cleanup from creating ownerless lock states.
+- Install and Update now filter the payload before staging: production refs carry no dev-tools, while development refs carry only the approved router self-test and live safety guard. Existing installations are filtered in RAM before their rollback archive is measured, so obsolete developer archives no longer inflate the JFFS requirement.
+- JFFS update and backup checks use a fixed 5 MiB safety reserve; temporary preparation remains in RAM and reports the reserve explicitly.
+- Recovered pre-activation failures clear the lifecycle journal directly after quiesce recovery, avoiding a second low-space journal write that could leave maintenance state blocking heal.
+- Added regression coverage for the lock handoff, realistic nested client inventory JSON, update lock ownership, boot ordering, payload filtering, and owner-temp cleanup.
 
 ################ END OF CURRENT CHANGELOG
 

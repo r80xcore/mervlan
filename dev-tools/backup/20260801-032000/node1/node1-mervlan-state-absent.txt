@@ -1,1 +1,0 @@
-No /jffs/addons/mervlan_state directory was present on node1.

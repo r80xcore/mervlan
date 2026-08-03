@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.61"                      #
+#                    - File: install.sh || version="0.62"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1679,6 +1679,7 @@ select_and_validate_tarball() {
             read action
             case "$action" in
               y|Y|yes|YES)
+                BRANCH="$branch"
                 SELECTED_TARBALL="$chosen"
                 return 0
                 ;;
@@ -1750,6 +1751,37 @@ cleanup_install_download_work() {
       ;;
   esac
   INSTALL_DOWNLOAD_WORK=""
+}
+
+# Filter the source snapshot before it is copied into the persistent addon.
+# Only the two executable router-side development tools are retained on a dev
+# install; documentation, plans, evidence, local harnesses, and archives stay
+# on the development computer.
+install_filter_source_tree() {
+    local root="$1" keep="$2"
+    [ -d "$root" ] || return 1
+    keep="$keep/.dev-tools-keep.$$"
+    rm -rf "$keep" 2>/dev/null || return 1
+    if [ "$BRANCH" = "dev" ]; then
+        mkdir -p "$keep/dev-tools/tests/router" "$keep/dev-tools/safety" 2>/dev/null || return 1
+        if [ -f "$root/dev-tools/tests/router/mervlan_selftest.sh" ]; then
+            cp -p "$root/dev-tools/tests/router/mervlan_selftest.sh" \
+                "$keep/dev-tools/tests/router/mervlan_selftest.sh" 2>/dev/null || return 1
+        fi
+        if [ -f "$root/dev-tools/safety/mervlan_live_test_guard.sh" ]; then
+            cp -p "$root/dev-tools/safety/mervlan_live_test_guard.sh" \
+                "$keep/dev-tools/safety/mervlan_live_test_guard.sh" 2>/dev/null || return 1
+        fi
+    fi
+    rm -rf "$root/dev-tools" "$root/.agent" "$root/.agents" \
+        "$root/.github/copilot-instructions.md" \
+        "$root/functions/sync_nodes.sh.bak" "$root/functions/wireless_backhaul.sh" \
+        "$root/roadmap.txt" "$root/puppeteer-config.json" 2>/dev/null || return 1
+    if [ -d "$keep/dev-tools" ]; then
+        cp -pR "$keep/dev-tools" "$root/dev-tools" 2>/dev/null || return 1
+    fi
+    rm -rf "$keep" 2>/dev/null || return 1
+    return 0
 }
 
 download_mervlan() {
@@ -1940,6 +1972,12 @@ download_mervlan() {
     echo "[download_mervlan] detected topdir (final): ${topdir:-<none>}"
 
   if [ -n "$topdir" ]; then
+        install_filter_source_tree "$topdir" "$work_dir" || {
+            echo "[download_mervlan] ERROR: developer-only payload filtering failed" >&2
+            RESULT_ARCHIVE="FAIL - payload filtering"
+            return 1
+        }
+        echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
             functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json \
             settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
