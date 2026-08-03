@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_local_clients.sh || version="0.49"            #
+#                - File: collect_local_clients.sh || version="0.50"            #
 # ============================================================================ #
 # - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local    #
 #               node so it can be collected by collect_clients.sh.             #
@@ -26,6 +26,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
@@ -44,7 +45,8 @@ done
 # ============================================================================ #
 
 # Output file path; defaults to $COLLECTDIR/clients_local.json if not provided
-OUT="${1:-$COLLECTDIR/clients_local.json}"
+OUT_TARGET="${1:-$COLLECTDIR/clients_local.json}"
+OUT="${OUT_TARGET}.new.$$"
 # Node/router name for identification in JSON; defaults to system hostname
 NODE_NAME="${2:-$(hostname)}"
 # Optional stable IP identity. The main router supplies this for node requests;
@@ -65,11 +67,12 @@ cleanup_local_collect() {
   rm -f "$COLLECTDIR"/mac_br*.lst.tmp "$COLLECTDIR"/mac_counts.tmp 2>/dev/null
   rm -f "$COLLECTDIR"/portmap_br*.lst 2>/dev/null
   rm -f "$COLLECTDIR"/mac_own_ifaces.lst "$COLLECTDIR"/mac_own_ifaces.lst.tmp 2>/dev/null
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null
 }
 trap 'cleanup_local_collect' EXIT INT TERM
 
 info -c vlan "Collecting VLAN clients (MAC-only) on $NODE_NAME"
-info -c vlan "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT'"
+info -c vlan "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT_TARGET'"
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -602,6 +605,15 @@ done
   echo '  ]'
   echo '}'
 } >> "$OUT"
+
+if ! json_validate_file "$OUT"; then
+  error -c cli,vlan "Local client collection produced invalid JSON; preserving the previous artifact"
+  exit 1
+fi
+if ! mv -f "$OUT" "$OUT_TARGET" 2>/dev/null; then
+  error -c cli,vlan "Local client collection could not publish its JSON artifact"
+  exit 1
+fi
 
 # Log final summary (different messages for empty vs populated results)
 if [ "$TOTAL_COUNT" -eq 0 ]; then

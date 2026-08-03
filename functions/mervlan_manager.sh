@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.3"                #
+#             - File: mervlan_manager.sh || version="0.72.4"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -2412,6 +2412,17 @@ main() {
       MANAGER_EXIT_REASON="final-verification-failed"
       return 1
     fi
+  fi
+
+  # The configuration mutation phase is complete: final placement passed and
+  # the manager's DHCP lease is released.  Observation deliberately defers
+  # while this lock is active, so release the manager/configuration lock before
+  # waiting for the post-apply worker.  The EXIT cleanup remains a fallback for
+  # every earlier failure, but normal client refresh must never depend on the
+  # observation timeout to retire this owner.
+  if ! release_script_lock; then
+    MANAGER_EXIT_REASON="configuration-lock-release-failed"
+    return 1
   fi
 
   # Summary: display final configuration status

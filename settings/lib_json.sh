@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_json.sh || version="0.55"                         #
+#                - File: lib_json.sh || version="0.56"                         #
 # ============================================================================ #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -1132,6 +1132,14 @@ _json_contract_validate_file() {
             exit 0
         }
     ' "$_jcv_file" >/dev/null 2>&1
+}
+
+# Public validation entry point for generated JSON artifacts.  Keep the
+# contract parser private so existing settings callers retain their current
+# interface while runtime publishers can use one shared syntax gate.
+json_validate_file() {
+    [ "$#" -eq 1 ] || return 1
+    _json_contract_validate_file "$1"
 }
 
 _json_contract_section_key_present() {

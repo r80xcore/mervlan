@@ -28,6 +28,11 @@ Maintenance: Regression coverage for the remediation
 - Added BusyBox/POSIX APMO override contract coverage for nested MAIN/NODE1 reads, setter/getter round trips, target serialization, and duplicate-interface validation.
 - Extended focused action-progress, loading-progress, SSH-trust, shell-syntax, and router self-test coverage for the new trust, pause/resume, lock, and override contracts.
 
+Fixed: Manager observation deadlock and client inventory publication
+- The VLAN manager now releases its configuration owner lock before waiting for post-apply observation, preventing the manager/worker lock cycle that caused quiesce timeouts and blocked client refresh.
+- Local, node, and aggregate client JSON artifacts are validated before publication; invalid output preserves the last known-good inventory and uses valid error artifacts for failed sources.
+- Added regression coverage for the lock handoff and realistic nested client inventory JSON.
+
 ################ END OF CURRENT CHANGELOG
 
 mervlan v0.53.25-dev

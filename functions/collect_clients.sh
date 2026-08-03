@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_clients.sh || version="0.52"                  #
+#                - File: collect_clients.sh || version="0.53"                  #
 # ============================================================================ #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -87,6 +87,7 @@ cleanup_collect() {
       COLLECT_LOCK_ACQUIRED=0
     fi
   fi
+  [ -z "${OUT_WORK:-}" ] || rm -f "$OUT_WORK" 2>/dev/null || _collect_cleanup_failed=1
   [ "$_collect_cleanup_failed" -eq 0 ] || _collect_cleanup_rc=1
   return "$_collect_cleanup_rc"
 }
@@ -229,7 +230,16 @@ collect_from_node() {
   rm -f "$_result_tmp" 2>/dev/null || :
 
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
-    printf '%s' "$result" > "$output_file"
+    _node_output_tmp="${output_file}.new.$$"
+    if ! printf '%s' "$result" > "$_node_output_tmp" 2>/dev/null ||
+       ! json_validate_file "$_node_output_tmp" 2>/dev/null ||
+       ! mv -f "$_node_output_tmp" "$output_file" 2>/dev/null; then
+      rm -f "$_node_output_tmp" 2>/dev/null || :
+      _reason="invalid-json"
+      warn -c cli,vlan "Invalid JSON received from $node_ip; using an error artifact"
+      printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
+      return 1
+    fi
     info -c vlan "✓ Successfully collected from $node_ip"
     return 0
   else
@@ -252,14 +262,18 @@ MAIN_JSON="$COLLECTDIR/main.json"
 MAIN_IP=$(nvram get lan_ipaddr 2>/dev/null | tr -d '\r\n')
 
 collect_from_main() {
-  if sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1; then
+  if sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1 &&
+     json_validate_file "$MAIN_JSON" 2>/dev/null; then
     info -c vlan "✓ Main router collection completed"
   else
     rc=$?
     error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
-    if [ ! -s "$MAIN_JSON" ]; then
-      printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+    if [ -s "$MAIN_JSON" ] && ! json_validate_file "$MAIN_JSON" 2>/dev/null; then
+      warn -c cli,vlan "Main router collection produced invalid JSON; using an error artifact"
+      rc=1
     fi
+    rm -f "$MAIN_JSON" 2>/dev/null || :
+    printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
   fi
 }
 
@@ -736,6 +750,12 @@ if awk \
 else
   rm -f "$_ann_tmp" "$_ann_stats" 2>/dev/null
   warn -c cli,vlan "Client metadata annotation skipped (kept raw collection)"
+fi
+
+if ! json_validate_file "$OUT_WORK" 2>/dev/null; then
+  error -c cli,vlan "Client collection produced invalid aggregate JSON; preserving the previous inventory"
+  rm -f "$OUT_WORK" 2>/dev/null || :
+  exit 1
 fi
 
 # Atomically publish the finished file. The old OUT_FINAL stays readable until

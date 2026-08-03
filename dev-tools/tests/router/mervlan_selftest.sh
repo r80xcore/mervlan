@@ -73,6 +73,7 @@ error() { shift 2 2>/dev/null || :; printf 'ERROR: %s\n' "$*" >&2; }
   exit 2
 }
 . "$MERV_BASE/settings/var_settings.sh"
+. "$MERV_BASE/settings/lib_json.sh"
 . "$MERV_BASE/settings/lib_mervqt.sh"
 
 write_fake_stat() {
@@ -1329,6 +1330,46 @@ test_atomic_publication() {
     grep -q 'MERV_MAC_SNAPSHOT_ALLOW_EMPTY=1' "$MERV_BASE/functions/post_apply_worker.sh" &&
     pass "manual reset mode is confined to coordinated complete snapshot" ||
     fail "manual reset mode is confined to coordinated complete snapshot"
+  grep -q 'json_validate_file "$OUT_WORK"' "$MERV_BASE/functions/collect_clients.sh" &&
+    grep -q 'json_validate_file "$MAIN_JSON"' "$MERV_BASE/functions/collect_clients.sh" &&
+    pass "client artifacts are validated before publication" ||
+    fail "client artifacts are validated before publication"
+}
+
+test_json_validation() {
+  _tjv_valid="$SELFTEST_ROOT/client-valid.json"
+  _tjv_invalid="$SELFTEST_ROOT/client-invalid.json"
+  cat > "$_tjv_valid" <<'EOF'
+{
+  "generated": "2026-08-03T15:00:00",
+  "run_id": "run-1",
+  "nodes": [
+    {
+      "generated": "2026-08-03T15:00:00",
+      "router": "Main Router",
+      "ip": "192.168.1.1",
+      "vlans": [
+        {
+          "id": "189",
+          "interfaces": [],
+          "clients": [
+            {"mac": "e4:2a:ac:5d:48:b6", "source_iface": "eth0.189", "source_type": "trunk-tagged", "source_port": "eth0", "fdb_age": 8, "location_confidence": "relayed", "active": false, "locked": true, "override": false, "unshielded": false, "stale": false, "location_status": "relay_only", "diagnostic": true, "duplicate": true}
+          ]
+        }
+      ]
+    }  ],
+  "stale_clients": [
+    {"mac": "0c:54:15:06:67:1a", "name": "laptop", "active": false, "locked": false, "override": false, "unshielded": true, "stale": true}
+  ]
+}
+EOF
+  printf '%s\n' '{"nodes":[]}{"nodes":[]}' > "$_tjv_invalid"
+  assert_ok "valid client JSON passes the shared validator" json_validate_file "$_tjv_valid"
+  assert_rc 1 "concatenated client JSON is rejected" json_validate_file "$_tjv_invalid"
+  grep -q 'json_validate_file "$OUT_TARGET"' "$MERV_BASE/functions/collect_local_clients.sh" 2>/dev/null ||
+    grep -q 'json_validate_file "$OUT"' "$MERV_BASE/functions/collect_local_clients.sh" &&
+    pass "local client artifacts use the shared validator" ||
+    fail "local client artifacts use the shared validator"
 }
 
 test_client_refresh_contract() {
@@ -2306,6 +2347,23 @@ test_apply_observation_contract() {
     _tao_ok=0
   fi
 
+  _tao_release=$(grep -n 'if ! release_script_lock' "$_tao_manager" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_wait=$(grep -n 'MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  case "$_tao_release:$_tao_wait" in
+    ''|*[!0-9:]*|*::)
+      fail "manager releases its configuration lock before observation wait"
+      _tao_ok=0
+      ;;
+    *)
+      if [ "$_tao_release" -lt "$_tao_wait" ]; then
+        pass "manager releases its configuration lock before observation wait"
+      else
+        fail "manager releases its configuration lock before observation wait"
+        _tao_ok=0
+      fi
+      ;;
+  esac
+
   return "$_tao_ok"
 }
 
@@ -2408,6 +2466,7 @@ run_one() {
     observation-resume-progress) test_observation_resume_progress ;;
     observation-generations) test_observation_generations ;;
     atomic-publication) test_atomic_publication ;;
+    json-validation) test_json_validation ;;
     client-refresh-contract) test_client_refresh_contract ;;
     manager-ownership) test_manager_ownership ;;
     node-job-logging) test_node_job_logging ;;
@@ -2468,7 +2527,7 @@ if [ "$SELFTEST_ACTION" = all ]; then
     process-identity lock-reclaim dhcp-owners dhcp-phases dhcp-crash-points \
     heal-handoff boot-handoff duplicate-events manager-ownership \
     settle-watchdog recovery failsafe-status post-apply observation-concurrency \
-    observation-timeouts observation-generations observation-resume-progress atomic-publication client-refresh-contract \
+    observation-timeouts observation-generations observation-resume-progress atomic-publication json-validation client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
     execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
