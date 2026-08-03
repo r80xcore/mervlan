@@ -4,14 +4,13 @@
   <!-- index.html version="0.53.26-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
+  <link rel="stylesheet" href="vlan_form_style.css" />
+  <link rel="stylesheet" href="vlan_index_style.css" />
   <script>
     (function () {
       var match = /(?:^|[?&])mvm_load=([^&]+)/.exec(window.location.search || '');
       var nonce = '';
       try { nonce = match ? decodeURIComponent(match[1]) : ''; } catch (_) { nonce = ''; }
-      var suffix = nonce ? '?mvm_load=' + encodeURIComponent(nonce) : '';
-      document.write('<link rel="stylesheet" href="vlan_form_style.css' + suffix + '" />');
-      document.write('<link rel="stylesheet" href="vlan_index_style.css' + suffix + '" />');
       if (window.console && typeof console.log === 'function') console.log('[MerVLAN] Web load: ' + (nonce || 'direct'));
     }());
   </script>
