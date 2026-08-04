@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.67"                   #
+#                - File: update_mervlan.sh || version="0.68"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -50,6 +50,37 @@ if [ -f /usr/sbin/helper.sh ] && ! . /usr/sbin/helper.sh; then
 fi
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+
+update_html_version() {
+	_update_html_file="$1"
+	_update_html_version=""
+	[ -f "$_update_html_file" ] || return 1
+	_update_html_version=$(sed -n 's/.*index\.html version="\([^"]*\)".*/\1/p' \
+		"$_update_html_file" 2>/dev/null | head -n 1 | tr -d '\r\n')
+	[ -n "$_update_html_version" ] || return 1
+	case "$_update_html_version" in
+		v*) printf '%s\n' "$_update_html_version" ;;
+		*) printf 'v%s\n' "$_update_html_version" ;;
+	esac
+}
+
+update_changelog_version() {
+	_update_changelog_file="$1"
+	_update_changelog_version=""
+	[ -f "$_update_changelog_file" ] || return 1
+	_update_changelog_version=$(sed -n 's/^[[:space:]]*mervlan[[:space:]]*\(v[0-9][^[:space:]]*\).*/\1/p' \
+		"$_update_changelog_file" 2>/dev/null | head -n 1 | tr -d '\r\n')
+	[ -n "$_update_changelog_version" ] || return 1
+	printf '%s\n' "$_update_changelog_version"
+}
+
+update_channel_label() {
+	case "${CHANNEL:-main}" in
+		main|main_direct|refs/tags/*) printf '%s\n' 'stable branch' ;;
+		dev|refs/heads/dev) printf '%s\n' 'development branch' ;;
+		*) printf '%s\n' 'custom branch' ;;
+	esac
+}
 
 # Run one update child with captured diagnostics while preserving its exact
 # return code.  The helper deliberately logs a stage label rather than the
@@ -1588,6 +1619,18 @@ if [ -z "$topdir" ]; then
 	fail_update extracting "Unable to determine extracted directory"
 fi
 
+
+# Publish the human-readable update banner once both versions are known. The
+# installed UI version is the source of truth for the current version; the
+# staged changelog is the source of truth for the selected target ref.
+UPDATE_FROM_VERSION=$(update_html_version "$MERV_BASE/www/index.html" 2>/dev/null) || UPDATE_FROM_VERSION="unknown"
+UPDATE_TO_VERSION=$(update_changelog_version "$topdir/changelog.txt" 2>/dev/null) || UPDATE_TO_VERSION="unknown"
+UPDATE_CHANNEL_LABEL=$(update_channel_label)
+info -c cli,vlan "#################################################"
+info -c cli,vlan "MerVLAN is updating! Please do not turn off the router/node(s) during the update."
+info -c cli,vlan "Updating from $UPDATE_FROM_VERSION to $UPDATE_TO_VERSION from $UPDATE_CHANNEL_LABEL"
+info -c cli,vlan "#################################################"
+
 	update_filter_source_tree "$topdir" || \
 		fail_update extracting "Could not filter developer-only files from the update payload"
 	info -c cli,vlan "Update payload filtered: dev-tools=${UPDATE_PAYLOAD_DEV_TOOLS:-0}"
@@ -1996,7 +2039,7 @@ EOF
 # Optionally refresh hardware profile on the upgraded installation
 if [ -x "$HW_PROBE" ]; then
 	info -c cli,vlan "Refreshing hardware profile via hw_probe.sh"
-	if ! run_update_step "hardware probe" sh "$HW_PROBE"; then
+	if ! run_update_step "hardware probe" env MERV_UPDATE_OWNER=1 sh "$HW_PROBE"; then
 		warn -c cli,vlan "hw_probe.sh reported errors; hardware profile may be stale"
 		UPDATE_PARTIAL=1
 	fi

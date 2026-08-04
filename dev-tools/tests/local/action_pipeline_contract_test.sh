@@ -25,6 +25,9 @@ grep -q 'action_ack_atomic_copy' "$MERV_BASE/settings/lib_action_ack.sh" || fail
 
 grep -q 'run_update_step' "$MERV_BASE/functions/update_mervlan.sh" || fail 'updater logged-step helper missing'
 grep -q 'return 0' "$MERV_BASE/functions/update_mervlan.sh" || fail 'updater helper success return missing'
+grep -q 'MERV_UPDATE_OWNER=1 sh "\$HW_PROBE"' "$MERV_BASE/functions/update_mervlan.sh" || fail 'update-owned hardware probe missing'
+grep -q 'MerVLAN is updating!' "$MERV_BASE/functions/update_mervlan.sh" || fail 'update start banner missing'
+grep -q 'index\\.html version=' "$MERV_BASE/functions/update_mervlan.sh" || fail 'HTML version header reader missing'
 
 grep -q "tmp/results/actions/" "$MERV_BASE/www/index.html" || fail 'frontend per-token ack polling missing'
 grep -q 'completion' "$MERV_BASE/www/index.html" || fail 'frontend loading completion promise missing'
