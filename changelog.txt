@@ -1,5 +1,12 @@
 mervlan v0.53.26-dev
 
+Improved: Resilient Update downloads
+- Update downloads now use a visible MerVLAN-controlled five-attempt retry
+  loop with 1, 2, 4, and 8 second delays instead of curl's opaque retry mode.
+- Each transfer writes to a temporary partial archive and is only published
+  after curl succeeds and the archive is non-empty, preventing interrupted
+  downloads from reaching extraction.
+
 Improved: Ownership, locking, and lifecycle safety
 - Unified normal process identity and nonce generation, including DHCP,
   action-progress, action-runtime, and node-job owners, without

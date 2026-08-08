@@ -2977,6 +2977,135 @@ test_payload_contract() {
   return "$_tpc_ok"
 }
 
+test_update_download_retry() {
+  _tudr_root="$SELFTEST_ROOT/update-download-retry"
+  _tudr_update="$MERV_BASE/functions/update_mervlan.sh"
+  _tudr_helper="$_tudr_root/download-helper.sh"
+  _tudr_curl="$_tudr_root/fake-curl.sh"
+  _tudr_ok=1
+  rm -rf "$_tudr_root" 2>/dev/null || return 1
+  mkdir -p "$_tudr_root" || return 1
+  sed -n '/^download_update_archive() {/,/^}/p' "$_tudr_update" > "$_tudr_helper" || return 1
+  [ -s "$_tudr_helper" ] || return 1
+
+  if grep -Fq '"$CURL_BIN" -fsL --connect-timeout 15 --max-time 300' "$_tudr_helper" &&
+     ! grep -Fq -- '--retry' "$_tudr_helper" &&
+     grep -Fq 'download_update_archive "$GITHUB_URL" "$ARCHIVE"' "$_tudr_update" &&
+     grep -Fq 'fail_update downloading "Download failed after 5 attempts"' "$_tudr_update"; then
+    pass "update download helper owns retries and preserves download failure lifecycle"
+  else
+    fail "update download helper owns retries and preserves download failure lifecycle"
+    _tudr_ok=0
+  fi
+
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'count=$(cat "$TUDR_CURL_COUNT" 2>/dev/null || printf 0)'
+    printf '%s\n' 'count=$((count + 1))'
+    printf '%s\n' 'printf "%s\\n" "$count" > "$TUDR_CURL_COUNT"'
+    printf '%s\n' 'out=""'
+    printf '%s\n' 'while [ "$#" -gt 0 ]; do'
+    printf '%s\n' '  case "$1" in -o) shift; out="${1:-}" ;; esac'
+    printf '%s\n' '  shift'
+    printf '%s\n' 'done'
+    printf '%s\n' '[ -n "$out" ] || exit 64'
+    printf '%s\n' 'outcome=$(sed -n "${count}p" "$TUDR_CURL_OUTCOMES")'
+    printf '%s\n' 'case "$outcome" in'
+    printf '%s\n' '  success) printf "archive-%s\\n" "$count" > "$out"; exit 0 ;;'
+    printf '%s\n' '  empty) : > "$out"; exit 0 ;;'
+    printf '%s\n' '  partial-fail) printf "partial-%s\\n" "$count" > "$out"; exit 6 ;;'
+    printf '%s\n' '  fail) exit 6 ;;'
+    printf '%s\n' '  *) exit 64 ;;'
+    printf '%s\n' 'esac'
+  } > "$_tudr_curl" || return 1
+  chmod 700 "$_tudr_curl" || return 1
+
+  if (
+    . "$_tudr_helper" || exit 1
+    info() { printf 'INFO: %s\n' "$*" >> "$TUDR_LOG"; }
+    warn() { printf 'WARN: %s\n' "$*" >> "$TUDR_LOG"; }
+    error() { printf 'ERROR: %s\n' "$*" >> "$TUDR_LOG"; }
+    sleep() { printf '%s\n' "$1" >> "$TUDR_SLEEPS"; }
+    mv() {
+      [ "${TUDR_MV_FAIL:-0}" = 1 ] && return 1
+      /bin/mv "$@"
+    }
+    tudr_run_case() {
+      TUDR_CASE="$1"
+      shift
+      TUDR_CASE_ROOT="$_tudr_root/$TUDR_CASE"
+      rm -rf "$TUDR_CASE_ROOT" || return 1
+      mkdir -p "$TUDR_CASE_ROOT" || return 1
+      TUDR_CURL_OUTCOMES="$TUDR_CASE_ROOT/outcomes"
+      TUDR_CURL_COUNT="$TUDR_CASE_ROOT/curl.count"
+      TUDR_LOG="$TUDR_CASE_ROOT/log"
+      TUDR_SLEEPS="$TUDR_CASE_ROOT/sleeps"
+      TUDR_MV_FAIL="${TUDR_FORCE_MV_FAILURE:-0}"
+      export TUDR_CURL_OUTCOMES TUDR_CURL_COUNT
+      printf '%s\n' "$@" > "$TUDR_CURL_OUTCOMES" || return 1
+      : > "$TUDR_CURL_COUNT" || return 1
+      : > "$TUDR_LOG" || return 1
+      : > "$TUDR_SLEEPS" || return 1
+      CURL_BIN="$_tudr_curl"
+      download_update_archive 'https://example.invalid/mervlan.tar.gz' "$TUDR_CASE_ROOT/archive"
+      TUDR_CASE_RC=$?
+      return 0
+    }
+    tudr_expect_sleeps() {
+      printf '%s\n' "$@" > "$TUDR_CASE_ROOT/expected-sleeps" || return 1
+      cmp -s "$TUDR_CASE_ROOT/expected-sleeps" "$TUDR_SLEEPS"
+    }
+
+    tudr_run_case immediate success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 1 ] &&
+      [ -s "$TUDR_CASE_ROOT/archive" ] && [ ! -s "$TUDR_SLEEPS" ] &&
+      grep -Fq 'Download completed successfully on attempt 1/5' "$TUDR_LOG" || exit 1
+
+    tudr_run_case transient fail fail success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 3 ] &&
+      tudr_expect_sleeps 1 2 &&
+      grep -Fq 'Download attempt 1/5 failed (curl rc=6)' "$TUDR_LOG" &&
+      grep -Fq 'Download completed successfully on attempt 3/5' "$TUDR_LOG" || exit 1
+
+    tudr_run_case fifth-success fail fail fail fail success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 5 ] &&
+      tudr_expect_sleeps 1 2 4 8 &&
+      [ "$(awk '{sum += $1} END {print sum+0}' "$TUDR_SLEEPS")" = 15 ] &&
+      grep -Fq 'Download completed successfully on attempt 5/5' "$TUDR_LOG" || exit 1
+
+    tudr_run_case exhausted fail fail fail fail fail || exit 1
+    [ "$TUDR_CASE_RC" -ne 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 5 ] &&
+      tudr_expect_sleeps 1 2 4 8 &&
+      [ ! -e "$TUDR_CASE_ROOT/archive" ] && [ ! -e "$TUDR_CASE_ROOT/archive.part" ] &&
+      grep -Fq 'Download failed after 5 attempts (curl rc=6)' "$TUDR_LOG" || exit 1
+
+    tudr_run_case partial-failure partial-fail success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 2 ] &&
+      [ "$(cat "$TUDR_CASE_ROOT/archive")" = 'archive-2' ] &&
+      [ ! -e "$TUDR_CASE_ROOT/archive.part" ] || exit 1
+
+    tudr_run_case empty-success empty success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 2 ] &&
+      tudr_expect_sleeps 1 && [ -s "$TUDR_CASE_ROOT/archive" ] &&
+      [ ! -e "$TUDR_CASE_ROOT/archive.part" ] || exit 1
+
+    TUDR_FORCE_MV_FAILURE=1
+    tudr_run_case publish-failure success || exit 1
+    TUDR_FORCE_MV_FAILURE=0
+    [ "$TUDR_CASE_RC" -ne 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 1 ] &&
+      [ ! -e "$TUDR_CASE_ROOT/archive" ] && [ ! -e "$TUDR_CASE_ROOT/archive.part" ] &&
+      grep -Fq 'could not publish the completed archive' "$TUDR_LOG" || exit 1
+    exit 0
+  ); then
+    pass "update download retry contract covers success, retries, exhaustion, partials, empty output, and publish failure"
+  else
+    fail "update download retry contract covers success, retries, exhaustion, partials, empty output, and publish failure"
+    _tudr_ok=0
+  fi
+  rm -rf "$_tudr_root" 2>/dev/null || _tudr_ok=0
+  return "$_tudr_ok"
+}
+
 test_failure_propagation_contract() {
   _tfpc_ui="$MERV_BASE/www/index.html"
   _tfpc_handler="$MERV_BASE/functions/service-event-handler.sh"
@@ -3688,6 +3817,7 @@ run_one() {
     direct-manager-save-overlap) test_direct_manager_save_overlap ;;
     update-lock-ownership) test_update_lock_ownership ;;
     update-exclusivity) test_update_exclusivity ;;
+    update-download-retry) test_update_download_retry ;;
     payload-contract) test_payload_contract ;;
     failure-propagation) test_failure_propagation_contract ;;
     ssh-outbound) test_ssh_outbound_contract ;;
@@ -3740,7 +3870,7 @@ if [ "$SELFTEST_ACTION" = all ]; then
     settle-watchdog recovery failsafe-status post-apply observation-lock observation-concurrency \
     observation-timeouts observation-generations observation-resume-progress atomic-publication json-validation client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax signal-termination live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity update-download-retry payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax signal-termination live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

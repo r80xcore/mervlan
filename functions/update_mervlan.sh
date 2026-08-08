@@ -1343,6 +1343,63 @@ find_curl() {
 	fi
 }
 
+download_update_archive() {
+	_update_download_url="$1"
+	_update_download_archive="$2"
+	_update_download_part="${_update_download_archive}.part"
+	_update_download_attempt=1
+	_update_download_delay=1
+	_update_download_max_attempts=5
+
+	[ -n "${CURL_BIN:-}" ] && [ -n "$_update_download_url" ] && [ -n "$_update_download_archive" ] || return 1
+	if ! rm -f "$_update_download_archive" "$_update_download_part"; then
+		error -c cli,vlan "Could not clear stale download archive before retrying"
+		return 1
+	fi
+
+	while [ "$_update_download_attempt" -le "$_update_download_max_attempts" ]; do
+		if ! rm -f "$_update_download_part"; then
+			error -c cli,vlan "Could not clear partial archive before download attempt $_update_download_attempt/$_update_download_max_attempts"
+			return 1
+		fi
+		info -c cli,vlan "Download attempt $_update_download_attempt/$_update_download_max_attempts"
+		"$CURL_BIN" -fsL --connect-timeout 15 --max-time 300 \
+			"$_update_download_url" -o "$_update_download_part"
+		_update_download_rc=$?
+
+		if [ "$_update_download_rc" -eq 0 ] && [ -s "$_update_download_part" ]; then
+			if mv -f "$_update_download_part" "$_update_download_archive"; then
+				info -c cli,vlan "Download completed successfully on attempt $_update_download_attempt/$_update_download_max_attempts"
+				return 0
+			fi
+			error -c cli,vlan "Download attempt $_update_download_attempt/$_update_download_max_attempts could not publish the completed archive"
+			rm -f "$_update_download_part" || \
+				error -c cli,vlan "Could not remove partial archive after publish failure"
+			return 1
+		fi
+
+		if ! rm -f "$_update_download_part"; then
+			error -c cli,vlan "Could not remove partial archive after failed download attempt $_update_download_attempt/$_update_download_max_attempts"
+			return 1
+		fi
+		if [ "$_update_download_rc" -eq 0 ]; then
+			_update_download_reason="curl rc=0; archive empty"
+		else
+			_update_download_reason="curl rc=$_update_download_rc"
+		fi
+		warn -c cli,vlan "Download attempt $_update_download_attempt/$_update_download_max_attempts failed ($_update_download_reason)"
+		if [ "$_update_download_attempt" -eq "$_update_download_max_attempts" ]; then
+			error -c cli,vlan "Download failed after $_update_download_max_attempts attempts ($_update_download_reason)"
+			return 1
+		fi
+		info -c cli,vlan "Retrying download in ${_update_download_delay}s"
+		sleep "$_update_download_delay" || return 1
+		_update_download_delay=$((_update_download_delay * 2))
+		_update_download_attempt=$((_update_download_attempt + 1))
+	done
+	return 1
+}
+
 # resolve curl once, fail with a helpful error if missing
 CURL_BIN="$(find_curl)" || \
 	fail_update curl "curl not found (tried PATH and /usr/sbin/curl); cannot update MerVLAN."
@@ -1606,10 +1663,8 @@ done
 
 info -c cli,vlan "Downloading latest MerVLAN snapshot using: $CURL_BIN"
 update_record_phase downloading || fail_update journal "Could not persist the downloading Update journal"
-"$CURL_BIN" -fsL --retry 3 --connect-timeout 15 --max-time 300 "$GITHUB_URL" -o "$ARCHIVE"
-if [ ! -s "$ARCHIVE" ]; then
-	fail_update downloading "Download failed or archive empty"
-fi
+download_update_archive "$GITHUB_URL" "$ARCHIVE" || \
+	fail_update downloading "Download failed after 5 attempts"
 
 # The archive is the first large RAM allocation. The original check above is
 # only a conservative baseline; refresh it with the actual compressed size and
