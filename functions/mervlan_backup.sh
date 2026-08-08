@@ -12,6 +12,10 @@
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the owner-lock library; refusing maintenance operation"
+  exit 1
+}
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing maintenance operation"
   exit 1
@@ -117,7 +121,7 @@ mb_cleanup() {
     rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
   fi
   if [ "$MB_LOCK_OWNED" = "1" ]; then
-    if type merv_lock_release >/dev/null 2>&1 && merv_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
+    if type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
       MB_LOCK_OWNED=0
     else
       _mb_cleanup_failed=1
@@ -444,8 +448,8 @@ mb_fail() {
 
 mb_acquire_lock() {
   mkdir -p "${MB_LOCK%/*}" 2>/dev/null || return 1
-  type merv_lock_acquire >/dev/null 2>&1 || return 1
-  if merv_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
+  type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
+  if merv_owner_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
     MB_LOCK_OWNED=1
     MB_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     return 0
@@ -457,7 +461,7 @@ mb_require_lock() {
   if mb_acquire_lock; then
     if ! mb_reconcile_stale_stages; then
       error -c cli,vlan "Stale restore or rollback trees could not be reconciled; maintenance is blocked"
-      if type merv_lock_release >/dev/null 2>&1 && merv_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
+      if type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
         MB_LOCK_OWNED=0
       else
         error -c cli,vlan "Maintenance cleanup could not release its owner lock after stale-tree failure"

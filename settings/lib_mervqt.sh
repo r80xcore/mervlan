@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.56"                      #
+#                  - File: lib_mervqt.sh || version="0.57"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -44,6 +44,8 @@ fi
 # Source it here so lib_mervqt.sh validators are self-consistent even when
 # lib_mervqt.sh is loaded without a full manager environment (e.g. heal_event).
 : "${MERV_BASE:=/jffs/addons/mervlan}"
+[ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || true
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
 
 # ============================================================================
@@ -582,12 +584,7 @@ merv_proc_start_time() {
     merv_dhcp_hold_test_root_valid || return 1
     case "$_mps_root" in "$MERV_DHCP_HOLD_TEST_ROOT"/*) ;; *) return 1 ;; esac
   fi
-  _mps_line=$(cat "$_mps_root/$_mps_pid/stat" 2>/dev/null) || return 1
-  case "$_mps_line" in *") "*) _mps_tail=${_mps_line##*) } ;; *) return 1 ;; esac
-  _mps_start=$(printf '%s\n' "$_mps_tail" | awk '{print $20}')
-  case "$_mps_start" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s\n' "$_mps_start"
-  return 0
+  merv_identity_proc_start "$_mps_pid" "$_mps_root"
 }
 
 merv_dhcp_proc_root() {
@@ -605,20 +602,77 @@ merv_dhcp_proc_root() {
 merv_process_identity_matches() {
   local _mpim_pid="$1" _mpim_expected="$2" _mpim_root="${3:-/proc}" _mpim_actual
   case "$_mpim_expected" in ''|*[!0-9]*) return 1 ;; esac
-  _mpim_actual=$(merv_proc_start_time "$_mpim_pid" "$_mpim_root" 2>/dev/null) || return 1
-  [ "$_mpim_actual" = "$_mpim_expected" ] || return 1
-  if [ "$_mpim_root" = "/proc" ]; then
-    kill -0 "$_mpim_pid" 2>/dev/null || return 1
-  fi
-  return 0
+  merv_identity_matches "$_mpim_pid" "$_mpim_expected" "$_mpim_root"
 }
 
 _merv_dhcp_nonce() {
-  local _mdn_start _mdn_now _mdn_proc
-  _mdn_proc=$(merv_dhcp_proc_root 2>/dev/null || printf '/proc')
-  _mdn_start=$(merv_proc_start_time "$$" "$_mdn_proc" 2>/dev/null || printf '0')
-  _mdn_now=$(date +%s 2>/dev/null || printf '0')
-  printf '%s-%s-%s-%s\n' "$_mdn_now" "$$" "$_mdn_start" "${RANDOM:-0}"
+  # DHCP keeps specialized owner/phase policy, but nonce generation is shared
+  # with every other normal runtime owner.  Call this directly (never through
+  # command substitution) so the identity sequence advances in this shell.
+  merv_identity_nonce_next || return 1
+  MERV_DHCP_NONCE="$MERV_IDENTITY_NONCE"
+}
+
+# DHCP state-lock timestamps must be readable on the router's BusyBox tools.
+# A missing timestamp is not treated as "now": that would renew an ambiguous
+# publication on every waiter retry and make its real age unknowable.
+merv_dhcp_state_lock_now() {
+  _mdln_now=$(date +%s 2>/dev/null || printf '')
+  case "$_mdln_now" in ''|*[!0-9]*|0) return 1 ;; esac
+  printf '%s\n' "$_mdln_now"
+}
+
+merv_dhcp_state_lock_timestamp() {
+  _mdlt_path="${1:-}"
+  [ -d "$_mdlt_path" ] || return 1
+  _mdlt_epoch=$(date -r "$_mdlt_path" +%s 2>/dev/null || printf '')
+  case "$_mdlt_epoch" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$_mdlt_epoch"
+}
+
+# Sets MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE to an incomplete publication's
+# measured age. The reason remains available to the caller for a fail-closed
+# diagnostic; it is deliberately never replaced by a synthetic current time.
+merv_dhcp_state_lock_incomplete_age() {
+  _mdlia_path="${1:-}"
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON=""
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE=""
+  _mdlia_now=$(merv_dhcp_state_lock_now 2>/dev/null) || {
+    MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON=incomplete-age-clock-unreadable
+    return 1
+  }
+  _mdlia_then=$(merv_dhcp_state_lock_timestamp "$_mdlia_path" 2>/dev/null) || {
+    MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON=incomplete-age-timestamp-unreadable
+    return 1
+  }
+  [ "$_mdlia_now" -ge "$_mdlia_then" ] 2>/dev/null || {
+    MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON=incomplete-age-future-timestamp
+    return 1
+  }
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE="$((_mdlia_now - _mdlia_then))"
+  return 0
+}
+
+_merv_dhcp_state_lock_owner_valid() {
+  _mdlov_pid="${1:-}"; _mdlov_start="${2:-}"
+  _mdlov_created="${3:-}"; _mdlov_nonce="${4:-}"
+  case "$_mdlov_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$_mdlov_start" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$_mdlov_created" in ''|*[!0-9]*|0) return 1 ;;
+  esac
+  case "$_mdlov_nonce" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  return 0
+}
+
+_merv_dhcp_state_lock_restore_fields() {
+  _mdlrf_lock="${1:-}"; _mdlrf_pid="${2:-}"; _mdlrf_start="${3:-}"
+  _mdlrf_created="${4:-}"; _mdlrf_nonce="${5:-}"
+  _merv_dhcp_state_lock_owner_valid "$_mdlrf_pid" "$_mdlrf_start" \
+    "$_mdlrf_created" "$_mdlrf_nonce" || return 1
+  merv_identity_atomic_field "$_mdlrf_lock" pid "$_mdlrf_pid" &&
+    merv_identity_atomic_field "$_mdlrf_lock" proc_start_time "$_mdlrf_start" &&
+    merv_identity_atomic_field "$_mdlrf_lock" created_epoch "$_mdlrf_created" &&
+    merv_identity_atomic_field "$_mdlrf_lock" owner_nonce "$_mdlrf_nonce"
 }
 
 # Dedicated DHCP state lock. Live PID/start-time owners are never reclaimed
@@ -626,14 +680,12 @@ _merv_dhcp_nonce() {
 merv_dhcp_state_lock_acquire() {
   local _mdla_lock _mdla_pid _mdla_start _mdla_nonce _mdla_created _mdla_owner_nonce
   local _mdla_quarantine _mdla_proc _mdla_attempt=0 _mdla_max=5
-  local _mdla_now _mdla_mtime _mdla_age _mdla_incomplete_stale
+  local _mdla_now _mdla_age _mdla_incomplete_stale
   merv_dhcp_hold_state_init || return $?
   _mdla_proc=$(merv_dhcp_proc_root) || return 1
   type usleep >/dev/null 2>&1 && _mdla_max=100
   _mdla_pid="$$"
   _mdla_start=$(merv_proc_start_time "$$" "$_mdla_proc" 2>/dev/null) || return 1
-  _mdla_created=$(date +%s 2>/dev/null || printf '0')
-  _mdla_nonce=$(_merv_dhcp_nonce)
   _mdla_incomplete_stale="${MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC:-30}"
   case "$_mdla_incomplete_stale" in ''|*[!0-9]*) _mdla_incomplete_stale=30 ;; esac
   _mdla_lock="$MERV_DHCP_HOLD_STATE_ROOT/state.lock"
@@ -647,8 +699,12 @@ merv_dhcp_state_lock_acquire() {
         rmdir "$_mdla_lock" 2>/dev/null || :
         return 2
       }
-      _mdla_created=$(date +%s 2>/dev/null || printf '0')
-      _mdla_nonce=$(_merv_dhcp_nonce)
+      _mdla_created=$(merv_dhcp_state_lock_now 2>/dev/null) || {
+        rmdir "$_mdla_lock" 2>/dev/null || :
+        return 2
+      }
+      _merv_dhcp_nonce || return 2
+      _mdla_nonce="$MERV_DHCP_NONCE"
       if printf '%s\n' "$_mdla_pid" > "$_mdla_lock/pid" 2>/dev/null &&
          printf '%s\n' "$_mdla_start" > "$_mdla_lock/proc_start_time" 2>/dev/null &&
          printf '%s\n' "$_mdla_created" > "$_mdla_lock/created_epoch" 2>/dev/null &&
@@ -665,31 +721,23 @@ merv_dhcp_state_lock_acquire() {
     _mdla_start=$(cat "$_mdla_lock/proc_start_time" 2>/dev/null || printf '')
     _mdla_created=$(cat "$_mdla_lock/created_epoch" 2>/dev/null || printf '')
     _mdla_owner_nonce=$(cat "$_mdla_lock/owner_nonce" 2>/dev/null || printf '')
-    case "$_mdla_pid:$_mdla_start:$_mdla_created:$_mdla_owner_nonce" in
-      :*|*::*|*:|*[!A-Za-z0-9._:-]*) _mdla_owner_nonce="" ;;
-    esac
-    if [ -z "$_mdla_owner_nonce" ]; then
+    if ! _merv_dhcp_state_lock_owner_valid "$_mdla_pid" "$_mdla_start" \
+      "$_mdla_created" "$_mdla_owner_nonce"; then
       # mkdir publishes the exclusion point before its metadata files can be
-      # written. Treat that brief incomplete directory as a live publication,
-      # not a stale lock. A PID whose current start time is readable is also
-      # never stolen even when the remaining fields are incomplete.
-      if case "$_mdla_pid" in ''|*[!0-9]*) false ;; *) merv_proc_start_time "$_mdla_pid" "$_mdla_proc" >/dev/null 2>&1 ;; esac; then
-        :
-      else
-        _mdla_now=$(date +%s 2>/dev/null || printf '0')
-        _mdla_mtime=$(stat -c %Y "$_mdla_lock" 2>/dev/null || printf '%s' "$_mdla_now")
-        case "$_mdla_now:$_mdla_mtime" in *[!0-9:]*) _mdla_age=0 ;; *)
-          _mdla_age=$((_mdla_now - _mdla_mtime))
-          [ "$_mdla_age" -ge 0 ] || _mdla_age=0
-          ;;
-        esac
-        if [ "$_mdla_age" -ge "$_mdla_incomplete_stale" ]; then
+      # written. Treat that bounded interval as active publication.  After
+      # it expires, even a readable PID-only claim is not ownership and is
+      # quarantined rather than protected indefinitely.
+      if ! merv_dhcp_state_lock_incomplete_age "$_mdla_lock"; then
+        _merv_dhcp_log warn "DHCP state lock age is unverifiable (${MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON:-incomplete-age-unknown}); refusing reclaim"
+      elif [ "$MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE" -ge "$_mdla_incomplete_stale" ]; then
+        _mdla_now=$(merv_dhcp_state_lock_now 2>/dev/null || printf '')
+        if [ -n "$_mdla_now" ]; then
           _mdla_quarantine="${_mdla_lock}.incomplete-stale.${_mdla_now}.$$.$_mdla_attempt"
           if mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null; then
             _merv_dhcp_log warn "quarantined stale incomplete DHCP state lock"
+            _mdla_attempt=$((_mdla_attempt + 1))
+            continue
           fi
-          _mdla_attempt=$((_mdla_attempt + 1))
-          continue
         fi
       fi
       if type usleep >/dev/null 2>&1; then usleep 50000; else sleep 1; fi
@@ -709,7 +757,7 @@ merv_dhcp_state_lock_acquire() {
       _mdla_attempt=$((_mdla_attempt + 1))
       continue
     fi
-    _mdla_created=$(date +%s 2>/dev/null || printf '0')
+    _mdla_created=$(merv_dhcp_state_lock_now 2>/dev/null || return 2)
     _mdla_quarantine="${_mdla_lock}.stale.${_mdla_created}.$$.$_mdla_attempt"
     if mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null; then
       _merv_dhcp_log warn "quarantined dead or reused-PID DHCP state lock"
@@ -720,7 +768,8 @@ merv_dhcp_state_lock_acquire() {
 }
 
 merv_dhcp_state_lock_release() {
-  local _mdlr_lock _mdlr_expected _mdlr_actual _mdlr_pid _mdlr_start _mdlr_proc
+  local _mdlr_lock _mdlr_expected _mdlr_actual _mdlr_pid _mdlr_start _mdlr_created _mdlr_proc
+  local _mdlr_parent _mdlr_base _mdlr_restore
   merv_dhcp_hold_state_root_valid || return 1
   _mdlr_lock="$MERV_DHCP_HOLD_STATE_ROOT/state.lock"
   _mdlr_expected="${1:-${MERV_DHCP_STATE_LOCK_NONCE:-}}"
@@ -728,13 +777,32 @@ merv_dhcp_state_lock_release() {
   _mdlr_proc=$(merv_dhcp_proc_root) || return 2
   _mdlr_pid=$(cat "$_mdlr_lock/pid" 2>/dev/null || printf '')
   _mdlr_start=$(cat "$_mdlr_lock/proc_start_time" 2>/dev/null || printf '')
-  [ "$_mdlr_pid" = "$$" ] || return 2
-  merv_process_identity_matches "$_mdlr_pid" "$_mdlr_start" "$_mdlr_proc" 2>/dev/null || return 2
+  _mdlr_created=$(cat "$_mdlr_lock/created_epoch" 2>/dev/null || printf '')
   _mdlr_actual=$(cat "$_mdlr_lock/owner_nonce" 2>/dev/null || printf '')
-  [ "$_mdlr_actual" = "$_mdlr_expected" ] || return 2
+  _merv_dhcp_state_lock_owner_valid "$_mdlr_pid" "$_mdlr_start" \
+    "$_mdlr_created" "$_mdlr_actual" || return 2
+  [ "$_mdlr_pid" = "$$" ] && [ "$_mdlr_actual" = "$_mdlr_expected" ] || return 2
+  merv_process_identity_matches "$_mdlr_pid" "$_mdlr_start" "$_mdlr_proc" 2>/dev/null || return 2
+  _mdlr_parent=${_mdlr_lock%/*}; _mdlr_base=${_mdlr_lock##*/}
+  _mdlr_restore="$_mdlr_parent/.${_mdlr_base}.owner.restore.$$.${_mdlr_created}.${_mdlr_actual}"
+  ( umask 077
+    printf 'pid=%s\nproc_start_time=%s\ncreated_epoch=%s\nowner_nonce=%s\n' \
+      "$_mdlr_pid" "$_mdlr_start" "$_mdlr_created" "$_mdlr_actual" > "$_mdlr_restore"
+  ) 2>/dev/null || return 2
+  chmod 600 "$_mdlr_restore" 2>/dev/null || { rm -f "$_mdlr_restore" 2>/dev/null; return 2; }
   rm -f "$_mdlr_lock/pid" "$_mdlr_lock/proc_start_time" \
-    "$_mdlr_lock/created_epoch" "$_mdlr_lock/owner_nonce" 2>/dev/null || return 2
-  rmdir "$_mdlr_lock" 2>/dev/null || return 2
+    "$_mdlr_lock/created_epoch" "$_mdlr_lock/owner_nonce" 2>/dev/null || {
+      if _merv_dhcp_state_lock_restore_fields "$_mdlr_lock" "$_mdlr_pid" "$_mdlr_start" "$_mdlr_created" "$_mdlr_actual"; then
+        rm -f "$_mdlr_restore" 2>/dev/null || :
+      fi
+      return 2
+    }
+  if ! rmdir "$_mdlr_lock" 2>/dev/null; then
+    _merv_dhcp_state_lock_restore_fields "$_mdlr_lock" "$_mdlr_pid" "$_mdlr_start" "$_mdlr_created" "$_mdlr_actual" || return 2
+    rm -f "$_mdlr_restore" 2>/dev/null || :
+    return 2
+  fi
+  rm -f "$_mdlr_restore" 2>/dev/null || :
   MERV_DHCP_STATE_LOCK_NONCE=""
   return 0
 }
@@ -770,7 +838,8 @@ merv_dhcp_hold_record_fault() {
   merv_dhcp_hold_valid_id "$_mdrf_reason" || _mdrf_reason="invalid-reason"
   merv_dhcp_hold_state_init || return 2
   _mdrf_now=$(date +%s 2>/dev/null || printf '0')
-  _mdrf_id="${_mdrf_reason}.${_mdrf_now}.$$.$(_merv_dhcp_nonce)"
+  _merv_dhcp_nonce || return 2
+  _mdrf_id="${_mdrf_reason}.${_mdrf_now}.$$.$MERV_DHCP_NONCE"
   _mdrf_tmp="$MERV_DHCP_HOLD_STATE_ROOT/faults/.${_mdrf_id}.tmp"
   _mdrf_dst="$MERV_DHCP_HOLD_STATE_ROOT/faults/${_mdrf_id}"
   {
@@ -1178,7 +1247,10 @@ _merv_dhcp_failsafe_create_locked() {
   _mdfc_id="${_mdfc_type}-${_mdfc_run}-${_mdfc_now}-$$"
   merv_dhcp_hold_valid_id "$_mdfc_id" || return 1
   _mdfc_dir="$MERV_DHCP_HOLD_STATE_ROOT/failsafe/$_mdfc_id"
-  [ ! -e "$_mdfc_dir" ] || _mdfc_dir="${_mdfc_dir}-$(_merv_dhcp_nonce)"
+  if [ -e "$_mdfc_dir" ]; then
+    _merv_dhcp_nonce || return 2
+    _mdfc_dir="${_mdfc_dir}-$MERV_DHCP_NONCE"
+  fi
   _mdfc_tmp="${_mdfc_dir}.pending"
   mkdir "$_mdfc_tmp" 2>/dev/null || return 2
   _merv_dhcp_atomic_field "$_mdfc_tmp" owner_type "$_mdfc_type" &&
@@ -1228,7 +1300,8 @@ merv_dhcp_hold_acquire() {
   [ -z "$_mdac_parent" ] || merv_dhcp_hold_valid_id "$_mdac_parent" || return 1
   _mdac_proc=$(merv_dhcp_proc_root) || return 1
   _mdac_start=$(merv_proc_start_time "$$" "$_mdac_proc" 2>/dev/null) || return 1
-  _mdac_token="${_mdac_type}.${_mdac_run}.${_mdac_now}.$$.$_mdac_start.$(_merv_dhcp_nonce)"
+  _merv_dhcp_nonce || return 1
+  _mdac_token="${_mdac_type}.${_mdac_run}.${_mdac_now}.$$.$_mdac_start.$MERV_DHCP_NONCE"
   merv_dhcp_hold_valid_id "$_mdac_token" || return 1
 
   merv_dhcp_state_lock_acquire || return 2
@@ -1416,7 +1489,10 @@ merv_dhcp_handoff_request() {
   local _mdhr_now _mdhr_nonce _mdhr_tmp _mdhr_dir
   _merv_dhcp_owner_type_valid "$_mdhr_child" || return 1
   _mdhr_now=$(date +%s 2>/dev/null || printf '0')
-  [ -n "$_mdhr_id" ] || _mdhr_id="handoff-${_mdhr_now}-$$-$(_merv_dhcp_nonce)"
+  if [ -z "$_mdhr_id" ]; then
+    _merv_dhcp_nonce || return 1
+    _mdhr_id="handoff-${_mdhr_now}-$$-$MERV_DHCP_NONCE"
+  fi
   merv_dhcp_hold_valid_id "$_mdhr_id" || return 1
   merv_dhcp_state_lock_acquire || return 2
   _mdhr_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
@@ -2198,23 +2274,8 @@ merv_guarded_sleep() {
 # ============================================================================
 
 # merv_lock_now — current epoch (0 on failure)
-merv_lock_now() {
-  local _n
-  _n=$(date +%s 2>/dev/null || echo 0)
-  case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
-  printf '%s' "$_n"
-}
+merv_lock_now() { merv_owner_lock_now "$@"; }
 
-# ============================================================================
-# Centralized directory-lock primitives
-# ----------------------------------------------------------------------------
-# One implementation shared by mervlan_manager.sh, heal_event.sh and any other
-# script that needs a robust mutex. The authoritative owner-aware implementation
-# is defined at the end of this file so every caller observes the same contract.
-# ============================================================================
-
-# Internal: best-effort log line for the lock helpers. Prefers the project's
-# log helpers (info/warn/error) when present, falls back to syslog.
 _merv_lock_log() {
   _mll_lvl="$1"; shift
   if type "$_mll_lvl" >/dev/null 2>&1; then
@@ -2224,16 +2285,8 @@ _merv_lock_log() {
   fi
 }
 
-# ============================================================================
-# Boot shield precondition
-# ----------------------------------------------------------------------------
-# merv_boot_shield_lan_configured [settings_file]
-# Returns 0 (true) iff settings.json declares at least one VLAN with a real,
-# numeric VID >= 2 in the VLAN.Pool slots VLAN_01..VLAN_12. Used by
-# mervlan_boot_wrap.sh `shield` mode to avoid arming the boot DHCP hold on a
-# fresh or unconfigured install, which would otherwise brick br0 DHCP until
-# the watchdog timeout elapses.
-# ============================================================================
+# Boot shield precondition remains an L2 policy helper; generic owner records
+# are implemented solely by lib_owner_lock.sh.
 merv_boot_shield_lan_configured() {
   local _file="${1:-$SETTINGS_FILE}" _i _slot _val _max
   [ -s "$_file" ] || return 1
@@ -2271,71 +2324,9 @@ merv_boot_shield_lan_configured() {
   return 1
 }
 
-# ============================================================================
-# Fail-closed owner-aware lock implementation (v2)
-# ============================================================================
-# The older helpers above remain in the file for compatibility with already
-# synced scripts, but these definitions are intentionally last so every fresh
-# caller uses the v2 contract.  A lock is reclaimable only when its complete
-# recorded process identity is proven dead or PID-reused.  Age is diagnostic
-# only; it never overrides a live owner.
-
-_merv_lock_v2_nonce() {
-  _ml2_now=$(merv_lock_now)
-  _ml2_start=$(merv_proc_start_time "$$" 2>/dev/null || printf '0')
-  printf '%s.%s.%s.%s\n' "$_ml2_now" "$$" "$_ml2_start" "${RANDOM:-0}"
-}
-
-_merv_lock_v2_write() {
-  _ml2_lock="$1"; _ml2_start="$2"; _ml2_nonce="$3"; _ml2_now="$4"
-  case "$_ml2_start:$_ml2_now" in *[!0-9:]*|:*|*::*) return 1 ;; esac
-  case "$_ml2_nonce" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
-  _ml2_tmp="$_ml2_lock/.owner.tmp.$$"
-  ( umask 077
-    printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=%s\nheartbeat=%s\n' \
-      "$$" "$_ml2_start" "$_ml2_nonce" "$_ml2_now" "$_ml2_now" > "$_ml2_tmp"
-  ) 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  chmod 600 "$_ml2_tmp" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  mv -f "$_ml2_tmp" "$_ml2_lock/owner" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  # Compatibility fields are informational only.  The single owner record is
-  # authoritative and is the one observers validate atomically.
-  printf '%s\n' "$$" > "$_ml2_lock/pid" 2>/dev/null || return 1
-  printf '%s\n' "$_ml2_start" > "$_ml2_lock/proc_start_time" 2>/dev/null || return 1
-  printf '%s\n' "$_ml2_nonce" > "$_ml2_lock/owner_nonce" 2>/dev/null || return 1
-  printf '%s\n' "$_ml2_now" > "$_ml2_lock/created" 2>/dev/null || return 1
-  printf '%s\n' "$_ml2_now" > "$_ml2_lock/heartbeat" 2>/dev/null || return 1
-  chmod 600 "$_ml2_lock/pid" "$_ml2_lock/proc_start_time" "$_ml2_lock/owner_nonce" "$_ml2_lock/created" "$_ml2_lock/heartbeat" 2>/dev/null || return 1
-}
-
-_merv_lock_v2_read() {
-  _ml2_lock="$1"
-  [ -f "$_ml2_lock/owner" ] || return 1
-  MERV_LOCK_OWNER_PID=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$_ml2_lock/owner" 2>/dev/null | head -n 1)
-  MERV_LOCK_OWNER_START=$(sed -n 's/^proc_start_time=\([0-9][0-9]*\)$/\1/p' "$_ml2_lock/owner" 2>/dev/null | head -n 1)
-  MERV_LOCK_OWNER_NONCE=$(sed -n 's/^owner_nonce=\([A-Za-z0-9._:-][A-Za-z0-9._:-]*\)$/\1/p' "$_ml2_lock/owner" 2>/dev/null | head -n 1)
-  MERV_LOCK_OWNER_CREATED=$(sed -n 's/^created=\([0-9][0-9]*\)$/\1/p' "$_ml2_lock/owner" 2>/dev/null | head -n 1)
-  MERV_LOCK_OWNER_HEARTBEAT=$(sed -n 's/^heartbeat=\([0-9][0-9]*\)$/\1/p' "$_ml2_lock/owner" 2>/dev/null | head -n 1)
-  case "$MERV_LOCK_OWNER_PID:$MERV_LOCK_OWNER_START:$MERV_LOCK_OWNER_CREATED:$MERV_LOCK_OWNER_HEARTBEAT" in
-    *[!0-9:]*|:*|*::*) return 1 ;;
-  esac
-  [ -n "$MERV_LOCK_OWNER_NONCE" ] || return 1
-}
-
-_merv_lock_v2_quarantine() {
-  _ml2_lock="$1"; _ml2_parent=${_ml2_lock%/*}; _ml2_base=${_ml2_lock##*/}; _ml2_try=0
-  while [ "$_ml2_try" -lt 8 ]; do
-    _ml2_dest="$_ml2_parent/.${_ml2_base}.quarantine.$$.$_ml2_try"
-    mv "$_ml2_lock" "$_ml2_dest" 2>/dev/null && return 0
-    _ml2_try=$((_ml2_try + 1))
-  done
-  return 1
-}
-
-# Upgrade-only compatibility for pre-owner-aware template locks.  Those locks
-# were regular empty files, while the current protocol uses an owner-record
-# directory.  An empty legacy file is preserved safely by quarantining it only
-# after its mtime is older than the bounded migration window; fresh,
-# non-empty, or ambiguous state remains fail-closed.
+# Upgrade-only compatibility for pre-owner-aware template locks. Empty legacy
+# files are quarantined only after a bounded stale-age check; ambiguous or
+# non-empty state remains fail-closed.
 merv_lock_quarantine_legacy_file() {
   _ml2_legacy="${1:-}"
   _ml2_label="${2:-legacy-lock}"
@@ -2351,14 +2342,14 @@ merv_lock_quarantine_legacy_file() {
   _ml2_mtime=$(date -r "$_ml2_legacy" +%s 2>/dev/null || printf '')
   case "$_ml2_now:$_ml2_mtime" in
     *[!0-9:]*|:*|*::)
-      _merv_lock_log warn "lock $_ml2_label has unreadable legacy age; refusing migration"
+      _merv_lock_log warn "lock $_ml2_label has unreadable legacy metadata; refusing migration"
       return 1
       ;;
   esac
   [ "$_ml2_now" -ge "$_ml2_mtime" ] || return 1
   _ml2_age=$((_ml2_now - _ml2_mtime))
   [ "$_ml2_age" -ge "$_ml2_stale" ] || {
-    _merv_lock_log warn "lock $_ml2_label is a fresh legacy file; refusing migration"
+    _merv_lock_log warn "lock $_ml2_label is a fresh legacy lock; refusing migration"
     return 1
   }
   _ml2_dest="${_ml2_legacy}.legacy.quarantine.${_ml2_now}.$$"
@@ -2366,92 +2357,6 @@ merv_lock_quarantine_legacy_file() {
   _merv_lock_log warn "quarantined stale legacy lock file for $_ml2_label"
   return 0
 }
-
-merv_lock_state() {
-  _ml2_lock="${1:-$LOCKDIR/mervlan_manager.lock}"
-  [ -d "$_ml2_lock" ] || { printf 'absent'; return 0; }
-  _merv_lock_v2_read "$_ml2_lock" 2>/dev/null || { printf 'unknown'; return 0; }
-  if merv_process_identity_matches "$MERV_LOCK_OWNER_PID" "$MERV_LOCK_OWNER_START" 2>/dev/null; then
-    printf 'active'
-  else
-    printf 'stale'
-  fi
-}
-
-merv_manager_lock_state() { merv_lock_state "$@"; }
-
-merv_lock_acquire() {
-  _ml2_lock="$1"; _ml2_stale="$2"; _ml2_max="${3:-30}"; _ml2_label="${4:-${1##*/}}"; _ml2_attempt=0
-  [ -n "$_ml2_lock" ] || return 1
-  case "$_ml2_max" in ''|*[!0-9]*) _ml2_max=30 ;; esac
-  mkdir -p "${_ml2_lock%/*}" 2>/dev/null || return 1
-  # Older installations used an empty regular file for the same lock name.
-  # Migrate only a provably stale, empty legacy file; fresh, non-empty, or
-  # unreadable metadata remains fail-closed in merv_lock_state below.
-  if [ -f "$_ml2_lock" ] && [ ! -d "$_ml2_lock" ]; then
-    merv_lock_quarantine_legacy_file "$_ml2_lock" "$_ml2_label" || return 1
-  fi
-  while ! mkdir "$_ml2_lock" 2>/dev/null; do
-    _ml2_state=$(merv_lock_state "$_ml2_lock")
-    case "$_ml2_state" in
-      active)
-        [ "$_ml2_attempt" -lt "$_ml2_max" ] || return 1
-        sleep 2; _ml2_attempt=$((_ml2_attempt + 1))
-        ;;
-      stale)
-        _merv_lock_v2_quarantine "$_ml2_lock" || return 1
-        ;;
-      unknown|*)
-        _merv_lock_log warn "lock ${_ml2_label} has unknown owner metadata; refusing reclaim"
-        return 1
-        ;;
-    esac
-  done
-  _ml2_start=$(merv_proc_start_time "$$" 2>/dev/null || printf '')
-  [ -n "$_ml2_start" ] || return 1
-  _ml2_nonce=$(_merv_lock_v2_nonce); _ml2_now=$(merv_lock_now)
-  _merv_lock_v2_write "$_ml2_lock" "$_ml2_start" "$_ml2_nonce" "$_ml2_now" || return 1
-  MERV_LOCK_NONCE="$_ml2_nonce"; MERV_LOCK_START="$_ml2_start"
-  return 0
-}
-
-merv_lock_heartbeat() {
-  _ml2_lock="$1"
-  _merv_lock_v2_read "$_ml2_lock" 2>/dev/null || return 1
-  [ "$MERV_LOCK_OWNER_PID" = "$$" ] && [ "$MERV_LOCK_OWNER_START" = "$(merv_proc_start_time "$$" 2>/dev/null)" ] || return 1
-  _ml2_now=$(merv_lock_now); _ml2_tmp="$_ml2_lock/.owner.tmp.$$"
-  sed "s/^heartbeat=.*/heartbeat=$_ml2_now/" "$_ml2_lock/owner" > "$_ml2_tmp" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  chmod 600 "$_ml2_tmp" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  mv -f "$_ml2_tmp" "$_ml2_lock/owner" 2>/dev/null || { rm -f "$_ml2_tmp" 2>/dev/null; return 1; }
-  printf '%s\n' "$_ml2_now" > "$_ml2_lock/heartbeat" 2>/dev/null
-}
-
-merv_lock_release() {
-  _ml2_lock="$1"; _ml2_nonce="${2:-${MERV_LOCK_NONCE:-}}"
-  _ml2_restore="${_ml2_lock%/*}/.${_ml2_lock##*/}.owner.restore.$$"
-  [ -n "$_ml2_lock" ] || return 0
-  [ -d "$_ml2_lock" ] || return 0
-  _merv_lock_v2_read "$_ml2_lock" 2>/dev/null || return 1
-  [ "$MERV_LOCK_OWNER_PID" = "$$" ] && [ "$MERV_LOCK_OWNER_START" = "$(merv_proc_start_time "$$" 2>/dev/null)" ] &&
-    [ "$MERV_LOCK_OWNER_NONCE" = "$_ml2_nonce" ] || return 1
-  cp -p "$_ml2_lock/owner" "$_ml2_restore" 2>/dev/null || return 1
-  rm -f "$_ml2_lock"/.owner.tmp.* 2>/dev/null || { rm -f "$_ml2_restore" 2>/dev/null; return 1; }
-  rm -f "$_ml2_lock/owner" "$_ml2_lock/pid" "$_ml2_lock/proc_start_time" "$_ml2_lock/owner_nonce" \
-    "$_ml2_lock/created" "$_ml2_lock/heartbeat" 2>/dev/null || {
-      mv -f "$_ml2_restore" "$_ml2_lock/owner" 2>/dev/null || :
-      return 1
-    }
-  if ! rmdir "$_ml2_lock" 2>/dev/null; then
-    if ! mv -f "$_ml2_restore" "$_ml2_lock/owner" 2>/dev/null; then
-      return 1
-    fi
-    chmod 600 "$_ml2_lock/owner" 2>/dev/null || :
-    return 1
-  fi
-  rm -f "$_ml2_restore" 2>/dev/null || :
-  return 0
-}
-
 _merv_ebtables_get_dump() {
   mervqt_has_ebtables || return 3
   _megd=$(ebtables -t filter -L --Lx 2>/dev/null) && [ -n "$_megd" ] && { printf '%s\n' "$_megd"; return 0; }
@@ -2754,5 +2659,21 @@ merv_qt_teardown() {
   _meqt_dump=$(_merv_ebtables_get_dump) || return 1
   ! merv_ebtables_chain_declared_exact "$_meqt_dump" "$MERV_QT_CHAIN"
 }
+
+# Generic owner-lock compatibility surface.  New callers use the canonical
+# merv_owner_lock_* APIs from lib_owner_lock.sh directly; these wrappers keep
+# already-synced entry points and legacy diagnostics working during rollout.
+merv_lock_state() {
+  _mlc_state=$(merv_owner_lock_state "$@") || _mlc_state=unknown
+  case "$_mlc_state" in
+    absent) printf 'absent' ;;
+    live) printf 'active' ;;
+    dead|reused) printf 'stale' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+merv_manager_lock_state() { merv_lock_state "$@"; }
+merv_lock_acquire() { merv_owner_lock_acquire "$@"; }
+merv_lock_release() { merv_owner_lock_release "$@"; }
 
 LIB_MERVQT_LOADED=1

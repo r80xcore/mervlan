@@ -35,6 +35,7 @@ fi
 # MAC validators reused by the client-metadata annotation pass. Best-effort:
 # if absent we degrade to unguarded collection rather than fail.
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
@@ -45,6 +46,10 @@ fi
 
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+if merv_update_mutation_blocked; then
+  warn -c cli,vlan "Client collection refused: Update maintenance is active"
+  exit 75
+fi
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -69,32 +74,92 @@ cleanup_collect() {
   _collect_cleanup_rc=$?
   _collect_cleanup_failed=0
   # Kill any remaining background collection jobs
-  for pid in $BG_PIDS; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || _collect_cleanup_failed=1
-    fi
+  for _collect_track in ${BG_TRACKED:-}; do
+    _collect_pid=${_collect_track%%:*}
+    _collect_start=${_collect_track#*:}
+    case "$_collect_pid:$_collect_start" in
+      ''|*[!0-9:]*|:*|*::*)
+        _collect_cleanup_failed=1
+        warn -c cli,vlan "Client collection cleanup could not validate a tracked worker identity"
+        continue
+        ;;
+    esac
+    collect_stop_tracked_pid "$_collect_pid" "$_collect_start" || _collect_cleanup_failed=1
   done
-  # Remove temporary collection directory only if we own the lock
+  # If a worker identity could not be recorded, do not release the collection
+  # owner: a later process must not race an unvalidated child.  The preserved
+  # lock/workspace is an explicit recovery signal rather than silent success.
   if [ "${COLLECT_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-    if [ -d "$COLLECTDIR" ] && ! rm -rf "$COLLECTDIR" 2>/dev/null; then
+    if [ "${BG_IDENTITY_FAILURE:-0}" -eq 1 ]; then
       _collect_cleanup_failed=1
-      error -c cli,vlan "Client collection cleanup could not remove its private workspace"
-    fi
-    if ! type merv_lock_release >/dev/null 2>&1 || ! merv_lock_release "$COLLECT_LOCK" "${COLLECT_LOCK_NONCE:-}" 2>/dev/null; then
-      _collect_cleanup_failed=1
-      error -c cli,vlan "Client collection cleanup could not release its owner lock"
+      error -c cli,vlan "Client collection cleanup retained ownership because a worker identity was unverifiable"
     else
-      COLLECT_LOCK_ACQUIRED=0
+      if [ -d "$COLLECTDIR" ] && ! rm -rf "$COLLECTDIR" 2>/dev/null; then
+        _collect_cleanup_failed=1
+        error -c cli,vlan "Client collection cleanup could not remove its private workspace"
+      fi
+      if ! type merv_lock_release >/dev/null 2>&1 || ! merv_lock_release "$COLLECT_LOCK" "${COLLECT_LOCK_NONCE:-}" 2>/dev/null; then
+        _collect_cleanup_failed=1
+        error -c cli,vlan "Client collection cleanup could not release its owner lock"
+      else
+        COLLECT_LOCK_ACQUIRED=0
+      fi
     fi
   fi
   [ -z "${OUT_WORK:-}" ] || rm -f "$OUT_WORK" 2>/dev/null || _collect_cleanup_failed=1
   [ "$_collect_cleanup_failed" -eq 0 ] || _collect_cleanup_rc=1
   return "$_collect_cleanup_rc"
 }
-trap 'cleanup_collect' EXIT INT TERM
+COLLECT_SIGNAL_HANDLING=0
+collect_handle_signal() {
+  _collect_signal_status="$1"
+  [ "${COLLECT_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_collect_signal_status"
+  COLLECT_SIGNAL_HANDLING=1
+  trap - INT TERM
+  error -c cli,vlan "Client collection interrupted (rc=$_collect_signal_status); stopping tracked workers"
+  exit "$_collect_signal_status"
+}
+trap 'cleanup_collect' EXIT
+trap 'collect_handle_signal 130' INT
+trap 'collect_handle_signal 143' TERM
 
 # Track background job PIDs for cleanup
 BG_PIDS=""
+BG_TRACKED=""
+BG_IDENTITY_FAILURE=0
+collect_stop_tracked_pid() {
+  _collect_stop_pid="$1"
+  _collect_stop_start="$2"
+  merv_process_identity_matches "$_collect_stop_pid" "$_collect_stop_start" 2>/dev/null || return 0
+  kill -TERM "$_collect_stop_pid" 2>/dev/null || return 1
+  _collect_stop_n=0
+  while [ "$_collect_stop_n" -lt 2 ] &&
+        merv_process_identity_matches "$_collect_stop_pid" "$_collect_stop_start" 2>/dev/null; do
+    sleep 1
+    _collect_stop_n=$((_collect_stop_n + 1))
+  done
+  if merv_process_identity_matches "$_collect_stop_pid" "$_collect_stop_start" 2>/dev/null; then
+    kill -KILL "$_collect_stop_pid" 2>/dev/null || return 1
+  fi
+  wait "$_collect_stop_pid" 2>/dev/null || :
+  return 0
+}
+
+collect_track_pid() {
+  _collect_track_pid="$1"
+  _collect_track_start=$(merv_proc_start_time "$_collect_track_pid" 2>/dev/null || printf '')
+  case "$_collect_track_start" in
+    ''|*[!0-9]*)
+      warn -c cli,vlan "Client collection could not record worker identity pid=$_collect_track_pid"
+      BG_PIDS="$BG_PIDS $_collect_track_pid"
+      BG_IDENTITY_FAILURE=1
+      return 1
+      ;;
+  esac
+  BG_PIDS="$BG_PIDS $_collect_track_pid"
+  BG_TRACKED="$BG_TRACKED $_collect_track_pid:$_collect_track_start"
+  return 0
+}
 
 # ----------------------------------------------------------- Collection lock --
 # COLLECTDIR is a single shared path, so two concurrent collections would race
@@ -361,7 +426,7 @@ fi
 # Start main collection only after the complete node trust preflight passes.
 ( trap - EXIT INT TERM; collect_from_main ) &
 MAIN_PID="$!"
-BG_PIDS="$BG_PIDS $MAIN_PID"
+collect_track_pid "$MAIN_PID" || :
 
 if [ "$NODES_ENABLED" = "true" ]; then
   # Spawn collection background jobs for each node with PID tracking
@@ -376,9 +441,18 @@ if [ "$NODES_ENABLED" = "true" ]; then
     [ -n "$node_id" ] || continue
     ( trap - EXIT INT TERM; collect_from_node "$node_id" "$node_ip" "$COLLECTDIR/node_${node_ip}.json" ) &
     # Track PID for cleanup handler
-    BG_PIDS="$BG_PIDS $!"
+    collect_track_pid "$!" || :
   done < "$_node_tmp"
   rm -f "$_node_tmp"
+fi
+
+# A worker whose process start identity could not be recorded is not safely
+# signalable or attributable. Stop before any merge/publication and retain the
+# owner/workspace for explicit recovery; never turn an unverifiable child into
+# a successful collection merely because it eventually exits.
+if [ "${BG_IDENTITY_FAILURE:-0}" -eq 1 ]; then
+  error -c cli,vlan "Client collection stopped: worker process identity could not be verified; preserving ownership for recovery"
+  exit 75
 fi
 
 # Wait for all background jobs (main + nodes) with timeout
@@ -386,8 +460,13 @@ if [ -n "$BG_PIDS" ]; then
   waited=0
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
     _still_running=0
-    for _pid in $BG_PIDS; do
-      if [ -d "/proc/$_pid" ]; then
+    for _collect_track in ${BG_TRACKED:-}; do
+      _collect_pid=${_collect_track%%:*}
+      _collect_start=${_collect_track#*:}
+      case "$_collect_pid:$_collect_start" in
+        ''|*[!0-9:]*|:*|*::*) continue ;;
+      esac
+      if merv_process_identity_matches "$_collect_pid" "$_collect_start" 2>/dev/null; then
         _still_running=1
         break
       fi
@@ -401,17 +480,28 @@ if [ -n "$BG_PIDS" ]; then
 
   if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
     warn -c cli,vlan "Client collection timeout after ${WAIT_TIMEOUT}s; some results may be incomplete"
-    for _pid in $BG_PIDS; do
-      [ -d "/proc/$_pid" ] && kill "$_pid" 2>/dev/null
+    for _collect_track in ${BG_TRACKED:-}; do
+      _collect_pid=${_collect_track%%:*}
+      _collect_start=${_collect_track#*:}
+      case "$_collect_pid:$_collect_start" in
+        ''|*[!0-9:]*|:*|*::*) continue ;;
+      esac
+      collect_stop_tracked_pid "$_collect_pid" "$_collect_start" || :
     done
   else
     info -c vlan "All collection jobs finished in ${waited}s"
   fi
 
-  for _pid in $BG_PIDS; do
-    wait "$_pid" 2>/dev/null
-  done
+    for _collect_track in ${BG_TRACKED:-}; do
+      _collect_pid=${_collect_track%%:*}
+      _collect_start=${_collect_track#*:}
+      case "$_collect_pid:$_collect_start" in
+        ''|*[!0-9:]*|:*|*::*) continue ;;
+      esac
+      wait "$_collect_pid" 2>/dev/null
+    done
   BG_PIDS=""
+  BG_TRACKED=""
 fi
 
 # ============================================================================ #

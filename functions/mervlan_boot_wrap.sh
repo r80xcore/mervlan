@@ -366,7 +366,24 @@ _mode_install() {
       return 75
     fi
     warn -c boot "Incomplete Update journal detected; running installer projection recovery without starting the manager"
-    if MERV_UPDATE_OWNER=1 MERV_UPDATE_RECOVERY=1 "$MERV_BASE/install.sh" reinstall >> "$LOG_chan_boot" 2>&1; then
+    _update_recovery_run=$(merv_update_journal_get run_id '' 2>/dev/null || printf '')
+    _update_recovery_start=$(merv_identity_current_start 2>/dev/null || printf '')
+    if [ -z "$_update_recovery_run" ] || [ -z "$_update_recovery_start" ] ||
+       ! merv_update_state_value "$_update_recovery_run" >/dev/null; then
+      warn -c boot "Interrupted Update recovery context could not be authenticated; manager startup remains suppressed"
+      return 75
+    fi
+    MERV_UPDATE_RECOVERY=1
+    MERV_UPDATE_RECOVERY_RUN_ID="$_update_recovery_run"
+    MERV_UPDATE_RECOVERY_PARENT_PID="$$"
+    MERV_UPDATE_RECOVERY_PARENT_START="$_update_recovery_start"
+    export MERV_UPDATE_RECOVERY MERV_UPDATE_RECOVERY_RUN_ID \
+      MERV_UPDATE_RECOVERY_PARENT_PID MERV_UPDATE_RECOVERY_PARENT_START
+    if ! merv_update_recovery_context_valid; then
+      warn -c boot "Interrupted Update recovery context could not be authenticated; manager startup remains suppressed"
+      return 75
+    fi
+    if "$MERV_BASE/install.sh" reinstall >> "$LOG_chan_boot" 2>&1; then
       if type merv_update_journal_active >/dev/null 2>&1 && merv_update_journal_active; then
         if [ "$(merv_update_journal_get activation_started 0)" != "1" ]; then
           merv_update_journal_clear || warn -c boot "Projection recovery succeeded but the pre-activation Update journal could not be cleared"

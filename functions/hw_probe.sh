@@ -58,8 +58,7 @@ hw_probe_ack_exit() {
 }
 trap 'hw_probe_ack_exit' EXIT
 
-if [ "${MERV_UPDATE_OWNER:-0}" != "1" ] &&
-   type merv_update_mutation_blocked >/dev/null 2>&1 &&
+if type merv_update_mutation_blocked >/dev/null 2>&1 &&
    merv_update_mutation_blocked; then
     error "Hardware profile refresh refused while Update maintenance is active"
     exit 75

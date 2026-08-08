@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: sync_nodes.sh || version="0.72.3"                     #
+#             - File: sync_nodes.sh || version="0.72.4"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -21,12 +21,29 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-    unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_SSH_LOADED LIB_JSON_LOADED LIB_DEBUG_LOADED
+    unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_SSH_LOADED LIB_JSON_LOADED LIB_DEBUG_LOADED LIB_OWNER_LOCK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
+    error -c cli,vlan "Unable to load the owner-lock library; refusing node synchronization"
+    exit 1
+}
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || {
+    error -c cli,vlan "Unable to load the Update lifecycle state library; refusing node synchronization"
+    exit 75
+}
+if [ "${MERV_MAINTENANCE_SYNC:-0}" = "1" ]; then
+    if ! merv_update_maintenance_sync_context_valid; then
+        error -c cli,vlan "Sync refused: maintenance synchronization lacks an authenticated Update owner"
+        exit 75
+    fi
+elif merv_update_mutation_blocked; then
+    error -c cli,vlan "Sync refused: Update maintenance is active"
+    exit 75
+fi
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
     error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing node synchronization"
     exit 1
@@ -36,16 +53,9 @@ fi
     error -c cli,vlan "Unable to load the action acknowledgement library; refusing node synchronization"
     exit 1
 }
-SYNC_ACTION_LOCK_ACQUIRED=0
-if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" != 1 ] && [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
-    . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || exit 75
-    merv_action_lock_acquire "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" || exit 75
-    SYNC_ACTION_LOCK_ACQUIRED=1
-    _sync_action_lock_nonce="$MERV_ACTION_LOCK_NONCE"; _sync_action_lock_start="$MERV_ACTION_LOCK_START"
-fi
-# Progress publication is optional. A missing or unusable status path must
-# never change the synchronization result. Keep no-op fallbacks so an older
-# installation missing the new helper can still run synchronization normally.
+# Progress publication is optional. Load it before lock acquisition so a
+# correlated request that is rejected by the action lock still reaches a
+# visible terminal failure state.
 merv_action_progress_init() { :; }
 merv_action_progress_phase() { :; }
 merv_action_progress_update() { :; }
@@ -54,6 +64,46 @@ merv_action_progress_fail() { :; }
 if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
     if ! . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null; then
         warn -c cli,vlan "Action progress publication is unavailable for node synchronization"
+    fi
+fi
+_sync_lock_ack_action=sync_vlanmgr
+for _sync_lock_arg in "$@"; do
+    [ "$_sync_lock_arg" = settings-only ] || [ "$_sync_lock_arg" = --settings-only ] && {
+        _sync_lock_ack_action=syncsettings_vlanmgr
+        break
+    }
+done
+SYNC_ACTION_LOCK_ACQUIRED=0
+if [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
+    . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || exit 75
+    _sync_action_lock_path="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+    merv_action_lock_enter "$_sync_action_lock_path"
+    _sync_action_lock_rc=$?
+    if [ "$_sync_action_lock_rc" -ne 0 ]; then
+        _sync_lock_message="The node synchronization could not start because its action lock could not be acquired."
+        if [ "$_sync_action_lock_rc" -eq 3 ]; then
+            _sync_lock_message="Another configuration action is already running; node synchronization was not started."
+        fi
+        merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_sync_lock_ack_action" \
+            "${_sync_lock_ack_action}" "Preparing synchronization..."
+        merv_action_progress_fail "$_sync_lock_message"
+        if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+            action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_sync_lock_ack_action" \
+                "$_sync_action_lock_rc" global >/dev/null 2>&1 || :
+        fi
+        exit 75
+    fi
+    _sync_action_lock_mode="${MERV_ACTION_LOCK_MODE:-none}"
+    [ "$_sync_action_lock_mode" = self ] && SYNC_ACTION_LOCK_ACQUIRED=1
+    _sync_action_lock_nonce="$MERV_ACTION_LOCK_NONCE"; _sync_action_lock_start="$MERV_ACTION_LOCK_START"
+    if ! merv_action_lock_export_child_context; then
+        merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_sync_lock_ack_action" \
+            "${_sync_lock_ack_action}" "Preparing synchronization..."
+        merv_action_progress_fail "The node synchronization owner context was invalid; no work was started."
+        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_sync_lock_ack_action" 4 global >/dev/null 2>&1 || :
+        merv_action_lock_leave "$_sync_action_lock_path" "$_sync_action_lock_nonce" \
+            "$_sync_action_lock_start" "$_sync_action_lock_mode" >/dev/null 2>&1 || :
+        exit 75
     fi
 fi
 # =========================================== End of MerVLAN environment setup #
@@ -149,6 +199,30 @@ fi
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$SYNC_PROGRESS_ACTION" \
     "$SYNC_PROGRESS_LABEL" "$SYNC_PROGRESS_PREP"
 
+sync_reconcile_signal_children() {
+    # lib_node_jobs publishes terminal worker results only after validating
+    # wrapper/child identities. Reuse that path rather than signalling a raw
+    # PID that may already belong to a different process.
+    if type mnj_reconcile_slot >/dev/null 2>&1 && [ -n "${MNJ_POOL_PHASE:-}" ]; then
+        [ -n "${MNJ_S1_PID:-}" ] && mnj_reconcile_slot 1 failed parent-signal || :
+        [ -n "${MNJ_S2_PID:-}" ] && mnj_reconcile_slot 2 failed parent-signal || :
+    fi
+}
+
+SYNC_SIGNAL_HANDLING=0
+sync_handle_signal() {
+    _sync_signal_status="$1"
+    [ "${SYNC_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_sync_signal_status"
+    SYNC_SIGNAL_HANDLING=1
+    trap - INT TERM
+    error -c cli,vlan "Sync interrupted (rc=$_sync_signal_status); reconciling tracked node workers"
+    sync_reconcile_signal_children
+    if type merv_action_progress_fail >/dev/null 2>&1; then
+        merv_action_progress_fail "Synchronization interrupted; tracked workers were stopped"
+    fi
+    exit "$_sync_signal_status"
+}
+
 # Remove any per-node sync metadata breadcrumbs left by copy_file_to_node.
 # Fires on every exit path (normal, error, signal) so no stale files survive
 # across runs even if verification was skipped or the script was interrupted.
@@ -163,7 +237,7 @@ _cleanup_sync_tmp() {
         fi
     done
     if [ "${SYNC_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-        if ! merv_lock_release "$SYNC_LOCK" "${SYNC_LOCK_NONCE:-}" 2>/dev/null; then
+        if ! merv_owner_lock_release "$SYNC_LOCK" "${SYNC_LOCK_NONCE:-}" 2>/dev/null; then
             _sync_cleanup_failed=1
             error -c cli,vlan "Sync cleanup could not release its owner lock"
         else
@@ -171,7 +245,7 @@ _cleanup_sync_tmp() {
         fi
     fi
     if [ "${SYNC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-        if merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_sync_action_lock_nonce" "$_sync_action_lock_start" >/dev/null 2>&1; then
+        if merv_action_lock_leave "${_sync_action_lock_path:-${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}}" "$_sync_action_lock_nonce" "$_sync_action_lock_start" "${_sync_action_lock_mode:-self}" >/dev/null 2>&1; then
             SYNC_ACTION_LOCK_ACQUIRED=0
         else
             _sync_cleanup_failed=1
@@ -189,7 +263,9 @@ _cleanup_sync_tmp() {
     fi
     return "$_sync_cleanup_rc"
 }
-trap '_cleanup_sync_tmp' EXIT INT TERM
+trap '_cleanup_sync_tmp' EXIT
+trap 'sync_handle_signal 130' INT
+trap 'sync_handle_signal 143' TERM
 
 # ========================================================================== #
 # CONCURRENCY GUARD — One sync at a time; never overlap a manager apply       #
@@ -206,28 +282,28 @@ trap '_cleanup_sync_tmp' EXIT INT TERM
 SYNC_LOCK="$LOCKDIR/sync_nodes.lock"
 SYNC_LOCK_ACQUIRED=0
 SYNC_LOCK_NONCE=""
-if [ "$DRY_RUN" != "yes" ] && type merv_lock_acquire >/dev/null 2>&1; then
+if [ "$DRY_RUN" != "yes" ] && type merv_owner_lock_acquire >/dev/null 2>&1; then
     mkdir -p "$LOCKDIR" 2>/dev/null || {
         error -c cli,vlan "Sync: lock directory could not be created; refusing synchronization"
         exit 1
     }
-    if [ "${MERV_MAINTENANCE_SYNC:-0}" != "1" ] && type merv_lock_state >/dev/null 2>&1; then
-        case "$(merv_lock_state "$LOCKDIR/mervlan_maintenance.lock" 1800)" in
-            active|unknown)
+    if ! merv_update_maintenance_sync_context_valid && type merv_owner_lock_state >/dev/null 2>&1; then
+        case "$(merv_owner_lock_state "$LOCKDIR/mervlan_maintenance.lock")" in
+            live|unknown)
                 warn -c cli,vlan "Sync: update, backup, or restore maintenance is active — skipping this run"
                 exit 1
                 ;;
         esac
     fi
-    if type merv_lock_state >/dev/null 2>&1; then
-        case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
-            active|unknown)
+    if type merv_owner_lock_state >/dev/null 2>&1; then
+        case "$(merv_owner_lock_state "$LOCKDIR/mervlan_manager.lock")" in
+            live|unknown)
                 warn -c cli,vlan "Sync: mervlan_manager is applying config — skipping this run"
                 exit 0
                 ;;
         esac
     fi
-    if merv_lock_acquire "$SYNC_LOCK" "${MERV_SYNC_LOCK_STALE_SEC:-600}" 0 "sync_nodes"; then
+    if merv_owner_lock_acquire "$SYNC_LOCK" "${MERV_SYNC_LOCK_STALE_SEC:-600}" 0 "sync_nodes"; then
         SYNC_LOCK_ACQUIRED=1
         SYNC_LOCK_NONCE="$MERV_LOCK_NONCE"
     else
@@ -248,6 +324,7 @@ settings/var_settings.sh
 settings/log_settings.sh 
 settings/lib_json.sh
 settings/lib_identity.sh
+settings/lib_owner_lock.sh
 settings/lib_ssh_trust.sh
 settings/lib_action_lock.sh
 settings/lib_debug.sh
@@ -316,6 +393,7 @@ settings/var_settings.sh
 settings/log_settings.sh 
 settings/lib_json.sh  
 settings/lib_identity.sh
+settings/lib_owner_lock.sh
 settings/lib_ssh_trust.sh
 settings/lib_action_lock.sh
 settings/lib_debug.sh 
@@ -1017,8 +1095,10 @@ verify_file_on_node() {
     exists_check=$(merv_ssh_exec "$node_id" "$node_ip" "test -f '$remote_file' && echo 'exists'" 2>/dev/null)
     if echo "$exists_check" | grep -q "exists"; then
         # Check file size to ensure it's not empty
-        remote_size=$(merv_ssh_exec "$node_id" "$node_ip" "stat -c%s '$remote_file' 2>/dev/null || wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
-        local_size=$(stat -c%s "$MERV_BASE/$file" 2>/dev/null || wc -c < "$MERV_BASE/$file" 2>/dev/null || echo 0)
+        # BusyBox stat variants do not share GNU's -c format flag.  wc -c is
+        # available on the router and is sufficient for this bounded check.
+        remote_size=$(merv_ssh_exec "$node_id" "$node_ip" "wc -c < '$remote_file' 2>/dev/null || echo 0" 2>/dev/null)
+        local_size=$(wc -c < "$MERV_BASE/$file" 2>/dev/null || echo 0)
 
         # Remove any extra characters from size
         remote_size=$(echo "$remote_size" | tr -cd '0-9')

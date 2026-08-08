@@ -23,12 +23,13 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_MERVQT_LOADED LIB_OWNER_LOCK_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 # Graceful-degradation: load MERV_MAC enforcement libs if present.
 # heal_event.sh degrades safely if the files are missing (partial install).
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
@@ -195,21 +196,21 @@ fi
 # with a dead/absent PID) cannot block every future heal forever — that was the
 # old failure mode that required a manual cleanup or reboot.
 MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
-if type merv_lock_state >/dev/null 2>&1; then
-  _mgr_state=$(merv_lock_state "$MANAGER_LOCK")
+if type merv_owner_lock_state >/dev/null 2>&1; then
+  _mgr_state=$(merv_owner_lock_state "$MANAGER_LOCK")
 else
   # The owner-aware lock contract is mandatory for mutating heal work.
   error -c vlan "Heal: owner-aware lock support is unavailable; refusing to run"
   exit 1
 fi
 case "$_mgr_state" in
-  active|unknown)
+  live|unknown)
     type merv_dhcp_handoff_coalesce >/dev/null 2>&1 &&
       merv_dhcp_handoff_coalesce heal manager manager-active >/dev/null 2>&1 || :
     info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active (${_mgr_state})"
     exit 0
     ;;
-  stale)
+  dead|reused)
     warn -c vlan "Heal: mervlan_manager.lock has a dead owner; continuing without deleting it"
     ;;
   absent)
@@ -224,7 +225,7 @@ esac
 # Ensure locks directory exists for all lock/cooldown files
 mkdir -p "$LOCKDIR" 2>/dev/null
 
-# Hard mutex via the shared lock primitive (lib_mervqt.sh). This is the same
+# Hard mutex via the shared lock primitive (lib_owner_lock.sh). This is the same
 # implementation the manager uses: atomic mkdir plus a complete process
 # identity record. Non-blocking (max_wait_iters=0): heal skips on contention
 # rather than queueing. A crashed heal is quarantined only after its recorded
@@ -245,8 +246,8 @@ heal_cleanup_on_exit() {
     fi
   fi
   if [ "${HEAL_LOCK_ACQUIRED:-0}" -eq 1 ] &&
-     type merv_lock_release >/dev/null 2>&1 &&
-     merv_lock_release "$LOCK" "${HEAL_LOCK_NONCE:-}" 2>/dev/null; then
+     type merv_owner_lock_release >/dev/null 2>&1 &&
+     merv_owner_lock_release "$LOCK" "${HEAL_LOCK_NONCE:-}" 2>/dev/null; then
     HEAL_LOCK_ACQUIRED=0
   elif [ "${HEAL_LOCK_ACQUIRED:-0}" -eq 1 ]; then
     _heal_cleanup_failed=1
@@ -255,8 +256,8 @@ heal_cleanup_on_exit() {
   [ "$_heal_cleanup_failed" -eq 0 ] || _heal_cleanup_rc=1
   return "$_heal_cleanup_rc"
 }
-if type merv_lock_acquire >/dev/null 2>&1; then
-  if merv_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
+if type merv_owner_lock_acquire >/dev/null 2>&1; then
+  if merv_owner_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
     HEAL_LOCK_ACQUIRED=1
     HEAL_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     trap 'HEAL_EXIT_REASON=signal-int; exit 130' INT
@@ -1059,12 +1060,12 @@ EVENT_LABEL="$EVENT"
 # Use the shared lock-state helper (not a raw [ -d ]) so a CRASHED manager that
 # left mervlan_manager.lock behind with a dead/absent PID cannot block every
 # subsequent heal event here — the same stale-safe guarantee applied at entry.
-if ! type merv_lock_state >/dev/null 2>&1; then
+if ! type merv_owner_lock_state >/dev/null 2>&1; then
   error -c vlan "Heal: owner-aware lock support is unavailable; refusing to run"
   exit 1
 fi
-case "$(merv_lock_state "$MANAGER_LOCK")" in
-  active|unknown)
+case "$(merv_owner_lock_state "$MANAGER_LOCK")" in
+  live|unknown)
     info -c vlan "Heal: skipping [$EVENT_LABEL] because mervlan_manager is active or its owner is unknown"
     exit 0
     ;;
@@ -1484,9 +1485,9 @@ if should_heal_event "$EVENT"; then
         # Skip if manager is genuinely running (concurrent apply in progress).
         # Use the stale-safe helper so a crashed manager's leftover lock does
         # not suppress the deferred recheck; the child heal re-checks anyway.
-        type merv_lock_state >/dev/null 2>&1 || exit 0
-        case "$(merv_lock_state "$MANAGER_LOCK")" in
-          active|unknown) exit 0 ;;
+        type merv_owner_lock_state >/dev/null 2>&1 || exit 0
+        case "$(merv_owner_lock_state "$MANAGER_LOCK")" in
+          live|unknown) exit 0 ;;
         esac
         sh "$MERV_BASE/functions/heal_event.sh" "deferred_${EVENT}"
       ) >/dev/null 2>&1 &

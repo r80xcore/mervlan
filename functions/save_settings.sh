@@ -46,19 +46,56 @@ if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
 fi
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "save_vlanmgr" "Save Settings" \
     "Saving settings..."
-if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" != "1" ] && [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
+_save_signal_handling=0
+_save_handle_signal() {
+    _save_signal_status="$1"
+    [ "${_save_signal_handling:-0}" -eq 0 ] || exit "$_save_signal_status"
+    _save_signal_handling=1
+    trap - INT TERM
+    if type merv_action_progress_fail >/dev/null 2>&1; then
+        merv_action_progress_fail "Settings save interrupted; no success result was published"
+    fi
+    printf '%s\n' "[WARN] save-settings interrupted (rc=$_save_signal_status); stopping before normal completion" >&2
+    exit "$_save_signal_status"
+}
+trap '_save_handle_signal 130' INT
+trap '_save_handle_signal 143' TERM
+if [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
     . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || exit 1
-    merv_action_lock_acquire "${MERV_ACTION_LOCK_PATH:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_action.lock}" || exit 75
+    _save_action_lock_path="${MERV_ACTION_LOCK_PATH:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_action.lock}"
+    merv_action_lock_enter "$_save_action_lock_path"
+    _save_action_lock_rc=$?
+    if [ "$_save_action_lock_rc" -ne 0 ]; then
+        _save_lock_message="The settings save could not start because its action lock could not be acquired."
+        if [ "$_save_action_lock_rc" -eq 3 ]; then
+            _save_lock_message="Another configuration action is already running; the settings save was not started."
+        fi
+        merv_action_progress_fail "$_save_lock_message"
+        if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+            action_ack_lock_failure "$MERV_PROGRESS_TOKEN" save_vlanmgr "$_save_action_lock_rc" global >/dev/null 2>&1 || :
+        fi
+        exit 75
+    fi
+    _save_action_lock_mode="${MERV_ACTION_LOCK_MODE:-none}"
     _save_action_lock_nonce="$MERV_ACTION_LOCK_NONCE"; _save_action_lock_start="$MERV_ACTION_LOCK_START"
+    merv_action_lock_export_child_context || exit 75
     _save_release_lock() {
         _save_exit_rc=$?
-        if ! merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_action.lock}" "$_save_action_lock_nonce" "$_save_action_lock_start" >/dev/null 2>&1; then
+        if ! merv_action_lock_leave "$_save_action_lock_path" "$_save_action_lock_nonce" "$_save_action_lock_start" "$_save_action_lock_mode" >/dev/null 2>&1; then
             printf '%s\n' "[ERROR] save-settings action-lock cleanup failed; lock retained for recovery" >&2
+            merv_action_progress_fail "Settings were saved, but action-lock cleanup failed; recovery is required."
+            if [ "${MERV_ACTION_ACK_STAGE:-0}" != "1" ] &&
+               [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
+                action_ack_error "$MERV_PROGRESS_TOKEN" save_vlanmgr \
+                    '{"local_saved":"1","node_sync":"unknown"}' \
+                    "Settings were saved, but backend action-lock cleanup failed; recovery is required." \
+                    '["action-lock-cleanup-failed"]' action-lock-cleanup-failed >/dev/null 2>&1 || :
+            fi
             [ "$_save_exit_rc" -eq 0 ] && _save_exit_rc=75
         fi
         return "$_save_exit_rc"
     }
-    trap '_save_release_lock' EXIT INT TERM
+    trap '_save_release_lock' EXIT
 fi
 # =========================================== End of MerVLAN environment setup #
 # ============================================================================ #

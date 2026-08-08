@@ -27,12 +27,26 @@ Runtime state is normally below `/tmp/mervlan_tmp/`:
 ## Ownership and publication
 
 - Lock directories are owned and released by the process that acquired them.
+- Generic locks publish one authoritative v2 `owner` record with exactly five
+  fields: `pid`, `proc_start_time`, `owner_nonce`, `created`, and `heartbeat`.
+  Fields are validated as untrusted text, published atomically, and mode 0600.
+  Compatibility sidecars may remain for named readers but never establish
+  liveness or reclaimability.
+- A complete owner is reclaimed only after exact PID/start identity proves it
+  dead or PID-reused. Incomplete claims use bounded publication grace and
+  fail closed when age is unavailable. Failed release restores the complete
+  owner record before returning failure.
 - Worker completion is an explicit validated terminal result, not merely a
   missing PID or lock.
 - Shared files are written to a same-directory temporary file and published by
   atomic rename.
 - Client JSON must remain readable if a new generation fails.
 - Progress and result files are parsed as data, never executed as shell.
+- Update maintenance has a journal-bound owner/quiesce marker under the
+  maintenance state root; ordinary mutation and observation requests remain
+  blocked until terminal cleanup. Observation ownership uses the generic
+  identity/owner primitives but keeps generation and coalescing state local to
+  the observation worker.
 
 ## Useful diagnostics
 
@@ -60,6 +74,11 @@ are:
 - client generations: `/tmp/mervlan_tmp/client_collection`;
 - selftest state: `/tmp/mervlan_tmp/selftest.<run-id>`;
 - evidence: `/tmp/mervlan_tmp/evidence/<run-id>/...`.
+
+The full Sync Nodes runtime manifest stages `settings/lib_owner_lock.sh` as a
+0644 library and verifies it on the node. Settings-only Sync intentionally
+stages only `settings/settings.json`; developer documentation, plans, and raw
+evidence are not runtime payload.
 
 Use variables such as `TMPDIR`, `LOGDIR`, `LOCKDIR`, `RESULTDIR`, `COLLECTDIR`,
 and `MERV_PROGRESS_ROOT` after loading `var_settings.sh`; this keeps tests

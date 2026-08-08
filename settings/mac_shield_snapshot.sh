@@ -42,6 +42,8 @@ if [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 
 # ============================================================================
@@ -656,13 +658,13 @@ merv_mac_maybe_trigger_heal_on_precondition_fail() {
   # directory with a dead/absent PID) suppress MERV_MAC-triggered recovery
   # forever. Use the shared lock-state helper; fall back to the blunt check if
   # lib_mervqt is somehow not loaded in this context.
-  if type merv_lock_state >/dev/null 2>&1; then
-    case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
-      active|unknown)
+  if type merv_owner_lock_state >/dev/null 2>&1; then
+    case "$(merv_owner_lock_state "$LOCKDIR/mervlan_manager.lock")" in
+      live|unknown)
         info -c vlan "MERV_MAC: precondition fail — heal not queued (mervlan_manager active)"
         return 0
         ;;
-      stale)
+      dead|reused)
         warn -c vlan "MERV_MAC: mervlan_manager.lock stale — ignoring for heal trigger"
         ;;
     esac
@@ -760,8 +762,8 @@ merv_mac_snapshot() {
   local _snap_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/mac_snapshot.lock"
   local _snap_owned=0
   local _snap_nonce=""
-  if type merv_lock_acquire >/dev/null 2>&1; then
-    if merv_lock_acquire "$_snap_lock" "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:-60}" 0 "mac_snapshot"; then
+  if type merv_owner_lock_acquire >/dev/null 2>&1; then
+    if merv_owner_lock_acquire "$_snap_lock" "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:-60}" 0 "mac_snapshot"; then
       _snap_owned=1
       _snap_nonce="${MERV_LOCK_NONCE:-}"
     else
@@ -803,7 +805,7 @@ merv_mac_snapshot() {
     _merv_mac_log warn "MERV_MAC: snapshot skipped — interfaces not fully settled (db unchanged)"
     merv_mac_maybe_trigger_heal_on_precondition_fail
     if [ "$_snap_owned" = 1 ]; then
-      merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+      merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
       _snap_owned=0
     fi
     return 0
@@ -825,7 +827,7 @@ merv_mac_snapshot() {
         MERV_MAC_LAST_REASON="ssh_trust_required"
         _merv_mac_log warn "MERV_MAC: snapshot blocked — complete SSH trust preflight failed"
         if [ "$_snap_owned" = 1 ]; then
-          merv_lock_release "$_snap_lock" "$_snap_nonce" || :
+          merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || :
           _snap_owned=0
         fi
         return 1
@@ -950,7 +952,7 @@ _NODES_
     fi
     rm -f "$snap_tmp" 2>/dev/null
     if [ "$_snap_owned" = 1 ]; then
-      merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+      merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
       _snap_owned=0
     fi
     return 0
@@ -966,7 +968,7 @@ _NODES_
     _merv_mac_set_counts
     rm -f "$snap_tmp" 2>/dev/null
     if [ "$_snap_owned" = 1 ]; then
-      merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+      merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
       _snap_owned=0
     fi
     return 1
@@ -1011,7 +1013,7 @@ _NODES_
   fi
 
   if [ "$_snap_owned" = 1 ]; then
-    merv_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+    merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
     _snap_owned=0
   fi
 }

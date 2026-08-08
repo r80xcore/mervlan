@@ -1,149 +1,179 @@
 #!/bin/sh
-# Lightweight global mutating-action lock for the service-event handler.
-# It has the same ownership rules as the full manager lock but does not source
-# the VLAN libraries in the DHCP-sensitive dispatch path.
+# MerVLAN action-serialization policy.
+#
+# This is deliberately a thin layer over the canonical v2 owner-record
+# implementation in lib_owner_lock.sh.  It authenticates inherited parent
+# ownership, acquires a self-owned action lock when no parent context exists,
+# exports the true owner to children, and releases only self-owned locks.
 
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] && return 0 2>/dev/null
 LIB_ACTION_LOCK_LOADED=1
+
 : "${LOCKDIR:=/tmp/mervlan_tmp/locks}"
 : "${MERV_ACTION_LOCK_PATH:=$LOCKDIR/mervlan_action.lock}"
 
-if [ -z "${LIB_IDENTITY_LOADED:-}" ]; then
+if [ -z "${LIB_OWNER_LOCK_LOADED:-}" ]; then
   _mal_base="${MERV_BASE:-/jffs/addons/mervlan}"
-  [ -f "$_mal_base/settings/lib_identity.sh" ] && . "$_mal_base/settings/lib_identity.sh" 2>/dev/null || return 1 2>/dev/null || exit 1
+  [ -r "$_mal_base/settings/lib_owner_lock.sh" ] || return 1 2>/dev/null || exit 1
+  . "$_mal_base/settings/lib_owner_lock.sh" 2>/dev/null || return 1 2>/dev/null || exit 1
 fi
 
-merv_action_lock_read() {
-  _mal_lock="$1"; [ -f "$_mal_lock/owner" ] || return 1
-  # Four complete, ordered fields are required. A partial or extra field is
-  # unknown and must not be treated as a reclaimable old lock.
-  _mal_lines=$(wc -l < "$_mal_lock/owner" 2>/dev/null) || return 1
-  [ "$_mal_lines" = 4 ] || return 1
-  MERV_ACTION_LOCK_PID=$(sed -n '1s/^pid=\([0-9][0-9]*\)$/\1/p' "$_mal_lock/owner" 2>/dev/null)
-  MERV_ACTION_LOCK_START=$(sed -n '2s/^start=\([0-9][0-9]*\)$/\1/p' "$_mal_lock/owner" 2>/dev/null)
-  MERV_ACTION_LOCK_NONCE=$(sed -n '3s/^nonce=\([A-Za-z0-9._:-][A-Za-z0-9._:-]*\)$/\1/p' "$_mal_lock/owner" 2>/dev/null)
-  MERV_ACTION_LOCK_CREATED=$(sed -n '4s/^created=\([0-9][0-9]*\)$/\1/p' "$_mal_lock/owner" 2>/dev/null)
-  case "$MERV_ACTION_LOCK_PID:$MERV_ACTION_LOCK_START:$MERV_ACTION_LOCK_CREATED" in *[!0-9:]*|:*|*::*) return 1 ;; esac
-  [ -n "$MERV_ACTION_LOCK_NONCE" ]
+# Keep the public state names used by existing callers, while making mode
+# explicit so a child can never release an inherited parent lock.
+MERV_ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+MERV_ACTION_LOCK_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+MERV_ACTION_LOCK_START="${MERV_ACTION_LOCK_START:-}"
+MERV_ACTION_LOCK_PATH_ACTIVE="${MERV_ACTION_LOCK_PATH_ACTIVE:-}"
+MERV_ACTION_LOCK_LAST_FAILURE="${MERV_ACTION_LOCK_LAST_FAILURE:-}"
+
+merv_action_lock_path_valid() {
+  _malp_path="${1:-}"
+  case "$_malp_path" in
+    ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  case "$_malp_path" in */*) return 0 ;; *) return 1 ;; esac
 }
 
-_merv_action_lock_claim_cleanup() {
-  _mal_lock="$1"
-  _mal_tmp="$2"
-  _mal_cleanup_rc=0
-  [ -z "$_mal_tmp" ] || rm -f "$_mal_tmp" 2>/dev/null || _mal_cleanup_rc=1
-  [ -e "$_mal_lock/owner" ] && _mal_cleanup_rc=1
-  rmdir "$_mal_lock" 2>/dev/null || _mal_cleanup_rc=1
-  return "$_mal_cleanup_rc"
-}
-
-merv_action_lock_acquire() {
-  _mal_lock="${1:-$MERV_ACTION_LOCK_PATH}"; _mal_parent=${_mal_lock%/*}
-  case "$_mal_lock" in *..*|*[!A-Za-z0-9_./-]*) return 4 ;; esac
-  mkdir -p "$_mal_parent" 2>/dev/null || return 4
-  if mkdir "$_mal_lock" 2>/dev/null; then
-    _mal_start=$(merv_identity_current_start 2>/dev/null || printf '')
-    _mal_nonce=$(merv_identity_nonce 2>/dev/null || printf '')
-    [ -n "$_mal_start" ] && [ -n "$_mal_nonce" ] || {
-      _merv_action_lock_claim_cleanup "$_mal_lock" "" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-      return 4
-    }
-    _mal_tmp="$_mal_lock/.owner.tmp.$$"
-    _mal_created=$(date +%s 2>/dev/null || printf 0)
-    case "$_mal_created" in ''|*[!0-9]*) _mal_created=0 ;; esac
-    ( umask 077; printf 'pid=%s\nstart=%s\nnonce=%s\ncreated=%s\n' "$$" "$_mal_start" "$_mal_nonce" "$_mal_created" > "$_mal_tmp" ) 2>/dev/null || {
-      _merv_action_lock_claim_cleanup "$_mal_lock" "$_mal_tmp" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-      return 4
-    }
-    chmod 600 "$_mal_tmp" 2>/dev/null || {
-      _merv_action_lock_claim_cleanup "$_mal_lock" "$_mal_tmp" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-      return 4
-    }
-    mv -f "$_mal_tmp" "$_mal_lock/owner" 2>/dev/null || {
-      _merv_action_lock_claim_cleanup "$_mal_lock" "$_mal_tmp" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-      return 4
-    }
-    MERV_ACTION_LOCK_NONCE="$_mal_nonce"; MERV_ACTION_LOCK_START="$_mal_start"; MERV_ACTION_LOCK_EXPECTED_NONCE="$_mal_nonce"; MERV_ACTION_LOCK_EXPECTED_START="$_mal_start"; MERV_ACTION_LOCK_OWNED=1
-    return 0
-  fi
-  merv_action_lock_read "$_mal_lock" 2>/dev/null || return 4
-  if merv_identity_matches "$MERV_ACTION_LOCK_PID" "$MERV_ACTION_LOCK_START" 2>/dev/null; then
-    return 3
-  fi
-  _mal_try=0
-  while [ "$_mal_try" -lt 8 ]; do
-    _mal_dest="${_mal_lock}.quarantine.$$.$_mal_try"
-    if mv "$_mal_lock" "$_mal_dest" 2>/dev/null; then
-      mkdir "$_mal_lock" 2>/dev/null || return 4
-      _mal_start=$(merv_identity_current_start 2>/dev/null || printf '')
-      _mal_nonce=$(merv_identity_nonce 2>/dev/null || printf '')
-      [ -n "$_mal_start" ] && [ -n "$_mal_nonce" ] || {
-        _merv_action_lock_claim_cleanup "$_mal_lock" "" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-        return 4
-      }
-      _mal_tmp="$_mal_lock/.owner.tmp.$$"
-      _mal_created=$(date +%s 2>/dev/null || printf 0)
-      case "$_mal_created" in ''|*[!0-9]*) _mal_created=0 ;; esac
-      ( umask 077; printf 'pid=%s\nstart=%s\nnonce=%s\ncreated=%s\n' "$$" "$_mal_start" "$_mal_nonce" "$_mal_created" > "$_mal_tmp" ) 2>/dev/null || {
-        _merv_action_lock_claim_cleanup "$_mal_lock" "$_mal_tmp" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-        return 4
-      }
-      chmod 600 "$_mal_tmp" 2>/dev/null || {
-        _merv_action_lock_claim_cleanup "$_mal_lock" "$_mal_tmp" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-        return 4
-      }
-      mv -f "$_mal_tmp" "$_mal_lock/owner" 2>/dev/null || {
-        _merv_action_lock_claim_cleanup "$_mal_lock" "$_mal_tmp" >/dev/null 2>&1 || printf '%s\n' "[ERROR] action-lock claim cleanup failed; unknown lock state retained" >&2
-        return 4
-      }
-      MERV_ACTION_LOCK_NONCE="$_mal_nonce"; MERV_ACTION_LOCK_START="$_mal_start"; MERV_ACTION_LOCK_EXPECTED_NONCE="$_mal_nonce"; MERV_ACTION_LOCK_EXPECTED_START="$_mal_start"; MERV_ACTION_LOCK_OWNED=1
-      return 0
-    fi
-    _mal_try=$((_mal_try + 1))
-  done
-  return 4
-}
-
-merv_action_lock_release() {
-  _mal_lock="${1:-$MERV_ACTION_LOCK_PATH}"; _mal_expected_nonce="${2:-${MERV_ACTION_LOCK_EXPECTED_NONCE:-}}"; _mal_expected_start="${3:-${MERV_ACTION_LOCK_EXPECTED_START:-}}"
-  _mal_restore="${_mal_lock%/*}/.${_mal_lock##*/}.owner.restore.$$"
-  merv_action_lock_read "$_mal_lock" 2>/dev/null || return 1
-  [ -n "$_mal_expected_nonce" ] && [ -n "$_mal_expected_start" ] || return 1
-  [ "$MERV_ACTION_LOCK_PID" = "$$" ] && [ "$MERV_ACTION_LOCK_START" = "$_mal_expected_start" ] &&
-    [ "$MERV_ACTION_LOCK_NONCE" = "$_mal_expected_nonce" ] || return 1
-  merv_identity_matches "$$" "$_mal_expected_start" 2>/dev/null || return 1
-  cp -p "$_mal_lock/owner" "$_mal_restore" 2>/dev/null || return 1
-  rm -f "$_mal_lock"/.owner.tmp.* 2>/dev/null || { rm -f "$_mal_restore" 2>/dev/null; return 1; }
-  rm -f "$_mal_lock/owner" 2>/dev/null || {
-    rm -f "$_mal_restore" 2>/dev/null
-    return 1
-  }
-  if ! rmdir "$_mal_lock" 2>/dev/null; then
-    if ! mv -f "$_mal_restore" "$_mal_lock/owner" 2>/dev/null; then
-      return 1
-    fi
-    chmod 600 "$_mal_lock/owner" 2>/dev/null || :
-    return 1
-  fi
-  rm -f "$_mal_restore" 2>/dev/null || :
+# Validate only the authenticated parent context.  A present but invalid
+# parent marker is an unknown owner and must never fall back to self-
+# acquisition.
+merv_action_lock_parent_owned() {
+  _mal_parent_lock="${1:-${MERV_ACTION_LOCK_PATH:-}}"
+  merv_action_lock_path_valid "$_mal_parent_lock" || return 1
+  [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ] || return 1
+  merv_owner_v2_positive_uint "${MERV_ACTION_LOCK_PARENT_PID:-}" || return 1
+  merv_owner_v2_positive_uint "${MERV_ACTION_LOCK_PARENT_START:-}" || return 1
+  merv_owner_v2_nonce_valid "${MERV_ACTION_LOCK_PARENT_NONCE:-}" || return 1
+  # merv_owner_v2_matches checks the exact five-field record and validates the
+  # PID/start identity against the live process.  No age/heartbeat shortcut is
+  # permitted here.
+  merv_owner_v2_matches "$_mal_parent_lock" \
+    "$MERV_ACTION_LOCK_PARENT_PID" "$MERV_ACTION_LOCK_PARENT_START" \
+    "$MERV_ACTION_LOCK_PARENT_NONCE" "${MERV_ACTION_LOCK_PROC_ROOT:-/proc}" || return 1
+  MERV_ACTION_LOCK_MODE=parent
+  MERV_ACTION_LOCK_PATH_ACTIVE="$_mal_parent_lock"
+  MERV_ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_PARENT_NONCE"
+  MERV_ACTION_LOCK_START="$MERV_ACTION_LOCK_PARENT_START"
   MERV_ACTION_LOCK_OWNED=0
   return 0
 }
 
-# The service dispatcher keeps the global action lock in the parent shell while
-# running a mutating child such as Update. The child may ignore only that exact,
-# authenticated parent-owned lock; every other owner, malformed record, or
-# missing identity remains blocking.
-merv_action_lock_parent_owned() {
-  _mal_lock="${1:-$MERV_ACTION_LOCK_PATH}"
-  [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ] || return 1
-  [ -n "${MERV_ACTION_LOCK_PARENT_PID:-}" ] &&
-    [ -n "${MERV_ACTION_LOCK_PARENT_START:-}" ] &&
-    [ -n "${MERV_ACTION_LOCK_PARENT_NONCE:-}" ] || return 1
-  merv_action_lock_read "$_mal_lock" 2>/dev/null || return 1
-  [ "$MERV_ACTION_LOCK_PID" = "$MERV_ACTION_LOCK_PARENT_PID" ] || return 1
-  [ "$MERV_ACTION_LOCK_START" = "$MERV_ACTION_LOCK_PARENT_START" ] || return 1
-  [ "$MERV_ACTION_LOCK_NONCE" = "$MERV_ACTION_LOCK_PARENT_NONCE" ] || return 1
-  merv_identity_matches "$MERV_ACTION_LOCK_PARENT_PID" \
-    "$MERV_ACTION_LOCK_PARENT_START" 2>/dev/null
+# Enter one action lock.  Return codes are intentionally stable for callers:
+# 0 acquired/validated, 3 busy live owner, 4 unknown/malformed/unavailable.
+# If parent context is advertised but cannot be authenticated, return 4 and do
+# not attempt a self-acquisition.
+merv_action_lock_enter() {
+  _mal_lock="${1:-${MERV_ACTION_LOCK_PATH:-}}"
+  _mal_requested_mode="${2:-auto}"
+  MERV_ACTION_LOCK_LAST_FAILURE=""
+  if ! merv_action_lock_path_valid "$_mal_lock"; then
+    MERV_ACTION_LOCK_LAST_FAILURE=action-lock-owner-unknown
+    return 4
+  fi
+  MERV_ACTION_LOCK_MODE=none
+  MERV_ACTION_LOCK_NONCE=""
+  MERV_ACTION_LOCK_START=""
+  MERV_ACTION_LOCK_PATH_ACTIVE="$_mal_lock"
+  MERV_ACTION_LOCK_OWNED=0
+
+  if [ "$_mal_requested_mode" != self ] && [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ]; then
+    if ! merv_action_lock_parent_owned "$_mal_lock"; then
+      MERV_ACTION_LOCK_LAST_FAILURE=action-lock-parent-invalid
+      return 4
+    fi
+    return 0
+  fi
+
+  # The generic owner library performs atomic publication, dead/reused-owner
+  # quarantine, and exact owner cleanup.  A zero retry budget keeps this
+  # action mutex non-blocking, matching the historical dispatch contract.
+  merv_owner_lock_acquire "$_mal_lock" 0 0 mervlan_action >/dev/null 2>&1
+  _mal_rc=$?
+  if [ "$_mal_rc" -eq 0 ]; then
+    MERV_ACTION_LOCK_MODE=self
+    MERV_ACTION_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    MERV_ACTION_LOCK_START="${MERV_LOCK_START:-}"
+    [ -n "$MERV_ACTION_LOCK_NONCE" ] && [ -n "$MERV_ACTION_LOCK_START" ] || {
+      MERV_ACTION_LOCK_MODE=none
+      MERV_ACTION_LOCK_LAST_FAILURE=action-lock-owner-unknown
+      return 4
+    }
+    MERV_ACTION_LOCK_OWNED=1
+    return 0
+  fi
+
+  # Distinguish a known live/in-progress owner from malformed or inaccessible
+  # metadata.  Unknown owners fail closed and are never reclaimed here.
+  _mal_state=$(merv_owner_lock_state "$_mal_lock" 2>/dev/null || printf 'unknown')
+  case "$_mal_state" in
+    live|incomplete-grace)
+      MERV_ACTION_LOCK_LAST_FAILURE=action-lock-busy
+      return 3
+      ;;
+    *)
+      MERV_ACTION_LOCK_LAST_FAILURE=action-lock-owner-unknown
+      return 4
+      ;;
+  esac
 }
+
+# Export the authenticated owner for a child process.  In self mode the
+# current process is the owner; in parent mode the received parent identity is
+# forwarded unchanged.  This function never invents a child identity.
+merv_action_lock_export_child_context() {
+  [ "${MERV_ACTION_LOCK_MODE:-none}" = self ] ||
+    [ "${MERV_ACTION_LOCK_MODE:-none}" = parent ] || return 1
+  MERV_ACTION_LOCK_PARENT_HELD=1
+  if [ "$MERV_ACTION_LOCK_MODE" = self ]; then
+    MERV_ACTION_LOCK_PARENT_PID="$$"
+    MERV_ACTION_LOCK_PARENT_START="$MERV_ACTION_LOCK_START"
+    MERV_ACTION_LOCK_PARENT_NONCE="$MERV_ACTION_LOCK_NONCE"
+  else
+    [ -n "${MERV_ACTION_LOCK_PARENT_PID:-}" ] || return 1
+    [ -n "${MERV_ACTION_LOCK_PARENT_START:-}" ] || return 1
+    [ -n "${MERV_ACTION_LOCK_PARENT_NONCE:-}" ] || return 1
+  fi
+  export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+    MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+  return 0
+}
+
+merv_action_lock_clear_child_context() {
+  MERV_ACTION_LOCK_PARENT_HELD=0
+  MERV_ACTION_LOCK_PARENT_PID=""
+  MERV_ACTION_LOCK_PARENT_START=""
+  MERV_ACTION_LOCK_PARENT_NONCE=""
+  export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+    MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+}
+
+# Leave one action lock.  Parent-owned mode is a deliberate no-op: only the
+# process that acquired the lock may release it.  Optional nonce/start/mode
+# arguments let callers retain two independent nested lock contexts (the
+# service dispatcher has an event lock and a global lock).
+merv_action_lock_leave() {
+  _mall_lock="${1:-${MERV_ACTION_LOCK_PATH_ACTIVE:-${MERV_ACTION_LOCK_PATH:-}}}"
+  _mall_nonce="${2:-${MERV_ACTION_LOCK_NONCE:-}}"
+  _mall_start="${3:-${MERV_ACTION_LOCK_START:-}}"
+  _mall_mode="${4:-${MERV_ACTION_LOCK_MODE:-none}}"
+  [ "$_mall_mode" = parent ] && return 0
+  [ "$_mall_mode" = self ] || return 0
+  merv_action_lock_path_valid "$_mall_lock" || return 1
+  [ -n "$_mall_nonce" ] && [ -n "$_mall_start" ] || return 1
+  merv_owner_v2_positive_uint "$_mall_start" || return 1
+  _mall_current_start=$(merv_identity_current_start 2>/dev/null) || return 1
+  [ "$_mall_current_start" = "$_mall_start" ] || return 1
+  merv_owner_lock_release "$_mall_lock" "$_mall_nonce" >/dev/null 2>&1 || return 1
+  if [ "${MERV_ACTION_LOCK_PATH_ACTIVE:-}" = "$_mall_lock" ]; then
+    MERV_ACTION_LOCK_MODE=none
+    MERV_ACTION_LOCK_NONCE=""
+    MERV_ACTION_LOCK_START=""
+    MERV_ACTION_LOCK_OWNED=0
+  fi
+  return 0
+}
+
+# Compatibility names for older installed callers.  New callers use the
+# policy names above; these aliases retain a safe migration boundary.
+merv_action_lock_acquire() { merv_action_lock_enter "$@"; }
+merv_action_lock_release() { merv_action_lock_leave "$@" self; }

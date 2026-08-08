@@ -1,5 +1,21 @@
 mervlan v0.53.26-dev
 
+Improved: Ownership, locking, and lifecycle safety
+- Unified normal process identity and nonce generation, including DHCP,
+  action-progress, action-runtime, and node-job owners, without
+  sequence-mutating command substitution or router-incompatible `stat -c`.
+- Added strict v2 generic owner publication/reclaim/release semantics with
+  authenticated parent action context, explicit terminal lock failures, and
+  fail-closed Update maintenance exclusivity.
+- Hardened DHCP Hold, standalone Recovery, and observation ownership against
+  incomplete metadata, PID reuse, interrupted cleanup, and publication or
+  release obstruction while preserving specialized phase/generation policy.
+- Verified full runtime manifests include `settings/lib_owner_lock.sh` at
+  mode 0644; Settings-only Sync remains limited to `settings.json`, and
+  developer documentation/evidence stays out of node payloads.
+- Replaced the mojibake local-manager identity error with portable ASCII and
+  retained focused BusyBox-compatible shell and router contract coverage.
+
 Security: Verified SSH host trust and node integrity
 - All router-to-node SSH actions and transfers now use the shared verified-host path with bounded, noninteractive Dropbear handling and no unconditional host-key bypass.
 - The main router keeps a durable, canonical per-node host-key trust database outside the replaceable addon tree. Trusted keys are never synchronized to nodes or exposed through public settings output.

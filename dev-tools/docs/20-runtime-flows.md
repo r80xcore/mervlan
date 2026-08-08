@@ -13,6 +13,12 @@ Every mode must end with exactly one coordinated snapshot/client refresh. The
 loading task remains active until that final observation generation completes.
 The progress phase is `Refreshing client inventory...`.
 
+Each asynchronous action has one authenticated owner and one terminal result.
+Busy, malformed, unknown-owner, invalid-parent, and cleanup-failure outcomes
+are explicit failures; an accepted token is never left running because a
+worker disappeared. INT/TERM handlers terminate after bounded child
+reconciliation and cannot resume normal work after cleanup.
+
 Main + Nodes and Nodes Only use `execute_nodes.sh` Phase 4. A direct local
 manager run performs the same request and waits through `post_apply_worker.sh
 run-wait`. Combined runs pass `--no-collect` to the local manager so collection
@@ -42,6 +48,11 @@ system-wide synchronization behavior.
 verifies each staged installation, activates it atomically, and reports
 per-node terminal results. The main router is validated first. Node-specific
 settings and hardware identity are preserved.
+
+The full runtime manifest includes `settings/lib_owner_lock.sh` with mode
+0644, and staged validation checks it. Settings-only Sync remains a
+`settings/settings.json`-only operation; developer documentation and evidence
+are never copied to nodes.
 
 ## Refresh Clients
 
@@ -82,6 +93,11 @@ healer, boot wrapper, Save/APMO, Apply, and ordinary node-sync workers from
 starting new mutations during that window. The normal addon backup/archive and
 activation recovery paths remain the only router-side copies owned by the
 addon; lifecycle journals and retry markers contain metadata only.
+
+Update child context is authenticated against the live maintenance owner;
+`MERV_UPDATE_OWNER=1` by itself is only an untrusted hint. Boot recovery is a
+separate journal-bound path, and a failed or interrupted cleanup preserves the
+owner/quiesce state for reconciliation instead of reporting success.
 
 Update retries transient node reachability failures within a bounded
 pre-mutation window and reports trust, authentication, malformed configuration,

@@ -12,6 +12,14 @@
 : "${MERV_UPDATE_JOURNAL:=$MERV_STATE_ROOT/update.journal}"
 : "${MERV_UPDATE_QUIESCE_FILE:=$MERV_STATE_ROOT/update.quiesce}"
 
+# The Update journal is policy, but live maintenance ownership is still the
+# canonical v2 owner record.  Load it here so every Update-aware entry point
+# uses the same authenticated predicate rather than reimplementing a flag
+# check.  A missing/invalid library fails closed for maintenance contexts.
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] ||
+  [ ! -r "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_owner_lock.sh" ] ||
+  . "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_owner_lock.sh"
+
 merv_update_state_path_valid() {
   local _mus_path="${1:-}"
   case "$_mus_path" in
@@ -120,15 +128,66 @@ merv_update_journal_requires_safe_boot() {
     [ "$(merv_update_journal_get activation_started 0)" = "1" ]
 }
 
+merv_update_maintenance_lock_path() {
+  printf '%s\n' "${MERV_UPDATE_MAINTENANCE_LOCK:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}"
+}
+
+# A live Update child must present the exact canonical owner tuple.  In
+# particular, MERV_UPDATE_OWNER alone is only an unauthenticated hint and
+# never permits a mutating entry point to bypass maintenance quiescence.
+merv_update_owner_context_valid() {
+  [ "${MERV_UPDATE_OWNER:-0}" = "1" ] || return 1
+  type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
+  type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
+  type merv_owner_v2_matches >/dev/null 2>&1 || return 1
+  merv_owner_v2_positive_uint "${MERV_UPDATE_OWNER_PID:-}" || return 1
+  merv_owner_v2_positive_uint "${MERV_UPDATE_OWNER_START:-}" || return 1
+  merv_owner_v2_nonce_valid "${MERV_UPDATE_OWNER_NONCE:-}" || return 1
+  _muoc_lock=$(merv_update_maintenance_lock_path) || return 1
+  merv_owner_v2_matches "$_muoc_lock" "$MERV_UPDATE_OWNER_PID" \
+    "$MERV_UPDATE_OWNER_START" "$MERV_UPDATE_OWNER_NONCE"
+}
+
+# Recovery is deliberately not an Update-owner bypass.  It is bound to the
+# interrupted journal and to the still-live boot parent, and is refused while
+# a live/unknown maintenance owner may still be operating.
+merv_update_recovery_context_valid() {
+  [ "${MERV_UPDATE_RECOVERY:-0}" = "1" ] || return 1
+  type merv_identity_positive_uint >/dev/null 2>&1 || return 1
+  type merv_identity_matches >/dev/null 2>&1 || return 1
+  merv_update_journal_requires_safe_boot || return 1
+  _murc_run=$(merv_update_journal_get run_id '') || return 1
+  [ -n "$_murc_run" ] && [ "${MERV_UPDATE_RECOVERY_RUN_ID:-}" = "$_murc_run" ] || return 1
+  merv_update_state_value "$MERV_UPDATE_RECOVERY_RUN_ID" >/dev/null || return 1
+  merv_identity_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_PID:-}" || return 1
+  merv_identity_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_START:-}" || return 1
+  merv_identity_matches "$MERV_UPDATE_RECOVERY_PARENT_PID" \
+    "$MERV_UPDATE_RECOVERY_PARENT_START" || return 1
+  _murc_lock=$(merv_update_maintenance_lock_path) || return 1
+  if type merv_owner_lock_state >/dev/null 2>&1; then
+    case "$(merv_owner_lock_state "$_murc_lock" 2>/dev/null)" in
+      live|unknown|malformed|incomplete-*) return 1 ;;
+    esac
+  elif [ -e "$_murc_lock" ]; then
+    return 1
+  fi
+  return 0
+}
+
+merv_update_maintenance_sync_context_valid() {
+  [ "${MERV_MAINTENANCE_SYNC:-0}" = "1" ] || return 1
+  merv_update_owner_context_valid
+}
+
 # Normal mutating workers use this gate before touching settings, hooks, VLAN
 # state, or nodes. The Update owner is the only caller allowed to continue
 # through its own quiesced maintenance window; all ordinary callers stop when
 # the maintenance lock, quiesce marker, or incomplete-update recovery state is
 # active. An unreadable owner record is treated as blocked rather than safe.
 merv_update_mutation_blocked() {
-  [ "${MERV_UPDATE_OWNER:-0}" = "1" ] && return 1
+  merv_update_owner_context_valid && return 1
   merv_update_journal_requires_safe_boot && return 0
-  _mumb_lock="${MERV_UPDATE_MAINTENANCE_LOCK:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}"
+  _mumb_lock=$(merv_update_maintenance_lock_path) || return 0
   [ -e "$_mumb_lock" ] || return 1
   type merv_lock_state >/dev/null 2>&1 || return 0
   case "$(merv_lock_state "$_mumb_lock" 2>/dev/null)" in

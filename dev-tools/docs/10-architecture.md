@@ -15,7 +15,8 @@ mervlan.asp / service-event-handler.sh
     └── maintenance helpers      backup, update, restore, keys, metadata
 
 settings/*.sh
-    shared parsing, logging, locks, SSH, progress, MAC Shield, and node jobs
+    shared parsing, identity/owner locks, logging, SSH, progress, MAC Shield,
+    and node jobs
         │
         ├── /tmp/mervlan_tmp/     volatile locks, progress, logs, workers
         └── /jffs/addons/mervlan/ persistent settings, scripts, and databases
@@ -25,11 +26,25 @@ settings/*.sh
 
 - Only the parent orchestration process owns global aggregation, orchestration
   locks, shared cleanup, and final summaries.
+- `settings/lib_identity.sh` is the normal process-identity and nonce owner.
+  PID alone never establishes ownership; PID plus `/proc` start time and an
+  acquisition nonce are required.
+- `settings/lib_owner_lock.sh` owns the generic v2 owner grammar and
+  acquire/release lifecycle. The authoritative record has exactly `pid`,
+  `proc_start_time`, `owner_nonce`, `created`, and `heartbeat`; compatibility
+  sidecars are retained only for named readers.
+- Action locks use the thin `lib_action_lock.sh` policy wrapper. A child that
+  receives parent context must authenticate the exact parent PID/start/nonce
+  and cannot acquire or release the parent lock on its own.
+- Update maintenance has an authenticated owner and journal-bound quiesce
+  state. Ordinary mutation and observation entry points are blocked until
+  terminal cleanup; read-only status remains available where safe.
 - Node workers own isolated job directories and terminal result records; they
   do not write shared parent logs directly.
 - The observation worker owns snapshot/collection serialization and generation
-  completion. Callers request work through it instead of invoking collection
-  scripts directly.
+  completion, using the shared identity/owner primitives while retaining its
+  own coalescing and deferral policy. Callers request work through it instead
+  of invoking collection scripts directly.
 - `settings/settings.json` is user data. Runtime code must preserve it unless
   the approved change explicitly includes a migration.
 
@@ -52,9 +67,9 @@ complete generation or the new complete generation, never a partial merge.
    ASP bridge.
 2. `service-event-handler.sh` validates the action and starts or dispatches
    the correct worker, returning an action token where asynchronous.
-3. The parent owns the action lock, progress token, global DHCP/MAC safety
-   state, and final aggregation. A node worker owns only its local operation
-   and result marker.
+3. The parent owns the authenticated action lock, progress token, global
+   DHCP/MAC safety state, and final aggregation. A node worker owns only its
+   local operation and result marker.
 4. Workers write logs and atomic result/progress artifacts. Missing, stale,
    malformed, or contradictory artifacts are failure/inconclusive.
 5. The UI polls the same authoritative token until terminal state, performs

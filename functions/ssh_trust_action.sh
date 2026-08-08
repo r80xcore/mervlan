@@ -13,6 +13,7 @@
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh" || exit 1
 [ -n "${LIB_SSH_TRUST_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh_trust.sh" || exit 1
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" || exit 1
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 
@@ -23,6 +24,15 @@ type merv_action_progress_fail >/dev/null 2>&1 || merv_action_progress_fail() { 
 
 SSH_TRUST_ACTION="${1:-}"
 SSH_TRUST_TOKEN="${2:-${MERV_PROGRESS_TOKEN:-}}"
+case "$SSH_TRUST_ACTION" in
+  status) : ;;
+  *)
+    if merv_update_mutation_blocked; then
+      error -c cli,vlan "SSH trust action refused: Update maintenance is active"
+      exit 75
+    fi
+    ;;
+esac
 # A resumed action keeps its loading record authoritative while a nested
 # collection rechecks SSH trust. The nested probe may publish progress to this
 # separate token, while acknowledgements and pending-review ownership stay on
@@ -33,10 +43,12 @@ SSH_TRUST_PROGRESS_TOKEN="${MERV_SSH_TRUST_PROGRESS_TOKEN:-$SSH_TRUST_TOKEN}"
 # library has been loaded.
 SSH_TRUST_ACTION_LOCKED=0
 SSH_TRUST_STATE_LOCKED=0
+SSH_TRUST_STATE_MODE="none"
 SSH_TRUST_STATE_NONCE=""
 SSH_TRUST_STATE_START=""
 SSH_TRUST_ACTION_NONCE=""
 SSH_TRUST_ACTION_START=""
+SSH_TRUST_ACTION_MODE="none"
 MERV_ACTION_ACK_PUBLISHED=0
 trust_probe_silent_on_verified() {
     case "$MERV_SSH_TRUST_SILENT_IF_VERIFIED" in
@@ -174,10 +186,11 @@ trust_action_allowlist() {
 
 trust_state_lock() {
     merv_ssh_trust_init >/dev/null 2>&1 || return 1
-    merv_action_lock_acquire "$MERV_SSH_TRUST_LOCK_PATH"
+    merv_action_lock_enter "$MERV_SSH_TRUST_LOCK_PATH" self
     _stsl_rc=$?
     [ "$_stsl_rc" -eq 0 ] || return "$_stsl_rc"
     SSH_TRUST_STATE_LOCKED=1
+    SSH_TRUST_STATE_MODE="${MERV_ACTION_LOCK_MODE:-self}"
     SSH_TRUST_STATE_NONCE="$MERV_ACTION_LOCK_NONCE"
     SSH_TRUST_STATE_START="$MERV_ACTION_LOCK_START"
     return 0
@@ -185,14 +198,14 @@ trust_state_lock() {
 
 trust_state_unlock() {
     [ "$SSH_TRUST_STATE_LOCKED" -eq 1 ] || return 0
-    merv_action_lock_release "$MERV_SSH_TRUST_LOCK_PATH" "$SSH_TRUST_STATE_NONCE" "$SSH_TRUST_STATE_START" >/dev/null 2>&1 || return 1
+    merv_action_lock_leave "$MERV_SSH_TRUST_LOCK_PATH" "$SSH_TRUST_STATE_NONCE" "$SSH_TRUST_STATE_START" "${SSH_TRUST_STATE_MODE:-self}" >/dev/null 2>&1 || return 1
     SSH_TRUST_STATE_LOCKED=0
     return 0
 }
 
 trust_action_unlock() {
     [ "$SSH_TRUST_ACTION_LOCKED" -eq 1 ] || return 0
-    merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$SSH_TRUST_ACTION_NONCE" "$SSH_TRUST_ACTION_START" >/dev/null 2>&1 || return 1
+    merv_action_lock_leave "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$SSH_TRUST_ACTION_NONCE" "$SSH_TRUST_ACTION_START" "${SSH_TRUST_ACTION_MODE:-self}" >/dev/null 2>&1 || return 1
     SSH_TRUST_ACTION_LOCKED=0
     return 0
 }
@@ -1391,20 +1404,53 @@ trust_main() {
         revoke) SSH_TRUST_ACK_ACTION=sshtrustrevoke_vlanmgr ;;
         abort) SSH_TRUST_ACK_ACTION=sshtrustabort_vlanmgr ;;
     esac
-    if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" != 1 ]; then
-        merv_action_lock_acquire "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
-        _stam_rc=$?
-        if [ "$_stam_rc" -ne 0 ]; then
-            if ! action_ack_busy "$SSH_TRUST_TOKEN" "$SSH_TRUST_ACK_ACTION" '{"lock":"global"}' "Another configuration action is already running." '[]' >/dev/null 2>&1; then
-                printf '%s\n' "[ERROR] SSH trust busy acknowledgement could not be published" >&2
-            fi
-            exit 75
+    SSH_TRUST_SIGNAL_HANDLING=0
+    trust_handle_signal() {
+        _str_signal_status="$1"
+        [ "${SSH_TRUST_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_str_signal_status"
+        SSH_TRUST_SIGNAL_HANDLING=1
+        trap - INT TERM
+        merv_action_progress_fail "SSH trust action interrupted; no success result was published"
+        if [ "${MERV_ACTION_ACK_PUBLISHED:-0}" -ne 1 ] && [ -n "${SSH_TRUST_TOKEN:-}" ]; then
+            action_ack_error "$SSH_TRUST_TOKEN" "${SSH_TRUST_ACK_ACTION:-sshtrust_vlanmgr}" \
+                '{"reason":"interrupted"}' \
+                "SSH trust action interrupted before completion." '[]' interrupted >/dev/null 2>&1 || \
+                logger -t VLANMgr "SSH trust interruption acknowledgement could not be published"
         fi
-        SSH_TRUST_ACTION_LOCKED=1
-        SSH_TRUST_ACTION_NONCE="$MERV_ACTION_LOCK_NONCE"
-        SSH_TRUST_ACTION_START="$MERV_ACTION_LOCK_START"
+        exit "$_str_signal_status"
+    }
+    merv_action_lock_enter "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+    _stam_rc=$?
+    if [ "$_stam_rc" -ne 0 ]; then
+        merv_action_progress_init "$SSH_TRUST_PROGRESS_TOKEN" "$SSH_TRUST_ACK_ACTION" \
+            "SSH trust action" "Preparing SSH trust action..."
+        if [ "$_stam_rc" -eq 3 ]; then
+            merv_action_progress_fail "Another configuration action is already running; SSH trust was not started."
+        else
+            merv_action_progress_fail "The SSH trust action owner could not be verified; no work was started."
+        fi
+        action_ack_lock_failure "$SSH_TRUST_TOKEN" "$SSH_TRUST_ACK_ACTION" \
+            "$_stam_rc" global >/dev/null 2>&1 || \
+            printf '%s\n' "[ERROR] SSH trust lock-failure acknowledgement could not be published" >&2
+        exit 75
     fi
-    trap 'trust_release_all_locks >/dev/null 2>&1 || logger -t VLANMgr "ssh trust cleanup could not prove/release ownership"' EXIT INT TERM
+    SSH_TRUST_ACTION_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+    [ "$SSH_TRUST_ACTION_MODE" = self ] && SSH_TRUST_ACTION_LOCKED=1
+    SSH_TRUST_ACTION_NONCE="$MERV_ACTION_LOCK_NONCE"
+    SSH_TRUST_ACTION_START="$MERV_ACTION_LOCK_START"
+    if ! merv_action_lock_export_child_context; then
+        MERV_ACTION_LOCK_LAST_FAILURE=action-lock-parent-invalid
+        merv_action_progress_init "$SSH_TRUST_PROGRESS_TOKEN" "$SSH_TRUST_ACK_ACTION" \
+            "SSH trust action" "Preparing SSH trust action..."
+        merv_action_progress_fail "The SSH trust owner context was invalid; no work was started."
+        action_ack_lock_failure "$SSH_TRUST_TOKEN" "$SSH_TRUST_ACK_ACTION" 4 global >/dev/null 2>&1 || :
+        merv_action_lock_leave "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" \
+            "$SSH_TRUST_ACTION_NONCE" "$SSH_TRUST_ACTION_START" "$SSH_TRUST_ACTION_MODE" >/dev/null 2>&1 || :
+        exit 75
+    fi
+    trap 'trust_release_all_locks >/dev/null 2>&1 || logger -t VLANMgr "ssh trust cleanup could not prove/release ownership"' EXIT
+    trap 'trust_handle_signal 130' INT
+    trap 'trust_handle_signal 143' TERM
     case "$SSH_TRUST_ACTION" in
         probe) trust_probe ;;
         enroll) trust_enroll ;;
@@ -1423,8 +1469,13 @@ trust_main() {
     fi
     trust_release_all_locks >/dev/null 2>&1
     _stam_cleanup_rc=$?
-    if [ "$_stam_cleanup_rc" -ne 0 ] && [ "$_stam_result" -eq 0 ]; then
-        _stam_result=75
+    if [ "$_stam_cleanup_rc" -ne 0 ]; then
+        merv_action_progress_fail "SSH trust completed, but action-lock cleanup failed; recovery is required."
+        action_ack_error "$SSH_TRUST_TOKEN" "$SSH_TRUST_ACK_ACTION" \
+            '{"reason":"cleanup-failed"}' \
+            "SSH trust completed, but action-lock cleanup failed; recovery is required." \
+            '["action-lock-cleanup-failed"]' action-lock-cleanup-failed >/dev/null 2>&1 || :
+        [ "$_stam_result" -eq 0 ] && _stam_result=75
     fi
     trap - EXIT INT TERM
     return "$_stam_result"

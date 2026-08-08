@@ -13,7 +13,10 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
+[ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || exit 75
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || exit 75
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
 [ -n "${LIB_PROGRESS_LOADED:-}" ] || [ ! -f "$MERV_BASE/settings/lib_progress.sh" ] || . "$MERV_BASE/settings/lib_progress.sh" 2>/dev/null || :
@@ -36,6 +39,15 @@ ssid_filter_init "${MERV_NODE_ID:-none}"
 export MAX_SSIDS MERV_NODE_ID
 
 OBS_ACTION="${1:-status}"
+case "$OBS_ACTION" in
+  status) : ;;
+  *)
+    if merv_update_mutation_blocked; then
+      printf '%s\n' 'Observation request refused: Update maintenance is active' >&2
+      exit 75
+    fi
+    ;;
+esac
 OBS_ROOT="${MERV_OBSERVATION_ROOT:-$LOCKDIR/observation}"
 OBS_STATE="$OBS_ROOT/request.state"
 OBS_WORKER_LOCK="$OBS_ROOT/worker.lock"
@@ -132,7 +144,11 @@ obs_state_load() {
 
 obs_state_write() {
   _osw_sr="$1"; _osw_sc="$2"; _osw_cr="$3"; _osw_cc="$4"
-  _osw_tmp="$OBS_ROOT/.request.state.tmp.$$.$(_merv_dhcp_nonce)"
+  # State publication is not an ownership record, but its temporary name
+  # still uses the canonical current-shell nonce so concurrent detached
+  # workers cannot collide on a PID-only path.
+  merv_identity_nonce_next || return 2
+  _osw_tmp="$OBS_ROOT/.request.state.tmp.$$.$MERV_IDENTITY_NONCE"
   {
     printf 'snapshot_requested_generation=%s\n' "$_osw_sr"
     printf 'snapshot_completed_generation=%s\n' "$_osw_sc"
@@ -146,55 +162,39 @@ obs_state_write() {
 }
 
 obs_lock_acquire() {
-  _ola_lock="$1" _ola_wait="${2:-0}" _ola_try=0
-  # Worker ownership is process identity, not simulated DHCP state. Keep this
-  # on real procfs unless a dedicated observation-test override is supplied.
-  _ola_proc="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
-  while :; do
-    if mkdir "$_ola_lock" 2>/dev/null; then
-      _ola_start=$(merv_proc_start_time "$$" "$_ola_proc" 2>/dev/null || printf '0')
-      _ola_nonce=$(_merv_dhcp_nonce)
-      printf '%s\n' "$$" > "$_ola_lock/pid" &&
-        printf '%s\n' "$_ola_start" > "$_ola_lock/proc_start_time" &&
-        printf '%s\n' "$_ola_nonce" > "$_ola_lock/owner_nonce" &&
-      printf '%s\n' "$(date +%s 2>/dev/null || printf '0')" > "$_ola_lock/created_epoch" || {
-        rm -f "$_ola_lock/pid" "$_ola_lock/proc_start_time" \
-          "$_ola_lock/owner_nonce" "$_ola_lock/created_epoch" 2>/dev/null || :
-        rmdir "$_ola_lock" 2>/dev/null || :
-        return 2
-      }
-      OBS_LOCK_NONCE="$_ola_nonce"
-      return 0
-    fi
-    _ola_pid=$(cat "$_ola_lock/pid" 2>/dev/null || printf '')
-    _ola_start=$(cat "$_ola_lock/proc_start_time" 2>/dev/null || printf '')
-    _ola_owner_nonce=$(cat "$_ola_lock/owner_nonce" 2>/dev/null || printf '')
-    case "$_ola_pid:$_ola_start:$_ola_owner_nonce" in
-      ''|*[!0-9:A-Za-z._:-]*|*::*|*::*) return 2 ;;
-    esac
-    if ! merv_process_identity_matches "$_ola_pid" "$_ola_start" "$_ola_proc" 2>/dev/null; then
-      mv "$_ola_lock" "${_ola_lock}.stale.$(date +%s 2>/dev/null || printf 0).$$.$_ola_try" 2>/dev/null || :
-      _ola_try=$((_ola_try + 1))
-      [ "$_ola_try" -lt 8 ] || return 2
-      continue
-    fi
-    [ "$_ola_try" -lt "$_ola_wait" ] || return 1
-    sleep 1
-    _ola_try=$((_ola_try + 1))
-  done
+  _ola_lock="$1" _ola_wait="${2:-0}"
+  case "$_ola_wait" in ''|*[!0-9]*) return 2 ;; esac
+  # Observation chooses its proc root for deterministic tests; the generic
+  # owner library retains /proc as the production default.
+  _ola_prev_proc_root="${MERV_OWNER_LOCK_PROC_ROOT+x}"
+  _ola_prev_proc_value="${MERV_OWNER_LOCK_PROC_ROOT:-}"
+  MERV_OWNER_LOCK_PROC_ROOT="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
+  merv_owner_lock_acquire "$_ola_lock" 0 "$_ola_wait" observation
+  _ola_rc=$?
+  if [ -n "$_ola_prev_proc_root" ]; then
+    MERV_OWNER_LOCK_PROC_ROOT="$_ola_prev_proc_value"
+  else
+    unset MERV_OWNER_LOCK_PROC_ROOT
+  fi
+  [ "$_ola_rc" -eq 0 ] || return "$_ola_rc"
+  OBS_LOCK_NONCE="$MERV_LOCK_NONCE"
+  OBS_LOCK_START="$MERV_LOCK_START"
+  return 0
 }
 
 obs_lock_release() {
   _olr_lock="$1" _olr_nonce="$2"
-  _olr_proc="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
-  _olr_pid=$(cat "$_olr_lock/pid" 2>/dev/null || printf '')
-  _olr_start=$(cat "$_olr_lock/proc_start_time" 2>/dev/null || printf '')
-  [ "$_olr_pid" = "$$" ] || return 2
-  merv_process_identity_matches "$_olr_pid" "$_olr_start" "$_olr_proc" 2>/dev/null || return 2
-  [ "$(cat "$_olr_lock/owner_nonce" 2>/dev/null)" = "$_olr_nonce" ] || return 2
-  rm -f "$_olr_lock/pid" "$_olr_lock/proc_start_time" "$_olr_lock/owner_nonce" \
-    "$_olr_lock/created_epoch" 2>/dev/null || return 2
-  rmdir "$_olr_lock" 2>/dev/null
+  _olr_prev_proc_root="${MERV_OWNER_LOCK_PROC_ROOT+x}"
+  _olr_prev_proc_value="${MERV_OWNER_LOCK_PROC_ROOT:-}"
+  MERV_OWNER_LOCK_PROC_ROOT="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
+  merv_owner_lock_release "$_olr_lock" "$_olr_nonce"
+  _olr_rc=$?
+  if [ -n "$_olr_prev_proc_root" ]; then
+    MERV_OWNER_LOCK_PROC_ROOT="$_olr_prev_proc_value"
+  else
+    unset MERV_OWNER_LOCK_PROC_ROOT
+  fi
+  return "$_olr_rc"
 }
 
 obs_config_observable() {

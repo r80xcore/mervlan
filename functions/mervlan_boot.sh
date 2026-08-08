@@ -22,7 +22,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED LIB_ACTION_ACK_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED LIB_OWNER_LOCK_LOADED LIB_ACTION_ACK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
@@ -30,6 +30,10 @@ fi
 . "$TEMPLATE_LIB"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
+  error -c vlan,cli "Unable to load the owner-lock library; refusing boot action"
+  exit 1
+}
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
   error -c vlan,cli "Unable to load the DHCP/L2 safety library; refusing boot action"
   exit 1
@@ -165,8 +169,7 @@ process_pending_node_reconcile() {
 
 case "$ACTION" in
   enable|disable|setupenable|setupdisable|nodeenable|nodedisable)
-    if [ "${MERV_UPDATE_OWNER:-0}" != "1" ] &&
-       type merv_update_mutation_blocked >/dev/null 2>&1 &&
+    if type merv_update_mutation_blocked >/dev/null 2>&1 &&
        merv_update_mutation_blocked; then
       boot_action_ack_error "Boot action blocked: Update maintenance is active" '{}' "UPDATE_MAINTENANCE_ACTIVE"
       error -c vlan,cli "Boot action '$ACTION' refused while Update maintenance is active"
@@ -493,13 +496,13 @@ copy_inject() {
     fi
   else
     _boot_file_lock="$LOCKDIR/$(basename "$dest").lock"
-    merv_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
+    merv_owner_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
       cleanup_boot_temp_files "$block_file" "$tmp_new"
       return 1
     }
     _boot_lock_nonce="$MERV_LOCK_NONCE"; _boot_lock_start="$MERV_LOCK_START"
     if inject_block; then _boot_inject_rc=0; else _boot_inject_rc=$?; fi
-    if ! merv_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_inject_rc=1; fi
+    if ! merv_owner_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_inject_rc=1; fi
     if [ "$_boot_inject_rc" -ne 0 ]; then
       cleanup_boot_temp_files "$block_file" "$tmp_new"
       return 1
@@ -569,13 +572,13 @@ remove_inject() {
     fi
   else
     _boot_file_lock="$LOCKDIR/$(basename "$dest").lock"
-    merv_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
+    merv_owner_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
       cleanup_boot_temp_files "$tmp_new"
       return 1
     }
     _boot_lock_nonce="$MERV_LOCK_NONCE"; _boot_lock_start="$MERV_LOCK_START"
     if remove_block; then _boot_remove_rc=0; else _boot_remove_rc=$?; fi
-    if ! merv_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_remove_rc=1; fi
+    if ! merv_owner_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_remove_rc=1; fi
     if [ "$_boot_remove_rc" -ne 0 ]; then
       cleanup_boot_temp_files "$tmp_new"
       return 1

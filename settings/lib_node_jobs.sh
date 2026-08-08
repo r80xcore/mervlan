@@ -1,4 +1,4 @@
-# File: lib_node_jobs.sh || version="0.72.2"
+# File: lib_node_jobs.sh || version="0.72.3"
 # Bounded POSIX/BusyBox node-job helper.  Parents own locks and aggregation;
 # workers own only their job directories and one atomic terminal result.
 [ -n "${LIB_NODE_JOBS_LOADED:-}" ] && return 0 2>/dev/null
@@ -84,8 +84,19 @@ mnj_publish_result() {
   _mnj_now=$(date +%s 2>/dev/null || printf '')
   mnj_positive "$_mnj_now" || return 1
   _mnj_owner_pid="${MNJ_WORK_OWNER_PID:-$$}"
-  _mnj_owner_start="${MNJ_WORK_OWNER_START:-$(merv_identity_current_start 2>/dev/null || printf '')}"
-  _mnj_owner_nonce="${MNJ_WORK_OWNER_NONCE:-$(merv_identity_nonce 2>/dev/null || printf '')}"
+  if [ -n "${MNJ_WORK_OWNER_START:-}" ]; then
+    _mnj_owner_start="$MNJ_WORK_OWNER_START"
+  else
+    _mnj_owner_start=$(merv_identity_current_start 2>/dev/null || printf '')
+  fi
+  if [ -n "${MNJ_WORK_OWNER_NONCE:-}" ]; then
+    _mnj_owner_nonce="$MNJ_WORK_OWNER_NONCE"
+  else
+    _mnj_owner_nonce=""
+    if merv_identity_nonce_next 2>/dev/null; then
+      _mnj_owner_nonce="$MERV_IDENTITY_NONCE"
+    fi
+  fi
   mnj_positive "$_mnj_owner_pid" && mnj_positive "$_mnj_owner_start" && mnj_safe_token "$_mnj_owner_nonce" || return 1
   _mnj_tmp="$_mnj_dir/.result.$$.${MNJ_RESULT_SEQ:-0}"
   MNJ_RESULT_SEQ=$(( ${MNJ_RESULT_SEQ:-0} + 1 ))
@@ -138,7 +149,10 @@ mnj_worker() {
   mnj_positive "$MNJ_WORK_STARTED" || return 2
   MNJ_WORK_OWNER_PID="$$"
   MNJ_WORK_OWNER_START=$(merv_identity_current_start 2>/dev/null || printf '')
-  MNJ_WORK_OWNER_NONCE=$(merv_identity_nonce 2>/dev/null || printf '')
+  MNJ_WORK_OWNER_NONCE=""
+  if merv_identity_nonce_next 2>/dev/null; then
+    MNJ_WORK_OWNER_NONCE="$MERV_IDENTITY_NONCE"
+  fi
   mnj_positive "$MNJ_WORK_OWNER_PID" && mnj_positive "$MNJ_WORK_OWNER_START" && mnj_safe_token "$MNJ_WORK_OWNER_NONCE" || return 2
   export MNJ_WORK_OWNER_PID MNJ_WORK_OWNER_START MNJ_WORK_OWNER_NONCE
   LOG_chan_cli="$MNJ_WORK_DIR/cli.log"; LOG_chan_vlan="$MNJ_WORK_DIR/vlan.log"

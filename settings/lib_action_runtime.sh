@@ -39,7 +39,10 @@ merv_action_runtime_start() {
   mkdir -p "$_marr_dir" 2>/dev/null || return 1
   _marr_start=$(merv_identity_current_start 2>/dev/null || printf '')
   [ -n "$_marr_start" ] || return 1
-  _marr_nonce=$(merv_identity_nonce 2>/dev/null || printf '')
+  _marr_nonce=""
+  if merv_identity_nonce_next 2>/dev/null; then
+    _marr_nonce="$MERV_IDENTITY_NONCE"
+  fi
   [ -n "$_marr_nonce" ] || return 1
 
   if [ -f "$MERV_ACTION_RUNTIME_FILE" ]; then

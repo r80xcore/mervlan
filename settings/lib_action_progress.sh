@@ -27,7 +27,10 @@ merv_action_progress_init() {
     MERV_ACTION_PROGRESS_LAST_RC=0
     MERV_ACTION_PROGRESS_PID="$$"
     MERV_ACTION_PROGRESS_OWNER_START="$(merv_identity_current_start 2>/dev/null || printf '')"
-    MERV_ACTION_PROGRESS_NONCE="$(merv_identity_nonce 2>/dev/null || printf '')"
+    MERV_ACTION_PROGRESS_NONCE=""
+    if merv_identity_nonce_next 2>/dev/null; then
+        MERV_ACTION_PROGRESS_NONCE="$MERV_IDENTITY_NONCE"
+    fi
     MERV_ACTION_PROGRESS_STARTED_AT="$(date +%s 2>/dev/null || printf '0')"
 
     [ -n "$MERV_ACTION_PROGRESS_TOKEN" ] || return 0

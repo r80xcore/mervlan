@@ -1979,7 +1979,7 @@ download_mervlan() {
         }
         echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
-            functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json \
+            functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
             settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
@@ -2011,7 +2011,7 @@ download_mervlan() {
             case "$base" in
                 log_settings.sh|var_settings.sh|\
                 lib_debug.sh|lib_json.sh|lib_ssh.sh|lib_action_ack.sh|\
-                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|\
+                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|lib_owner_lock.sh|\
                 lib_radio.sh|\
                 mervlan_templates.sh|mac_shield_snapshot.sh|\
                 lib_br0_guard.sh)

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: execute_nodes.sh || version="0.72.3"                  #
+#              - File: execute_nodes.sh || version="0.72.4"                  #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -22,12 +22,16 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_OWNER_LOCK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the owner-lock library; refusing node execution"
+  exit 1
+}
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing node execution"
   exit 1
@@ -76,6 +80,29 @@ fi
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 
+execute_nodes_reconcile_signal_children() {
+  # Reconcile only identities this parent has actually published.  PID alone
+  # is never sufficient for a signal after a shell interruption.
+  if type mnj_reconcile_slot >/dev/null 2>&1 && [ -n "${MNJ_POOL_PHASE:-}" ]; then
+    [ -n "${MNJ_S1_PID:-}" ] && mnj_reconcile_slot 1 failed parent-signal || :
+    [ -n "${MNJ_S2_PID:-}" ] && mnj_reconcile_slot 2 failed parent-signal || :
+  fi
+  if [ -n "${main_pid:-}" ] && [ -n "${main_start:-}" ] &&
+     type merv_process_identity_matches >/dev/null 2>&1 &&
+     merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; then
+    kill -TERM "$main_pid" 2>/dev/null || :
+    _ens_n=0
+    while [ "$_ens_n" -lt 5 ] && merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; do
+      sleep 1
+      _ens_n=$((_ens_n + 1))
+    done
+    if merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; then
+      kill -KILL "$main_pid" 2>/dev/null || :
+    fi
+    wait "$main_pid" 2>/dev/null || :
+  fi
+}
+
 execute_nodes_progress_cleanup() {
   _enpc_rc=$?
   _enpc_cleanup_rc=0
@@ -86,10 +113,10 @@ execute_nodes_progress_cleanup() {
     merv_action_runtime_finish 2>/dev/null || { _enpc_runtime_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the action-runtime marker (rc=$_enpc_runtime_rc)"; }
   fi
   if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-    merv_lock_release "$EXEC_NODES_LOCK" "${_exec_nodes_lock_nonce:-}" 2>/dev/null || { _enpc_nodes_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release its owner lock (rc=$_enpc_nodes_lock_rc)"; }
+    merv_owner_lock_release "$EXEC_NODES_LOCK" "${_exec_nodes_lock_nonce:-}" 2>/dev/null || { _enpc_nodes_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release its owner lock (rc=$_enpc_nodes_lock_rc)"; }
   fi
   if [ "${EXEC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-    merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_exec_action_lock_nonce" "$_exec_action_lock_start" >/dev/null 2>&1 || { _enpc_action_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the global action lock (rc=$_enpc_action_lock_rc)"; }
+    merv_action_lock_leave "$_exec_action_lock_path" "$_exec_action_lock_nonce" "$_exec_action_lock_start" "${_exec_action_lock_mode:-self}" >/dev/null 2>&1 || { _enpc_action_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the global action lock (rc=$_enpc_action_lock_rc)"; }
     [ "$_enpc_action_lock_rc" -eq 0 ] && EXEC_ACTION_LOCK_ACQUIRED=0
   fi
   [ "$_enpc_cleanup_rc" -eq 0 ] || _enpc_rc=1
@@ -112,6 +139,20 @@ execute_nodes_progress_cleanup() {
   return "$_enpc_rc"
 }
 
+EXEC_SIGNAL_HANDLING=0
+execute_nodes_handle_signal() {
+  _ens_signal_status="$1"
+  [ "${EXEC_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_ens_signal_status"
+  EXEC_SIGNAL_HANDLING=1
+  trap - INT TERM
+  error -c cli,vlan "Execute interrupted (rc=$_ens_signal_status); reconciling tracked node and router workers"
+  execute_nodes_reconcile_signal_children
+  if type merv_action_progress_fail >/dev/null 2>&1; then
+    merv_action_progress_fail "Apply interrupted; tracked workers were stopped"
+  fi
+  exit "$_ens_signal_status"
+}
+
 # ----------------------------------------------------------- Concurrency lock --
 # execute_nodes orchestrates a local manager apply plus remote node runs. The
 # local manager self-locks, but two overlapping execute_nodes invocations (e.g.
@@ -122,34 +163,58 @@ EXEC_NODES_LOCK="$LOCKDIR/execute_nodes.lock"
 EXEC_NODES_LOCK_ACQUIRED=0
 EXEC_ACTION_LOCK_ACQUIRED=0
 EXEC_PHASE4_ACTION_LOCK_HELD=0
-if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ]; then
-  EXEC_PHASE4_ACTION_LOCK_HELD=1
-fi
-if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" != 1 ] && type merv_action_lock_acquire >/dev/null 2>&1; then
-  merv_action_lock_acquire "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" || exit 75
-  EXEC_ACTION_LOCK_ACQUIRED=1
+_exec_action_lock_path="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+_exec_lock_ack_action=executenodes_vlanmgr
+[ "${1:-}" = nodesonly ] && _exec_lock_ack_action=executenodesonly_vlanmgr
+merv_action_lock_enter "$_exec_action_lock_path"
+_exec_action_lock_rc=$?
+if [ "$_exec_action_lock_rc" -eq 0 ]; then
+  _exec_action_lock_mode="${MERV_ACTION_LOCK_MODE:-none}"
+  [ "$_exec_action_lock_mode" = self ] && EXEC_ACTION_LOCK_ACQUIRED=1
   EXEC_PHASE4_ACTION_LOCK_HELD=1
   _exec_action_lock_nonce="$MERV_ACTION_LOCK_NONCE"
   _exec_action_lock_start="$MERV_ACTION_LOCK_START"
+  if ! merv_action_lock_export_child_context; then
+    merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_exec_lock_ack_action" \
+      "${_exec_lock_ack_action}" "Preparing apply..."
+    merv_action_progress_fail "The apply owner context was invalid; no work was started."
+    action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_exec_lock_ack_action" 4 global >/dev/null 2>&1 || :
+    merv_action_lock_leave "$_exec_action_lock_path" "$_exec_action_lock_nonce" \
+      "$_exec_action_lock_start" "$_exec_action_lock_mode" >/dev/null 2>&1 || :
+    exit 75
+  fi
+else
+  merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_exec_lock_ack_action" \
+    "${_exec_lock_ack_action}" "Preparing apply..."
+  _exec_lock_message="The apply could not start because its action lock could not be acquired."
+  [ "$_exec_action_lock_rc" -eq 3 ] && _exec_lock_message="Another configuration action is already running; the apply was not started."
+  merv_action_progress_fail "$_exec_lock_message"
+  if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+    action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_exec_lock_ack_action" \
+      "$_exec_action_lock_rc" global >/dev/null 2>&1 || :
+  fi
+  exit 75
 fi
-if type merv_lock_acquire >/dev/null 2>&1; then
+if type merv_owner_lock_acquire >/dev/null 2>&1; then
   mkdir -p "$LOCKDIR" 2>/dev/null || {
     error -c cli,vlan "Execute: unable to prepare its lock directory"
     if [ "$EXEC_ACTION_LOCK_ACQUIRED" -eq 1 ]; then
-      merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_exec_action_lock_nonce" "$_exec_action_lock_start" >/dev/null 2>&1 || error -c cli,vlan "Execute: global action-lock cleanup failed"
+      merv_action_lock_leave "$_exec_action_lock_path" "$_exec_action_lock_nonce" "$_exec_action_lock_start" "${_exec_action_lock_mode:-self}" >/dev/null 2>&1 || error -c cli,vlan "Execute: global action-lock cleanup failed"
       [ -d "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" ] && warn -c cli,vlan "Execute: global action lock was retained for recovery"
     fi
     exit 1
   }
-  if merv_lock_acquire "$EXEC_NODES_LOCK" "${MERV_EXEC_NODES_LOCK_STALE_SEC:-900}" 0 "execute_nodes"; then
+  if merv_owner_lock_acquire "$EXEC_NODES_LOCK" "${MERV_EXEC_NODES_LOCK_STALE_SEC:-900}" 0 "execute_nodes"; then
     EXEC_NODES_LOCK_ACQUIRED=1
     _exec_nodes_lock_nonce="$MERV_LOCK_NONCE"
     _exec_nodes_owner_pid="$$"
     _exec_nodes_owner_start="${MERV_LOCK_START:-}"
-    trap 'execute_nodes_progress_cleanup' EXIT INT TERM
+    trap 'execute_nodes_progress_cleanup' EXIT
+    trap 'execute_nodes_handle_signal 130' INT
+    trap 'execute_nodes_handle_signal 143' TERM
   else
     if [ "$EXEC_ACTION_LOCK_ACQUIRED" -eq 1 ]; then
-      if merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_exec_action_lock_nonce" "$_exec_action_lock_start" >/dev/null 2>&1; then
+      if merv_action_lock_leave "$_exec_action_lock_path" "$_exec_action_lock_nonce" "$_exec_action_lock_start" "${_exec_action_lock_mode:-self}" >/dev/null 2>&1; then
         EXEC_ACTION_LOCK_ACQUIRED=0
       else
         error -c cli,vlan "Execute: could not release the global action lock after contention; lock retained for recovery"
@@ -1011,7 +1076,7 @@ else
             ( MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; _main_child_rc=$?; _main_rc_tmp="${_main_rc_file}.tmp.$$"; printf '%s\n' "$_main_child_rc" > "$_main_rc_tmp" && mv -f "$_main_rc_tmp" "$_main_rc_file" ) &
             main_pid=$!
             main_start=$(merv_proc_start_time "$main_pid" 2>/dev/null || printf '')
-            case "$main_start" in ''|*[!0-9]*) error -c cli,vlan "âœ— Could not record local manager process identity"; kill "$main_pid" 2>/dev/null || :; wait "$main_pid" 2>/dev/null || :; local_success=false; main_pid="" ;; esac
+            case "$main_start" in ''|*[!0-9]*) error -c cli,vlan "ERROR: Could not record local manager process identity"; kill "$main_pid" 2>/dev/null || :; wait "$main_pid" 2>/dev/null || :; local_success=false; main_pid="" ;; esac
         fi
     fi
     

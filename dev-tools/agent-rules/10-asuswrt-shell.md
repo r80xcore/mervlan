@@ -33,6 +33,10 @@ Use when editing or reviewing runtime shell files.
   retain the hard timeout. Dropbear emitted `failed creating //.ssh` only with
   `HOME=/`; a writable temporary HOME removed that warning without changing
   connection success.
+- WSL2 BusyBox 1.37.0 validation (2026-08-08) confirmed
+  `date -r <directory> +%s` returns a numeric epoch. DHCP incomplete-lock
+  recovery may use that form only when the result is validated; an unreadable
+  timestamp must remain fail-closed and must never be replaced with `now`.
 - Validate numeric values before arithmetic, timeouts, `sleep`, PID use, or path construction.
 - Do not use `$$` alone for a temporary filename in concurrent code; BusyBox subshells may share it.
 - Use temporary-file-plus-same-directory-`mv` for shared state publication.

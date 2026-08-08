@@ -10,6 +10,7 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 if ! type merv_action_progress_init >/dev/null 2>&1; then
   merv_action_progress_init() { :; }
@@ -20,6 +21,10 @@ fi
 
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macrefresh_vlanmgr" "Rebuild MAC Shield" \
   "Preparing MAC shield refresh..."
+if merv_update_mutation_blocked; then
+  merv_action_progress_fail "MAC shield refresh refused while Update maintenance is active"
+  exit 75
+fi
 
 mac_refresh_progress_exit() {
   _mr_rc=$?

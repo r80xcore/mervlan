@@ -11,32 +11,62 @@
 LIB_IDENTITY_LOADED=1
 MERV_IDENTITY_NONCE_SEQ="${MERV_IDENTITY_NONCE_SEQ:-0}"
 
+merv_identity_positive_uint() {
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  # Avoid arithmetic conversion (and its shell-specific overflow/octal
+  # behavior); any non-zero digit is sufficient to prove positivity.
+  case "$1" in *[1-9]*) return 0 ;; *) return 1 ;; esac
+}
+
 merv_identity_proc_start() {
   _mi_pid="${1:-$$}"
   _mi_root="${2:-/proc}"
-  case "$_mi_pid" in ''|*[!0-9]*) return 1 ;; esac
+  # PID 0 is the kernel's process group and cannot identify an owner.  Keep
+  # the normal identity API strict so malformed/zero values fail closed.
+  merv_identity_positive_uint "$_mi_pid" || return 1
   _mi_line=$(cat "$_mi_root/$_mi_pid/stat" 2>/dev/null) || return 1
   case "$_mi_line" in *") "*) _mi_tail=${_mi_line##*) } ;; *) return 1 ;; esac
   _mi_start=$(printf '%s\n' "$_mi_tail" | awk '{print $20}')
-  case "$_mi_start" in ''|*[!0-9]*) return 1 ;; esac
+  merv_identity_positive_uint "$_mi_start" || return 1
   printf '%s\n' "$_mi_start"
 }
 
 merv_identity_matches() {
   _mi_pid="$1"
   _mi_expected="$2"
-  case "$_mi_pid:$_mi_expected" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+  merv_identity_positive_uint "$_mi_pid" || return 1
+  merv_identity_positive_uint "$_mi_expected" || return 1
   _mi_actual=$(merv_identity_proc_start "$_mi_pid" "${3:-/proc}") || return 1
   [ "$_mi_actual" = "$_mi_expected" ] || return 1
   [ "${3:-/proc}" != "/proc" ] || kill -0 "$_mi_pid" 2>/dev/null
 }
 
-merv_identity_nonce() {
+merv_identity_nonce_next() {
+  # This function intentionally mutates state in the caller's shell.  Call it
+  # directly and consume MERV_IDENTITY_NONCE; command substitution would run
+  # it in a child shell and lose the sequence update.
+  _mi_pid="$$"
+  merv_identity_positive_uint "$_mi_pid" || return 1
+  _mi_start=$(merv_identity_current_start 2>/dev/null) || return 1
+  case "$_mi_start" in ''|*[!0-9]*|0) return 1 ;; esac
+  _mi_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_mi_now" in ''|*[!0-9]*) _mi_now=0 ;; esac
   case "$MERV_IDENTITY_NONCE_SEQ" in ''|*[!0-9]*) MERV_IDENTITY_NONCE_SEQ=0 ;; esac
   MERV_IDENTITY_NONCE_SEQ=$((MERV_IDENTITY_NONCE_SEQ + 1))
-  _mi_now=$(date +%s 2>/dev/null || printf '0')
-  _mi_start=$(merv_identity_proc_start "$$" 2>/dev/null || printf '0')
-  printf '%s.%s.%s.%s\n' "$_mi_now" "$$" "$_mi_start" "$MERV_IDENTITY_NONCE_SEQ"
+  MERV_IDENTITY_NONCE="${_mi_now}.${_mi_pid}.${_mi_start}.${MERV_IDENTITY_NONCE_SEQ}"
+  merv_identity_nonce_valid "$MERV_IDENTITY_NONCE" || {
+    MERV_IDENTITY_NONCE=""
+    return 1
+  }
+  return 0
+}
+
+# Compatibility output wrapper for callers awaiting migration to the
+# current-shell API above.  New code must call merv_identity_nonce_next
+# directly and read MERV_IDENTITY_NONCE.
+merv_identity_nonce() {
+  merv_identity_nonce_next || return 1
+  printf '%s\n' "$MERV_IDENTITY_NONCE"
 }
 
 merv_identity_uint() {

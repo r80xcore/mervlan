@@ -23,13 +23,15 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_STP_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_STP_LOADED LIB_MERVQT_LOADED LIB_OWNER_LOCK_LOADED LIB_ACTION_LOCK_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh"
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
@@ -403,6 +405,10 @@ else
 fi
 
 LOCK_ACQUIRED=0
+ACTION_LOCK_ACQUIRED=0
+ACTION_LOCK_MODE="none"
+ACTION_LOCK_NONCE=""
+ACTION_LOCK_START=""
 MANAGER_DHCP_TOKEN=""
 MANAGER_RUN_ID=""
 MANAGER_EXIT_REASON="process-exit"
@@ -410,20 +416,34 @@ MANAGER_RUNTIME_OWNED=0
 
 acquire_script_lock() {
   # Prevent concurrent runs from stomping on bridges/interfaces. The owner-aware
-  # identity/nonce primitive lives in lib_mervqt.sh so heal, MAC Shield refresh,
+  # identity/nonce primitive lives in lib_owner_lock.sh so heal, MAC Shield refresh,
   # and this manager share one contract. Live owners are never reclaimed by age;
   # unknown metadata fails closed.
   [ "$DRY_RUN" = "yes" ] && return 0
   [ -n "$LOCK_PATH" ] || return 0
+
+  ACTION_LOCK_PATH="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+  if ! merv_action_lock_enter "$ACTION_LOCK_PATH"; then
+    error -c cli,vlan "Could not acquire global action lock; aborting"
+    exit 75
+  fi
+  ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+  [ "$ACTION_LOCK_MODE" = self ] && ACTION_LOCK_ACQUIRED=1
+  ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_NONCE"
+  ACTION_LOCK_START="$MERV_ACTION_LOCK_START"
+  merv_action_lock_export_child_context || {
+    error -c cli,vlan "Could not export authenticated action ownership; aborting"
+    exit 75
+  }
 
   # Courtesy yield to an in-flight heal: heal is non-blocking and short-lived,
   # so a single brief wait lets it finish reading interface state before we
   # start mutating bridges. This is a BEST-EFFORT yield only — we NEVER abort
   # or reclaim heal's lock here. The final owner-aware acquisition below is
   # authoritative: active or unknown ownership is never bypassed by this wait.
-  if type merv_lock_state >/dev/null 2>&1; then
-    case "$(merv_lock_state "$LOCKDIR/vlan_event.lock")" in
-      active|unknown)
+  if type merv_owner_lock_state >/dev/null 2>&1; then
+    case "$(merv_owner_lock_state "$LOCKDIR/vlan_event.lock")" in
+      live|unknown)
         info -c cli,vlan "Manager: heal in flight — yielding briefly before apply"
         sleep 3
         ;;
@@ -432,7 +452,7 @@ acquire_script_lock() {
 
   local stale
   stale="${MERV_MANAGER_LOCK_STALE_SEC:-420}"
-  if merv_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
+  if merv_owner_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
     LOCK_ACQUIRED=1
     MANAGER_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     if [ "${MERV_ACTION_RUNTIME_OWNER:-0}" != "1" ] &&
@@ -450,13 +470,25 @@ acquire_script_lock() {
 release_script_lock() {
   # No-op in dry-run
   [ "$DRY_RUN" = "yes" ] && return 0
-  [ "$LOCK_ACQUIRED" -eq 1 ] || return
-  if merv_lock_release "$LOCK_PATH" "$MANAGER_LOCK_NONCE"; then
-    LOCK_ACQUIRED=0
-    return 0
+  _rsl_failed=0
+  if [ "$LOCK_ACQUIRED" -eq 1 ]; then
+    if merv_owner_lock_release "$LOCK_PATH" "$MANAGER_LOCK_NONCE"; then
+      LOCK_ACQUIRED=0
+    else
+      _rsl_failed=1
+      error -c cli,vlan "Could not release mervlan_manager owner lock; recovery is required"
+    fi
   fi
-  error -c cli,vlan "Could not release mervlan_manager owner lock; recovery is required"
-  return 1
+  if [ "$ACTION_LOCK_ACQUIRED" -eq 1 ]; then
+    if merv_action_lock_leave "${ACTION_LOCK_PATH:-$MERV_ACTION_LOCK_PATH}" "$ACTION_LOCK_NONCE" "$ACTION_LOCK_START" "$ACTION_LOCK_MODE"; then
+      ACTION_LOCK_ACQUIRED=0
+      merv_action_lock_clear_child_context
+    else
+      _rsl_failed=1
+      error -c cli,vlan "Could not release global action lock; recovery is required"
+    fi
+  fi
+  [ "$_rsl_failed" -eq 0 ]
 }
 
 cleanup_on_exit() {

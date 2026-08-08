@@ -256,7 +256,36 @@ action_ack_busy() {
   _aa_wrapper_result="${3-}"; _aa_wrapper_warnings="${5-}"
   [ -n "$_aa_wrapper_result" ] || _aa_wrapper_result='{}'
   [ -n "$_aa_wrapper_warnings" ] || _aa_wrapper_warnings='[]'
-  action_ack_write "$1" "$2" busy "$_aa_wrapper_result" "${4:-Another action is already running.}" "$_aa_wrapper_warnings" busy
+  action_ack_write "$1" "$2" busy "$_aa_wrapper_result" "${4:-Another action is already running.}" "$_aa_wrapper_warnings" "${6:-action-lock-busy}"
+}
+
+# Publish one stable terminal result for an action-lock refusal.  merv_action
+# lock_enter returns 3 for a verified live owner and 4 for malformed,
+# unavailable, or unauthenticated ownership.  Keep the distinction visible to
+# the browser while retaining the precise internal reason in result.class.
+action_ack_lock_failure() {
+  _aa_lf_token="${1:-}"
+  _aa_lf_action="${2:-unknown}"
+  _aa_lf_rc="${3:-4}"
+  _aa_lf_scope="${4:-global}"
+  _aa_lf_class="${MERV_ACTION_LOCK_LAST_FAILURE:-}"
+  case "$_aa_lf_rc:$_aa_lf_class" in
+    3:*|*:action-lock-busy)
+      action_ack_busy "$_aa_lf_token" "$_aa_lf_action" \
+        "{\"lock\":\"$(action_ack_json_escape "$_aa_lf_scope")\",\"class\":\"action-lock-busy\"}" \
+        "Another action is already running; try again after it finishes." '[]' action-lock-busy
+      ;;
+    *:action-lock-parent-invalid)
+      action_ack_error "$_aa_lf_token" "$_aa_lf_action" \
+        "{\"lock\":\"$(action_ack_json_escape "$_aa_lf_scope")\",\"class\":\"action-lock-parent-invalid\"}" \
+        "The action owner context was invalid; no work was started." '[]' action-lock-parent-invalid
+      ;;
+    *)
+      action_ack_error "$_aa_lf_token" "$_aa_lf_action" \
+        "{\"lock\":\"$(action_ack_json_escape "$_aa_lf_scope")\",\"class\":\"action-lock-owner-unknown\"}" \
+        "The action owner could not be verified; no work was started." '[]' action-lock-owner-unknown
+      ;;
+  esac
 }
 
 action_ack_ssh_trust_required() {

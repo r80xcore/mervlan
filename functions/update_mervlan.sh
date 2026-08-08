@@ -21,7 +21,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_OWNER_LOCK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
@@ -31,6 +31,10 @@ fi
 }
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the owner-lock library; refusing update"
+  exit 1
+}
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing update"
   exit 1
@@ -143,9 +147,10 @@ MAC_DB_BACKUP_PRESENT="0"
 UPDATE_PARTIAL="0"
 
 # Serialize updates with manual backup, deletion, and restore operations.
-UPDATE_MAINTENANCE_LOCK="${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock"
+UPDATE_MAINTENANCE_LOCK="${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}"
 UPDATE_MAINTENANCE_LOCK_OWNED="0"
 UPDATE_MAINTENANCE_LOCK_NONCE=""
+UPDATE_MAINTENANCE_LOCK_START=""
 UPDATE_SIGNAL_HANDLING="0"
 UPDATE_ACTIVATION_STARTED="0"
 UPDATE_PRESERVE_TMP="0"
@@ -185,7 +190,7 @@ update_wait_for_runtime_idle() {
 	# This is a safety gate, not a best-effort status display.  If the
 	# classifiers are unavailable, the updater cannot prove that runtime work
 	# and DHCP/observation handoffs are idle, so it must stop before teardown.
-	type merv_lock_state >/dev/null 2>&1 || {
+	type merv_owner_lock_state >/dev/null 2>&1 || {
 		error -c cli,vlan "Update cannot quiesce safely: runtime lock classifier is unavailable"
 		return 1
 	}
@@ -206,13 +211,14 @@ update_wait_for_runtime_idle() {
 			"$LOCKDIR/client_collect.lock"
 		do
 			[ -e "$_update_lock" ] || continue
-			case "$(merv_lock_state "$_update_lock")" in
-				active) _update_busy="1" ;;
+			case "$(merv_owner_lock_state "$_update_lock")" in
+				live) _update_busy="1" ;;
+				dead|reused) : ;;
 				unknown) error -c cli,vlan "Update cannot classify runtime lock $_update_lock"; return 1 ;;
 				esac
 		done
 		# The service-event global action lock has a deliberately different
-		# metadata schema from merv_lock_state. Presence is therefore treated as
+		# metadata schema from merv_owner_lock_state. Presence is therefore treated as
 		# busy and allowed to drain, while malformed/stale state cannot be
 		# mistaken for an idle runtime.
 		if [ -e "$LOCKDIR/mervlan_action.lock" ] &&
@@ -787,6 +793,7 @@ settings/settings.json
 settings/var_settings.sh
 settings/log_settings.sh
 settings/lib_json.sh
+settings/lib_owner_lock.sh
 settings/lib_ssh.sh
 settings/lib_update_state.sh
 settings/lib_node_reconcile.sh
@@ -1097,8 +1104,8 @@ cleanup_tmp() {
 		rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
 	fi
 	if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ]; then
-		if type merv_lock_release >/dev/null 2>&1 &&
-		   merv_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" 2>/dev/null; then
+		if type merv_owner_lock_release >/dev/null 2>&1 &&
+		   merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" 2>/dev/null; then
 			UPDATE_MAINTENANCE_LOCK_OWNED="0"
 		else
 			_update_cleanup_failed=1
@@ -1209,6 +1216,22 @@ esac
 # Consume the newest value before resolving the download URL.  The value is
 # one-shot: removing every copy prevents a custom branch/tag from unexpectedly
 # overriding a later normal main/dev or CLI update.
+update_gui_ref_transport_digest() {
+	_update_grtd_file="${1:-}"
+	[ -f "$_update_grtd_file" ] || return 1
+	if type md5sum >/dev/null 2>&1; then
+		_update_grtd_hash=$(md5sum "$_update_grtd_file" 2>/dev/null | awk 'NR == 1 { print $1 }')
+		case "$_update_grtd_hash" in
+			????????????????????????????????) printf '%s' "$_update_grtd_hash" | grep -q '^[0-9A-Fa-f][0-9A-Fa-f]*$' 2>/dev/null && { printf 'md5:%s\n' "$_update_grtd_hash"; return 0; } ;;
+		esac
+	fi
+	if type cksum >/dev/null 2>&1; then
+		_update_grtd_hash=$(cksum "$_update_grtd_file" 2>/dev/null | awk 'NR == 1 { print $1 ":" $2 }')
+		case "$_update_grtd_hash" in [0-9]*:[0-9]*) printf 'cksum:%s\n' "$_update_grtd_hash"; return 0 ;; esac
+	fi
+	return 1
+}
+
 consume_gui_update_ref() {
 	_gui_ref_file="${CUSTOM_SETTINGS_FILE:-/jffs/addons/custom_settings.txt}"
 	GUI_UPDATE_REF=""
@@ -1216,14 +1239,6 @@ consume_gui_update_ref() {
 
 	_gui_ref_raw=$(sed -n 's/^vlanmgr_update_ref=//p' "$_gui_ref_file" 2>/dev/null | tail -n 1 | tr -d '\r')
 	[ -n "$_gui_ref_raw" ] || return 1
-	_gui_ref_mtime=$(stat -c %Y "$_gui_ref_file" 2>/dev/null || printf '0')
-	case "$_gui_ref_mtime" in ''|*[!0-9]*) _gui_ref_mtime=0 ;; esac
-	mkdir -p "$MERV_STATE_ROOT" 2>/dev/null || return 2
-	_gui_ref_ledger="$MERV_UPDATE_CONSUMED_FILE"
-	if [ -f "$_gui_ref_ledger" ] && grep -F -x -q "$_gui_ref_mtime|$_gui_ref_raw" "$_gui_ref_ledger" 2>/dev/null; then
-		return 1
-	fi
-
 	_gui_ref_clean=$(printf '%s' "$_gui_ref_raw" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-')
 	[ "$_gui_ref_clean" = "$_gui_ref_raw" ] || return 3
 	case "$_gui_ref_clean" in
@@ -1233,8 +1248,14 @@ consume_gui_update_ref() {
 		refs/heads/?*|refs/tags/v[0-9]*) GUI_UPDATE_REF="$_gui_ref_clean" ;;
 		*) return 3 ;;
 	esac
+	_gui_ref_digest=$(update_gui_ref_transport_digest "$_gui_ref_file" 2>/dev/null) || return 2
+	mkdir -p "$MERV_STATE_ROOT" 2>/dev/null || return 2
+	_gui_ref_ledger="$MERV_UPDATE_CONSUMED_FILE"
+	if [ -f "$_gui_ref_ledger" ] && grep -F -x -q "$_gui_ref_digest|$_gui_ref_raw" "$_gui_ref_ledger" 2>/dev/null; then
+		return 1
+	fi
 	_gui_ref_tmp="${_gui_ref_ledger}.tmp.$$"
-	( umask 077; { [ -f "$_gui_ref_ledger" ] && cat "$_gui_ref_ledger"; printf '%s|%s\n' "$_gui_ref_mtime" "$_gui_ref_raw"; } > "$_gui_ref_tmp" ) 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
+	( umask 077; { [ -f "$_gui_ref_ledger" ] && cat "$_gui_ref_ledger"; printf '%s|%s\n' "$_gui_ref_digest" "$_gui_ref_raw"; } > "$_gui_ref_tmp" ) 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
 	chmod 600 "$_gui_ref_tmp" 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
 	mv -f "$_gui_ref_tmp" "$_gui_ref_ledger" 2>/dev/null || { rm -f "$_gui_ref_tmp" 2>/dev/null; return 2; }
 	return 0
@@ -1246,12 +1267,23 @@ consume_gui_update_ref() {
 mkdir -p "${UPDATE_MAINTENANCE_LOCK%/*}" 2>/dev/null || \
 	fail_update lock "Could not prepare the MerVLAN maintenance lock directory"
 
-if ! type merv_lock_acquire >/dev/null 2>&1; then
+if ! type merv_owner_lock_acquire >/dev/null 2>&1; then
 	fail_update lock "Owner-aware maintenance lock support is unavailable"
 fi
-if merv_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenance"; then
+if merv_owner_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenance"; then
 	UPDATE_MAINTENANCE_LOCK_OWNED="1"
 	UPDATE_MAINTENANCE_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+	UPDATE_MAINTENANCE_LOCK_START="${MERV_LOCK_START:-}"
+	# Every child that operates inside this quiesced Update uses the exact
+	# maintenance owner record; a bare MERV_UPDATE_OWNER flag is not authority.
+	MERV_UPDATE_OWNER=1
+	MERV_UPDATE_OWNER_PID="$$"
+	MERV_UPDATE_OWNER_START="$UPDATE_MAINTENANCE_LOCK_START"
+	MERV_UPDATE_OWNER_NONCE="$UPDATE_MAINTENANCE_LOCK_NONCE"
+	export MERV_UPDATE_OWNER MERV_UPDATE_OWNER_PID MERV_UPDATE_OWNER_START MERV_UPDATE_OWNER_NONCE
+	if ! merv_update_owner_context_valid; then
+		fail_update lock "Could not authenticate the Update maintenance owner context"
+	fi
 else
 	fail_update busy "Another MerVLAN update, backup, restore, or deletion is already running"
 fi
@@ -1815,6 +1847,7 @@ for rel_path in \
 	"settings/lib_debug.sh" \
 	"settings/lib_action_ack.sh" \
 	"settings/lib_json.sh" \
+	"settings/lib_owner_lock.sh" \
 	"settings/lib_ssh.sh" \
 	"settings/lib_update_state.sh" \
 	"settings/lib_node_reconcile.sh" \

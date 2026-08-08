@@ -49,6 +49,9 @@ fi
 if [ -z "${LIB_ACTION_ACK_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
   . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || exit 1
 fi
+if [ -z "${LIB_ACTION_PROGRESS_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+fi
 
 # ========================================================================== #
 # PARAMETER EXTRACTION & VALIDATION — Parse event action from arguments      #
@@ -425,40 +428,63 @@ dispatch_if_executable() {
   _se_key=$(printf '%s' "${RAW:-${SCRIPT_PATH##*/}}" | tr -cd 'A-Za-z0-9._-')
   [ -n "$_se_key" ] || return 1
   _se_event_lock="${LOCKDIR%/}/${_se_key}.lock"
-  merv_action_lock_acquire "$_se_event_lock"
+  merv_action_lock_enter "$_se_event_lock"
   _se_event_rc=$?
   if [ "$_se_event_rc" -ne 0 ]; then
-    if [ "$_se_event_rc" -eq 3 ] && type action_ack_busy >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
-      if ! action_ack_busy "$MERV_PROGRESS_TOKEN" "$_se_key" '{"lock":"event"}' "Another action is already running." '[]' >/dev/null 2>&1; then
-        logger -t "VLANMgr" "handler: busy acknowledgement failed for $_se_key"
-      fi
+    merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+    if [ "$_se_event_rc" -eq 3 ]; then
+      merv_action_progress_fail "Another action is already running; this event was not started."
+    else
+      merv_action_progress_fail "The event action owner could not be verified; no work was started."
     fi
-    logger -t "VLANMgr" "handler: $_se_key owner lock unavailable (rc=$_se_event_rc); skipping"
-    return 0
+    if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+      action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_event_rc" event >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: lock-failure acknowledgement failed for $_se_key"
+    fi
+    logger -t "VLANMgr" "handler: $_se_key owner lock unavailable (rc=$_se_event_rc); refusing dispatch"
+    return 75
   fi
   _se_event_nonce="$MERV_ACTION_LOCK_NONCE"; _se_event_start="$MERV_ACTION_LOCK_START"
+  _se_event_mode="${MERV_ACTION_LOCK_MODE:-none}"
   logger -t "VLANMgr" "handler: event lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
   _se_global_needed=0
   case "$SCRIPT_PATH" in
-    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/hw_probe.sh|*/update_mervlan.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh) _se_global_needed=1 ;;
+    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/hw_probe.sh|*/update_mervlan.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh|*/mac_client_meta.sh|*/dropbear_sshkey_gen.sh) _se_global_needed=1 ;;
   esac
   _se_global_nonce=""; _se_global_start=""
   if [ "$_se_global_needed" -eq 1 ]; then
-    merv_action_lock_acquire "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+    merv_action_lock_enter "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
     _se_global_rc=$?
     if [ "$_se_global_rc" -ne 0 ]; then
-      if ! merv_action_lock_release "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" >/dev/null 2>&1; then
+      _se_event_release_rc=0
+      merv_action_lock_leave "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" "$_se_event_mode" >/dev/null 2>&1 || _se_event_release_rc=1
+      if [ "$_se_event_release_rc" -ne 0 ]; then
         logger -t "VLANMgr" "handler: event lock cleanup failed after global lock contention; retained for recovery"
-      fi
-      if [ "$_se_global_rc" -eq 3 ] && type action_ack_busy >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
-        if ! action_ack_busy "$MERV_PROGRESS_TOKEN" "$_se_key" '{"lock":"global"}' "Another configuration action is already running." '[]' >/dev/null 2>&1; then
-          logger -t "VLANMgr" "handler: global-busy acknowledgement failed for $_se_key"
+        merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+        merv_action_progress_fail "The action lock could not be reconciled; recovery is required."
+        if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
+          action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+            '{"reason":"cleanup-failed","lock":"event"}' \
+            "The event action lock could not be cleaned up; recovery is required." \
+            '["action-lock-cleanup-failed"]' action-lock-cleanup-failed >/dev/null 2>&1 || :
         fi
+        return 75
       fi
-      logger -t "VLANMgr" "handler: global action lock busy/unknown (rc=$_se_global_rc); skipping $_se_key"
-      return 0
+      merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+      if [ "$_se_global_rc" -eq 3 ]; then
+        merv_action_progress_fail "Another configuration action is already running; this action was not started."
+      else
+        merv_action_progress_fail "The global action owner could not be verified; no work was started."
+      fi
+      if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_global_rc" global >/dev/null 2>&1 || \
+          logger -t "VLANMgr" "handler: global lock-failure acknowledgement failed for $_se_key"
+      fi
+      logger -t "VLANMgr" "handler: global action lock unavailable (rc=$_se_global_rc); refusing $_se_key"
+      return 75
     fi
     _se_global_nonce="$MERV_ACTION_LOCK_NONCE"; _se_global_start="$MERV_ACTION_LOCK_START"
+    _se_global_mode="${MERV_ACTION_LOCK_MODE:-none}"
     logger -t "VLANMgr" "handler: global lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
   fi
   _se_ack_stage=0
@@ -468,20 +494,46 @@ dispatch_if_executable() {
       ;;
   esac
   _se_release_owner_locks() {
+    [ "${_se_cleanup_done:-0}" -eq 0 ] || return "${_se_release_rc:-0}"
+    _se_cleanup_done=1
     _se_release_rc=0
-    if ! merv_action_lock_release "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" >/dev/null 2>&1; then
+    if ! merv_action_lock_leave "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" "$_se_event_mode" >/dev/null 2>&1; then
       _se_release_rc=1
       logger -t "VLANMgr" "handler: event lock cleanup failed; ownership was not proven"
     fi
     if [ -n "$_se_global_nonce" ]; then
-      if ! merv_action_lock_release "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_se_global_nonce" "$_se_global_start" >/dev/null 2>&1; then
+      if ! merv_action_lock_leave "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_se_global_nonce" "$_se_global_start" "$_se_global_mode" >/dev/null 2>&1; then
         _se_release_rc=1
         logger -t "VLANMgr" "handler: global action-lock cleanup failed; ownership was not proven"
       fi
     fi
     return "$_se_release_rc"
   }
-  trap '_se_release_owner_locks' EXIT INT TERM
+  _se_cleanup_done=0
+  _se_signal_handling=0
+  _se_signal_status=0
+  _se_handle_signal() {
+    _se_signal_status="$1"
+    [ "${_se_signal_handling:-0}" -eq 0 ] || exit "$_se_signal_status"
+    _se_signal_handling=1
+    trap - INT TERM
+    logger -t "VLANMgr" "handler: action=$_se_key interrupted (rc=$_se_signal_status); stopping before normal completion"
+    _se_release_owner_locks
+    _se_release_rc=$?
+    if [ "${_se_ack_stage:-0}" -eq 1 ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_discard_staged >/dev/null 2>&1; then
+      action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"unknown","node_sync":"unknown"}' \
+        "Settings save interrupted; no success result was published." \
+        '["interrupted"]' interrupted >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: interruption acknowledgement could not be published"
+    fi
+    [ "$_se_release_rc" -eq 0 ] || logger -t "VLANMgr" "handler: interrupted action cleanup failed; ownership retained for recovery"
+    exit "$_se_signal_status"
+  }
+  trap '_se_release_owner_locks' EXIT
+  trap '_se_handle_signal 130' INT
+  trap '_se_handle_signal 143' TERM
   # ASUSWRT may mount the JFFS tree with execution disabled even when the
   # executable bit is present.  Invoke the shell workers through BusyBox sh so
   # an action cannot disappear with a bare 126 before it publishes its ack.
@@ -490,15 +542,12 @@ dispatch_if_executable() {
     # the parent-held marker. Observation requests do not own that lock and
     # must let a nested SSH trust probe acquire it itself.
     if [ "$_se_global_needed" -eq 1 ]; then
-      MERV_ACTION_LOCK_PARENT_HELD=1
-      MERV_ACTION_LOCK_PARENT_PID="$$"
-      MERV_ACTION_LOCK_PARENT_START="$_se_global_start"
-      MERV_ACTION_LOCK_PARENT_NONCE="$_se_global_nonce"
+      merv_action_lock_export_child_context || {
+        logger -t "VLANMgr" "handler: could not export authenticated global lock context"
+        _se_script_rc=75
+      }
     else
-      MERV_ACTION_LOCK_PARENT_HELD=0
-      MERV_ACTION_LOCK_PARENT_PID=""
-      MERV_ACTION_LOCK_PARENT_START=""
-      MERV_ACTION_LOCK_PARENT_NONCE=""
+      merv_action_lock_clear_child_context
     fi
     MERV_ACTION_ACK_STAGE="$_se_ack_stage"
     export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \

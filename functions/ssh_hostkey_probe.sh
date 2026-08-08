@@ -41,30 +41,62 @@ case "$_shkp_root" in /tmp/mervlan_tmp/ssh_hostkey_probe.[0-9]*) ;; *) exit 2 ;;
 mkdir -p "$_shkp_root/.ssh" 2>/dev/null || exit 4
 chmod 700 "$_shkp_root" "$_shkp_root/.ssh" 2>/dev/null || exit 4
 _shkp_pid=""
+_shkp_start=""
+_shkp_identity_failure=0
 _shkp_cleanup() {
-  if [ -n "${_shkp_pid:-}" ] && kill -0 "$_shkp_pid" 2>/dev/null; then
+  if [ -n "${_shkp_pid:-}" ] && [ -n "${_shkp_start:-}" ] &&
+     merv_process_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null; then
     kill "$_shkp_pid" 2>/dev/null || :
     sleep 1
-    kill -9 "$_shkp_pid" 2>/dev/null || :
+    merv_process_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null &&
+      kill -9 "$_shkp_pid" 2>/dev/null || :
   fi
   [ -n "${_shkp_pid:-}" ] && wait "$_shkp_pid" 2>/dev/null || :
-  rm -f "$_shkp_root/.ssh/known_hosts" "$_shkp_root/client.stdout" "$_shkp_root/client.stderr" 2>/dev/null || :
-  rmdir "$_shkp_root/.ssh" "$_shkp_root" 2>/dev/null || :
+  if [ "${_shkp_identity_failure:-0}" -eq 1 ]; then
+    # The child could not be authenticated by PID/start identity. Preserve
+    # its exact probe workspace and an explicit recovery marker instead of
+    # silently removing state while an unknown child may still be running.
+    printf '%s\n' "child-identity-unverifiable" > "$_shkp_root/recovery.pending" 2>/dev/null || :
+    printf '%s\n' "[ERROR] SSH host-key probe retained recovery workspace $_shkp_root" >&2
+  else
+    rm -f "$_shkp_root/.ssh/known_hosts" "$_shkp_root/client.stdout" "$_shkp_root/client.stderr" 2>/dev/null || :
+    rmdir "$_shkp_root/.ssh" "$_shkp_root" 2>/dev/null || :
+  fi
 }
-trap '_shkp_cleanup' EXIT INT TERM
+_shkp_signal_handling=0
+_shkp_handle_signal() {
+  _shkp_signal_status="$1"
+  [ "${_shkp_signal_handling:-0}" -eq 0 ] || exit "$_shkp_signal_status"
+  _shkp_signal_handling=1
+  trap - INT TERM
+  printf '%s\n' "[WARN] SSH host-key probe interrupted (rc=$_shkp_signal_status)" >&2
+  exit "$_shkp_signal_status"
+}
+trap '_shkp_cleanup' EXIT
+trap '_shkp_handle_signal 130' INT
+trap '_shkp_handle_signal 143' TERM
 
 _shkp_home="$_shkp_root"
 export HOME="$_shkp_home"
 "$_shkp_client_path" -y -N -p "$_shkp_port" -i "$SSH_KEY" \
   "$_shkp_user@$_shkp_host" >"$_shkp_root/client.stdout" 2>"$_shkp_root/client.stderr" &
 _shkp_pid=$!
+_shkp_start=$(merv_proc_start_time "$_shkp_pid" 2>/dev/null || printf '')
+case "$_shkp_start" in
+  ''|*[!0-9]*)
+    _shkp_start=""
+    _shkp_identity_failure=1
+    printf '%s\n' "[ERROR] SSH host-key probe could not verify child process identity" >&2
+    exit 4
+    ;;
+esac
 _shkp_wait="${MERV_SSH_CONNECT_TIMEOUT:-10}"
 case "$_shkp_wait" in ''|*[!0-9]*) _shkp_wait=10 ;; esac
 [ "$_shkp_wait" -ge 1 ] 2>/dev/null || _shkp_wait=10
 _shkp_tick=0
 while [ "$_shkp_tick" -lt "$_shkp_wait" ]; do
   [ -s "$_shkp_root/.ssh/known_hosts" ] && break
-  kill -0 "$_shkp_pid" 2>/dev/null || break
+  merv_process_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null || break
   sleep 1
   _shkp_tick=$((_shkp_tick + 1))
 done
