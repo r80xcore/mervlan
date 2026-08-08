@@ -75,7 +75,7 @@ confirm callers and behavior before editing.
 - `dev-tools/` is for development/test branches. Before preparing a main or
   release branch, verify that developer-only files are excluded explicitly.
 
-If an AI tool does not automatically discover this nested `AGENTS.md`, tell it
-explicitly to read `dev-tools/AGENTS.md`. A tool-specific adapter may point to
-this file, but `dev-tools/AGENTS.md` and `dev-tools/agent-rules/` remain the
+If an AI tool does not automatically discover this nested `RULES.md`, tell it
+explicitly to read `dev-tools/RULES.md`. A tool-specific adapter may point to
+this file, but `dev-tools/RULES.md` and `dev-tools/agent-rules/` remain the
 source of truth.

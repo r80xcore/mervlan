@@ -1,5 +1,8 @@
 .agent
 .agents
+.tmp/
+.agent_docs/
+agent_docs/
 dev-tools/mervlan_ssh_credentials.md
 .github/copilot-instructions.md
 dev-tools/backup/*
