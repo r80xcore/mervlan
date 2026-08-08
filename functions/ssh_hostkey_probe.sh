@@ -10,6 +10,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh" || exit 2
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh" || exit 2
+[ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" || exit 2
 [ -n "${LIB_SSH_TRUST_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh_trust.sh" || exit 2
 
 _shkp_node="${1:-}"
@@ -45,13 +46,19 @@ _shkp_start=""
 _shkp_identity_failure=0
 _shkp_cleanup() {
   if [ -n "${_shkp_pid:-}" ] && [ -n "${_shkp_start:-}" ] &&
-     merv_process_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null; then
+     merv_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null; then
     kill "$_shkp_pid" 2>/dev/null || :
     sleep 1
-    merv_process_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null &&
+    merv_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null &&
       kill -9 "$_shkp_pid" 2>/dev/null || :
+  elif [ -n "${_shkp_pid:-}" ] && kill -0 "$_shkp_pid" 2>/dev/null; then
+    # A live child whose start identity no longer matches might be a reused
+    # PID.  Never signal or wait on it: preserve the workspace for recovery
+    # instead of turning this bounded probe into an unbounded wait.
+    _shkp_identity_failure=1
   fi
-  [ -n "${_shkp_pid:-}" ] && wait "$_shkp_pid" 2>/dev/null || :
+  [ "${_shkp_identity_failure:-0}" -eq 0 ] && [ -n "${_shkp_pid:-}" ] &&
+    wait "$_shkp_pid" 2>/dev/null || :
   if [ "${_shkp_identity_failure:-0}" -eq 1 ]; then
     # The child could not be authenticated by PID/start identity. Preserve
     # its exact probe workspace and an explicit recovery marker instead of
@@ -81,7 +88,7 @@ export HOME="$_shkp_home"
 "$_shkp_client_path" -y -N -p "$_shkp_port" -i "$SSH_KEY" \
   "$_shkp_user@$_shkp_host" >"$_shkp_root/client.stdout" 2>"$_shkp_root/client.stderr" &
 _shkp_pid=$!
-_shkp_start=$(merv_proc_start_time "$_shkp_pid" 2>/dev/null || printf '')
+_shkp_start=$(merv_identity_proc_start "$_shkp_pid" 2>/dev/null || printf '')
 case "$_shkp_start" in
   ''|*[!0-9]*)
     _shkp_start=""
@@ -96,7 +103,7 @@ case "$_shkp_wait" in ''|*[!0-9]*) _shkp_wait=10 ;; esac
 _shkp_tick=0
 while [ "$_shkp_tick" -lt "$_shkp_wait" ]; do
   [ -s "$_shkp_root/.ssh/known_hosts" ] && break
-  merv_process_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null || break
+  merv_identity_matches "$_shkp_pid" "$_shkp_start" 2>/dev/null || break
   sleep 1
   _shkp_tick=$((_shkp_tick + 1))
 done

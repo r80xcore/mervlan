@@ -45,6 +45,46 @@ _startup_rc=$?
 printf '%s' "$_startup_output" | grep -Fq 'is read only' && fail readonly-settings-startup
 ok readonly-settings-startup
 
+# A first-contact probe must retain its short timeout even when its client
+# never responds.  The helper runs as a separate shell, so give it a minimal
+# disposable MerVLAN tree and a fake client that records its PID then blocks.
+# The probe must terminate that exact child and return its normal no-key rc.
+PROBE_BASE="$TEST_ROOT/probe-base"
+PROBE_CLIENT="$TEST_ROOT/probe-client"
+PROBE_PID_FILE="$TEST_ROOT/probe-client.pid"
+mkdir -p "$PROBE_BASE/functions" "$PROBE_BASE/settings" "$PROBE_BASE/.ssh" || fail probe-fixture-root
+for _probe_file in \
+  functions/ssh_hostkey_probe.sh \
+  settings/var_settings.sh settings/lib_json.sh settings/lib_identity.sh settings/lib_ssh_trust.sh; do
+  mkdir -p "$PROBE_BASE/$(dirname "$_probe_file")" || fail probe-fixture-dir
+  cp "$BASE_DIR/$_probe_file" "$PROBE_BASE/$_probe_file" || fail probe-fixture-copy
+done
+: > "$PROBE_BASE/.ssh/vlan_manager" || fail probe-fixture-key
+printf '%s\n' '#!/bin/sh' \
+  'printf "%s\\n" "$$" > "$FAKE_PROBE_PID_FILE"' \
+  'trap "exit 0" INT TERM' \
+  'while :; do sleep 1; done' > "$PROBE_CLIENT" || fail probe-client-write
+chmod 700 "$PROBE_CLIENT" || fail probe-client-mode
+_probe_started=$(date +%s)
+FAKE_PROBE_PID_FILE="$PROBE_PID_FILE" MERV_BASE="$PROBE_BASE" \
+  MERV_SSH_CLIENT="$PROBE_CLIENT" MERV_SSH_CONNECT_TIMEOUT=1 \
+  timeout -k 2 8 sh "$PROBE_BASE/functions/ssh_hostkey_probe.sh" \
+    'NODE1@198.51.100.10:22' 198.51.100.10 22 >/dev/null 2>&1
+_probe_rc=$?
+_probe_elapsed=$(( $(date +%s) - _probe_started ))
+if [ -f "$PROBE_PID_FILE" ]; then
+  _probe_pid=$(cat "$PROBE_PID_FILE" 2>/dev/null || printf '')
+  if kill -0 "$_probe_pid" 2>/dev/null; then
+    kill -TERM "$_probe_pid" 2>/dev/null || :
+    sleep 1
+    kill -0 "$_probe_pid" 2>/dev/null && kill -KILL "$_probe_pid" 2>/dev/null || :
+    fail probe-client-cleanup
+  fi
+fi
+[ "$_probe_rc" -eq 5 ] || fail probe-timeout-result
+[ "$_probe_elapsed" -lt 8 ] || fail probe-timeout-bound
+ok probe-timeout-cleans-up-client
+
 # Keep the browser-facing acknowledgement contract covered as well: a trust
 # required result must be valid JSON and must be published to both paths.
 export ACTION_ACK_FILE="$TEST_ROOT/public/action_result.json"
