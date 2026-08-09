@@ -7,6 +7,13 @@ Improved: Resilient Update downloads
   after curl succeeds and the archive is non-empty, preventing interrupted
   downloads from reaching extraction.
 
+Fixed: Custom branch validation could fail open
+- The Update UI now keeps Custom branch installation blocked until the exact
+  branch's `changelog.txt` is fetched and yields a valid MerVLAN version.
+- Missing branches, unreadable or malformed changelogs, GitHub errors, and
+  network failures cannot expose the Install action; validation repeats just
+  before submission so stale targets cannot bypass the WebUI gate.
+
 New: Emergency Update Repair
 - Added a standalone, manifest-driven repair command that restores validated
   update/runtime program components from `main`, `dev`, or an advanced custom

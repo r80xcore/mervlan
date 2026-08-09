@@ -510,6 +510,8 @@ The web UI is the recommended way to update, create backups, restore an earlier 
 > [!WARNING]
 > **Custom branches** are intended for developers and selected testers. Use one only when you understand its purpose or have been asked to test a specific change.
 
+Custom branches are verified against GitHub and must provide a readable MerVLAN version before the **Install branch** action becomes available.
+
 ### Updating Through the Web UI
 
 1. Open the version window and leave the **Update** tab selected.

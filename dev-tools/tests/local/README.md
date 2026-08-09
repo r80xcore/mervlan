@@ -21,6 +21,7 @@ sh dev-tools/tests/local/relay_badges_contract_test.sh
 sh dev-tools/tests/local/save_local_only_sync_test.sh
 sh dev-tools/tests/local/update_lifecycle_contract_test.sh
 sh dev-tools/tests/local/update_repair_contract_test.sh
+sh dev-tools/tests/local/custom_branch_validation_contract_test.sh
 ```
 
 Each script derives `MERV_BASE` from its own location unless it is explicitly

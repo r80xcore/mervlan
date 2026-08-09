@@ -1669,27 +1669,65 @@
           return 0;
         }
 
-        async function fetchLatestVersionFromChangelog(branch) {
-          const effectiveBranch = String(branch || "main").trim();
+        function isValidCustomBranchName(value) {
+          const branch = String(value || "").trim();
+          return branch.length > 0 &&
+            /^[a-zA-Z0-9][a-zA-Z0-9._\-\/]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(branch) &&
+            !branch.includes("//") && !branch.includes("..") && !branch.endsWith(".lock");
+        }
+
+        function customBranchValidationMessage(result) {
+          if (!result || result.ok) return "";
+          switch (result.kind) {
+            case "invalid": return "Enter a valid custom branch name.";
+            case "not_found": return `Custom branch "${result.branch}" was not found. Check the branch name.`;
+            case "version": return `Custom branch "${result.branch}" does not report a valid MerVLAN version. Update is blocked.`;
+            case "network": return `Could not verify custom branch "${result.branch}". Check the connection and try again.`;
+            case "http": return `Could not verify custom branch "${result.branch}". GitHub returned HTTP ${result.status}.`;
+            default: return `Could not verify custom branch "${result.branch || ""}". Update is blocked.`;
+          }
+        }
+
+        async function fetchCustomBranchVersion(branch) {
+          const effectiveBranch = String(branch || "").trim();
+          if (!isValidCustomBranchName(effectiveBranch)) {
+            return { ok: false, kind: "invalid", branch: effectiveBranch, version: "" };
+          }
           const encodedBranch = effectiveBranch.split("/").map(encodeURIComponent).join("/");
           const url =
             "https://raw.githubusercontent.com/r80xcore/mervlan/" +
             encodedBranch +
             "/changelog.txt?_=" +
             Date.now();
-
-          const resp = await fetch(url);
-          if (!resp.ok) {
-            throw new Error("HTTP " + resp.status);
+          let response;
+          let text;
+          try {
+            response = await fetch(url, { method: "GET", cache: "no-store" });
+          } catch (_) {
+            return { ok: false, kind: "network", branch: effectiveBranch, version: "" };
           }
-          const text = await resp.text();
-          // Fallback: numeric versions only, without suffixes such as "-dev"
-          // const match = text.match(/^mervlan\s+v?([0-9.]+)/im);
-          const match = text.match(/^mervlan\s+v?([0-9]+(?:\.[0-9]+)*(?:-[a-z0-9.-]+)?)/im);
+          if (response.status === 404) {
+            return { ok: false, kind: "not_found", branch: effectiveBranch, status: 404, version: "" };
+          }
+          if (!response.ok) {
+            return { ok: false, kind: "http", branch: effectiveBranch, status: response.status, version: "" };
+          }
+          try {
+            text = await response.text();
+          } catch (_) {
+            return { ok: false, kind: "network", branch: effectiveBranch, version: "" };
+          }
+          const match = String(text || "").match(/^mervlan\s+v?([0-9]+(?:\.[0-9]+)*(?:-[a-z0-9.-]+)?)/im);
           if (!match || !match[1]) {
-            throw new Error("No version line found in changelog");
+            return { ok: false, kind: "version", branch: effectiveBranch, version: "" };
           }
-          return match[1].trim();
+          return { ok: true, kind: "ok", branch: effectiveBranch, version: match[1].trim(), status: response.status };
+        }
+
+        async function fetchLatestVersionFromChangelog(branch) {
+          const result = await fetchCustomBranchVersion(branch);
+          if (!result.ok) throw new Error(customBranchValidationMessage(result));
+          return result.version;
         }
 
         const MAX_NODES = 10;
@@ -10905,7 +10943,7 @@ async function checkForUpdates() {
 
   statusEl.textContent = "Checking...";
   detailsSection.style.display = "none";
-  runUpdateBtn.style.display = "none";
+  clearCustomBranchTarget(runUpdateBtn);
   if (releaseSelectSection) releaseSelectSection.style.display = "none";
   if (changelogToggleSection) changelogToggleSection.style.display = "none";
   hideChangelogDisplay();
@@ -11145,6 +11183,16 @@ function onReleaseSelectChange() {
   if (toggleBtn) toggleBtn.textContent = "Show Changelog";
 }
 
+function clearCustomBranchTarget(runUpdateBtn) {
+  const button = runUpdateBtn || document.getElementById("runUpdateBtn");
+  if (!button) return;
+  button.style.display = "none";
+  button.classList.remove("update-btn--warn");
+  button.removeAttribute("data-channel");
+  button.removeAttribute("data-ref");
+  button.removeAttribute("data-latest");
+}
+
 function onCustomBranchInput() {
   const input = document.getElementById("customBranchInput");
   const runUpdateBtn = document.getElementById("runUpdateBtn");
@@ -11152,9 +11200,7 @@ function onCustomBranchInput() {
   const downgradeWarn = document.getElementById("downgradeWarning");
   if (!input || !runUpdateBtn) return;
   const branch = input.value.trim();
-  const valid = branch.length > 0 &&
-    /^[a-zA-Z0-9][a-zA-Z0-9._\-\/]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(branch) &&
-    branch.indexOf("//") === -1 && branch.indexOf("..") === -1 && !branch.endsWith(".lock");
+  const valid = isValidCustomBranchName(branch);
 
   _customBranchCheckSequence += 1;
   const checkSequence = _customBranchCheckSequence;
@@ -11162,23 +11208,35 @@ function onCustomBranchInput() {
     clearTimeout(_customBranchCheckTimer);
     _customBranchCheckTimer = null;
   }
+  // Clear stale target metadata before validating the newly typed branch.
+  clearCustomBranchTarget(runUpdateBtn);
   if (downgradeWarn) downgradeWarn.style.display = "none";
+  const statusEl = document.getElementById("updateStatusText");
+  if (statusEl) { statusEl.textContent = ""; statusEl.style.color = ""; }
 
   if (valid) {
-    runUpdateBtn.textContent = "Install branch";
-    runUpdateBtn.classList.add("update-btn--warn");
-    runUpdateBtn.style.display = "inline-block";
-    runUpdateBtn.dataset.channel = "custom";
-    runUpdateBtn.dataset.ref = "refs/heads/" + branch;
-    runUpdateBtn.dataset.latest = branch;
     if (comparisonEl) comparisonEl.textContent = "Checking branch version\u2026";
 
     _customBranchCheckTimer = setTimeout(async () => {
       try {
-        const targetVersion = await fetchLatestVersionFromChangelog(branch);
+        const validation = await fetchCustomBranchVersion(branch);
         if (checkSequence !== _customBranchCheckSequence || input.value.trim() !== branch) return;
+        if (!validation.ok) {
+          if (comparisonEl) comparisonEl.textContent = customBranchValidationMessage(validation);
+          if (statusEl) { statusEl.textContent = customBranchValidationMessage(validation); statusEl.style.color = "#ff8a8a"; }
+          clearCustomBranchTarget(runUpdateBtn);
+          return;
+        }
+        const targetVersion = validation.version;
         const current = getIndexHtmlVersion() || "0.0";
         const cmp = compareVersions(targetVersion, current);
+        runUpdateBtn.textContent = "Install branch";
+        runUpdateBtn.dataset.channel = "custom";
+        runUpdateBtn.dataset.ref = "refs/heads/" + branch;
+        runUpdateBtn.dataset.latest = branch;
+        runUpdateBtn.style.display = "inline-block";
+        runUpdateBtn.classList.toggle("update-btn--warn", cmp < 0);
+        if (statusEl) { statusEl.textContent = ""; statusEl.style.color = ""; }
         if (cmp < 0) {
           if (comparisonEl) comparisonEl.textContent = `Custom branch ${branch} (${targetVersion}) is older than your current install (v${current}).`;
           if (downgradeWarn) downgradeWarn.style.display = "block";
@@ -11189,12 +11247,15 @@ function onCustomBranchInput() {
         }
       } catch (_) {
         if (checkSequence !== _customBranchCheckSequence || input.value.trim() !== branch) return;
-        if (comparisonEl) comparisonEl.textContent = `Custom branch ${branch} is ready to install. Its version could not be compared.`;
+        const result = { ok: false, kind: "network", branch };
+        const message = customBranchValidationMessage(result);
+        if (comparisonEl) comparisonEl.textContent = message;
+        if (statusEl) { statusEl.textContent = message; statusEl.style.color = "#ff8a8a"; }
+        clearCustomBranchTarget(runUpdateBtn);
       }
     }, 400);
   } else {
-    runUpdateBtn.style.display = "none";
-    if (comparisonEl) comparisonEl.textContent = branch ? "Enter a valid custom branch name." : "Enter a branch name, then click Install branch.";
+    if (comparisonEl) comparisonEl.textContent = branch ? "Enter a valid custom branch name." : "Enter a branch name.";
   }
 }
 
@@ -11213,12 +11274,7 @@ function onChannelSelectChange() {
 
   if (detailsSection) detailsSection.style.display = "none";
   if (releaseSelectSection) releaseSelectSection.style.display = "none";
-  if (runUpdateBtn) runUpdateBtn.style.display = "none";
-  if (runUpdateBtn) {
-    runUpdateBtn.removeAttribute("data-channel");
-    runUpdateBtn.removeAttribute("data-ref");
-    runUpdateBtn.removeAttribute("data-latest");
-  }
+  clearCustomBranchTarget(runUpdateBtn);
   if (changelogToggleSection) changelogToggleSection.style.display = "none";
   if (statusEl) { statusEl.textContent = ""; statusEl.style.color = ""; }
   if (downgradeWarn) downgradeWarn.style.display = "none";
@@ -11394,12 +11450,21 @@ async function runUpdateFromModal(buttonEl) {
   if (selectedChannel === "custom") {
     const branchInput = document.getElementById("customBranchInput");
     const branch = branchInput ? branchInput.value.trim() : "";
-    const valid = branch.length > 0 &&
-      /^[a-zA-Z0-9][a-zA-Z0-9._\-\/]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/.test(branch) &&
-      branch.indexOf("//") === -1 && branch.indexOf("..") === -1 && !branch.endsWith(".lock");
-    if (!valid) {
+    if (!isValidCustomBranchName(branch)) {
       const statusEl = document.getElementById("updateStatusText");
       if (statusEl) { statusEl.textContent = "Enter a valid custom branch name."; statusEl.style.color = "#ff8a8a"; }
+      clearCustomBranchTarget(buttonEl);
+      return;
+    }
+    rememberUpdateAction(buttonEl);
+    setUpdateFlowState("checking");
+    const statusEl = document.getElementById("updateStatusText");
+    if (statusEl) { statusEl.textContent = "Checking custom branch version..."; statusEl.style.color = ""; }
+    const validation = await fetchCustomBranchVersion(branch);
+    if (!validation.ok) {
+      setUpdateFlowState("failed");
+      clearCustomBranchTarget(buttonEl);
+      if (statusEl) { statusEl.textContent = customBranchValidationMessage(validation); statusEl.style.color = "#ff8a8a"; }
       return;
     }
     channel = "custom";
@@ -11413,7 +11478,7 @@ async function runUpdateFromModal(buttonEl) {
     ref = channel === "dev" ? "refs/heads/dev" : "refs/heads/main";
   }
 
-  rememberUpdateAction(buttonEl);
+  if (selectedChannel !== "custom") rememberUpdateAction(buttonEl);
 
   const repairRequested = !!(repairBeforeUpdateEl && repairBeforeUpdateEl.checked && selectedChannel !== "custom");
   if (repairRequested) {
@@ -11428,26 +11493,6 @@ async function runUpdateFromModal(buttonEl) {
       return;
     }
     if (repairStatus) { repairStatus.textContent = "Repair complete. Starting update..."; repairStatus.style.color = "#7bd77b"; }
-  }
-
-  // Custom branch: verify the branch exists on GitHub before triggering
-  if (channel === "custom") {
-    setUpdateFlowState("checking");
-    const statusEl = document.getElementById("updateStatusText");
-    if (statusEl) { statusEl.textContent = "Checking branch..."; statusEl.style.color = ""; }
-    try {
-      const checkUrl = "https://raw.githubusercontent.com/r80xcore/mervlan/" + latest + "/changelog.txt?_=" + Date.now();
-      const r = await fetch(checkUrl, { method: "HEAD" });
-      if (!r.ok) {
-        if (statusEl) { statusEl.textContent = "Branch \"" + latest + "\" not found on GitHub."; statusEl.style.color = "#ff8a8a"; }
-        setUpdateFlowState("failed");
-        return;
-      }
-    } catch (e) {
-      // Network error: proceed and let the update script report the failure
-    }
-    const statusEl2 = document.getElementById("updateStatusText");
-    if (statusEl2) { statusEl2.textContent = ""; statusEl2.style.color = ""; }
   }
 
   const descBase = (channel === "custom" && latest)
