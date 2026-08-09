@@ -20,6 +20,11 @@ Use when editing or reviewing runtime shell files.
 - A validated ASUSWRT BusyBox observation found that `/bin/sh` did not provide
   the `command` builtin; probe required utilities by direct invocation and
   handle nonzero results instead of assuming `command -v` exists.
+- Lab observation (2026-08-01): `ebtables -t filter -L --Lx` on the test node
+  emitted restore-style `ebtables -t filter -N`/`-A` records instead of
+  `Bridge chain:` headings. Exact L2 verification must recognize either
+  complete canonical format; do not replace exact matching with substring
+  checks.
 - A validated ASUSWRT BusyBox observation found no `timeout` or `mktemp`
   applet. The installed `_merv_timeout_run` fallback
   completed `dbclient` in about 1s when output was redirected to a file, but
@@ -28,6 +33,10 @@ Use when editing or reviewing runtime shell files.
   retain the hard timeout. Dropbear emitted `failed creating //.ssh` only with
   `HOME=/`; a writable temporary HOME removed that warning without changing
   connection success.
+- WSL2 BusyBox 1.37.0 validation (2026-08-08) confirmed
+  `date -r <directory> +%s` returns a numeric epoch. DHCP incomplete-lock
+  recovery may use that form only when the result is validated; an unreadable
+  timestamp must remain fail-closed and must never be replaced with `now`.
 - Validate numeric values before arithmetic, timeouts, `sleep`, PID use, or path construction.
 - Do not use `$$` alone for a temporary filename in concurrent code; BusyBox subshells may share it.
 - Use temporary-file-plus-same-directory-`mv` for shared state publication.

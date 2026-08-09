@@ -9,7 +9,10 @@ avoid sourcing the same library repeatedly.
 | `var_settings.sh` | Establishes runtime paths, settings locations, hardware context, and node identity. |
 | `log_settings.sh` | Configures log channels, files, retention, and `info`/`warn`/`error`. |
 | `lib_json.sh` | Reads validated values from JSON/settings files without sourcing data as shell. |
-| `lib_mervqt.sh` | DHCP Hold, ownership leases, exact ebtables state, quarantine, recovery, and process identity. |
+| `lib_identity.sh` | Canonical PID/start identity matching and current-shell nonce generation. |
+| `lib_owner_lock.sh` | Strict v2 generic owner grammar, atomic publication, bounded acquire/reclaim, quarantine, and authenticated release. |
+| `lib_action_lock.sh` | Thin action policy wrapper for self-owned and authenticated parent-owned action locks. |
+| `lib_mervqt.sh` | Specialized DHCP Hold/phase ownership, exact ebtables state, quarantine, recovery, and compatibility wrappers to canonical identity/owner helpers. |
 | `lib_action_progress.sh` | Atomic WebUI progress initialization, phase updates, completion, and failure. |
 | `lib_action_runtime.sh` | Runtime markers used to suppress redundant page refreshes during Apply. |
 | `lib_action_ack.sh` | Correlated service-action acknowledgements and safe messages. |
@@ -19,6 +22,8 @@ avoid sourcing the same library repeatedly.
 | `mac_shield_snapshot.sh` | Snapshot generation, MAC Shield database state, and observation identity. |
 | `lib_stp.sh` | Bridge/STP policy and stable bridge identity. |
 | `lib_radio.sh` | Radio/interface readiness and restart-related helpers. |
+| `lib_update_state.sh` | Durable Update phase journal and explicit maintenance-quiesce state. |
+| `lib_node_reconcile.sh` | Atomic, bounded node-action retry marker used by boot/health reconciliation. |
 
 ## Load-order rules
 
@@ -26,7 +31,16 @@ avoid sourcing the same library repeatedly.
   diagnostic.
 - Load settings and logging before calling shared log or path helpers.
 - Load `lib_mervqt.sh` before using DHCP Hold, process identity, or exact rule
-  functions.
+- Load `lib_identity.sh` before requesting process identity or nonces, and
+  call `merv_identity_nonce_next` directly in the current shell. Never put a
+  sequence-mutating nonce helper in command substitution.
+- Load `lib_owner_lock.sh` before generic lock acquire/release or v2 owner
+  parsing. Its five-field `owner` record is authoritative; compatibility
+  sidecars are not parsed for liveness or reclaim.
+- Load `lib_action_lock.sh` for action enter/export/leave. Parent context must
+  match PID/start/nonce and must not fall back to self-acquisition.
+- Load `lib_mervqt.sh` before using DHCP Hold or exact rule functions. DHCP
+  remains specialized and fail-closed, but uses the canonical identity nonce.
 - Treat settings, marker, progress, and result files as untrusted text. Parse
   and validate them; never source them as shell code.
 - Preserve the library's loaded-marker convention and avoid hidden duplicate
@@ -47,10 +61,10 @@ the parent page; do not make shell scripts responsible for UI state.
 fixture. `settings/log_settings.sh` defines log channels and trimming. Do not
 hard-code a different temporary root in a production caller.
 
-Libraries use loaded markers such as `VAR_SETTINGS_LOADED` and
-`LOG_SETTINGS_LOADED`. Preserve those markers and source order because a worker
-graph may source a library more than once; top-level initialization must be
-idempotent.
+Libraries use loaded markers such as `VAR_SETTINGS_LOADED`,
+`LOG_SETTINGS_LOADED`, `LIB_IDENTITY_LOADED`, and `LIB_OWNER_LOCK_LOADED`.
+Preserve those markers and source order because a worker graph may source a
+library more than once; top-level initialization must be idempotent.
 
 `lib_progress.sh` is the lower-level progress/file primitive. The action
 libraries (`lib_action_progress.sh`, `lib_action_runtime.sh`, and

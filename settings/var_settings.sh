@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: var_settings.sh || version="0.72.0"                  #
+#              - File: var_settings.sh || version="0.72.1"                  #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -18,6 +18,31 @@
 [ -n "${VAR_SETTINGS_LOADED:-}" ] && return 0 2>/dev/null
 # Only set if not already set (allows override for testing)
 : "${MERV_BASE:?MERV_BASE must be set before sourcing folder_settings.sh}"
+
+# Durable security/action state.  These roots deliberately live outside the
+# versioned release tree and outside the browser-facing public symlink.  Test
+# harnesses may override them with a path beneath their private self-test
+# directory; the consuming libraries validate that boundary before writing.
+: "${MERV_STATE_ROOT:=/jffs/addons/mervlan_state}"
+: "${MERV_SSH_TRUST_ROOT:=$MERV_STATE_ROOT/ssh_trust}"
+: "${MERV_SSH_TRUST_FILE:=$MERV_SSH_TRUST_ROOT/known_hosts.v1}"
+: "${MERV_SSH_TRUST_PENDING_ROOT:=$MERV_SSH_TRUST_ROOT/pending}"
+: "${MERV_SSH_TRUST_REQUESTS_ROOT:=$MERV_SSH_TRUST_ROOT/requests}"
+: "${MERV_SSH_TRUST_STAGING_ROOT:=$MERV_SSH_TRUST_ROOT/staging}"
+: "${MERV_SSH_TRUST_QUARANTINE_ROOT:=$MERV_SSH_TRUST_ROOT/quarantine}"
+: "${MERV_SSH_TRUST_LOCK_PATH:=$MERV_SSH_TRUST_ROOT/state.lock}"
+: "${MERV_UPDATE_CONSUMED_FILE:=$MERV_STATE_ROOT/update_refs.consumed}"
+# Update lifecycle state is a small durable journal, not a backup archive. It
+# lets boot distinguish an interrupted update from a normal reboot without
+# copying any source tree onto the router outside the addon's real backup
+# mechanism.
+: "${MERV_UPDATE_JOURNAL:=$MERV_STATE_ROOT/update.journal}"
+: "${MERV_UPDATE_QUIESCE_FILE:=$MERV_STATE_ROOT/update.quiesce}"
+: "${MERV_UPDATE_NODE_RETRY_MAX_SEC:=300}"
+: "${MERV_UPDATE_NODE_RETRY_INTERVAL_SEC:=15}"
+: "${MERV_UPDATE_QUIESCE_WAIT_SEC:=180}"
+: "${MERV_NODE_RECONCILE_FILE:=$MERV_STATE_ROOT/node_reconcile.pending}"
+: "${MERV_NODE_RECONCILE_DELAY_SEC:=300}"
 
 # ---- merv: portable `command -v` replacement ----
 # merv_has <name> : true if <name> exists as function/builtin/external
@@ -134,8 +159,10 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 # operations at once; malformed settings are normalized by lib_node_jobs.sh.
 : "${MERV_NODE_PARALLELISM:=2}"
 : "${MERV_NODE_PREPARE_MAX_SEC:=180}"
+: "${MERV_NODE_LAUNCH_MAX_SEC:=180}"
 : "${MERV_NODE_SYNC_MAX_SEC:=720}"
 : "${MERV_NODE_COMPLETION_MAX_SEC:=600}"
+: "${MERV_MAIN_MANAGER_MAX_SEC:=600}"
 : "${MERV_NODE_MARKER_POLL_SEC:=5}"
 : "${MERV_EXEC_NODES_LOCK_STALE_SEC:=900}"
 : "${MERV_NODE_STATUS_RETENTION_SEC:=86400}"
@@ -147,6 +174,24 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 : "${MERV_PROGRESS_ROOT:=$TMPDIR/progress}"
 : "${MERV_PROGRESS_RETENTION_SEC:=3600}"
 : "${MERV_PROGRESS_STALE_SEC:=900}"
+: "${MERV_PROGRESS_MAX_FILES:=64}"
+: "${MERV_PROGRESS_QUARANTINE_MAX_FILES:=16}"
+
+# SSH trust/capability policy.  A live client must prove it can use a pinned
+# host key before an ordinary command or stream is allowed.  The probe adapter
+# is deliberately narrow: it captures Dropbear's exact first-contact key in a
+# disposable HOME, requests -N, and is killed as soon as the key is written.
+# Ordinary SSH calls never inherit its one-time -y behavior.
+: "${MERV_SSH_CONNECT_TIMEOUT:=10}"
+: "${MERV_SSH_TRUST_TTL_SEC:=31536000}"
+: "${MERV_SSH_TRUST_PENDING_TTL_SEC:=300}"
+: "${MERV_SSH_TRUST_RETENTION_SEC:=86400}"
+: "${MERV_SSH_TRUST_MAX_PENDING:=64}"
+: "${MERV_SSH_TRUST_MAX_STAGING:=64}"
+: "${MERV_SSH_TRUST_MAX_QUARANTINE:=64}"
+: "${MERV_SSH_TRUST_MAX_RECORDS:=64}"
+: "${MERV_SSH_HOSTKEY_PROBE_CMD:=$FUNCDIR/ssh_hostkey_probe.sh}"
+: "${MERV_SSH_CAPABILITY_PROVEN:=1}"
 
 # Stale-lock reclaim threshold for the unified mac_snapshot.lock. This single
 # lock serializes every MAC snapshot path — the cron tick (heal_event.sh), the

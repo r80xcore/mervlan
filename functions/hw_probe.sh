@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: hw_probe.sh || version="0.58"                      #
+#                   - File: hw_probe.sh || version="0.60"                      #
 # ============================================================================ #
 # - Purpose:  Probe system hardware and record hardware keys in the central    #
 #             settings store (settings.json). Writes non-destructively via     #
@@ -31,6 +31,10 @@ fi
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
+    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
+fi
 # =========================================== End of MerVLAN environment setup #
 
 # APMO may pass a verified request token as the first argument. The normal
@@ -53,6 +57,12 @@ hw_probe_ack_exit() {
     exit "$_hp_rc"
 }
 trap 'hw_probe_ack_exit' EXIT
+
+if type merv_update_mutation_blocked >/dev/null 2>&1 &&
+   merv_update_mutation_blocked; then
+    error "Hardware profile refresh refused while Update maintenance is active"
+    exit 75
+fi
 
 # ============================================================================ #
 #                      HARDWARE DETECTION & PROBING                            #
@@ -171,11 +181,24 @@ else
   _OVR_TARGET="MAIN"
 fi
 
+info "Hardware override target: $_OVR_TARGET (IS_NODE=${_OVR_IS_NODE:-0}, NODE_ID=${_OVR_NODE_ID:-none})"
+
 # Read override values for resolved target via two-level nested JSON helper
 _ovr_get() { json_get_section2_value "Hardware_Override" "$_OVR_TARGET" "$1" "$SETTINGS_FILE" 2>/dev/null; }
 
 OVERRIDE_MAP=$(_ovr_get "MAP_OVERRIDE")
-[ -z "$OVERRIDE_MAP" ] && OVERRIDE_MAP="0"
+if [ -z "$OVERRIDE_MAP" ]; then
+  warn "Hardware override MAP_OVERRIDE is missing or unreadable for $_OVR_TARGET; using normal detection"
+  OVERRIDE_MAP="0"
+fi
+
+case "$OVERRIDE_MAP" in
+  0|1) ;;
+  *)
+    warn "Hardware override MAP_OVERRIDE '$OVERRIDE_MAP' is invalid for $_OVR_TARGET; using normal detection"
+    OVERRIDE_MAP="0"
+    ;;
+esac
 
 if [ "$OVERRIDE_MAP" = "1" ]; then
   OVERRIDE_WAN=$(_ovr_get "OVERRIDE_WAN")
@@ -436,8 +459,18 @@ LAN_PORT_LABEL_OVERRIDES=$(sanitize_lan_port_label_overrides "$LAN_PORT_LABEL_OV
 # Verify WAN interface exists; fallback to nvram if default not found.         #
 # ============================================================================ #
 
-# Ensure WAN_IF exists in kernel; fallback to nvram wan_ifname if not
-[ ! -d "/sys/class/net/$WAN_IF" ] && WAN_IF=$(nvram get wan_ifname 2>/dev/null)
+# Manual WAN mappings are authoritative. Do not silently replace an explicit
+# override with nvram's default just because the interface is temporarily
+# absent from sysfs; retain the configured value so the resulting profile and
+# Apply diagnostics identify the actual problem. Automatic detection keeps the
+# legacy nvram fallback when no manual mapping is active.
+if [ "$USE_MAP_OVERRIDE" = "1" ]; then
+    if [ ! -d "/sys/class/net/$WAN_IF" ]; then
+        warn "Manual WAN override '$WAN_IF' for $_OVR_TARGET is not currently present; retaining the explicit mapping"
+    fi
+else
+    [ ! -d "/sys/class/net/$WAN_IF" ] && WAN_IF=$(nvram get wan_ifname 2>/dev/null)
+fi
 
 # ============================================================================ #
 #                     RECORD hardware into settings.json (Hardware block)      #

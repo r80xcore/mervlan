@@ -18,8 +18,12 @@ RECOVERY_ORIGINAL="$RECOVERY_WORK/original"
 RECOVERY_TREE=""
 RECOVERY_JFFS_STAGE="$MERVLAN_RECOVERY_BACKUP_ROOT/.mervlan.new.$$"
 RECOVERY_JFFS_OLD="$MERVLAN_RECOVERY_BACKUP_ROOT/.mervlan.old.$$"
-RECOVERY_LOCK="${MERVLAN_RECOVERY_LOCK_OVERRIDE:-/tmp/mervlan_tmp/locks/mervlan_maintenance.lock}"
+RECOVERY_LOCK="${MERVLAN_RECOVERY_LOCK_OVERRIDE:-${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}}"
 RECOVERY_LOCK_OWNED=0
+RECOVERY_LOCK_NONCE=""
+RECOVERY_LOCK_START=""
+RECOVERY_NONCE_SEQ="${RECOVERY_NONCE_SEQ:-0}"
+RECOVERY_OWNER_TMP_SEQ="${RECOVERY_OWNER_TMP_SEQ:-0}"
 RECOVERY_PRESERVE_JFFS=0
 RECOVERY_REPLACED=0
 RECOVERY_ROLLING_BACK=0
@@ -28,50 +32,221 @@ recovery_log() { printf '[MerVLAN recovery] %s\n' "$*"; }
 recovery_error() { printf '[MerVLAN recovery] ERROR: %s\n' "$*" >&2; }
 
 recovery_now() {
-  date +%s 2>/dev/null || printf '0'
+  recovery_now_value=$(date +%s 2>/dev/null || printf '')
+  recovery_positive_uint "$recovery_now_value" || return 1
+  printf '%s\n' "$recovery_now_value"
 }
 
-recovery_lock_age() {
-  recovery_created=$(cat "$RECOVERY_LOCK/created" 2>/dev/null || printf '')
-  recovery_current=$(recovery_now)
-  case "$recovery_created" in ''|*[!0-9]*) recovery_created=0 ;; esac
-  case "$recovery_current" in ''|*[!0-9]*) recovery_current=0 ;; esac
-  if [ "$recovery_created" -gt 0 ] && [ "$recovery_current" -ge "$recovery_created" ]; then
-    printf '%s' "$((recovery_current - recovery_created))"
+# Recovery must remain usable when the installed settings tree is missing or
+# damaged.  Its small v2 protocol copy is intentionally not a second generic
+# ownership framework; normal maintenance uses settings/lib_owner_lock.sh.
+recovery_positive_uint() {
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  case "$1" in *[1-9]*) return 0 ;; *) return 1 ;; esac
+}
+
+recovery_nonce_valid() {
+  case "${1:-}" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ "${#1}" -le 160 ]
+}
+
+recovery_lock_path_valid() {
+  case "$RECOVERY_LOCK" in
+    /tmp/mervlan_tmp/locks/mervlan_maintenance.lock|/tmp/mervlan_tmp/selftest.*/*) ;;
+    *) return 1 ;;
+  esac
+  case "$RECOVERY_LOCK" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+}
+
+recovery_proc_start() {
+  recovery_pid="$1"
+  recovery_positive_uint "$recovery_pid" || return 1
+  recovery_stat=$(cat "/proc/$recovery_pid/stat" 2>/dev/null) || return 1
+  case "$recovery_stat" in *") "*) recovery_tail=${recovery_stat##*) } ;; *) return 1 ;; esac
+  recovery_start=$(printf '%s\n' "$recovery_tail" | awk '{print $20}')
+  recovery_positive_uint "$recovery_start" || return 1
+  printf '%s\n' "$recovery_start"
+}
+
+recovery_owner_v2_read() {
+  recovery_owner_file="$1"
+  RECOVERY_OWNER_PID=''; RECOVERY_OWNER_START=''; RECOVERY_OWNER_NONCE=''
+  RECOVERY_OWNER_CREATED=''; RECOVERY_OWNER_HEARTBEAT=''
+  [ -r "$recovery_owner_file" ] || return 1
+  recovery_owner_size=$(wc -c < "$recovery_owner_file" 2>/dev/null | awk '{print $1}') || return 1
+  case "$recovery_owner_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$recovery_owner_size" -gt 0 ] 2>/dev/null && [ "$recovery_owner_size" -le 512 ] 2>/dev/null || return 1
+  LC_ALL=C grep -q '[^ -~]' "$recovery_owner_file" 2>/dev/null && return 1
+  recovery_seen_pid=0; recovery_seen_start=0; recovery_seen_nonce=0
+  recovery_seen_created=0; recovery_seen_heartbeat=0; recovery_lines=0
+  while IFS= read -r recovery_line || [ -n "$recovery_line" ]; do
+    recovery_lines=$((recovery_lines + 1))
+    case "$recovery_line" in
+      pid=*) [ "$recovery_seen_pid" -eq 0 ] || return 1; recovery_seen_pid=1; recovery_pid=${recovery_line#pid=} ;;
+      proc_start_time=*) [ "$recovery_seen_start" -eq 0 ] || return 1; recovery_seen_start=1; recovery_start=${recovery_line#proc_start_time=} ;;
+      owner_nonce=*) [ "$recovery_seen_nonce" -eq 0 ] || return 1; recovery_seen_nonce=1; recovery_nonce=${recovery_line#owner_nonce=} ;;
+      created=*) [ "$recovery_seen_created" -eq 0 ] || return 1; recovery_seen_created=1; recovery_created=${recovery_line#created=} ;;
+      heartbeat=*) [ "$recovery_seen_heartbeat" -eq 0 ] || return 1; recovery_seen_heartbeat=1; recovery_heartbeat=${recovery_line#heartbeat=} ;;
+      *) return 1 ;;
+    esac
+  done < "$recovery_owner_file" || return 1
+  [ "$recovery_lines" -eq 5 ] && [ "$recovery_seen_pid" -eq 1 ] &&
+    [ "$recovery_seen_start" -eq 1 ] && [ "$recovery_seen_nonce" -eq 1 ] &&
+    [ "$recovery_seen_created" -eq 1 ] && [ "$recovery_seen_heartbeat" -eq 1 ] || return 1
+  recovery_positive_uint "$recovery_pid" && recovery_positive_uint "$recovery_start" &&
+    recovery_nonce_valid "$recovery_nonce" && recovery_positive_uint "$recovery_created" &&
+    recovery_positive_uint "$recovery_heartbeat" || return 1
+  RECOVERY_OWNER_PID="$recovery_pid"; RECOVERY_OWNER_START="$recovery_start"
+  RECOVERY_OWNER_NONCE="$recovery_nonce"; RECOVERY_OWNER_CREATED="$recovery_created"
+  RECOVERY_OWNER_HEARTBEAT="$recovery_heartbeat"
+}
+
+# This exact four-field compatibility reader belongs only to emergency
+# maintenance recovery.  Do not migrate it to the generic owner library.
+recovery_owner_legacy_read() {
+  recovery_owner_file="$1"
+  RECOVERY_OWNER_PID=''; RECOVERY_OWNER_START=''; RECOVERY_OWNER_NONCE=''; RECOVERY_OWNER_CREATED=''
+  [ -r "$recovery_owner_file" ] || return 1
+  recovery_owner_size=$(wc -c < "$recovery_owner_file" 2>/dev/null | awk '{print $1}') || return 1
+  case "$recovery_owner_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$recovery_owner_size" -gt 0 ] 2>/dev/null && [ "$recovery_owner_size" -le 512 ] 2>/dev/null || return 1
+  LC_ALL=C grep -q '[^ -~]' "$recovery_owner_file" 2>/dev/null && return 1
+  recovery_seen_pid=0; recovery_seen_start=0; recovery_seen_nonce=0; recovery_seen_created=0; recovery_lines=0
+  while IFS= read -r recovery_line || [ -n "$recovery_line" ]; do
+    recovery_lines=$((recovery_lines + 1))
+    case "$recovery_line" in
+      pid=*) [ "$recovery_seen_pid" -eq 0 ] || return 1; recovery_seen_pid=1; recovery_pid=${recovery_line#pid=} ;;
+      start=*) [ "$recovery_seen_start" -eq 0 ] || return 1; recovery_seen_start=1; recovery_start=${recovery_line#start=} ;;
+      nonce=*) [ "$recovery_seen_nonce" -eq 0 ] || return 1; recovery_seen_nonce=1; recovery_nonce=${recovery_line#nonce=} ;;
+      created=*) [ "$recovery_seen_created" -eq 0 ] || return 1; recovery_seen_created=1; recovery_created=${recovery_line#created=} ;;
+      *) return 1 ;;
+    esac
+  done < "$recovery_owner_file" || return 1
+  [ "$recovery_lines" -eq 4 ] && [ "$recovery_seen_pid" -eq 1 ] &&
+    [ "$recovery_seen_start" -eq 1 ] && [ "$recovery_seen_nonce" -eq 1 ] && [ "$recovery_seen_created" -eq 1 ] || return 1
+  recovery_positive_uint "$recovery_pid" && recovery_positive_uint "$recovery_start" &&
+    recovery_nonce_valid "$recovery_nonce" && recovery_positive_uint "$recovery_created" || return 1
+  RECOVERY_OWNER_PID="$recovery_pid"; RECOVERY_OWNER_START="$recovery_start"
+  RECOVERY_OWNER_NONCE="$recovery_nonce"; RECOVERY_OWNER_CREATED="$recovery_created"
+}
+
+recovery_lock_read() {
+  RECOVERY_LOCK_FORMAT=''
+  recovery_owner_v2_read "$RECOVERY_LOCK/owner" && { RECOVERY_LOCK_FORMAT=v2; return 0; }
+  # A malformed v2 candidate may not silently fall through to legacy parsing.
+  grep -q '^\(proc_start_time\|owner_nonce\|heartbeat\)=' "$RECOVERY_LOCK/owner" 2>/dev/null && return 1
+  recovery_owner_legacy_read "$RECOVERY_LOCK/owner" && { RECOVERY_LOCK_FORMAT=legacy; return 0; }
+  return 1
+}
+
+recovery_lock_owner_state() {
+  recovery_lock_read || { printf 'malformed'; return 0; }
+  recovery_actual_start=$(recovery_proc_start "$RECOVERY_OWNER_PID" 2>/dev/null)
+  if recovery_positive_uint "$recovery_actual_start"; then
+    [ "$recovery_actual_start" = "$RECOVERY_OWNER_START" ] || { printf 'reused'; return 0; }
+    kill -0 "$RECOVERY_OWNER_PID" 2>/dev/null && { printf 'live'; return 0; }
+    printf 'unknown'
+  elif [ -e "/proc/$RECOVERY_OWNER_PID/stat" ]; then
+    printf 'unknown'
   else
-    printf '0'
+    printf 'dead'
   fi
 }
 
+recovery_lock_quarantine() {
+  recovery_quarantine_reason="$1"; recovery_quarantine_attempt="$2"
+  recovery_now_value=$(recovery_now 2>/dev/null) || return 1
+  recovery_quarantine="${RECOVERY_LOCK}.quarantine.${recovery_quarantine_reason}.$$.${recovery_now_value}.${recovery_quarantine_attempt}"
+  mv "$RECOVERY_LOCK" "$recovery_quarantine" 2>/dev/null
+}
+
+recovery_nonce_next() {
+  recovery_start=$(recovery_proc_start "$$" 2>/dev/null) || return 1
+  case "$RECOVERY_NONCE_SEQ" in ''|*[!0-9]*) RECOVERY_NONCE_SEQ=0 ;; esac
+  RECOVERY_NONCE_SEQ=$((RECOVERY_NONCE_SEQ + 1))
+  recovery_now_value=$(recovery_now 2>/dev/null) || return 1
+  RECOVERY_NEXT_NONCE="${recovery_now_value}.$$.${recovery_start}.${RECOVERY_NONCE_SEQ}"
+  recovery_nonce_valid "$RECOVERY_NEXT_NONCE"
+}
+
+recovery_owner_v2_write_atomic() {
+  recovery_write_pid="$1"; recovery_write_start="$2"; recovery_write_nonce="$3"
+  recovery_write_created="$4"; recovery_write_heartbeat="$5"
+  recovery_positive_uint "$recovery_write_pid" && recovery_positive_uint "$recovery_write_start" &&
+    recovery_nonce_valid "$recovery_write_nonce" && recovery_positive_uint "$recovery_write_created" && recovery_positive_uint "$recovery_write_heartbeat" || return 1
+  case "$RECOVERY_OWNER_TMP_SEQ" in ''|*[!0-9]*) RECOVERY_OWNER_TMP_SEQ=0 ;; esac
+  RECOVERY_OWNER_TMP_SEQ=$((RECOVERY_OWNER_TMP_SEQ + 1))
+  recovery_tmp="$RECOVERY_LOCK/.owner.tmp.$$.$RECOVERY_OWNER_TMP_SEQ"
+  ( umask 077
+    printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=%s\nheartbeat=%s\n' \
+      "$recovery_write_pid" "$recovery_write_start" "$recovery_write_nonce" "$recovery_write_created" "$recovery_write_heartbeat" > "$recovery_tmp"
+  ) 2>/dev/null || { rm -f "$recovery_tmp" 2>/dev/null; return 1; }
+  chmod 600 "$recovery_tmp" 2>/dev/null || { rm -f "$recovery_tmp" 2>/dev/null; return 1; }
+  recovery_owner_v2_read "$recovery_tmp" 2>/dev/null || { rm -f "$recovery_tmp" 2>/dev/null; return 1; }
+  mv -f "$recovery_tmp" "$RECOVERY_LOCK/owner" 2>/dev/null || { rm -f "$recovery_tmp" 2>/dev/null; return 1; }
+}
+
 recovery_acquire_lock() {
+  recovery_lock_path_valid || { recovery_error "Unsafe recovery lock path; refusing to run."; return 1; }
   mkdir -p "${RECOVERY_LOCK%/*}" 2>/dev/null || return 1
   recovery_attempt=0
   while ! mkdir "$RECOVERY_LOCK" 2>/dev/null; do
-    recovery_owner=$(cat "$RECOVERY_LOCK/pid" 2>/dev/null || printf '')
-    case "$recovery_owner" in ''|*[!0-9]*) recovery_owner='' ;; esac
-    recovery_age=$(recovery_lock_age)
-    case "$recovery_age" in ''|*[!0-9]*) recovery_age=0 ;; esac
-    if { [ -z "$recovery_owner" ] && [ "$recovery_age" -ge 10 ]; } || \
-       { [ "$recovery_age" -ge 1800 ]; }; then
-      rm -rf "$RECOVERY_LOCK" 2>/dev/null || return 1
-      recovery_attempt=$((recovery_attempt + 1))
-      [ "$recovery_attempt" -le 2 ] || return 1
-      continue
-    fi
-    recovery_error "Another MerVLAN update, backup, restore, or deletion is already running."
-    return 1
+    recovery_lock_state=$(recovery_lock_owner_state)
+    case "$recovery_lock_state" in
+      live)
+        recovery_error "Another MerVLAN update, backup, restore, or deletion is already running."
+        return 1
+        ;;
+      dead|reused)
+        recovery_lock_quarantine "$recovery_lock_state" "$recovery_attempt" || return 1
+        recovery_attempt=$((recovery_attempt + 1))
+        [ "$recovery_attempt" -lt 8 ] || return 1
+        ;;
+      malformed|unknown|*)
+        recovery_error "Recovery lock owner metadata is unknown; refusing to reclaim it."
+        return 1
+        ;;
+    esac
   done
-  printf '%s\n' "$$" > "$RECOVERY_LOCK/pid" 2>/dev/null || :
-  recovery_now > "$RECOVERY_LOCK/created" 2>/dev/null || :
+  recovery_lock_start=$(recovery_proc_start "$$" 2>/dev/null) || {
+    if ! rmdir "$RECOVERY_LOCK" 2>/dev/null; then recovery_error "Could not remove the unowned recovery lock directory"; fi
+    return 1
+  }
+  recovery_nonce_next || {
+    if ! rmdir "$RECOVERY_LOCK" 2>/dev/null; then recovery_error "Could not remove the failed recovery lock directory"; fi
+    return 1
+  }
+  recovery_lock_now=$(recovery_now 2>/dev/null) || { rmdir "$RECOVERY_LOCK" 2>/dev/null || :; return 1; }
+  recovery_owner_v2_write_atomic "$$" "$recovery_lock_start" "$RECOVERY_NEXT_NONCE" "$recovery_lock_now" "$recovery_lock_now" || {
+    rm -f "$RECOVERY_LOCK/owner" 2>/dev/null || :
+    if ! rmdir "$RECOVERY_LOCK" 2>/dev/null; then recovery_error "Could not remove the failed recovery lock directory"; fi
+    return 1
+  }
+  RECOVERY_LOCK_NONCE="$RECOVERY_NEXT_NONCE"
+  RECOVERY_LOCK_START="$recovery_lock_start"
   RECOVERY_LOCK_OWNED=1
   return 0
 }
 
 recovery_release_lock() {
   [ "$RECOVERY_LOCK_OWNED" = "1" ] || return 0
-  rm -f "$RECOVERY_LOCK/pid" "$RECOVERY_LOCK/created" 2>/dev/null || :
-  rmdir "$RECOVERY_LOCK" 2>/dev/null || :
+  recovery_owner_v2_read "$RECOVERY_LOCK/owner" || return 1
+  recovery_current_start=$(recovery_proc_start "$$" 2>/dev/null) || return 1
+  [ "$RECOVERY_OWNER_PID" = "$$" ] && [ "$RECOVERY_OWNER_START" = "$recovery_current_start" ] && \
+    [ -n "$RECOVERY_LOCK_NONCE" ] && [ "$RECOVERY_OWNER_NONCE" = "$RECOVERY_LOCK_NONCE" ] || return 1
+  case "$RECOVERY_OWNER_TMP_SEQ" in ''|*[!0-9]*) RECOVERY_OWNER_TMP_SEQ=0 ;; esac
+  RECOVERY_OWNER_TMP_SEQ=$((RECOVERY_OWNER_TMP_SEQ + 1))
+  recovery_restore="${RECOVERY_LOCK%/*}/.${RECOVERY_LOCK##*/}.owner.restore.$$.${RECOVERY_OWNER_TMP_SEQ}"
+  cp -p "$RECOVERY_LOCK/owner" "$recovery_restore" 2>/dev/null || return 1
+  rm -f "$RECOVERY_LOCK/owner" 2>/dev/null || { rm -f "$recovery_restore" 2>/dev/null; return 1; }
+  if ! rmdir "$RECOVERY_LOCK" 2>/dev/null; then
+    mv -f "$recovery_restore" "$RECOVERY_LOCK/owner" 2>/dev/null || return 1
+    return 1
+  fi
+  rm -f "$recovery_restore" 2>/dev/null || :
   RECOVERY_LOCK_OWNED=0
+  RECOVERY_LOCK_NONCE=""
+  RECOVERY_LOCK_START=""
 }
 
 recovery_path_size_kb() {
@@ -111,20 +286,40 @@ recovery_path_safe() {
 }
 
 recovery_cleanup() {
+  recovery_cleanup_rc=$?
+  recovery_cleanup_failed=0
   if recovery_path_safe "$RECOVERY_WORK" && [ -d "$RECOVERY_WORK" ]; then
-    rm -rf "$RECOVERY_WORK" 2>/dev/null || :
+    if ! rm -rf "$RECOVERY_WORK" 2>/dev/null; then
+      recovery_error "Could not remove recovery workspace $RECOVERY_WORK"
+      recovery_cleanup_failed=1
+    fi
   fi
   if [ "$RECOVERY_PRESERVE_JFFS" != "1" ]; then
     case "$RECOVERY_JFFS_STAGE" in
-      "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.new.*) rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || : ;;
+      "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.new.*)
+        if ! rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
+          recovery_error "Could not remove recovery activation stage $RECOVERY_JFFS_STAGE"
+          recovery_cleanup_failed=1
+        fi
+        ;;
     esac
   fi
   if [ "$RECOVERY_PRESERVE_JFFS" != "1" ] && [ "$RECOVERY_REPLACED" = "0" ]; then
     case "$RECOVERY_JFFS_OLD" in
-      "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*) rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null || : ;;
+      "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*)
+        if ! rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null; then
+          recovery_error "Could not remove recovery rollback tree $RECOVERY_JFFS_OLD"
+          recovery_cleanup_failed=1
+        fi
+        ;;
     esac
   fi
-  recovery_release_lock
+  if ! recovery_release_lock; then
+    recovery_error "Recovery cleanup could not release its owner lock"
+    recovery_cleanup_failed=1
+  fi
+  [ "$recovery_cleanup_failed" -eq 0 ] || recovery_cleanup_rc=1
+  return "$recovery_cleanup_rc"
 }
 
 recovery_reconcile_stale_stages() {
@@ -132,14 +327,22 @@ recovery_reconcile_stale_stages() {
     recovery_log "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees."
     return 0
   fi
+  recovery_stale_failed=0
   for recovery_stale in "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.new.*; do
     [ -d "$recovery_stale" ] || continue
-    rm -rf "$recovery_stale" 2>/dev/null || :
+    if ! rm -rf "$recovery_stale" 2>/dev/null; then
+      recovery_error "Could not remove stale recovery stage $recovery_stale"
+      recovery_stale_failed=1
+    fi
   done
   for recovery_stale in "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*; do
     [ -d "$recovery_stale" ] || continue
-    rm -rf "$recovery_stale" 2>/dev/null || :
+    if ! rm -rf "$recovery_stale" 2>/dev/null; then
+      recovery_error "Could not remove stale recovery rollback tree $recovery_stale"
+      recovery_stale_failed=1
+    fi
   done
+  [ "$recovery_stale_failed" -eq 0 ]
 }
 
 recovery_settings_valid() {
@@ -245,11 +448,14 @@ recovery_reconcile() {
   recovery_target="$1"
   recovery_boot="$2"
   [ "$MERVLAN_RECOVERY_TEST_MODE" = "1" ] && return 0
-  chmod 755 "$recovery_target"/*.sh "$recovery_target"/functions/*.sh 2>/dev/null || :
-  chmod 644 "$recovery_target"/settings/*.sh "$recovery_target"/www/*.css "$recovery_target"/www/*.html 2>/dev/null || :
+  chmod 755 "$recovery_target"/*.sh "$recovery_target"/functions/*.sh 2>/dev/null || return 1
+  chmod 644 "$recovery_target"/settings/*.sh "$recovery_target"/www/*.css "$recovery_target"/www/*.html 2>/dev/null || return 1
   sh "$recovery_target/uninstall.sh" reinstall >/dev/null 2>&1 || return 1
   sh "$recovery_target/install.sh" reinstall >/dev/null 2>&1 || return 1
-  [ -x "$recovery_target/functions/hw_probe.sh" ] && sh "$recovery_target/functions/hw_probe.sh" >/dev/null 2>&1 || :
+  if [ -x "$recovery_target/functions/hw_probe.sh" ] && ! sh "$recovery_target/functions/hw_probe.sh" >/dev/null 2>&1; then
+    recovery_error "Restored hardware probe failed."
+    return 1
+  fi
   if [ "$recovery_boot" = "1" ]; then
     MERV_SKIP_NODE_SYNC=1 sh "$recovery_target/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1 || return 1
     MERV_SKIP_NODE_SYNC=1 sh "$recovery_target/functions/mervlan_boot.sh" enable >/dev/null 2>&1 || return 1
@@ -266,14 +472,23 @@ recovery_rollback() {
   recovery_error "Recovery activation failed; restoring the installation saved in RAM."
   case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') return 1 ;; esac
   rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || return 1
-  [ -d "$MERVLAN_RECOVERY_ACTIVE_ROOT" ] && mv "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$RECOVERY_JFFS_STAGE" 2>/dev/null || :
+  if [ -d "$MERVLAN_RECOVERY_ACTIVE_ROOT" ] && ! mv "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
+    RECOVERY_PRESERVE_JFFS=1
+    return 1
+  fi
   if [ -d "$RECOVERY_JFFS_OLD" ]; then
     mv "$RECOVERY_JFFS_OLD" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || return 1
   else
     recovery_copy_tree "$RECOVERY_ORIGINAL" "$MERVLAN_RECOVERY_ACTIVE_ROOT" || return 1
   fi
-  rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || :
-  recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT")" || :
+  if ! rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
+    RECOVERY_PRESERVE_JFFS=1
+    return 1
+  fi
+  if ! recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT")"; then
+    RECOVERY_PRESERVE_JFFS=1
+    return 1
+  fi
   RECOVERY_REPLACED=0
   return 0
 }
@@ -281,7 +496,10 @@ recovery_rollback() {
 recovery_on_signal() {
   recovery_signal="$1"
   trap - INT TERM
-  recovery_rollback || :
+  if ! recovery_rollback; then
+    RECOVERY_PRESERVE_JFFS=1
+    recovery_error "Interrupted recovery rollback failed; recovery trees were preserved."
+  fi
   recovery_cleanup
   exit "$recovery_signal"
 }
@@ -292,9 +510,12 @@ recovery_restore() {
   recovery_archive_id_valid "$recovery_id" || { recovery_error "Invalid backup identifier."; return 1; }
   recovery_archive="$MERVLAN_RECOVERY_BACKUP_ROOT/$recovery_id"
   recovery_acquire_lock || return 1
-  recovery_reconcile_stale_stages
+  if ! recovery_reconcile_stale_stages; then
+    recovery_error "Stale recovery trees could not be reconciled; restore is blocked."
+    return 1
+  fi
   mkdir -p "$RECOVERY_WORK" 2>/dev/null || { recovery_error "Could not create recovery workspace in /tmp."; return 1; }
-  chmod 700 "$RECOVERY_WORK" 2>/dev/null || :
+  chmod 700 "$RECOVERY_WORK" 2>/dev/null || { recovery_error "Could not secure the recovery workspace."; return 1; }
   trap 'recovery_on_signal 130' INT
   trap 'recovery_on_signal 143' TERM
   recovery_log "Validating $recovery_id"
@@ -331,8 +552,14 @@ recovery_restore() {
     return 1
   }
   if [ "$MERVLAN_RECOVERY_TEST_MODE" != "1" ] && [ -x "$MERVLAN_RECOVERY_ACTIVE_ROOT/functions/mervlan_boot.sh" ]; then
-    MERV_SKIP_NODE_SYNC=1 sh "$MERVLAN_RECOVERY_ACTIVE_ROOT/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || :
-    MERV_SKIP_NODE_SYNC=1 sh "$MERVLAN_RECOVERY_ACTIVE_ROOT/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1 || :
+    if ! MERV_SKIP_NODE_SYNC=1 sh "$MERVLAN_RECOVERY_ACTIVE_ROOT/functions/mervlan_boot.sh" disable >/dev/null 2>&1; then
+      recovery_error "Could not disable the current MerVLAN runtime before recovery activation."
+      return 1
+    fi
+    if ! MERV_SKIP_NODE_SYNC=1 sh "$MERVLAN_RECOVERY_ACTIVE_ROOT/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
+      recovery_error "Could not remove the current MerVLAN hooks before recovery activation."
+      return 1
+    fi
   fi
   case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') recovery_error "Unsafe active path."; return 1 ;; esac
   if [ -d "$MERVLAN_RECOVERY_ACTIVE_ROOT" ]; then
@@ -340,19 +567,23 @@ recovery_restore() {
   fi
   RECOVERY_REPLACED=1
   mv "$RECOVERY_JFFS_STAGE" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || {
-    recovery_rollback || :
+    if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
     return 1
   }
   recovery_tree_valid "$MERVLAN_RECOVERY_ACTIVE_ROOT" || {
-    recovery_rollback || :
+    if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
     return 1
   }
   recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$recovery_target_boot" || {
-    recovery_rollback || :
+    if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
     return 1
   }
   RECOVERY_REPLACED=0
-  rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null || :
+  if ! rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null; then
+    RECOVERY_PRESERVE_JFFS=1
+    recovery_error "Recovery completed, but the displaced installation could not be removed."
+    return 1
+  fi
   recovery_log "Main-router recovery completed successfully."
   recovery_log "Run MerVLAN node synchronization after confirming the main router."
   return 0
@@ -378,6 +609,12 @@ promise power-loss atomicity. Validate the backup first and restore nodes after
 the main router is confirmed working.
 EOF
 }
+
+if [ "${MERVLAN_RECOVERY_SOURCE_ONLY:-0}" = "1" ]; then
+  # Isolated protocol tests source the standalone implementation without
+  # installing or loading any settings library.
+  return 0 2>/dev/null || exit 0
+fi
 
 trap recovery_cleanup EXIT
 case "$1" in

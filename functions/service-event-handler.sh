@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.63"                  #
+#          - File: service-event-handler.sh || version="0.64"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -40,10 +40,18 @@
 #   MERV_HEAL_DELAY      — fire-and-forget delay before launching heal_event.sh
 #                          for non-wireless system events
 LOCKDIR="${LOCKDIR:-/tmp/mervlan_tmp/locks}"
-DEBOUNCE_SECONDS="${DEBOUNCE_SECONDS:-3}"
-STALE_LOCK_SECONDS="${STALE_LOCK_SECONDS:-300}"
 MERV_HEAL_EVENT_DEBOUNCE="${MERV_HEAL_EVENT_DEBOUNCE:-5}"
 MERV_HEAL_DELAY="${MERV_HEAL_DELAY:-3}"
+
+if [ -z "${LIB_ACTION_LOCK_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || exit 1
+fi
+if [ -z "${LIB_ACTION_ACK_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || exit 1
+fi
+if [ -z "${LIB_ACTION_PROGRESS_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
+  . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
+fi
 
 # ========================================================================== #
 # PARAMETER EXTRACTION & VALIDATION — Parse event action from arguments      #
@@ -70,6 +78,13 @@ fi
 # Normalize action format: convert dashes to underscores for case matching
 # Example: "save-vlanmgr" becomes "save_vlanmgr" (case statement uses underscores)
 RAW_NORM="$(printf '%s' "$RAW" | tr '-' '_')"
+case "$RAW_NORM" in
+  ''|*[!A-Za-z0-9._-]*)
+    logger -t "VLANMgr" "handler: rejected unsafe action name"
+    exit 1
+    ;;
+esac
+RAW="$RAW_NORM"
 
 # ========================================================================== #
 # EVENT PARSING — Extract TYPE and EVENT components from action string       #
@@ -80,7 +95,7 @@ RAW_NORM="$(printf '%s' "$RAW" | tr '-' '_')"
 #   1. ACTION already contains underscore: TYPE_EVENT (e.g., "save_vlanmgr")
 #   2. ACTION is single word: use TYPE=$1, EVENT=$2 (e.g., "restart" + "$2")
 # After parsing, reconstruct RAW as TYPE_EVENT for consistency
-case "${RAW}" in
+case "${RAW_NORM:-$RAW}" in
   *_*)
     # Format 1: action already contains underscore (TYPE_EVENT pattern)
     # Extract TYPE as everything before first underscore (${RAW%%_*})
@@ -97,9 +112,17 @@ case "${RAW}" in
     ;;
 esac
 
-# Build combined normalized name for downstream heal handlers
+# The event router consumes only this sanitized spelling.  Normalize the
+# second argument as well for the legacy TYPE EVENT calling convention.
 TYPE_NORM=$(printf '%s' "$TYPE" | tr 'A-Z' 'a-z' | tr '-' '_')
 EVENT_NORM=$(printf '%s' "$EVENT" | tr 'A-Z' 'a-z' | tr '-' '_')
+case "$TYPE_NORM" in ''|*[!A-Za-z0-9_.-]*) exit 1 ;; esac
+case "$EVENT_NORM" in *[!A-Za-z0-9_.-]*) exit 1 ;; esac
+TYPE="$TYPE_NORM"
+EVENT="$EVENT_NORM"
+RAW="${TYPE}_${EVENT}"
+
+# Build combined normalized name for downstream heal handlers
 if [ -n "$EVENT_NORM" ]; then
   COMBINED_NORM="${TYPE_NORM}_${EVENT_NORM}"
 else
@@ -157,6 +180,10 @@ get_verified_action_token() {
 get_progress_action_token() {
   _pat_action="${1:-}"
   case "$_pat_action" in
+    sshtrustprobe_vlanmgr_pgt_*_nsl_*)
+      _pat_tail="${_pat_action#sshtrustprobe_vlanmgr_pgt_}"
+      _pat_hex="${_pat_tail%%_nsl_*}"
+      ;;
     *_pgt_*) _pat_hex="${_pat_action#*_pgt_}" ;;
     *) return 1 ;;
   esac
@@ -166,8 +193,35 @@ get_progress_action_token() {
   printf '%s\n' "$_pat_token"
 }
 
+get_ssh_trust_probe_node_slots() {
+  _stps_action="${1:-}"
+  _stps_tail="${_stps_action#sshtrustprobe_vlanmgr_pgt_}"
+  [ "$_stps_tail" != "$_stps_action" ] || return 1
+  case "$_stps_tail" in
+    *_nsl_*) _stps_slots="${_stps_tail#*_nsl_}" ;;
+    *) return 1 ;;
+  esac
+  case "$_stps_slots" in
+    ''|*[!0-9.]*|.*|*..*|*.) return 1 ;;
+  esac
+  _stps_seen=" "
+  _stps_max=10
+  for _stps_slot in $(printf '%s' "$_stps_slots" | tr '.' ' '); do
+    case "$_stps_slot" in
+      ''|0|0[0-9]*) return 1 ;;
+    esac
+    [ "$_stps_slot" -ge 1 ] 2>/dev/null && [ "$_stps_slot" -le "$_stps_max" ] 2>/dev/null || return 1
+    case "$_stps_seen" in *" $_stps_slot "*) return 1 ;; esac
+    _stps_seen="${_stps_seen}${_stps_slot} "
+  done
+  printf '%s\n' "$_stps_slots"
+}
+
 decode_update_ref_action() {
   _ura_encoded="${1#updateref_vlanmgr_}"
+  [ "$_ura_encoded" != "$1" ] || return 1
+  [ -n "$_ura_encoded" ] && [ "${#_ura_encoded}" -le 260 ] || return 1
+  case "$_ura_encoded" in *[!0-9a-f_kcht_]* ) return 1 ;; esac
   _ura_policy=keep
   _ura_kind="${_ura_encoded%%_*}"
   _ura_hex="${_ura_encoded#*_}"
@@ -183,6 +237,7 @@ decode_update_ref_action() {
   esac
   case "$_ura_kind" in h|t) ;; *) return 1 ;; esac
   _ura_name=$(decode_hex_ascii "$_ura_hex") || return 1
+  [ "${#_ura_name}" -le 120 ] || return 1
   _ura_clean=$(printf '%s' "$_ura_name" | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-')
   [ -n "$_ura_name" ] && [ "$_ura_clean" = "$_ura_name" ] || return 1
   case "$_ura_name" in *..*|*//*|/*|*/|.*|*.lock) return 1 ;; esac
@@ -288,13 +343,15 @@ fi
 
 APP_EVENT=0
 case "${TYPE}_${EVENT}" in
-  save_vlanmgr|apply_vlanmgr|apply_vlanmgr_pgt_*|sync_vlanmgr|sync_vlanmgr_pgt_*|executenodes_vlanmgr|executenodes_vlanmgr_pgt_*|\
+  save_vlanmgr|save_vlanmgr_pgt_*|apply_vlanmgr|apply_vlanmgr_pgt_*|sync_vlanmgr|sync_vlanmgr_pgt_*|syncsettings_vlanmgr|syncsettings_vlanmgr_pgt_*|executenodes_vlanmgr|executenodes_vlanmgr_pgt_*|\
   executenodesonly_vlanmgr|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr|genkey_vlanmgr_pgt_*|enableservice_vlanmgr|\
-  disableservice_vlanmgr|enableservice_vlanmgr_vrt_*|disableservice_vlanmgr_vrt_*|checkservice_vlanmgr|collectclients_vlanmgr|\
+  disableservice_vlanmgr|enableservice_vlanmgr_vrt_*|disableservice_vlanmgr_vrt_*|checkservice_vlanmgr|collectclients_vlanmgr|collectclients_vlanmgr_pgt_*|\
   clearclilog_vlanmgr|update_vlanmgr|updatedev_vlanmgr|updaterelease_vlanmgr|updateref_vlanmgr_*|\
   backupinventory_vlanmgr_*|manualbackup_vlanmgr_*|deletebackup_vlanmgr_*|deleteallbackups_vlanmgr_*|restorebackup_vlanmgr_*|\
   undorestore_vlanmgr_*|undoupdate_vlanmgr_*|\
   hwprobe_vlanmgr|hwprobe_vlanmgr_vrt_*|macrefresh_vlanmgr|macrefresh_vlanmgr_pgt_*|\
+  sshtrustprobe_vlanmgr|sshtrustprobe_vlanmgr_pgt_*|sshtrustprobe_vlanmgr_vrt_*|sshtrustenroll_vlanmgr_vrt_*|sshtrustresume_vlanmgr_vrt_*|\
+  sshtruststatus_vlanmgr|sshtruststatus_vlanmgr_pgt_*|sshtruststatus_vlanmgr_vrt_*|sshtrustrevoke_vlanmgr_vrt_*|sshtrustabort_vlanmgr_vrt_*|\
   macclientmeta_vlanmgr|macclientmeta_vlanmgr_pgt_*)
     APP_EVENT=1
     ;;
@@ -322,86 +379,11 @@ fi
 # DEBOUNCE & LOCK SETUP — Initialize locking for concurrent execution        #
 # ========================================================================== #
 
-# Lightweight debounce/lock mechanism prevents concurrent execution of same event
-# Uses directory creation as atomic lock (mkdir fails if dir exists = already locked)
-# Lockdir stores both lock dirs (.lock) and timestamp files (.last) for debounce.
-# Timing knobs (LOCKDIR, DEBOUNCE_SECONDS, STALE_LOCK_SECONDS) are defined in the
-# HANDLER TUNABLES block at the top of this file.
-# Create lock directory structure (ignore errors if it already exists)
-mkdir -p "$LOCKDIR" 2>/dev/null || :
-
-# ========================================================================== #
-# LOCK METADATA HELPERS (self-contained — no lib_mervqt.sh dependency)        #
-# ========================================================================== #
-# These give each mkdir-based event lock the same pid+created robustness the
-# central locks have, WITHOUT sourcing the shared lock library (this handler
-# runs in the DHCP-sensitive hot path and must stay dependency-free). The
-# metadata closes the "no-stamp orphan" gap: if a handler dies after mkdir but
-# before the .last stamp is written (DEBOUNCE_SECONDS=0, SIGKILL, or /tmp full),
-# later events can still tell whether the holder is alive or the lock is stale.
-
-# _se_write_lock_meta <lock_dir>
-# Record pid + created stamp in an already-acquired lock dir. Called right after
-# every successful mkdir so metadata exists before anything can interrupt us.
-_se_write_lock_meta() {
-  echo "$$"   > "$1/pid"     2>/dev/null || :
-  date +%s    > "$1/created" 2>/dev/null || :
-}
-
-# _se_cleanup_lock_dir <lock_dir>
-# Remove ONLY the known metadata files, then rmdir. Never recursively deletes:
-# if the dir still has unexpected contents, rmdir fails and we leave it for a
-# human to inspect rather than blindly wiping it (key is event-derived input).
-_se_cleanup_lock_dir() {
-  rm -f "$1/pid" "$1/created" 2>/dev/null || :
-  rmdir "$1" 2>/dev/null || :
-}
-
-# _se_lock_age <lock_dir>
-# Seconds since the lock was created. Prefers the created stamp; falls back to
-# directory mtime. Returns 0 when age is unknown OR when the clock appears to
-# have moved backward (NTP step at boot), so a negative age never masks a stale
-# lock as fresh.
-_se_lock_age() {
-  local _now _created _mtime _age
-  _now=$(date +%s 2>/dev/null || echo 0)
-  case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
-
-  _created=$(cat "$1/created" 2>/dev/null || echo "")
-  case "$_created" in ''|*[!0-9]*) _created="" ;; esac
-  if [ -n "$_created" ] && [ "$_now" -gt 0 ]; then
-    _age=$(( _now - _created ))
-    [ "$_age" -lt 0 ] 2>/dev/null && _age=0
-    printf '%s' "$_age"
-    return 0
-  fi
-
-  _mtime=$(stat -c %Y "$1" 2>/dev/null || echo 0)
-  case "$_mtime" in ''|*[!0-9]*) _mtime=0 ;; esac
-  if [ "$_mtime" -gt 0 ] && [ "$_now" -gt 0 ]; then
-    _age=$(( _now - _mtime ))
-    [ "$_age" -lt 0 ] 2>/dev/null && _age=0
-    printf '%s' "$_age"
-  else
-    printf '0'
-  fi
-}
-
-# _se_reclaim_lock_dir <lock_dir> <key>
-# Clean known metadata, then re-acquire. Prints nothing; returns:
-#   0 = reclaimed (caller may proceed, meta must be (re)written by caller)
-#   1 = could not reclaim (foreign contents or lost race) — caller must skip
-_se_reclaim_lock_dir() {
-  _se_cleanup_lock_dir "$1"
-  if [ -d "$1" ]; then
-    logger -t "VLANMgr" "handler: ${2} lock dir not empty after cleanup — skipping"
-    return 1
-  fi
-  if ! mkdir "$1" 2>/dev/null; then
-    logger -t "VLANMgr" "handler: ${2} already running (lost reclaim race); skipping"
-    return 1
-  fi
-  return 0
+# Prepare the durable lock parent. The action lock library owns all lock state;
+# this handler does not reclaim locks by age or by raw directory presence.
+mkdir -p "$LOCKDIR" 2>/dev/null || {
+  logger -t "VLANMgr" "handler: lock directory could not be created; refusing dispatch"
+  exit 1
 }
 
 # ========================================================================== #
@@ -417,140 +399,221 @@ _se_reclaim_lock_dir() {
 dispatch_if_executable() {
   local SCRIPT_PATH="$1"
   shift
+  logger -t "VLANMgr" "handler: dispatch raw=${RAW:-} script=${SCRIPT_PATH##*/}"
 
   # Only explicitly progress-enabled actions receive a progress token. This
   # prevents a stale custom-settings value from leaking into unrelated actions.
   MERV_PROGRESS_TOKEN=""
   case "${RAW:-}" in
-    sync_vlanmgr|apply_vlanmgr)
+    sync_vlanmgr|syncsettings_vlanmgr|apply_vlanmgr)
       MERV_PROGRESS_TOKEN="$(get_progress_request_token)"
       ;;
-    sync_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*|macrefresh_vlanmgr_pgt_*|macclientmeta_vlanmgr_pgt_*)
+    save_vlanmgr_pgt_*|sync_vlanmgr_pgt_*|syncsettings_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*|macrefresh_vlanmgr_pgt_*|macclientmeta_vlanmgr_pgt_*|collectclients_vlanmgr_pgt_*|repairmain_vlanmgr_pgt_*|repairdev_vlanmgr_pgt_*|sshtrustprobe_vlanmgr_pgt_*|sshtruststatus_vlanmgr_pgt_*|sshtrustrevoke_vlanmgr_pgt_*)
       MERV_PROGRESS_TOKEN="$(get_progress_action_token "${RAW:-}")"
       ;;
+    sshtrustprobe_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustprobe_vlanmgr)" ;;
+    sshtrustenroll_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustenroll_vlanmgr)" ;;
+    sshtrustresume_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustresume_vlanmgr)" ;;
+    sshtruststatus_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtruststatus_vlanmgr)" ;;
+    sshtrustrevoke_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustrevoke_vlanmgr)" ;;
+    sshtrustabort_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustabort_vlanmgr)" ;;
   esac
   case "$MERV_PROGRESS_TOKEN" in
     ''|*[!A-Za-z0-9._-]*) MERV_PROGRESS_TOKEN="" ;;
   esac
   export MERV_PROGRESS_TOKEN
 
-  # Initialize lock and timestamp tracking variables
-  # key: unique identifier for this event (action name or script name)
-  # lock_dir/lock_root: where filesystem locks are stored
-  # stamp: where last execution timestamp is recorded (for debounce window)
-  # window: debounce interval in seconds (skip re-execution within this time)
-  # stale: seconds after which a held lock is considered orphaned (crashed script)
-  local key lock_root lock_dir stamp now last window stale elapsed
-  local _se_pid _se_age
-  key="${RAW:-${SCRIPT_PATH##*/}}"
-  lock_root="${LOCKDIR%/}"
-  lock_dir="${lock_root}/${key}.lock"
-  stamp="${lock_root}/${key}.last"
-  window="${DEBOUNCE_SECONDS:-0}"
-  stale="${STALE_LOCK_SECONDS:-300}"
-
-  # Attempt to acquire lock by creating lock directory (atomic operation)
-  # If mkdir fails, lock already exists (concurrent execution or recent invocation)
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    # Lock acquisition failed: determine whether to skip or reclaim a stale lock.
-    # Two independent checks with different thresholds:
-    #   DEBOUNCE (window): reject rapid re-fires (e.g. firmware double-calling hook)
-    #   STALE   (stale):  reclaim locks abandoned by crashed scripts
-    if [ -f "$stamp" ]; then
-      now="$(date +%s 2>/dev/null || echo 0)"
-      last="$(cat "$stamp" 2>/dev/null || echo 0)"
-      case "$last" in ''|*[!0-9]*) last=0 ;; esac
-      elapsed=$((now - last))
-      if [ "$window" -gt 0 ] 2>/dev/null && [ "$elapsed" -lt "$window" ]; then
-        # Still within debounce window — rapid re-fire; skip
-        logger -t "VLANMgr" "handler: ${key} debounced (${elapsed}s < ${window}s); skipping"
-        return 0
-      elif [ "$elapsed" -lt "$stale" ]; then
-        # Outside debounce but within stale threshold — script is still running; skip
-        logger -t "VLANMgr" "handler: ${key} already running (${elapsed}s < stale ${stale}s); skipping"
-        return 0
-      else
-        # Older than stale threshold — lock was abandoned by a crashed script; reclaim
-        logger -t "VLANMgr" "handler: ${key} lock stale (${elapsed}s >= ${stale}s); reclaiming"
-        _se_reclaim_lock_dir "$lock_dir" "$key" || return 0
-      fi
+  # Every dispatched script receives a parent-owned identity lock. Unknown or
+  # malformed owner metadata is treated as busy and is never reclaimed by age.
+  _se_key=$(printf '%s' "${RAW:-${SCRIPT_PATH##*/}}" | tr -cd 'A-Za-z0-9._-')
+  [ -n "$_se_key" ] || return 1
+  _se_event_lock="${LOCKDIR%/}/${_se_key}.lock"
+  merv_action_lock_enter "$_se_event_lock"
+  _se_event_rc=$?
+  if [ "$_se_event_rc" -ne 0 ]; then
+    merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+    if [ "$_se_event_rc" -eq 3 ]; then
+      merv_action_progress_fail "Another action is already running; this event was not started."
     else
-      # No stamp file — fall back to pid + created metadata written at acquire
-      # time. This covers DEBOUNCE_SECONDS=0 (stamp never written by design), a
-      # SIGKILL between mkdir and stamp write, and stamp write failures.
-      _se_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
-      case "$_se_pid" in ''|*[!0-9]*) _se_pid="" ;; esac
-      _se_age=$(_se_lock_age "$lock_dir")
-      case "$_se_age" in ''|*[!0-9]*) _se_age=0 ;; esac
-      if [ -n "$_se_pid" ] && kill -0 "$_se_pid" 2>/dev/null; then
-        # Holder PID is alive. Honour it UNLESS the lock has aged past the stale
-        # window — on a busy router a crashed holder's PID is quickly recycled
-        # by an unrelated process, so an aged live-PID lock is likely a reuse.
-        if [ "$_se_age" -ge "$stale" ]; then
-          logger -t "VLANMgr" "handler: ${key} live PID ${_se_pid} but age=${_se_age}s >= stale=${stale}s (likely reused); reclaiming"
-          _se_reclaim_lock_dir "$lock_dir" "$key" || return 0
-        else
-          logger -t "VLANMgr" "handler: ${key} already running (pid=${_se_pid} live, age=${_se_age}s); skipping"
-          return 0
+      merv_action_progress_fail "The event action owner could not be verified; no work was started."
+    fi
+    if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+      action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_event_rc" event >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: lock-failure acknowledgement failed for $_se_key"
+    fi
+    logger -t "VLANMgr" "handler: $_se_key owner lock unavailable (rc=$_se_event_rc); refusing dispatch"
+    return 75
+  fi
+  _se_event_nonce="$MERV_ACTION_LOCK_NONCE"; _se_event_start="$MERV_ACTION_LOCK_START"
+  _se_event_mode="${MERV_ACTION_LOCK_MODE:-none}"
+  logger -t "VLANMgr" "handler: event lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
+  _se_global_needed=0
+  case "$SCRIPT_PATH" in
+    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/hw_probe.sh|*/update_mervlan.sh|*/update_mervlan_repair.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh|*/mac_client_meta.sh|*/dropbear_sshkey_gen.sh) _se_global_needed=1 ;;
+  esac
+  _se_global_nonce=""; _se_global_start=""
+  if [ "$_se_global_needed" -eq 1 ]; then
+    merv_action_lock_enter "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+    _se_global_rc=$?
+    if [ "$_se_global_rc" -ne 0 ]; then
+      _se_event_release_rc=0
+      merv_action_lock_leave "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" "$_se_event_mode" >/dev/null 2>&1 || _se_event_release_rc=1
+      if [ "$_se_event_release_rc" -ne 0 ]; then
+        logger -t "VLANMgr" "handler: event lock cleanup failed after global lock contention; retained for recovery"
+        merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+        merv_action_progress_fail "The action lock could not be reconciled; recovery is required."
+        if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
+          action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+            '{"reason":"cleanup-failed","lock":"event"}' \
+            "The event action lock could not be cleaned up; recovery is required." \
+            '["action-lock-cleanup-failed"]' action-lock-cleanup-failed >/dev/null 2>&1 || :
         fi
+        return 75
+      fi
+      merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+      if [ "$_se_global_rc" -eq 3 ]; then
+        merv_action_progress_fail "Another configuration action is already running; this action was not started."
       else
-        # PID dead or absent — decide purely on lock age.
-        if [ "$_se_age" -ge "$stale" ]; then
-          logger -t "VLANMgr" "handler: ${key} orphaned lock (no live pid, age=${_se_age}s >= stale=${stale}s); reclaiming"
-          _se_reclaim_lock_dir "$lock_dir" "$key" || return 0
-        else
-          logger -t "VLANMgr" "handler: ${key} young orphan lock (age=${_se_age}s < stale=${stale}s); skipping"
-          return 0
-        fi
+        merv_action_progress_fail "The global action owner could not be verified; no work was started."
+      fi
+      if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
+        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_global_rc" global >/dev/null 2>&1 || \
+          logger -t "VLANMgr" "handler: global lock-failure acknowledgement failed for $_se_key"
+      fi
+      logger -t "VLANMgr" "handler: global action lock unavailable (rc=$_se_global_rc); refusing $_se_key"
+      return 75
+    fi
+    _se_global_nonce="$MERV_ACTION_LOCK_NONCE"; _se_global_start="$MERV_ACTION_LOCK_START"
+    _se_global_mode="${MERV_ACTION_LOCK_MODE:-none}"
+    logger -t "VLANMgr" "handler: global lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
+  fi
+  _se_ack_stage=0
+  case "$SCRIPT_PATH" in
+    */save_settings.sh)
+      [ -n "${MERV_PROGRESS_TOKEN:-}" ] && _se_ack_stage=1
+      ;;
+  esac
+  _se_release_owner_locks() {
+    [ "${_se_cleanup_done:-0}" -eq 0 ] || return "${_se_release_rc:-0}"
+    _se_cleanup_done=1
+    _se_release_rc=0
+    if ! merv_action_lock_leave "$_se_event_lock" "$_se_event_nonce" "$_se_event_start" "$_se_event_mode" >/dev/null 2>&1; then
+      _se_release_rc=1
+      logger -t "VLANMgr" "handler: event lock cleanup failed; ownership was not proven"
+    fi
+    if [ -n "$_se_global_nonce" ]; then
+      if ! merv_action_lock_leave "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" "$_se_global_nonce" "$_se_global_start" "$_se_global_mode" >/dev/null 2>&1; then
+        _se_release_rc=1
+        logger -t "VLANMgr" "handler: global action-lock cleanup failed; ownership was not proven"
       fi
     fi
-  fi
-
-  # Lock acquired (fresh, or reclaimed above) — record ownership metadata before
-  # anything can interrupt us, then register the cleanup trap.
-  _se_write_lock_meta "$lock_dir"
-
-  # Lock acquired: register cleanup trap to remove lock on exit
-  trap 'logger -t "VLANMgr" "handler: ${key} lock released (trap)"; _se_cleanup_lock_dir "$lock_dir"' EXIT INT TERM
-
-  # Debounce check: if within window, skip execution (prevent rapid re-invocation)
-  if [ "$window" -gt 0 ] 2>/dev/null; then
-    # Get current timestamp
-    now="$(date +%s 2>/dev/null || echo 0)"
-    # Get last execution timestamp from file (or 0 if missing)
-    if [ -f "$stamp" ]; then
-      last="$(cat "$stamp" 2>/dev/null || echo 0)"
+    return "$_se_release_rc"
+  }
+  _se_cleanup_done=0
+  _se_signal_handling=0
+  _se_signal_status=0
+  _se_handle_signal() {
+    _se_signal_status="$1"
+    [ "${_se_signal_handling:-0}" -eq 0 ] || exit "$_se_signal_status"
+    _se_signal_handling=1
+    trap - INT TERM
+    logger -t "VLANMgr" "handler: action=$_se_key interrupted (rc=$_se_signal_status); stopping before normal completion"
+    _se_release_owner_locks
+    _se_release_rc=$?
+    if [ "${_se_ack_stage:-0}" -eq 1 ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_discard_staged >/dev/null 2>&1; then
+      action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"unknown","node_sync":"unknown"}' \
+        "Settings save interrupted; no success result was published." \
+        '["interrupted"]' interrupted >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: interruption acknowledgement could not be published"
+    fi
+    [ "$_se_release_rc" -eq 0 ] || logger -t "VLANMgr" "handler: interrupted action cleanup failed; ownership retained for recovery"
+    exit "$_se_signal_status"
+  }
+  trap '_se_release_owner_locks' EXIT
+  trap '_se_handle_signal 130' INT
+  trap '_se_handle_signal 143' TERM
+  # ASUSWRT may mount the JFFS tree with execution disabled even when the
+  # executable bit is present.  Invoke the shell workers through BusyBox sh so
+  # an action cannot disappear with a bare 126 before it publishes its ack.
+  if [ -f "$SCRIPT_PATH" ]; then
+    # Only workers whose dispatcher actually owns the global lock may inherit
+    # the parent-held marker. Observation requests do not own that lock and
+    # must let a nested SSH trust probe acquire it itself.
+    if [ "$_se_global_needed" -eq 1 ]; then
+      merv_action_lock_export_child_context || {
+        logger -t "VLANMgr" "handler: could not export authenticated global lock context"
+        _se_script_rc=75
+      }
     else
-      last=0
+      merv_action_lock_clear_child_context
     fi
-    # Validate last timestamp is numeric
-    case "$last" in ''|*[!0-9]*) last=0 ;; esac
-    # If within debounce window, skip execution
-    if [ $((now - last)) -lt "$window" ]; then
-      logger -t "VLANMgr" "handler: debounced ${key} (window=${window}s); skipping"
-      _se_cleanup_lock_dir "$lock_dir"
-      trap - EXIT INT TERM
-      return 0
-    fi
-    # Update timestamp to current time (record this execution)
-    printf '%s' "$now" >"$stamp" 2>/dev/null || :
-  fi
-
-  logger -t "VLANMgr" "handler: ${key} lock acquired; launching ${SCRIPT_PATH##*/}"
-
-  # Execute script: try direct execution first (if +x bit set), fallback to sh
-  if [ -x "$SCRIPT_PATH" ]; then
-    "$SCRIPT_PATH" "$@"
-  elif [ -f "$SCRIPT_PATH" ]; then
+    MERV_ACTION_ACK_STAGE="$_se_ack_stage"
+    export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+      MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
+      MERV_ACTION_ACK_STAGE
+    logger -t "VLANMgr" "handler: worker start action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} global=$_se_global_needed"
     sh "$SCRIPT_PATH" "$@"
   else
-    logger -t "VLANMgr" "handler: missing script ${SCRIPT_PATH}"
+    logger -t "VLANMgr" "handler: missing script ${SCRIPT_PATH##*/}"
+    _se_script_rc=1
   fi
-
-  # Cleanup: remove lock directory and trap handlers
-  logger -t "VLANMgr" "handler: ${key} lock released"
-  _se_cleanup_lock_dir "$lock_dir"
+  _se_script_rc=${_se_script_rc:-$?}
+  [ "$_se_script_rc" -eq 0 ] || logger -t "VLANMgr" "handler: $_se_key script failed (rc=$_se_script_rc)"
+  logger -t "VLANMgr" "handler: worker return action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} rc=$_se_script_rc"
+  _se_release_owner_locks
+  _se_release_rc=$?
   trap - EXIT INT TERM
+  logger -t "VLANMgr" "handler: locks released action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} rc=$_se_release_rc"
+  _se_ack_finalized=0
+  if [ "$_se_ack_stage" -eq 1 ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+    if [ "$_se_release_rc" -ne 0 ]; then
+      action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"1","node_sync":"unknown"}' \
+        "Settings were saved, but backend lock cleanup failed; recovery is required." \
+        '["action-lock-cleanup-failed"]' cleanup-failed >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
+      _se_ack_finalized=1
+    elif [ "$_se_script_rc" -ne 0 ]; then
+      action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"0","node_sync":"unknown"}' \
+        "Settings save worker failed before a terminal result was available." \
+        '["save-worker-failed"]' worker-failed >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: worker-failure acknowledgement could not be published"
+      _se_ack_finalized=1
+    elif action_ack_publish_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1; then
+      logger -t "VLANMgr" "handler: acknowledgement published action=save_vlanmgr token=${MERV_PROGRESS_TOKEN}"
+      _se_ack_finalized=1
+    else
+      action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+        '{"local_saved":"1","node_sync":"unknown"}' \
+        "Settings were saved, but the correlated acknowledgement could not be published." \
+        '["ack-publication-failed"]' ack-publication-failed >/dev/null 2>&1 || \
+        logger -t "VLANMgr" "handler: staged Save acknowledgement publication failed"
+      _se_ack_finalized=1
+    fi
+  fi
+  if [ "$_se_release_rc" -ne 0 ]; then
+    logger -t "VLANMgr" "handler: $_se_key completed with cleanup failure; refusing success"
+    if [ "$_se_script_rc" -eq 0 ]; then
+      _se_script_rc=75
+      if [ "$_se_ack_finalized" -eq 0 ] && type action_ack_error >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
+      fi
+    fi
+  fi
+  return "$_se_script_rc"
+
+        # Still within debounce window — rapid re-fire; skip
+        # Outside debounce but within stale threshold — script is still running; skip
+        # Older than stale threshold — lock was abandoned by a crashed script; reclaim
+      # No stamp file — fall back to pid + created metadata written at acquire
+        # window — on a busy router a crashed holder's PID is quickly recycled
+        # PID dead or absent — decide purely on lock age.
+  # Lock acquired (fresh, or reclaimed above) — record ownership metadata before
 }
 
 # ========================================================================== #
@@ -562,7 +625,7 @@ dispatch_if_executable() {
 # Patterns support wildcards (*) for pattern matching on TYPE or EVENT
 case "${TYPE}_${EVENT}" in
   # MerVLAN application handlers (explicit handlers for UI/API calls)
-  save_vlanmgr) 
+  save_vlanmgr|save_vlanmgr_pgt_*)
     # Save VLAN settings to JSON file (triggered by web form submission)
     dispatch_if_executable "/jffs/addons/mervlan/functions/save_settings.sh"
     ;;
@@ -583,6 +646,14 @@ case "${TYPE}_${EVENT}" in
     # Progress-token variant; the dispatch helper decodes and exports the
     # token before sync_nodes.sh is launched.
     dispatch_if_executable "/jffs/addons/mervlan/functions/sync_nodes.sh"
+    ;;
+  syncsettings_vlanmgr)
+    # Sync settings only to remote nodes
+    dispatch_if_executable "/jffs/addons/mervlan/functions/sync_nodes.sh" --settings-only
+    ;;
+  syncsettings_vlanmgr_pgt_*)
+    # Progress-token variant for settings-only sync
+    dispatch_if_executable "/jffs/addons/mervlan/functions/sync_nodes.sh" --settings-only
     ;;
   executenodes_vlanmgr)
     # Execute VLAN Manager workflow on configured nodes (runs execute_nodes.sh)
@@ -642,6 +713,11 @@ case "${TYPE}_${EVENT}" in
     # Collect client list from router and nodes (triggered by refresh request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/post_apply_worker.sh" request collect
     ;;
+  collectclients_vlanmgr_pgt_*)
+    # Progress-token variant lets collection publish the SSH trust challenge
+    # before any local or node inventory work starts.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/post_apply_worker.sh" request collect
+    ;;
   clearclilog_vlanmgr)
     # Clear CLI output log file (triggered by Clear button in UI)
     # Uses : to truncate file in place; no script needed
@@ -655,6 +731,14 @@ case "${TYPE}_${EVENT}" in
   updatedev_vlanmgr)
     # Update MerVLAN addon from development channel (triggered by update request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update dev
+    ;;
+  repairmain_vlanmgr|repairmain_vlanmgr_pgt_*)
+    # Repair only the main-branch update/runtime components before a separate update.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" main
+    ;;
+  repairdev_vlanmgr|repairdev_vlanmgr_pgt_*)
+    # Repair only the dev-branch update/runtime components before a separate update.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" dev
     ;;
   updateref_vlanmgr_*)
     _encoded_update_request="$(decode_update_ref_action "${TYPE}_${EVENT}")"
@@ -671,17 +755,10 @@ case "${TYPE}_${EVENT}" in
     esac
     ;;
   updaterelease_vlanmgr)
-    # Update MerVLAN addon to a specific tagged release or custom branch
-    # Ref is written to custom_settings.txt by Merlin (not nvram) via vlanmgr_update_ref key
-    _upd_ref="$(grep '^vlanmgr_update_ref=' "$CUSTOM_SETTINGS_FILE" 2>/dev/null | tail -n1 | cut -d'=' -f2- | tr -cd 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-')"
-    case "$_upd_ref" in
-        refs/tags/v[0-9]*|refs/heads/?*)
-            dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update "$_upd_ref"
-            ;;
-        *)
-            logger -t "VLANMgr" "handler: updaterelease_vlanmgr - invalid or missing ref '$_upd_ref'"
-            ;;
-    esac
+    # Legacy transport: the update worker may consult custom_settings.txt only
+    # after owning the maintenance lock. Canonical ref actions use the encoded
+    # updateref_vlanmgr_* path above and never depend on this fallback.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update legacy
     ;;
   backupinventory_vlanmgr_*)
     _maint_decoded=$(decode_maintenance_action "${TYPE}_${EVENT}" backupinventory_vlanmgr 0)
@@ -778,6 +855,58 @@ case "${TYPE}_${EVENT}" in
   macclientmeta_vlanmgr_pgt_*)
     # Progress-token variant; mac_client_meta.sh owns terminal action status.
     dispatch_if_executable "/jffs/addons/mervlan/functions/mac_client_meta.sh"
+    ;;
+  sshtrustprobe_vlanmgr)
+    _trust_action_token="$(get_action_request_token)"
+    dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" probe "$_trust_action_token"
+    ;;
+  sshtrustprobe_vlanmgr_pgt_*_nsl_*)
+    _trust_node_slots="$(get_ssh_trust_probe_node_slots "${TYPE}_${EVENT}")"
+    _trust_action_token="$(get_progress_action_token "${TYPE}_${EVENT}")"
+    if [ -n "$_trust_node_slots" ]; then
+      MERV_SSH_TRUST_NODE_SLOTS="$_trust_node_slots"
+      export MERV_SSH_TRUST_NODE_SLOTS
+      dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" probe
+      unset MERV_SSH_TRUST_NODE_SLOTS
+    elif [ -n "$_trust_action_token" ]; then
+      action_ack_error "$_trust_action_token" sshtrustprobe_vlanmgr '{"reason":"invalid-node-selection"}' "The SSH trust probe rejected the selected node list." '[]' ssh-trust-invalid >/dev/null 2>&1 || logger -t "VLANMgr" "handler: invalid SSH trust node selection acknowledgement failed"
+    else
+      logger -t "VLANMgr" "handler: rejected SSH trust probe with invalid selected-node transport"
+    fi
+    ;;
+  sshtrustprobe_vlanmgr_pgt_*)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" probe
+    ;;
+  sshtrustprobe_vlanmgr_vrt_*)
+    _trust_action_token="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustprobe_vlanmgr)"
+    [ -n "$_trust_action_token" ] && dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" probe "$_trust_action_token" || logger -t "VLANMgr" "handler: rejected SSH trust probe with invalid verification token"
+    ;;
+  sshtruststatus_vlanmgr)
+    _trust_action_token="$(get_action_request_token)"
+    dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" status "$_trust_action_token"
+    ;;
+  sshtruststatus_vlanmgr_pgt_*)
+    dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" status
+    ;;
+  sshtruststatus_vlanmgr_vrt_*)
+    _trust_action_token="$(get_verified_action_token "${TYPE}_${EVENT}" sshtruststatus_vlanmgr)"
+    [ -n "$_trust_action_token" ] && dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" status "$_trust_action_token" || logger -t "VLANMgr" "handler: rejected SSH trust status request with invalid verification token"
+    ;;
+  sshtrustenroll_vlanmgr_vrt_*)
+    _trust_action_token="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustenroll_vlanmgr)"
+    [ -n "$_trust_action_token" ] && dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" enroll "$_trust_action_token" || logger -t "VLANMgr" "handler: rejected SSH trust enrollment with invalid verification token"
+    ;;
+  sshtrustresume_vlanmgr_vrt_*)
+    _trust_action_token="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustresume_vlanmgr)"
+    [ -n "$_trust_action_token" ] && dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" resume "$_trust_action_token" || logger -t "VLANMgr" "handler: rejected SSH trust resume with invalid verification token"
+    ;;
+  sshtrustrevoke_vlanmgr_vrt_*)
+    _trust_action_token="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustrevoke_vlanmgr)"
+    [ -n "$_trust_action_token" ] && dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" revoke "$_trust_action_token" || logger -t "VLANMgr" "handler: rejected SSH trust revocation with invalid verification token"
+    ;;
+  sshtrustabort_vlanmgr_vrt_*)
+    _trust_action_token="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustabort_vlanmgr)"
+    [ -n "$_trust_action_token" ] && dispatch_if_executable "/jffs/addons/mervlan/functions/ssh_trust_action.sh" abort "$_trust_action_token" || logger -t "VLANMgr" "handler: rejected SSH trust abort with invalid verification token"
     ;;
   # System event handlers (triggered by Asuswrt-Merlin events)
   # Wildcard patterns catch restart_* and service events (wireless, WAN, LAN, NET, FW, NAT, DNS)

@@ -14,23 +14,38 @@ LIB_ACTION_PROGRESS_LOADED=1
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 
+if [ -z "${LIB_IDENTITY_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_identity.sh" ]; then
+    . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || return 1 2>/dev/null || exit 1
+fi
+
 merv_action_progress_init() {
     MERV_ACTION_PROGRESS_TOKEN="${1:-}"
     MERV_ACTION_PROGRESS_ACTION="${2:-}"
     MERV_ACTION_PROGRESS_LABEL="${3:-MerVLAN Loading}"
     MERV_ACTION_PROGRESS_ENABLED=0
     MERV_ACTION_PROGRESS_FINAL=0
+    MERV_ACTION_PROGRESS_LAST_RC=0
+    MERV_ACTION_PROGRESS_PID="$$"
+    MERV_ACTION_PROGRESS_OWNER_START="$(merv_identity_current_start 2>/dev/null || printf '')"
+    MERV_ACTION_PROGRESS_NONCE=""
+    if merv_identity_nonce_next 2>/dev/null; then
+        MERV_ACTION_PROGRESS_NONCE="$MERV_IDENTITY_NONCE"
+    fi
+    MERV_ACTION_PROGRESS_STARTED_AT="$(date +%s 2>/dev/null || printf '0')"
 
     [ -n "$MERV_ACTION_PROGRESS_TOKEN" ] || return 0
     if [ -z "${LIB_PROGRESS_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_progress.sh" ]; then
         . "$MERV_BASE/settings/lib_progress.sh" 2>/dev/null || :
     fi
     type merv_progress_start >/dev/null 2>&1 || return 0
-    merv_progress_prune 2>/dev/null || :
+    merv_progress_prune 2>/dev/null || MERV_ACTION_PROGRESS_LAST_RC=$?
     if merv_progress_start "$MERV_ACTION_PROGRESS_TOKEN" \
         "$MERV_ACTION_PROGRESS_ACTION" "$MERV_ACTION_PROGRESS_LABEL" phase \
         "${4:-Preparing...}" >/dev/null 2>&1; then
         MERV_ACTION_PROGRESS_ENABLED=1
+        MERV_ACTION_PROGRESS_LAST_RC=0
+    else
+        MERV_ACTION_PROGRESS_LAST_RC=$?
     fi
 }
 
@@ -38,7 +53,7 @@ merv_action_progress_phase() {
     [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] || return 0
     merv_progress_phase "$MERV_ACTION_PROGRESS_TOKEN" \
         "$MERV_ACTION_PROGRESS_ACTION" "$MERV_ACTION_PROGRESS_LABEL" \
-        "${1:-working}" "${2:-Working...}" >/dev/null 2>&1 || :
+        "${1:-working}" "${2:-Working...}" >/dev/null 2>&1 || MERV_ACTION_PROGRESS_LAST_RC=$?
 }
 
 # Arguments: phase current total percent message
@@ -47,7 +62,7 @@ merv_action_progress_update() {
     merv_progress_update "$MERV_ACTION_PROGRESS_TOKEN" \
         "$MERV_ACTION_PROGRESS_ACTION" "$MERV_ACTION_PROGRESS_LABEL" \
         running determinate "${1:-working}" "${2:-0}" "${3:-0}" \
-        "${4:-}" "${5:-Working...}" "" >/dev/null 2>&1 || :
+        "${4:-}" "${5:-Working...}" "" >/dev/null 2>&1 || MERV_ACTION_PROGRESS_LAST_RC=$?
 }
 
 merv_action_progress_complete() {
@@ -55,7 +70,7 @@ merv_action_progress_complete() {
     MERV_ACTION_PROGRESS_FINAL=1
     merv_progress_complete "$MERV_ACTION_PROGRESS_TOKEN" \
         "$MERV_ACTION_PROGRESS_ACTION" "$MERV_ACTION_PROGRESS_LABEL" \
-        "${1:-Complete}" >/dev/null 2>&1 || :
+        "${1:-Complete}" >/dev/null 2>&1 || MERV_ACTION_PROGRESS_LAST_RC=$?
 }
 
 merv_action_progress_fail() {
@@ -63,5 +78,5 @@ merv_action_progress_fail() {
     MERV_ACTION_PROGRESS_FINAL=1
     merv_progress_fail "$MERV_ACTION_PROGRESS_TOKEN" \
         "$MERV_ACTION_PROGRESS_ACTION" "$MERV_ACTION_PROGRESS_LABEL" \
-        phase "${1:-Action failed}" "${1:-Action failed}" >/dev/null 2>&1 || :
+        phase "${1:-Action failed}" "${1:-Action failed}" >/dev/null 2>&1 || MERV_ACTION_PROGRESS_LAST_RC=$?
 }

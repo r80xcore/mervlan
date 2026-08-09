@@ -510,17 +510,21 @@ The web UI is the recommended way to update, create backups, restore an earlier 
 > [!WARNING]
 > **Custom branches** are intended for developers and selected testers. Use one only when you understand its purpose or have been asked to test a specific change.
 
+Custom branches are verified against GitHub and must provide a readable MerVLAN version before the **Install branch** action becomes available.
+
 ### Updating Through the Web UI
 
 1. Open the version window and leave the **Update** tab selected.
 2. Choose an update channel.
-3. Choose whether to retain or clear the existing logs.
+3. Choose whether to retain or clear the existing logs. Optionally select **Repair update components before update** to restore the update/runtime program files before the normal update begins.
 4. Click <kbd>Check for updates</kbd>. For **Stable (releases)**, choose a tagged version. For **Custom branch**, enter the branch name directly instead.
 5. Review the version comparison and any downgrade warning. Where available, click <kbd>Show Changelog</kbd> to review the changes before continuing.
 6. Start the update and keep the version window open to follow its progress.
 7. When the update finishes, refresh your browser to load the new interface.
 
 Closing the version window does not cancel an update that has already started, but you will lose live progress tracking in that window. The completion message will tell you whether **Undo Update** is available until the next reboot.
+
+When selected, Repair-before-update downloads the supported branch's update/runtime components, validates them, and replaces only those program and static files before the existing update starts. It preserves settings, SSH keys, databases, and backups; it does not apply configuration or contact nodes. Stable release and Stable latest repairs use `main`, Development uses `dev`, and Custom branch repair is intentionally CLI-only.
 
 ### Backups and the Restore Tab
 
@@ -606,6 +610,34 @@ after verification succeeds. See the development branch's
 | `sh functions/update_mervlan.sh update dev --logs=clear` | Update from `dev` and clear older logs after the update lock is acquired. The new update is still logged. |
 | `sh functions/update_mervlan.sh refs/heads/BRANCH` | Install a named custom branch. Replace `BRANCH` with the required branch name. |
 | `sh functions/update_mervlan.sh refs/tags/v0.53.15` | Install a tagged release. Replace the example with the required tag. |
+
+#### Emergency Update Repair
+
+Use repair when the installed updater, its support libraries, node-sync helpers, or related update/runtime files are missing, damaged, or have incorrect permissions. Repair restores branch-owned program and static components only; it preserves settings, SSH keys, databases, and backups. It does not start an update, synchronize nodes, apply VLANs, restart services, or reboot. Run the normal update after repair when ready.
+
+| Command | What it does |
+| --- | --- |
+| `sh functions/update_mervlan_repair.sh main` | Repair update/runtime components from the supported `main` branch. |
+| `sh functions/update_mervlan_repair.sh dev` | Repair update/runtime components from the supported `dev` branch. |
+| `sh functions/update_mervlan_repair.sh feature/example` | Repair from a named custom branch. Advanced CLI use only. |
+
+The Web UI's **Repair update components before update** option runs the same repair stage first and starts the selected normal update only after repair reports success. A stable-release repair always uses `main`, not the selected release tag.
+
+If the Web UI repair cannot start because the installed event handler or its lock/action support is damaged, bootstrap the standalone repair script over SSH first. For `main`:
+
+```sh
+mkdir -p /jffs/addons/mervlan/functions && \
+tmp="/tmp/update_mervlan_repair.sh.$$" && \
+/usr/sbin/curl -fsL --retry 3 --connect-timeout 15 \
+"https://raw.githubusercontent.com/r80xcore/mervlan/main/functions/update_mervlan_repair.sh" \
+-o "$tmp" && \
+sh -n "$tmp" && \
+chmod 0755 "$tmp" && \
+mv -f "$tmp" "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" && \
+sh "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" main
+```
+
+For `dev`, replace the `main` URL segment and final `main` argument with `dev`. The bootstrap installs the rescue command before running it, so it remains available for future recovery.
 
 #### Backup
 
@@ -860,7 +892,7 @@ Before posting, run through these:
 To contribute code or test a temporary branch, see [Branches, Releases and Contributions](../README.md#branches-releases-and-contributions). Device profiles and bug reports can be submitted through the links above.
 
 For how the addon works, start with `dev-tools/docs/README.md`. If you are
-using an AI coding agent, tell it to read and start from `dev-tools/AGENTS.md`.
+using an AI coding agent, tell it to read and start from `dev-tools/RULES.md`.
 That is the portable entry point for project rules, developer guidance,
 testing, and deployment constraints.
 

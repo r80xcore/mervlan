@@ -75,6 +75,13 @@ if [ "$LOG_chan_cli" = "$LOG_chan_vlan" ]; then
 fi
 # ============================================== End of Central settings setup #
 
+# Log maintenance participates in the same owner-aware lock contract as all
+# other mutating work.  Loading this small library here avoids a timestamp-only
+# mutex in contexts that source log_settings before the main action libraries.
+if [ -z "${LIB_ACTION_LOCK_LOADED:-}" ] && [ -f "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_action_lock.sh" ]; then
+    . "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_action_lock.sh" 2>/dev/null || :
+fi
+
 
 # =========================== internals (do not edit) ======================== #
 
@@ -201,26 +208,29 @@ _log_trim_file() {
 _log_maintenance_lock_acquire() {
     _lmla_lock="$LOGROOT/.maintenance.lock"
     mkdir -p "$LOGROOT" 2>/dev/null || return 1
-    if mkdir "$_lmla_lock" 2>/dev/null; then
-        date +%s > "$_lmla_lock/created" 2>/dev/null || :
-        return 0
-    fi
-    _lmla_now=$(date +%s 2>/dev/null || printf '0')
-    _lmla_created=$(cat "$_lmla_lock/created" 2>/dev/null || printf '0')
-    case "$_lmla_now" in ''|*[!0-9]*) _lmla_now=0 ;; esac
-    case "$_lmla_created" in ''|*[!0-9]*) _lmla_created=0 ;; esac
-    _lmla_age=$((_lmla_now - _lmla_created))
-    [ "$_lmla_age" -ge "${LOG_MAINT_LOCK_STALE:-300}" ] 2>/dev/null || return 1
-    rm -rf "$_lmla_lock" 2>/dev/null || return 1
-    mkdir "$_lmla_lock" 2>/dev/null || return 1
-    printf '%s\n' "$_lmla_now" > "$_lmla_lock/created" 2>/dev/null || :
+    type merv_action_lock_acquire >/dev/null 2>&1 || return 1
+    merv_action_lock_acquire "$_lmla_lock" || return 1
+    LOG_MAINT_LOCK_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+    LOG_MAINT_LOCK_START="${MERV_ACTION_LOCK_START:-}"
+    [ -n "$LOG_MAINT_LOCK_NONCE" ] && [ -n "$LOG_MAINT_LOCK_START" ] || {
+        if ! merv_action_lock_release "$_lmla_lock" "$LOG_MAINT_LOCK_NONCE" "$LOG_MAINT_LOCK_START" 2>/dev/null; then
+            printf '%s\n' "[ERROR] log maintenance lock cleanup failed; lock retained for recovery" >&2
+        fi
+        return 1
+    }
     return 0
 }
 
 _log_maintenance_lock_release() {
     _lmlr_lock="$LOGROOT/.maintenance.lock"
-    rm -f "$_lmlr_lock/created" 2>/dev/null || :
-    rmdir "$_lmlr_lock" 2>/dev/null || :
+    type merv_action_lock_release >/dev/null 2>&1 || return 1
+    if ! merv_action_lock_release "$_lmlr_lock" "${LOG_MAINT_LOCK_NONCE:-}" "${LOG_MAINT_LOCK_START:-}" 2>/dev/null; then
+        printf '%s\n' "[ERROR] log maintenance lock cleanup failed; lock retained for recovery" >&2
+        return 1
+    fi
+    LOG_MAINT_LOCK_NONCE=""
+    LOG_MAINT_LOCK_START=""
+    return 0
 }
 
 # Trim every managed log file, including boot/custom channels, and record the
@@ -235,7 +245,7 @@ log_maintain_all() {
     if [ "$_lma_failed" = "0" ]; then
         date +%s > "$LOGROOT/.last_maintenance" 2>/dev/null || :
     fi
-    _log_maintenance_lock_release
+    _log_maintenance_lock_release || _lma_failed=1
     [ "$_lma_failed" = "0" ]
 }
 
@@ -271,7 +281,7 @@ log_clear_all() {
     if [ "$_lca_failed" = "0" ]; then
         date +%s > "$LOGROOT/.last_maintenance" 2>/dev/null || :
     fi
-    _log_maintenance_lock_release
+    _log_maintenance_lock_release || _lca_failed=1
     [ "$_lca_failed" = "0" ]
 }
 

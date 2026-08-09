@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_clients.sh || version="0.52"                  #
+#                - File: collect_clients.sh || version="0.53"                  #
 # ============================================================================ #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -35,12 +35,21 @@ fi
 # MAC validators reused by the client-metadata annotation pass. Best-effort:
 # if absent we degrade to unguarded collection rather than fail.
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
 
+if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ] && [ -z "$LIB_ACTION_ACK_LOADED" ]; then
+  . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || true
+fi
+
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
+if merv_update_mutation_blocked; then
+  warn -c cli,vlan "Client collection refused: Update maintenance is active"
+  exit 75
+fi
 # =========================================== End of MerVLAN environment setup #
 
 # ============================================================================ #
@@ -62,22 +71,95 @@ WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-90}"
 # second (skipped) collector must never delete the working dir out from under
 # the running owner. The lock itself is released here too.
 cleanup_collect() {
+  _collect_cleanup_rc=$?
+  _collect_cleanup_failed=0
   # Kill any remaining background collection jobs
-  for pid in $BG_PIDS; do
-    kill "$pid" 2>/dev/null
+  for _collect_track in ${BG_TRACKED:-}; do
+    _collect_pid=${_collect_track%%:*}
+    _collect_start=${_collect_track#*:}
+    case "$_collect_pid:$_collect_start" in
+      ''|*[!0-9:]*|:*|*::*)
+        _collect_cleanup_failed=1
+        warn -c cli,vlan "Client collection cleanup could not validate a tracked worker identity"
+        continue
+        ;;
+    esac
+    collect_stop_tracked_pid "$_collect_pid" "$_collect_start" || _collect_cleanup_failed=1
   done
-  # Remove temporary collection directory only if we own the lock
+  # If a worker identity could not be recorded, do not release the collection
+  # owner: a later process must not race an unvalidated child.  The preserved
+  # lock/workspace is an explicit recovery signal rather than silent success.
   if [ "${COLLECT_LOCK_ACQUIRED:-0}" -eq 1 ]; then
-    [ -d "$COLLECTDIR" ] && rm -rf "$COLLECTDIR" 2>/dev/null
-    if type merv_lock_release >/dev/null 2>&1; then
-      merv_lock_release "$COLLECT_LOCK" 2>/dev/null
+    if [ "${BG_IDENTITY_FAILURE:-0}" -eq 1 ]; then
+      _collect_cleanup_failed=1
+      error -c cli,vlan "Client collection cleanup retained ownership because a worker identity was unverifiable"
+    else
+      if [ -d "$COLLECTDIR" ] && ! rm -rf "$COLLECTDIR" 2>/dev/null; then
+        _collect_cleanup_failed=1
+        error -c cli,vlan "Client collection cleanup could not remove its private workspace"
+      fi
+      if ! type merv_lock_release >/dev/null 2>&1 || ! merv_lock_release "$COLLECT_LOCK" "${COLLECT_LOCK_NONCE:-}" 2>/dev/null; then
+        _collect_cleanup_failed=1
+        error -c cli,vlan "Client collection cleanup could not release its owner lock"
+      else
+        COLLECT_LOCK_ACQUIRED=0
+      fi
     fi
   fi
+  [ -z "${OUT_WORK:-}" ] || rm -f "$OUT_WORK" 2>/dev/null || _collect_cleanup_failed=1
+  [ "$_collect_cleanup_failed" -eq 0 ] || _collect_cleanup_rc=1
+  return "$_collect_cleanup_rc"
 }
-trap 'cleanup_collect' EXIT INT TERM
+COLLECT_SIGNAL_HANDLING=0
+collect_handle_signal() {
+  _collect_signal_status="$1"
+  [ "${COLLECT_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_collect_signal_status"
+  COLLECT_SIGNAL_HANDLING=1
+  trap - INT TERM
+  error -c cli,vlan "Client collection interrupted (rc=$_collect_signal_status); stopping tracked workers"
+  exit "$_collect_signal_status"
+}
+trap 'cleanup_collect' EXIT
+trap 'collect_handle_signal 130' INT
+trap 'collect_handle_signal 143' TERM
 
 # Track background job PIDs for cleanup
 BG_PIDS=""
+BG_TRACKED=""
+BG_IDENTITY_FAILURE=0
+collect_stop_tracked_pid() {
+  _collect_stop_pid="$1"
+  _collect_stop_start="$2"
+  merv_process_identity_matches "$_collect_stop_pid" "$_collect_stop_start" 2>/dev/null || return 0
+  kill -TERM "$_collect_stop_pid" 2>/dev/null || return 1
+  _collect_stop_n=0
+  while [ "$_collect_stop_n" -lt 2 ] &&
+        merv_process_identity_matches "$_collect_stop_pid" "$_collect_stop_start" 2>/dev/null; do
+    sleep 1
+    _collect_stop_n=$((_collect_stop_n + 1))
+  done
+  if merv_process_identity_matches "$_collect_stop_pid" "$_collect_stop_start" 2>/dev/null; then
+    kill -KILL "$_collect_stop_pid" 2>/dev/null || return 1
+  fi
+  wait "$_collect_stop_pid" 2>/dev/null || :
+  return 0
+}
+
+collect_track_pid() {
+  _collect_track_pid="$1"
+  _collect_track_start=$(merv_proc_start_time "$_collect_track_pid" 2>/dev/null || printf '')
+  case "$_collect_track_start" in
+    ''|*[!0-9]*)
+      warn -c cli,vlan "Client collection could not record worker identity pid=$_collect_track_pid"
+      BG_PIDS="$BG_PIDS $_collect_track_pid"
+      BG_IDENTITY_FAILURE=1
+      return 1
+      ;;
+  esac
+  BG_PIDS="$BG_PIDS $_collect_track_pid"
+  BG_TRACKED="$BG_TRACKED $_collect_track_pid:$_collect_track_start"
+  return 0
+}
 
 # ----------------------------------------------------------- Collection lock --
 # COLLECTDIR is a single shared path, so two concurrent collections would race
@@ -87,29 +169,54 @@ BG_PIDS=""
 COLLECT_LOCK="$LOCKDIR/client_collect.lock"
 COLLECT_LOCK_ACQUIRED=0
 
+# execute_nodes retains its orchestration lock while publishing the final
+# observation. Permit that one parent-owned collection only after all node
+# workers have published terminal verified results, and authenticate the
+# exception against the live owner record rather than an unscoped flag.
+collect_execute_nodes_observation_grant_valid() {
+  [ "${MERV_OBS_EXECUTE_NODES_OWNER_GRANT:-0}" = 1 ] || return 1
+  case "${MERV_OBS_EXECUTE_NODES_OWNER_PID:-}:${MERV_OBS_EXECUTE_NODES_OWNER_START:-}:${MERV_OBS_EXECUTE_NODES_OWNER_NONCE:-}" in
+    ''|*[!0-9A-Za-z._:-]*|*::*|*::*) return 1 ;;
+  esac
+  _ceog_lock="$LOCKDIR/execute_nodes.lock"
+  [ -d "$_ceog_lock" ] || return 1
+  _ceog_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$_ceog_lock/owner" 2>/dev/null | head -n 1)
+  _ceog_start=$(sed -n 's/^proc_start_time=\([0-9][0-9]*\)$/\1/p' "$_ceog_lock/owner" 2>/dev/null | head -n 1)
+  _ceog_nonce=$(sed -n 's/^owner_nonce=\([A-Za-z0-9._:-][A-Za-z0-9._:-]*\)$/\1/p' "$_ceog_lock/owner" 2>/dev/null | head -n 1)
+  [ "$_ceog_pid" = "$MERV_OBS_EXECUTE_NODES_OWNER_PID" ] || return 1
+  [ "$_ceog_start" = "$MERV_OBS_EXECUTE_NODES_OWNER_START" ] || return 1
+  [ "$_ceog_nonce" = "$MERV_OBS_EXECUTE_NODES_OWNER_NONCE" ] || return 1
+  merv_process_identity_matches "$_ceog_pid" "$_ceog_start" 2>/dev/null
+}
+
 # An apply already requests its own post-apply collection. Do not let a page
 # load or manual refresh start a second collection while configuration is
 # mutating. post_apply_worker.sh retries pending generations after the manager
 # releases these locks, so this is safe for apply-owned collection too.
 if type merv_lock_state >/dev/null 2>&1; then
   case "$(merv_lock_state "$LOCKDIR/mervlan_manager.lock")" in
-    active|unknown_recent)
+    active|unknown)
       info -c cli,vlan "Client collection skipped while VLAN apply is active"
       exit 75
       ;;
   esac
   case "$(merv_lock_state "$LOCKDIR/execute_nodes.lock")" in
-    active|unknown_recent)
-      info -c cli,vlan "Client collection skipped while node apply is active"
-      exit 75
+    active|unknown)
+      if collect_execute_nodes_observation_grant_valid; then
+        info -c cli,vlan "Client collection authorized by the terminal node-apply owner"
+      else
+        info -c cli,vlan "Client collection skipped while node apply is active"
+        exit 75
+      fi
       ;;
   esac
 fi
 
 if type merv_lock_acquire >/dev/null 2>&1; then
-  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  mkdir -p "$LOCKDIR" 2>/dev/null || { error -c cli,vlan "Client collection: lock directory unavailable"; exit 1; }
   if merv_lock_acquire "$COLLECT_LOCK" "${COLLECT_STALE_SEC:-300}" 0 "client_collect"; then
     COLLECT_LOCK_ACQUIRED=1
+    COLLECT_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
   else
     info -c cli,vlan "Client collection already running — skipping"
     exit 75
@@ -153,6 +260,9 @@ collect_from_node() {
   node_id="$1"
   node_ip="$2"
   output_file="$3"
+  # This background worker must establish its own initial reachability proof.
+  # It may then avoid exactly one duplicate ICMP probe in merv_ssh_exec.
+  unset MERV_SSH_SKIP_PING
 
   info -c vlan "→ Collecting from node $node_ip (NODE${node_id})"
 
@@ -162,6 +272,8 @@ collect_from_node() {
     printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$MERV_SSH_LAST_REASON" > "$output_file"
     return 1
   fi
+  MERV_SSH_SKIP_PING=1
+  export MERV_SSH_SKIP_PING
 
   # Run remote collector and fetch JSON via SSH wrapper
   # Publish a node-local collection generation and wait for that exact target.
@@ -170,7 +282,7 @@ collect_from_node() {
   # Keep the remote artifact's router identity equal to the configured IP.
   # The environment is exported once for both request and run-wait because the
   # coordinator executes the local collector only during the latter command.
-  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 $MERV_BASE/functions/post_apply_worker.sh request collect >/dev/null 2>&1 && $MERV_BASE/functions/post_apply_worker.sh run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
+  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 sh '$MERV_BASE/functions/post_apply_worker.sh' request collect >/dev/null 2>&1 && sh '$MERV_BASE/functions/post_apply_worker.sh' run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
   
   _result_tmp="$COLLECTDIR/node_${node_ip}.out.$$"
   result=""
@@ -183,7 +295,16 @@ collect_from_node() {
   rm -f "$_result_tmp" 2>/dev/null || :
 
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
-    printf '%s' "$result" > "$output_file"
+    _node_output_tmp="${output_file}.new.$$"
+    if ! printf '%s' "$result" > "$_node_output_tmp" 2>/dev/null ||
+       ! json_validate_file "$_node_output_tmp" 2>/dev/null ||
+       ! mv -f "$_node_output_tmp" "$output_file" 2>/dev/null; then
+      rm -f "$_node_output_tmp" 2>/dev/null || :
+      _reason="invalid-json"
+      warn -c cli,vlan "Invalid JSON received from $node_ip; using an error artifact"
+      printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
+      return 1
+    fi
     info -c vlan "✓ Successfully collected from $node_ip"
     return 0
   else
@@ -206,21 +327,20 @@ MAIN_JSON="$COLLECTDIR/main.json"
 MAIN_IP=$(nvram get lan_ipaddr 2>/dev/null | tr -d '\r\n')
 
 collect_from_main() {
-  if "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1; then
+  if sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1 &&
+     json_validate_file "$MAIN_JSON" 2>/dev/null; then
     info -c vlan "✓ Main router collection completed"
   else
     rc=$?
     error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
-    if [ ! -s "$MAIN_JSON" ]; then
-      printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+    if [ -s "$MAIN_JSON" ] && ! json_validate_file "$MAIN_JSON" 2>/dev/null; then
+      warn -c cli,vlan "Main router collection produced invalid JSON; using an error artifact"
+      rc=1
     fi
+    rm -f "$MAIN_JSON" 2>/dev/null || :
+    printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
   fi
 }
-
-# Start main collection in background so it runs while we check node config
-( trap - EXIT INT TERM; collect_from_main ) &
-MAIN_PID="$!"
-BG_PIDS="$BG_PIDS $MAIN_PID"
 
 # ============================================================================ #
 #                          NODE DISCOVERY & VALIDATION                         #
@@ -259,6 +379,55 @@ fi
 # proceeding to result merging.                                                #
 # ============================================================================ #
 
+# A progress-backed collection must discover every untrusted node before
+# starting even the local inventory job.  This lets the common SSH trust modal
+# interrupt collection safely and keeps the original generation resumable.
+if [ "$NODES_ENABLED" = "true" ] && [ "$DRY_RUN" != yes ]; then
+  if type merv_ssh_preflight_grant_fresh >/dev/null 2>&1 && merv_ssh_preflight_grant_fresh; then
+    info -c vlan "Reusing the verified SSH host-key preflight for this client refresh"
+  else
+  _collect_trust_file="$TMPDIR/collect_trust.$$"
+  while IFS=' ' read -r _collect_slot _collect_ip _collect_extra || [ -n "$_collect_slot" ]; do
+    [ -z "$_collect_extra" ] || { rm -f "$_collect_trust_file"; exit 2; }
+    _collect_mac=$(json_get_flag "AUTO_NODE""$_collect_slot""_MAC" "" "$SETTINGS_FILE" 2>/dev/null)
+    printf '%s %s %s\n' "$_collect_slot" "$_collect_ip" "$_collect_mac" >> "$_collect_trust_file" || {
+      rm -f "$_collect_trust_file"
+      exit 1
+    }
+  done <<EOF
+$NODE_IPS
+EOF
+  merv_ssh_preflight_node_set "$_collect_trust_file"
+  _collect_trust_rc=$?
+  if [ "$_collect_trust_rc" -ne 0 ]; then
+    _collect_trust_worker_rc=1
+    _collect_trust_reason="$MERV_SSH_TRUST_LAST_REASON"
+    [ -n "$_collect_trust_reason" ] || _collect_trust_reason=unknown
+    warn -c cli,vlan "Collection refused before mutation: SSH host-key trust/capability preflight failed ($_collect_trust_reason)"
+    if [ -n "$MERV_PROGRESS_TOKEN" ] && [ -f "$MERV_BASE/functions/ssh_trust_action.sh" ]; then
+      MERV_SSH_TRUST_ORIGINAL_ACTION=collectclients_vlanmgr \
+      MERV_SSH_TRUST_ACK_ACTION=collectclients_vlanmgr \
+      sh "$MERV_BASE/functions/ssh_trust_action.sh" probe "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1
+      _collect_trust_worker_rc=$?
+    fi
+    if [ "$_collect_trust_worker_rc" -ne 0 ] && [ -n "$MERV_PROGRESS_TOKEN" ] &&
+       type action_ack_ssh_trust_required >/dev/null 2>&1; then
+      action_ack_ssh_trust_required "$MERV_PROGRESS_TOKEN" collectclients_vlanmgr \
+        '{"reason":"ssh-trust-required"}' \
+        "SSH host-key verification is required before client collection." '[]' >/dev/null 2>&1 || :
+    fi
+    rm -f "$_collect_trust_file" 2>/dev/null || :
+    exit "$_collect_trust_rc"
+  fi
+  rm -f "$_collect_trust_file" 2>/dev/null || exit 75
+  fi
+fi
+
+# Start main collection only after the complete node trust preflight passes.
+( trap - EXIT INT TERM; collect_from_main ) &
+MAIN_PID="$!"
+collect_track_pid "$MAIN_PID" || :
+
 if [ "$NODES_ENABLED" = "true" ]; then
   # Spawn collection background jobs for each node with PID tracking
   info -c vlan "Spawning node collection jobs (timeout: ${WAIT_TIMEOUT}s)..."
@@ -272,9 +441,18 @@ if [ "$NODES_ENABLED" = "true" ]; then
     [ -n "$node_id" ] || continue
     ( trap - EXIT INT TERM; collect_from_node "$node_id" "$node_ip" "$COLLECTDIR/node_${node_ip}.json" ) &
     # Track PID for cleanup handler
-    BG_PIDS="$BG_PIDS $!"
+    collect_track_pid "$!" || :
   done < "$_node_tmp"
   rm -f "$_node_tmp"
+fi
+
+# A worker whose process start identity could not be recorded is not safely
+# signalable or attributable. Stop before any merge/publication and retain the
+# owner/workspace for explicit recovery; never turn an unverifiable child into
+# a successful collection merely because it eventually exits.
+if [ "${BG_IDENTITY_FAILURE:-0}" -eq 1 ]; then
+  error -c cli,vlan "Client collection stopped: worker process identity could not be verified; preserving ownership for recovery"
+  exit 75
 fi
 
 # Wait for all background jobs (main + nodes) with timeout
@@ -282,8 +460,13 @@ if [ -n "$BG_PIDS" ]; then
   waited=0
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
     _still_running=0
-    for _pid in $BG_PIDS; do
-      if [ -d "/proc/$_pid" ]; then
+    for _collect_track in ${BG_TRACKED:-}; do
+      _collect_pid=${_collect_track%%:*}
+      _collect_start=${_collect_track#*:}
+      case "$_collect_pid:$_collect_start" in
+        ''|*[!0-9:]*|:*|*::*) continue ;;
+      esac
+      if merv_process_identity_matches "$_collect_pid" "$_collect_start" 2>/dev/null; then
         _still_running=1
         break
       fi
@@ -297,17 +480,28 @@ if [ -n "$BG_PIDS" ]; then
 
   if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
     warn -c cli,vlan "Client collection timeout after ${WAIT_TIMEOUT}s; some results may be incomplete"
-    for _pid in $BG_PIDS; do
-      [ -d "/proc/$_pid" ] && kill "$_pid" 2>/dev/null
+    for _collect_track in ${BG_TRACKED:-}; do
+      _collect_pid=${_collect_track%%:*}
+      _collect_start=${_collect_track#*:}
+      case "$_collect_pid:$_collect_start" in
+        ''|*[!0-9:]*|:*|*::*) continue ;;
+      esac
+      collect_stop_tracked_pid "$_collect_pid" "$_collect_start" || :
     done
   else
     info -c vlan "All collection jobs finished in ${waited}s"
   fi
 
-  for _pid in $BG_PIDS; do
-    wait "$_pid" 2>/dev/null
-  done
+    for _collect_track in ${BG_TRACKED:-}; do
+      _collect_pid=${_collect_track%%:*}
+      _collect_start=${_collect_track#*:}
+      case "$_collect_pid:$_collect_start" in
+        ''|*[!0-9:]*|:*|*::*) continue ;;
+      esac
+      wait "$_collect_pid" 2>/dev/null
+    done
   BG_PIDS=""
+  BG_TRACKED=""
 fi
 
 # ============================================================================ #
@@ -646,6 +840,12 @@ if awk \
 else
   rm -f "$_ann_tmp" "$_ann_stats" 2>/dev/null
   warn -c cli,vlan "Client metadata annotation skipped (kept raw collection)"
+fi
+
+if ! json_validate_file "$OUT_WORK" 2>/dev/null; then
+  error -c cli,vlan "Client collection produced invalid aggregate JSON; preserving the previous inventory"
+  rm -f "$OUT_WORK" 2>/dev/null || :
+  exit 1
 fi
 
 # Atomically publish the finished file. The old OUT_FINAL stays readable until

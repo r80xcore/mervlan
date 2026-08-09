@@ -63,7 +63,12 @@
       ]
     },
     "locks_progress_safety": {
-      "start": ["settings/lib_mervqt.sh"],
+      "start": [
+        "settings/lib_identity.sh",
+        "settings/lib_owner_lock.sh",
+        "settings/lib_action_lock.sh",
+        "settings/lib_mervqt.sh"
+      ],
       "next": [
         "settings/lib_br0_guard.sh",
         "settings/lib_progress.sh",
@@ -107,7 +112,8 @@
       "start": [
         "functions/update_mervlan.sh",
         "functions/mervlan_backup.sh",
-        "functions/mervlan_recover.sh"
+        "functions/mervlan_recover.sh",
+        "settings/lib_update_state.sh"
       ],
       "next": ["functions/service-event-handler.sh", "settings/lib_action_ack.sh"],
       "notes": ["dev-tools/docs/20-runtime-flows.md", "dev-tools/docs/95-deployment-checklist.md"]
@@ -155,6 +161,20 @@
       "dev-tools/tests/local/loading_progress_test.sh"
     ],
     "router": ["dev-tools/tests/router/mervlan_selftest.sh"],
+    "router_focus": [
+      "signal-termination",
+      "nonce-uniqueness",
+      "owner-lock-contract",
+      "lock-publication",
+      "action-parent-ownership",
+      "direct-manager-save-overlap",
+      "update-exclusivity",
+      "action-lock-failure",
+      "dhcp-incomplete-lock",
+      "router-portability",
+      "maintenance-lock-interop",
+      "observation-lock"
+    ],
     "live_safety": ["dev-tools/safety/mervlan_live_test_guard.sh"],
     "specifications": ["dev-tools/tests/specs/"]
   },

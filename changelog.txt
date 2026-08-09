@@ -1,3 +1,110 @@
+mervlan v0.53.26-dev
+
+Improved: Resilient Update downloads
+- Update downloads now use a visible MerVLAN-controlled five-attempt retry
+  loop with 1, 2, 4, and 8 second delays instead of curl's opaque retry mode.
+- Each transfer writes to a temporary partial archive and is only published
+  after curl succeeds and the archive is non-empty, preventing interrupted
+  downloads from reaching extraction.
+
+Fixed: Custom branch validation could fail open
+- The Update UI now keeps Custom branch installation blocked until the exact
+  branch's `changelog.txt` is fetched and yields a valid MerVLAN version.
+- Missing branches, unreadable or malformed changelogs, GitHub errors, and
+  network failures cannot expose the Install action; validation repeats just
+  before submission so stale targets cannot bypass the WebUI gate.
+
+New: Emergency Update Repair
+- Added a standalone, manifest-driven repair command that restores validated
+  update/runtime program components from `main`, `dev`, or an advanced custom
+  branch without updating, applying configuration, or contacting nodes.
+- Repair stages and validates every download before publication, uses explicit
+  modes, preserves settings/keys/databases/backups, and rolls back a partial
+  replacement failure.
+- The Update modal can repair supported `main`/`dev` components first, waits
+  for a confirmed repair result, and only then starts the existing update.
+
+Improved: Modal loading and request lifecycle
+- SSH Key Install and Settings now open immediately with clear loading states
+  while their local configuration data is retrieved.
+- SSH key, Settings, and Trusted Devices status requests are single-flight,
+  guard against stale responses, and disable dependent controls while work is
+  in progress to prevent duplicate requests and action backlogs.
+- Opening SSH Key Install no longer submits a router SSH trust-status action;
+  Trusted Devices loads its cached or fresh status only when that tab is used.
+- Fixed a Settings-modal script parse regression that could leave the UI shell
+  visible while preventing form initialization and button handlers from loading.
+
+Improved: VLAN validation and configuration feedback
+- MerVLAN-managed VLAN entry now consistently accepts only strict decimal IDs
+  from 2 through 4094 across SSIDs, LAN ports, trunks, assignments, and
+  AP-Isolation availability.
+- Row indicators now compare the current form with an authoritative persisted
+  baseline, so pending edits, reverts, deletions, invalid rows, duplicate VLANs,
+  and Main/Node LAN tab switches report their real state.
+- Duplicate VLANs are presented as allowed-if-intentional warnings with current
+  field and row explanations instead of being described as invalid conflicts.
+- Refined action, legend, client-metadata, and relay-location tooltips; the
+  compact relay-only client badge is now `R/O` with clear distinction from `R`.
+
+Improved: Ownership, locking, and lifecycle safety
+- Unified normal process identity and nonce generation, including DHCP,
+  action-progress, action-runtime, and node-job owners, without
+  sequence-mutating command substitution or router-incompatible `stat -c`.
+- Added strict v2 generic owner publication/reclaim/release semantics with
+  authenticated parent action context, explicit terminal lock failures, and
+  fail-closed Update maintenance exclusivity.
+- Hardened DHCP Hold, standalone Recovery, and observation ownership against
+  incomplete metadata, PID reuse, interrupted cleanup, and publication or
+  release obstruction while preserving specialized phase/generation policy.
+- Verified full runtime manifests include `settings/lib_owner_lock.sh` at
+  mode 0644; Settings-only Sync remains limited to `settings.json`, and
+  developer documentation/evidence stays out of node payloads.
+- Replaced the mojibake local-manager identity error with portable ASCII and
+  retained focused BusyBox-compatible shell and router contract coverage.
+
+Security: Verified SSH host trust and node integrity
+- All router-to-node SSH actions and transfers now use the shared verified-host path with bounded, noninteractive Dropbear handling and no unconditional host-key bypass.
+- The main router keeps a durable, canonical per-node host-key trust database outside the replaceable addon tree. Trusted keys are never synchronized to nodes or exposed through public settings output.
+- Parent actions preflight the complete required node set before mutation. Unknown, changed, malformed, or unsupported host-key states fail closed instead of becoming generic successful or unknown SSH results.
+- Action and mutation ownership now records the process identity, acquisition nonce, heartbeat, and terminal state so stale markers, PID reuse, interrupted workers, and competing actions cannot release or reuse another owner's state.
+
+New: Trusted Devices and SSH verification workflow
+- Added the Trusted Devices view to the SSH modal, including trusted-node inventory, pending verification visibility, multi-node selection, explicit trust/update decisions, and revoke support.
+- SSH actions that encounter untrusted nodes now pause before mutation and show a MerVLAN verification prompt listing every affected node and its host-key fingerprint.
+- The verification prompt keeps the addon covered and inactive in the background, clearly shows that loading is paused, supports Trust node(s) and Abort, and includes a five-minute expiry countdown plus immediate manual abort.
+- Accepted decisions resume the original stored action only after the complete required node set has been rechecked. Abort, expiry, stale responses, and closed prompts cancel or clean up safely without leaving a loading screen or backend action stranded.
+
+Improved: Action liveness and SSH observability
+- SSH trust probes, enrollment, resume, revoke, and ordinary node actions now share typed progress, bounded phase budgets, isolated per-run logs, and explicit terminal results.
+- Long-running actions retain their backend ownership while the user reviews SSH trust, while the browser rejects late results and prevents overlapping polls or duplicate submissions.
+- Sync, Apply, and client refresh logs now expose the actual phase and node result rather than collapsing transport, timeout, trust, and completion failures into an ambiguous status.
+
+Fixed: BusyBox JSON parsing and APMO hardware overrides
+- Fixed nested settings reads on ASUSWRT BusyBox awk by removing the GNU awk-only capture-array form from `json_get_section2_value()`.
+- `MAP_OVERRIDE=1` is now honored during hardware probing for both MAIN and NODE1-NODE10 targets, including the correct per-device `Hardware_Override.NODE<n>` block on nodes.
+- Manual WAN mappings are treated as authoritative when an override is enabled, with a clear warning when the interface is not currently present instead of silently falling back to automatic detection.
+- APMO rejects duplicate WAN/LAN interface assignments before saving or applying and preserves target-specific override serialization during Save and Sync Nodes.
+- Hardware probing now logs the resolved override target, node identity, and whether the manual mapping was enabled, making override selection auditable on the device.
+
+Maintenance: Regression coverage for the remediation
+- Added BusyBox/POSIX APMO override contract coverage for nested MAIN/NODE1 reads, setter/getter round trips, target serialization, and duplicate-interface validation.
+- Extended focused action-progress, loading-progress, SSH-trust, shell-syntax, and router self-test coverage for the new trust, pause/resume, lock, and override contracts.
+
+Fixed: Manager observation deadlock and client inventory publication
+- The VLAN manager now releases its configuration owner lock before waiting for post-apply observation, preventing the manager/worker lock cycle that caused quiesce timeouts and blocked client refresh.
+- Local, node, and aggregate client JSON artifacts are validated before publication; invalid output preserves the last known-good inventory and uses valid error artifacts for failed sources.
+- The shared JSON validator now uses BusyBox-compatible punctuation tokenization; router-generated inventories no longer fail validation solely because of the router's awk implementation.
+- Updates now ignore only the exact dispatcher-owned global action lock while retaining the lock against every unrelated or malformed action owner.
+- Boot apply now queues observation, retires the boot shield, and only then starts the bounded observation worker, removing the boot shield/observation handoff cycle.
+- Owner-lock release removes abandoned owner temp files and restores an authenticated owner record if directory cleanup fails, preventing normal cleanup from creating ownerless lock states.
+- Install and Update now filter the payload before staging: production refs carry no dev-tools, while development refs carry only the approved router self-test and live safety guard. Existing installations are filtered in RAM before their rollback archive is measured, so obsolete developer archives no longer inflate the JFFS requirement.
+- JFFS update and backup checks use a fixed 5 MiB safety reserve; temporary preparation remains in RAM and reports the reserve explicitly.
+- Recovered pre-activation failures clear the lifecycle journal directly after quiesce recovery, avoiding a second low-space journal write that could leave maintenance state blocking heal.
+- Added regression coverage for the lock handoff, realistic nested client inventory JSON, update lock ownership, boot ordering, payload filtering, and owner-temp cleanup.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.25-dev
 
 Maintenance: Developer tools and test workspace

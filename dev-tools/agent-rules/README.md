@@ -1,7 +1,7 @@
 # MerVLAN agent rules
 
 This is the canonical policy directory for the development bundle. Start at
-`../AGENTS.md`; it is the only portable agent entry point. Read only the rule
+`../RULES.md`; it is the only portable agent entry point. Read only the rule
 files relevant to the task; do not load every file by default.
 
 ## Start and route
@@ -20,4 +20,4 @@ contract or safety boundary is unclear. Never omit a relevant safety check to
 save tokens.
 
 Do not create a second copy of these rules. If a tool-specific adapter is
-needed, point it to `../AGENTS.md`.
+needed, point it to `../RULES.md`.

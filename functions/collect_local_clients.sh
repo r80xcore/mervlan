@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_local_clients.sh || version="0.49"            #
+#                - File: collect_local_clients.sh || version="0.50"            #
 # ============================================================================ #
 # - Purpose:    Collect VLAN→client info via bridge FDB (MAC-only) on local    #
 #               node so it can be collected by collect_clients.sh.             #
@@ -26,9 +26,15 @@ if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } |
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
+[ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
+if merv_update_mutation_blocked; then
+  error -c cli,vlan "Local client collection refused: Update maintenance is active"
+  exit 75
+fi
 # Log available commands for debugging purposes (help diagnose missing tools)
 logger -t "VLANMgr" "collect_local_clients: PATH=$PATH"
 # Check that all required commands are available in the environment
@@ -44,7 +50,8 @@ done
 # ============================================================================ #
 
 # Output file path; defaults to $COLLECTDIR/clients_local.json if not provided
-OUT="${1:-$COLLECTDIR/clients_local.json}"
+OUT_TARGET="${1:-$COLLECTDIR/clients_local.json}"
+OUT="${OUT_TARGET}.new.$$"
 # Node/router name for identification in JSON; defaults to system hostname
 NODE_NAME="${2:-$(hostname)}"
 # Optional stable IP identity. The main router supplies this for node requests;
@@ -60,16 +67,35 @@ FDB_RETRY_SLEEP="${FDB_RETRY_SLEEP:-1}"
 
 # Cleanup handler for temp files on exit/interrupt
 cleanup_local_collect() {
+  _local_collect_exit_rc=$?
+  _local_collect_cleanup_failed=0
   # Remove per-bridge temp files
-  rm -f "$COLLECTDIR"/mac_br*.lst "$COLLECTDIR"/mac_exclude.lst 2>/dev/null
-  rm -f "$COLLECTDIR"/mac_br*.lst.tmp "$COLLECTDIR"/mac_counts.tmp 2>/dev/null
-  rm -f "$COLLECTDIR"/portmap_br*.lst 2>/dev/null
-  rm -f "$COLLECTDIR"/mac_own_ifaces.lst "$COLLECTDIR"/mac_own_ifaces.lst.tmp 2>/dev/null
+  rm -f "$COLLECTDIR"/mac_br*.lst "$COLLECTDIR"/mac_exclude.lst 2>/dev/null || _local_collect_cleanup_failed=1
+  rm -f "$COLLECTDIR"/mac_br*.lst.tmp "$COLLECTDIR"/mac_counts.tmp 2>/dev/null || _local_collect_cleanup_failed=1
+  rm -f "$COLLECTDIR"/portmap_br*.lst 2>/dev/null || _local_collect_cleanup_failed=1
+  rm -f "$COLLECTDIR"/mac_own_ifaces.lst "$COLLECTDIR"/mac_own_ifaces.lst.tmp 2>/dev/null || _local_collect_cleanup_failed=1
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || _local_collect_cleanup_failed=1
+  if [ "$_local_collect_cleanup_failed" -ne 0 ]; then
+    error -c cli,vlan "Local client collection cleanup failed; temporary state may require recovery"
+    [ "$_local_collect_exit_rc" -eq 0 ] && _local_collect_exit_rc=1
+  fi
+  return "$_local_collect_exit_rc"
 }
-trap 'cleanup_local_collect' EXIT INT TERM
+LOCAL_COLLECT_SIGNAL_HANDLING=0
+local_collect_handle_signal() {
+  _local_collect_signal_status="$1"
+  [ "${LOCAL_COLLECT_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_local_collect_signal_status"
+  LOCAL_COLLECT_SIGNAL_HANDLING=1
+  trap - INT TERM
+  error -c cli,vlan "Local client collection interrupted (rc=$_local_collect_signal_status); stopping before publication"
+  exit "$_local_collect_signal_status"
+}
+trap 'cleanup_local_collect' EXIT
+trap 'local_collect_handle_signal 130' INT
+trap 'local_collect_handle_signal 143' TERM
 
 info -c vlan "Collecting VLAN clients (MAC-only) on $NODE_NAME"
-info -c vlan "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT'"
+info -c vlan "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT_TARGET'"
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -602,6 +628,15 @@ done
   echo '  ]'
   echo '}'
 } >> "$OUT"
+
+if ! json_validate_file "$OUT"; then
+  error -c cli,vlan "Local client collection produced invalid JSON; preserving the previous artifact"
+  exit 1
+fi
+if ! mv -f "$OUT" "$OUT_TARGET" 2>/dev/null; then
+  error -c cli,vlan "Local client collection could not publish its JSON artifact"
+  exit 1
+fi
 
 # Log final summary (different messages for empty vs populated results)
 if [ "$TOTAL_COUNT" -eq 0 ]; then

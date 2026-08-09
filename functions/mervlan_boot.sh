@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: mervlan_boot.sh || version="0.72.0"                  #
+#              - File: mervlan_boot.sh || version="0.72.1"                  #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -22,7 +22,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED LIB_ACTION_ACK_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_MERVQT_LOADED LIB_OWNER_LOCK_LOADED LIB_ACTION_ACK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
@@ -30,7 +30,16 @@ fi
 . "$TEMPLATE_LIB"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
-[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
+  error -c vlan,cli "Unable to load the owner-lock library; refusing boot action"
+  exit 1
+}
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
+  error -c vlan,cli "Unable to load the DHCP/L2 safety library; refusing boot action"
+  exit 1
+}
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
+[ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
 if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
   [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh"
 fi
@@ -50,8 +59,10 @@ ACTION_REQUEST_TOKEN="$2"
 # the manager before it acquires its own lease.
 case "$ACTION" in
   status|report)
-    type merv_dhcp_hold_reconcile >/dev/null 2>&1 && \
-      merv_dhcp_hold_reconcile status-start >/dev/null 2>&1 || :
+    if type merv_dhcp_hold_reconcile >/dev/null 2>&1; then
+      merv_dhcp_hold_reconcile status-start >/dev/null 2>&1 ||
+        warn -c vlan,cli "DHCP hold reconciliation could not complete before status"
+    fi
     ;;
 esac
 
@@ -67,7 +78,10 @@ boot_action_ack_error() {
   type action_ack_error >/dev/null 2>&1 || return 0
   _ba_error_result="$3"
   [ -n "$_ba_error_result" ] || _ba_error_result='{}'
-  action_ack_error "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_error_result" "$1" '[]' "$2" || :
+  action_ack_error "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_error_result" "$1" '[]' "$2" || {
+    warn -c vlan,cli "Unable to publish boot-action error acknowledgement"
+    return 1
+  }
 }
 
 boot_action_ack_complete() {
@@ -78,15 +92,91 @@ boot_action_ack_complete() {
   _ba_result="{\"BOOT_ENABLED\":\"${_ba_boot}\"}"
   case "$_ba_status" in
     partial)
-      type action_ack_partial >/dev/null 2>&1 && \
-        action_ack_partial "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_result" "$_ba_message" "$_ba_warnings" || :
+      if type action_ack_partial >/dev/null 2>&1; then
+        action_ack_partial "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_result" "$_ba_message" "$_ba_warnings" || {
+          warn -c vlan,cli "Unable to publish boot-action partial acknowledgement"
+          return 1
+        }
+      fi
       ;;
     *)
-      type action_ack_ok >/dev/null 2>&1 && \
-        action_ack_ok "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_result" "$_ba_message" "$_ba_warnings" || :
+      if type action_ack_ok >/dev/null 2>&1; then
+        action_ack_ok "$ACTION_REQUEST_TOKEN" "$(boot_action_name)" "$_ba_result" "$_ba_message" "$_ba_warnings" || {
+          warn -c vlan,cli "Unable to publish boot-action completion acknowledgement"
+          return 1
+        }
+      fi
       ;;
   esac
 }
+
+node_preflight_failure_is_transient() {
+  case "${MERV_SSH_LAST_REASON:-${MERV_SSH_TRUST_LAST_REASON:-}}" in
+    unreachable|timeout|refused|no-route) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+schedule_node_reconcile() {
+  _snr_action="$1"
+  _snr_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_snr_now" in ''|*[!0-9]*) _snr_now=0 ;; esac
+  _snr_delay="${MERV_NODE_RECONCILE_DELAY_SEC:-300}"
+  case "$_snr_delay" in ''|*[!0-9]*) _snr_delay=300 ;; esac
+  _snr_next=$((_snr_now + _snr_delay))
+  _snr_detail=$(printf '%s' "${MERV_SSH_LAST_DETAIL:-node temporarily unavailable}" | tr ' ' '_' | tr -cd 'A-Za-z0-9._:/-')
+  _snr_digest="unknown"
+  if type merv_node_list_digest >/dev/null 2>&1; then
+    _snr_digest=$(merv_node_list_digest 2>/dev/null || printf 'unknown')
+  fi
+  if type merv_node_reconcile_write >/dev/null 2>&1 &&
+     merv_node_reconcile_write "$_snr_action" "${MERV_SSH_LAST_REASON:-unreachable}" \
+       "${_snr_detail:-node-unavailable}" 0 "$_snr_next" "$_snr_digest"; then
+    info -c vlan,cli "Node action '$_snr_action' deferred: a bounded retry is scheduled in ${_snr_delay}s"
+    return 0
+  fi
+  warn -c vlan,cli "Node action '$_snr_action' could not publish its bounded retry marker"
+  return 1
+}
+
+process_pending_node_reconcile() {
+  type merv_node_reconcile_active >/dev/null 2>&1 && merv_node_reconcile_active || return 0
+  _pnr_action=$(merv_node_reconcile_get action '')
+  _pnr_next=$(merv_node_reconcile_get next_epoch 0)
+  case "$_pnr_action" in
+    enable|disable|setupenable|setupdisable|nodeenable|nodedisable) ;;
+    *) merv_node_reconcile_clear || :; return 1 ;;
+  esac
+  case "$_pnr_next" in ''|*[!0-9]*) merv_node_reconcile_clear || :; return 1 ;; esac
+  _pnr_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_pnr_now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_pnr_now" -ge "$_pnr_next" ] 2>/dev/null || return 0
+  info -c vlan,cli "Retrying deferred node action '$_pnr_action' after the bounded recovery delay"
+  MERV_NODE_RECONCILE_SUPPRESS_SCHEDULE=1 sh "$0" "$_pnr_action"
+  _pnr_rc=$?
+  if [ "$_pnr_rc" -eq 0 ]; then
+    merv_node_reconcile_clear || warn -c vlan,cli "Deferred node action succeeded but its retry marker could not be cleared"
+    return 0
+  fi
+  if node_preflight_failure_is_transient; then
+    warn -c vlan,cli "Deferred node action '$_pnr_action' still cannot reach a node after the bounded retry; manual action is required"
+  else
+    warn -c vlan,cli "Deferred node action '$_pnr_action' ended with a non-retryable result: ${MERV_SSH_LAST_REASON:-action-failed}"
+  fi
+  merv_node_reconcile_clear || warn -c vlan,cli "Could not clear the completed deferred node retry marker"
+  return "$_pnr_rc"
+}
+
+case "$ACTION" in
+  enable|disable|setupenable|setupdisable|nodeenable|nodedisable)
+    if type merv_update_mutation_blocked >/dev/null 2>&1 &&
+       merv_update_mutation_blocked; then
+      boot_action_ack_error "Boot action blocked: Update maintenance is active" '{}' "UPDATE_MAINTENANCE_ACTIVE"
+      error -c vlan,cli "Boot action '$ACTION' refused while Update maintenance is active"
+      exit 75
+    fi
+    ;;
+esac
 
 persist_boot_enabled_state() {
   _pbes_value="$1"
@@ -98,7 +188,10 @@ persist_boot_enabled_state() {
   if [ -f "${PUBLIC_SETTINGS_FILE:-}" ] && [ ! -L "$PUBLIC_SETTINGS_FILE" ] && \
      ! cmp -s "$SETTINGS_FILE" "$PUBLIC_SETTINGS_FILE" 2>/dev/null; then
     if cp "$SETTINGS_FILE" "$PUBLIC_SETTINGS_FILE" 2>/dev/null; then
-      chmod 644 "$PUBLIC_SETTINGS_FILE" 2>/dev/null || :
+      chmod 644 "$PUBLIC_SETTINGS_FILE" 2>/dev/null || {
+        warn -c vlan,cli "Failed to set permissions on the public settings copy"
+        return 1
+      }
     else
       warn -c vlan,cli "Failed to refresh the public settings copy after changing BOOT_ENABLED"
     fi
@@ -168,7 +261,10 @@ inject_template() {
   tpl=$(tpl_path "$name" "$resolved" "$dest") || return 1
   copy_inject "$tpl" "$dest"
   rc=$?
-  rm -f "$tpl" 2>/dev/null || :
+  if ! rm -f "$tpl" 2>/dev/null; then
+    warn -c vlan,cli "Could not remove temporary rendered template $tpl"
+    [ "$rc" -eq 0 ] && rc=1
+  fi
   return $rc
 }
 
@@ -178,8 +274,23 @@ remove_template_block() {
   tpl=$(tpl_path "$name" "$resolved" "$dest") || return 1
   remove_inject "$tpl" "$dest"
   rc=$?
-  rm -f "$tpl" 2>/dev/null || :
+  if ! rm -f "$tpl" 2>/dev/null; then
+    warn -c vlan,cli "Could not remove temporary rendered template $tpl"
+    [ "$rc" -eq 0 ] && rc=1
+  fi
   return $rc
+}
+
+reconcile_legacy_boot_file_locks() {
+  _rbl_dest=""
+  _rbl_lock=""
+  for _rbl_dest in "$SERVICE_EVENT_WRAPPER" "$SERVICES_START"; do
+    _rbl_lock="$LOCKDIR/${_rbl_dest##*/}.lock"
+    [ -e "$_rbl_lock" ] || continue
+    [ -d "$_rbl_lock" ] && continue
+    merv_lock_quarantine_legacy_file "$_rbl_lock" "boot-file" || return 1
+  done
+  return 0
 }
 
 is_node() {
@@ -210,6 +321,19 @@ marker_present() {
   LC_ALL=C grep -qF "$start_base" "$dest" 2>/dev/null
 }
 
+cleanup_boot_temp_files() {
+  _boot_cleanup_failed=0
+  for _boot_cleanup_path in "$@"; do
+    [ -n "$_boot_cleanup_path" ] || continue
+    [ -e "$_boot_cleanup_path" ] || continue
+    if ! rm -f "$_boot_cleanup_path" 2>/dev/null; then
+      warn -c vlan,cli "Could not remove temporary boot-injection file $_boot_cleanup_path"
+      _boot_cleanup_failed=1
+    fi
+  done
+  [ "$_boot_cleanup_failed" -eq 0 ]
+}
+
 # copy_inject — Marker-bounded injection that preserves surrounding content
 # Args: $1=rendered_template_path, $2=dest_file
 # Returns: 0 on success (injected or updated), 1 on failure
@@ -219,7 +343,9 @@ copy_inject() {
 
   local block_file md5 tplid destid start_tag end_tag start_base end_base shebang_line tmp_sb first_line
 
-  block_file="$(mktemp "${TMPDIR:-/tmp}/merv_inj_block.XXXXXX" 2>/dev/null || printf '%s/merv_inj_block.%s' "${TMPDIR:-/tmp}" "$$")"
+  block_file="${TMPDIR:-/tmp}/merv_inj_block.$$"
+  [ ! -e "$block_file" ] || { error -c vlan,cli "Temporary injection path already exists"; return 1; }
+  ( umask 077; : > "$block_file" ) 2>/dev/null || return 1
 
   md5="$(_content_md5 "$tmpl")"
   tplid="$(_template_id "$tmpl")"
@@ -245,8 +371,14 @@ copy_inject() {
     printf '%s\n' "$end_tag"
   } > "$block_file"
 
-  mkdir -p "$(dirname "$dest")" 2>/dev/null || { rm -f "$block_file" 2>/dev/null || :; return 1; }
-  [ -f "$dest" ] || : > "$dest"
+  if ! mkdir -p "$(dirname "$dest")" 2>/dev/null; then
+    cleanup_boot_temp_files "$block_file"
+    return 1
+  fi
+  if [ ! -f "$dest" ] && ! : > "$dest" 2>/dev/null; then
+    cleanup_boot_temp_files "$block_file"
+    return 1
+  fi
 
   case "$dest" in
     /jffs/scripts/*)
@@ -258,20 +390,26 @@ copy_inject() {
     if [ -s "$dest" ]; then
       if ! head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
         tmp_sb="${dest}.shebang.$$"
-        {
+        if ! {
           printf '%s\n' "$shebang_line"
           cat "$dest"
-        } > "$tmp_sb" 2>/dev/null && mv -f "$tmp_sb" "$dest" 2>/dev/null || rm -f "$tmp_sb" 2>/dev/null || :
+        } > "$tmp_sb" 2>/dev/null || ! mv -f "$tmp_sb" "$dest" 2>/dev/null; then
+          cleanup_boot_temp_files "$tmp_sb"
+          return 1
+        fi
       fi
     else
-      printf '%s\n' "$shebang_line" > "$dest" 2>/dev/null || :
+      if ! printf '%s\n' "$shebang_line" > "$dest" 2>/dev/null; then
+        cleanup_boot_temp_files "$block_file"
+        return 1
+      fi
     fi
   fi
 
   if LC_ALL=C grep -Fq "$start_base" "$dest"; then
     if ! LC_ALL=C grep -Fq "$end_base" "$dest"; then
       error -c vlan,cli "Cowardly refusing to modify $dest: found START marker without matching END. Please fix markers manually."
-      rm -f "$block_file" 2>/dev/null || :
+      cleanup_boot_temp_files "$block_file" "$tmp_sb"
       return 1
     fi
   fi
@@ -306,7 +444,10 @@ copy_inject() {
     if LC_ALL=C grep -qF "$start_base" "$dest"; then
       mv -f "$tmp_new" "$dest" || return 1
     else
-      rm -f "$tmp_new" 2>/dev/null || :
+      if ! rm -f "$tmp_new" 2>/dev/null; then
+        warn -c vlan,cli "Could not remove unused injection staging file $tmp_new"
+        return 1
+      fi
       if [ -s "$dest" ]; then
         last_char=$(tail -c 1 "$dest" 2>/dev/null | tr '\n' '_')
         [ "$last_char" = "_" ] || printf '\n' >> "$dest"
@@ -331,22 +472,39 @@ copy_inject() {
             skipping = 0
           }
         }
-      ' "$dest" > "$dedupe_tmp" || { rm -f "$dedupe_tmp" 2>/dev/null || :; break; }
-      mv -f "$dedupe_tmp" "$dest" || { rm -f "$dedupe_tmp" 2>/dev/null || :; break; }
+      ' "$dest" > "$dedupe_tmp" || {
+        if ! rm -f "$dedupe_tmp" 2>/dev/null; then
+          warn -c vlan,cli "Could not remove duplicate-injection staging file $dedupe_tmp"
+        fi
+        return 1
+      }
+      if ! mv -f "$dedupe_tmp" "$dest"; then
+        if ! rm -f "$dedupe_tmp" 2>/dev/null; then
+          warn -c vlan,cli "Could not remove duplicate-injection staging file $dedupe_tmp"
+        fi
+        return 1
+      fi
     done
 
     return 0
   }
 
-  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! merv_has flock; then
-    inject_block || { rm -f "$block_file" "$tmp_new" 2>/dev/null || :; return 1; }
+  if [ "$MERV_DISABLE_LOCKS" = "1" ]; then
+    if ! inject_block; then
+      cleanup_boot_temp_files "$block_file" "$tmp_new"
+      return 1
+    fi
   else
-    mkdir -p "$LOCKDIR" 2>/dev/null || :
-    if ! (
-      flock -x 9 || exit 1
-      inject_block
-    ) 9>"$LOCKDIR/$(basename "$dest").lock"; then
-      rm -f "$block_file" "$tmp_new" 2>/dev/null || :
+    _boot_file_lock="$LOCKDIR/$(basename "$dest").lock"
+    merv_owner_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
+      cleanup_boot_temp_files "$block_file" "$tmp_new"
+      return 1
+    }
+    _boot_lock_nonce="$MERV_LOCK_NONCE"; _boot_lock_start="$MERV_LOCK_START"
+    if inject_block; then _boot_inject_rc=0; else _boot_inject_rc=$?; fi
+    if ! merv_owner_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_inject_rc=1; fi
+    if [ "$_boot_inject_rc" -ne 0 ]; then
+      cleanup_boot_temp_files "$block_file" "$tmp_new"
       return 1
     fi
   fi
@@ -355,7 +513,7 @@ copy_inject() {
     chmod 755 "$dest" 2>/dev/null || warn -c vlan,cli "Could not set chmod on $dest"
   fi
 
-  rm -f "$block_file" 2>/dev/null || :
+  cleanup_boot_temp_files "$block_file" "$tmp_new" || return 1
   return 0
 }
 
@@ -407,19 +565,27 @@ remove_inject() {
     mv -f "$tmp_new" "$dest"
   }
 
-  if [ "$MERV_DISABLE_LOCKS" = "1" ] || ! merv_has flock; then
-    remove_block || { rm -f "$tmp_new" 2>/dev/null || :; return 1; }
+  if [ "$MERV_DISABLE_LOCKS" = "1" ]; then
+    if ! remove_block; then
+      cleanup_boot_temp_files "$tmp_new"
+      return 1
+    fi
   else
-    mkdir -p "$LOCKDIR" 2>/dev/null || :
-    if ! (
-      flock -x 9 || exit 1
-      remove_block
-    ) 9>"$LOCKDIR/$(basename "$dest").lock"; then
-      rm -f "$tmp_new" 2>/dev/null || :
+    _boot_file_lock="$LOCKDIR/$(basename "$dest").lock"
+    merv_owner_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
+      cleanup_boot_temp_files "$tmp_new"
+      return 1
+    }
+    _boot_lock_nonce="$MERV_LOCK_NONCE"; _boot_lock_start="$MERV_LOCK_START"
+    if remove_block; then _boot_remove_rc=0; else _boot_remove_rc=$?; fi
+    if ! merv_owner_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_remove_rc=1; fi
+    if [ "$_boot_remove_rc" -ne 0 ]; then
+      cleanup_boot_temp_files "$tmp_new"
       return 1
     fi
   fi
 
+  cleanup_boot_temp_files "$tmp_new" || return 1
   return 0
 }
 
@@ -459,7 +625,7 @@ run_ssh_command() {
 
     info -c cli,vlan "Running '$cmd' on NODE${node_id} ($node_ip) via SSH..."
     # Execute command on node with MERV_NODE_CONTEXT=1 (forces local node execution)
-    remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 ./mervlan_boot.sh '$cmd'"
+    remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh '$cmd'"
 
   if merv_ssh_exec "$node_id" "$node_ip" "$remote" >/dev/null 2>&1; then
         info -c cli,vlan "✓ Command '$cmd' succeeded on NODE${node_id} ($node_ip)"
@@ -536,7 +702,7 @@ collect_node_status() {
     while read -r node_id node_ip; do
       [ -n "$node_ip" ] || continue
       # Single SSH invocation per node; grab the last line from remote's report
-      ns=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE/functions' && ./mervlan_boot.sh report" 2>/dev/null | tail -1)
+      ns=$(merv_ssh_exec "$node_id" "$node_ip" "cd '$MERV_BASE/functions' && sh ./mervlan_boot.sh report" 2>/dev/null | tail -1)
       if [ -n "$ns" ]; then
         # Normalize empty reply
         [ -n "$ns" ] || ns="REPORT error=empty"
@@ -606,7 +772,37 @@ disable_cron_now() {
 # MAIN ACTION DISPATCH — Entry point for all actions (enable/disable/status/etc)  #
 # =============================================================================== #
 
+# Node-propagating boot actions must prove the complete configured node set
+# before touching local hooks, cron, ebtables, or boot state.  Internal node
+# invocations and explicitly quiesced update/recovery flows already own their
+# separate preflight and therefore opt out here.
 case "$ACTION" in
+  enable|disable|setupenable|setupdisable|nodeenable|nodedisable)
+    if [ "${MERV_NODE_CONTEXT:-0}" != "1" ] && [ "${MERV_SKIP_NODE_SYNC:-0}" != "1" ]; then
+      if ! merv_ssh_preflight_configured_nodes; then
+        if node_preflight_failure_is_transient; then
+          if [ "${MERV_NODE_RECONCILE_SUPPRESS_SCHEDULE:-0}" != "1" ]; then
+            schedule_node_reconcile "$ACTION" || :
+          fi
+          boot_action_ack_error "Boot action deferred: configured node is temporarily unreachable; retry is scheduled" \
+            '{"reason":"node-unreachable"}' "NODE_UNREACHABLE"
+          error -c vlan,cli "Boot action '$ACTION' deferred before local mutation: ${MERV_SSH_LAST_DETAIL:-node temporarily unreachable}"
+        else
+          boot_action_ack_error "Boot action blocked: complete SSH trust preflight failed" \
+            '{"reason":"ssh-trust-required"}' "SSH_TRUST_REQUIRED"
+          error -c vlan,cli "Boot action '$ACTION' refused before local mutation: ${MERV_SSH_LAST_DETAIL:-SSH trust preflight failed}"
+        fi
+        exit 1
+      fi
+    fi
+    ;;
+esac
+
+case "$ACTION" in
+  reconcile-pending)
+    process_pending_node_reconcile
+    exit $?
+    ;;
   # =========================================================================== #
   # enable — Boot MerVLAN at router startup; enable mervlan.asp auto-load       #
   # =========================================================================== #
@@ -687,10 +883,14 @@ case "$ACTION" in
     fi
 
     # Tear down MERV_MAC secondary shield (db files retained for re-enable)
-    type ebt_mac_shield_teardown >/dev/null 2>&1 && {
-      ebt_mac_shield_teardown
-      info -c vlan,cli "MERV_MAC: secondary shield torn down (db files retained)"
-    }
+    if type ebt_mac_shield_teardown >/dev/null 2>&1; then
+      if ebt_mac_shield_teardown; then
+        info -c vlan,cli "MERV_MAC: secondary shield torn down (db files retained)"
+      else
+        warn -c vlan,cli "MERV_MAC: secondary shield teardown reported an error"
+        _boot_partial=1
+      fi
+    fi
 
     # Propagate disable action to all configured nodes via SSH
     if ! handle_nodes_via_ssh "disable"; then
@@ -760,16 +960,22 @@ case "$ACTION" in
     # jumps, then delete chain. Strict ebtables order: -F before -D, -D before
     # -X. No restart_wireless needed — rules vanish silently in milliseconds.
     if type ebtables >/dev/null 2>&1; then
-      ebtables -t filter -F MERV_QT 2>/dev/null || true
-      ebtables -t filter -D FORWARD -j MERV_QT 2>/dev/null || true
-      ebtables -t filter -D INPUT   -j MERV_QT 2>/dev/null || true
-      ebtables -t filter -X MERV_QT 2>/dev/null || true
+      if ! merv_qt_teardown; then
+        error -c vlan,cli "MERV_QT: quarantine chain teardown failed"
+        exit 1
+      fi
       info -c vlan,cli "MERV_QT: quarantine chain torn down"
     fi
     # Tear down MERV_MAC secondary shield and remove persistent db files
-    ebt_mac_shield_teardown
+    if ! ebt_mac_shield_teardown; then
+      error -c vlan,cli "MERV_MAC: secondary shield teardown failed"
+      exit 1
+    fi
     info -c vlan,cli "MERV_MAC: secondary shield torn down"
-    rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null || true
+    if ! rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null; then
+      error -c vlan,cli "MERV_MAC: could not remove persistent shield database files"
+      exit 1
+    fi
     # Propagate setupdisable to all configured nodes via SSH
     handle_nodes_via_ssh "setupdisable"
     ;;
@@ -796,6 +1002,10 @@ case "$ACTION" in
       if ! is_node; then
         error -c vlan,cli "Refusing nodeenable on this device (not marked as node)"
         error -c vlan,cli "Ensure IS_NODE is 1 in settings.json or run via SSH with MERV_NODE_CONTEXT=1"
+        exit 1
+      fi
+      if ! reconcile_legacy_boot_file_locks; then
+        error -c vlan,cli "Refusing nodeenable while legacy boot-file lock state is ambiguous"
         exit 1
       fi
       mkdir -p "$SCRIPTS_DIR"
@@ -878,16 +1088,22 @@ case "$ACTION" in
       fi
       # Tear down MERV_QT quarantine chain on this node
       if type ebtables >/dev/null 2>&1; then
-        ebtables -t filter -F MERV_QT 2>/dev/null || true
-        ebtables -t filter -D FORWARD -j MERV_QT 2>/dev/null || true
-        ebtables -t filter -D INPUT   -j MERV_QT 2>/dev/null || true
-        ebtables -t filter -X MERV_QT 2>/dev/null || true
+        if ! merv_qt_teardown; then
+          error -c vlan,cli "MERV_QT: quarantine chain teardown failed"
+          exit 1
+        fi
         info -c vlan,cli "MERV_QT: quarantine chain torn down"
       fi
       # Tear down MERV_MAC secondary shield and remove persistent db files
-      ebt_mac_shield_teardown
+      if ! ebt_mac_shield_teardown; then
+        error -c vlan,cli "MERV_MAC: secondary shield teardown failed"
+        exit 1
+      fi
       info -c vlan,cli "MERV_MAC: secondary shield torn down"
-      rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null || true
+      if ! rm -f "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_JFFS" 2>/dev/null; then
+        error -c vlan,cli "MERV_MAC: could not remove persistent shield database files"
+        exit 1
+      fi
       exit 0
     fi
 
@@ -1037,7 +1253,7 @@ case "$ACTION" in
     fi
     if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
       info -c vlan,cli "<--- Observation State --->"
-      "$MERV_BASE/functions/post_apply_worker.sh" status 2>&1 |
+      sh "$MERV_BASE/functions/post_apply_worker.sh" status 2>&1 |
         while IFS= read -r _observation_status_line; do
           [ -n "$_observation_status_line" ] && info -c vlan,cli "$_observation_status_line"
         done
@@ -1047,7 +1263,10 @@ case "$ACTION" in
     # Lives in /tmp (tmpfs) so it never persists across reboots.
     # Populated only when the user presses the refresh button in the modal.
     _sj_dir="${PUBLIC_MERV_BASE:-/www/user/mervlan}/tmp/results"
-    mkdir -p "$_sj_dir" 2>/dev/null || :
+    if ! mkdir -p "$_sj_dir" 2>/dev/null; then
+      error -c vlan,cli "Could not prepare the service-status result directory"
+      return 1
+    fi
     _sj_ts="$(date '+%H:%M:%S' 2>/dev/null)"
     # Minimal inline JSON string escaping (backslash then quote)
     _json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -1078,12 +1297,18 @@ case "$ACTION" in
       }
     )"
 
-    printf '{"ts":"%s","main":{"hw":"%s","boot":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"},"nodes":[%s]}\n' \
+    if ! printf '{"ts":"%s","main":{"hw":"%s","boot":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"},"nodes":[%s]}\n' \
       "$_sj_ts" "$(_json_str "$hw_label")" \
       "$boot_state" "$addon_state" "$event_state" "$cron_state" "$mac_shield_state" \
       "$_sj_nodes" \
-      > "${_sj_dir}/service_status.json" 2>/dev/null
-    chmod 644 "${_sj_dir}/service_status.json" 2>/dev/null || :
+      > "${_sj_dir}/service_status.json" 2>/dev/null; then
+      error -c vlan,cli "Could not publish service-status JSON"
+      return 1
+    fi
+    if ! chmod 644 "${_sj_dir}/service_status.json" 2>/dev/null; then
+      error -c vlan,cli "Could not secure service-status JSON permissions"
+      return 1
+    fi
     ;;
 
   # ========================================================================== #

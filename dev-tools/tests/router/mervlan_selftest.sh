@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.2"                #
+#            - File: mervlan_selftest.sh || version="0.72.5"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -73,6 +73,10 @@ error() { shift 2 2>/dev/null || :; printf 'ERROR: %s\n' "$*" >&2; }
   exit 2
 }
 . "$MERV_BASE/settings/var_settings.sh"
+. "$MERV_BASE/settings/lib_json.sh"
+. "$MERV_BASE/settings/lib_identity.sh" || exit 2
+. "$MERV_BASE/settings/lib_owner_lock.sh" || exit 2
+. "$MERV_BASE/settings/lib_action_lock.sh" || exit 2
 . "$MERV_BASE/settings/lib_mervqt.sh"
 
 write_fake_stat() {
@@ -108,6 +112,17 @@ esac
 shift 2
 op="${1:-}"
 shift || :
+if [ "$op" = "-L" ] && [ "${1:-}" = "--Lx" ]; then
+  for file in "$state/chains/"*; do
+    [ -f "$file" ] || continue
+    list_chain=${file##*/}
+    printf 'ebtables -t filter -N %s\n' "$list_chain"
+    while IFS= read -r rule || [ -n "$rule" ]; do
+      [ -n "$rule" ] && printf 'ebtables -t filter -A %s %s\n' "$list_chain" "$rule"
+    done < "$file"
+  done
+  exit 0
+fi
 chain="${1:-}"
 case "$chain" in ''|*[!A-Za-z0-9_-]*) exit 64 ;; esac
 shift || :
@@ -186,6 +201,7 @@ if [ "${MERV_SELFTEST_BUSYBOX_FS:-0}" = 1 ] &&
   rmdir() { busybox rmdir "$@"; }
 fi
 . "$MERV_BASE/settings/var_settings.sh" || exit 2
+. "$MERV_BASE/settings/lib_owner_lock.sh" || exit 2
 . "$MERV_BASE/settings/lib_mervqt.sh" || exit 2
 if [ "$MERV_DHCP_HOLD_PROC_ROOT" != /proc ]; then
   _cece_proc_dir="$MERV_DHCP_HOLD_PROC_ROOT/$$"
@@ -384,6 +400,90 @@ test_dhcp_rule_exactness() {
   export MERV_DHCP_HOLD_PROC_ROOT
 }
 
+test_l2_guard_dump_contract() {
+  _tlgd_human='Bridge chain: MERV_MAC, entries: 1, policy: ACCEPT
+-s 02:00:00:00:00:01 --logical-in br0 -j DROP
+Bridge chain: MERV_QT, entries: 1, policy: ACCEPT
+-i wl0.2 --logical-in br0 -j DROP
+Bridge chain: FORWARD, entries: 2, policy: ACCEPT
+-j MERV_MAC
+-j MERV_QT
+Bridge chain: INPUT, entries: 2, policy: ACCEPT
+-j MERV_MAC
+-j MERV_QT'
+  _tlgd_restore='ebtables -t filter -N MERV_MAC
+ebtables -t filter -N MERV_QT
+ebtables -t filter -A MERV_MAC -s 02:00:00:00:00:01 --logical-in br0 -j DROP
+ebtables -t filter -A MERV_QT -i wl0.2 --logical-in br0 -j DROP
+ebtables -t filter -A FORWARD -j MERV_MAC
+ebtables -t filter -A FORWARD -j MERV_QT
+ebtables -t filter -A INPUT -j MERV_MAC
+ebtables -t filter -A INPUT -j MERV_QT'
+  _tlgd_ok=1
+
+  for _tlgd_dump in "$_tlgd_human" "$_tlgd_restore"; do
+    if ! merv_ebtables_verify_parent_jumps "$_tlgd_dump" MERV_MAC ||
+       ! merv_ebtables_verify_parent_jumps "$_tlgd_dump" MERV_QT ||
+       [ "$(merv_ebtables_rule_count_exact "$_tlgd_dump" MERV_MAC '-s 02:00:00:00:00:01 --logical-in br0 -j DROP')" != 1 ] ||
+       [ "$(merv_ebtables_rule_count_exact "$_tlgd_dump" MERV_QT '-i wl0.2 --logical-in br0 -j DROP')" != 1 ] ||
+       [ "$(merv_ebtables_chain_rule_count "$_tlgd_dump" MERV_MAC)" != 1 ] ||
+       [ "$(merv_ebtables_chain_rule_count "$_tlgd_dump" MERV_QT)" != 1 ]; then
+      _tlgd_ok=0
+    fi
+  done
+
+  # ASUSWRT may print a valid MAC with one-digit octets (08:... as 8:...).
+  # The canonical verifier must still match it to the padded database form.
+  _tlgd_short_human='Bridge chain: MERV_MAC, entries: 1, policy: ACCEPT
+-s 8:95:42:19:53:b2 --logical-in br0 -j DROP'
+  _tlgd_short_restore='ebtables -t filter -N MERV_MAC
+ebtables -t filter -A MERV_MAC -s 8:95:42:19:53:b2 --logical-in br0 -j DROP'
+  for _tlgd_dump in "$_tlgd_short_human" "$_tlgd_short_restore"; do
+    [ "$(merv_ebtables_rule_count_exact "$_tlgd_dump" MERV_MAC '-s 08:95:42:19:53:b2 --logical-in br0 -j DROP')" = 1 ] ||
+      _tlgd_ok=0
+  done
+
+  if [ "$_tlgd_ok" = 1 ]; then
+    pass "L2 guard exact verifier accepts firmware MAC formatting in both ebtables dump styles"
+  else
+    fail "L2 guard exact verifier accepts firmware MAC formatting in both ebtables dump styles"
+  fi
+  return "$_tlgd_ok"
+}
+
+test_mac_shield_lifecycle() {
+  selftest_reset || return 1
+  _tms_old_active="$MERV_MAC_DB_ACTIVE"
+  _tms_old_jffs="$MERV_MAC_DB_JFFS"
+  _tms_old_override="$MERV_MAC_OVERRIDE_DB"
+  _tms_old_dry="${DRY_RUN:-no}"
+  _tms_db="$SELFTEST_ROOT/mac-shield.db"
+  MERV_MAC_DB_ACTIVE="$_tms_db"
+  MERV_MAC_DB_JFFS="$SELFTEST_ROOT/mac-shield.jffs.db"
+  MERV_MAC_OVERRIDE_DB="$SELFTEST_ROOT/mac-shield.override.db"
+  DRY_RUN=no
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  printf '1 02:00:00:00:00:01 wl0.2 187\n' > "$_tms_db" || return 1
+
+  # Keep the fake ebtables command scoped to this test. The strict lifecycle
+  # must create a missing chain before it tries to flush it.
+  ebtables() { "$SELFTEST_FAKE_BIN" "$@"; }
+  if ebt_mac_shield_init_and_apply "$_tms_db" && merv_mac_shield_verify_exact; then
+    pass "MAC shield initializes a missing owner chain before flushing and verifies exactly"
+    _tms_rc=0
+  else
+    fail "MAC shield initializes a missing owner chain before flushing and verifies exactly"
+    _tms_rc=1
+  fi
+  unset -f ebtables 2>/dev/null || :
+  MERV_MAC_DB_ACTIVE="$_tms_old_active"
+  MERV_MAC_DB_JFFS="$_tms_old_jffs"
+  MERV_MAC_OVERRIDE_DB="$_tms_old_override"
+  DRY_RUN="$_tms_old_dry"
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  return "$_tms_rc"
+}
+
 test_process_identity() {
   selftest_reset || return 1
   write_fake_stat 9001 123456
@@ -393,6 +493,449 @@ test_process_identity() {
   assert_ok "matching PID/start identity accepted" merv_process_identity_matches 9001 123456 "$MERV_DHCP_HOLD_PROC_ROOT"
   assert_rc 1 "reused PID/start mismatch rejected" merv_process_identity_matches 9001 654321 "$MERV_DHCP_HOLD_PROC_ROOT"
   assert_rc 1 "invalid PID rejected" merv_proc_start_time "../1" "$MERV_DHCP_HOLD_PROC_ROOT"
+}
+
+test_owner_lock_contract() {
+  selftest_reset || return 1
+  _tol_root="$SELFTEST_ROOT/owner-lock"
+  _tol_lock="$_tol_root/claim"
+  _tol_owner="$_tol_lock/owner"
+  rm -rf "$_tol_root" 2>/dev/null || return 1
+  mkdir -p "$_tol_lock" || return 1
+
+  assert_ok "owner v2 writer publishes a valid record" \
+    merv_owner_v2_write_atomic "$_tol_lock" "$$" 424242 owner-contract 100 1
+  assert_ok "owner v2 parser accepts a valid record" merv_owner_v2_read "$_tol_lock"
+  [ "$MERV_OWNER_V2_PID" = "$$" ] &&
+    [ "$MERV_OWNER_V2_PROC_START_TIME" = 424242 ] &&
+    [ "$MERV_OWNER_V2_NONCE" = owner-contract ] &&
+    [ "$MERV_OWNER_V2_CREATED" = 100 ] &&
+    [ "$MERV_OWNER_V2_HEARTBEAT" = 1 ] &&
+    pass "owner v2 parser exports all five fields" ||
+    fail "owner v2 parser exports all five fields"
+  [ "$(ls -l "$_tol_owner" 2>/dev/null | awk '{print $1}')" = "-rw-------" ] &&
+    pass "owner v2 publication mode is 0600" ||
+    fail "owner v2 publication mode is 0600"
+  _tol_tmp_left=0
+  for _tol_tmp in "$_tol_lock"/.owner.tmp.*; do
+    [ -e "$_tol_tmp" ] || continue
+    _tol_tmp_left=1
+  done
+  [ "$_tol_tmp_left" -eq 0 ] && pass "owner v2 publication leaves no temporary owner" ||
+    fail "owner v2 publication leaves no temporary owner"
+
+  printf 'pid=%s\nowner_nonce=owner-contract\ncreated=100\nheartbeat=1\n' "$$" > "$_tol_owner"
+  assert_rc 1 "owner v2 missing key rejected" merv_owner_v2_read "$_tol_owner"
+  printf 'pid=%s\npid=%s\nproc_start_time=424242\nowner_nonce=owner-contract\ncreated=100\nheartbeat=1\n' "$$" "$$" > "$_tol_owner"
+  assert_rc 1 "owner v2 duplicate key rejected" merv_owner_v2_read "$_tol_owner"
+  printf 'pid=%s\nproc_start_time=424242\nowner_nonce=owner-contract\ncreated=100\nheartbeat=1\nunknown=x\n' "$$" > "$_tol_owner"
+  assert_rc 1 "owner v2 unknown key rejected" merv_owner_v2_read "$_tol_owner"
+  printf 'pid=not-a-number\nproc_start_time=424242\nowner_nonce=owner-contract\ncreated=100\nheartbeat=1\n' > "$_tol_owner"
+  assert_rc 1 "owner v2 non-numeric field rejected" merv_owner_v2_read "$_tol_owner"
+  printf 'pid=0\nproc_start_time=424242\nowner_nonce=owner-contract\ncreated=100\nheartbeat=1\n' > "$_tol_owner"
+  assert_rc 1 "owner v2 zero numeric field rejected" merv_owner_v2_read "$_tol_owner"
+  printf 'pid=%s \nproc_start_time=424242\nowner_nonce=owner-contract\ncreated=100\nheartbeat=1\n' "$$" > "$_tol_owner"
+  assert_rc 1 "owner v2 whitespace rejected" merv_owner_v2_read "$_tol_owner"
+  printf 'pid=%s\nproc_start_time=424242\nowner_nonce=bad\$nonce\ncreated=100\nheartbeat=1\n' "$$" > "$_tol_owner"
+  assert_rc 1 "owner v2 invalid nonce characters rejected" merv_owner_v2_read "$_tol_owner"
+  _tol_long_nonce=$(awk 'BEGIN { for (i = 0; i < 161; i++) printf "a" }')
+  printf 'pid=%s\nproc_start_time=424242\nowner_nonce=%s\ncreated=100\nheartbeat=1\n' "$$" "$_tol_long_nonce" > "$_tol_owner"
+  assert_rc 1 "owner v2 oversized nonce rejected" merv_owner_v2_read "$_tol_owner"
+  _tol_long_num=$(awk 'BEGIN { for (i = 0; i < 130; i++) printf "1" }')
+  printf 'pid=%s\nproc_start_time=%s\nowner_nonce=owner-contract\ncreated=%s\nheartbeat=%s\n' \
+    "$_tol_long_num" "$_tol_long_num" "$_tol_long_num" "$_tol_long_num" > "$_tol_owner"
+  assert_rc 1 "owner v2 oversized record rejected" merv_owner_v2_read "$_tol_owner"
+
+  _tol_marker="$_tol_root/not-executed"
+  rm -f "$_tol_marker"
+  printf 'pid=%s\nproc_start_time=424242\nowner_nonce=\$(touch %s)\ncreated=100\nheartbeat=1\n' "$$" "$_tol_marker" > "$_tol_owner"
+  assert_rc 1 "malformed owner record rejected without execution" merv_owner_v2_read "$_tol_owner"
+  assert_no_file "$_tol_marker" "malformed owner record is never sourced"
+
+  assert_ok "owner v2 exact live PID/start/nonce match" \
+    merv_owner_v2_write_atomic "$_tol_lock" "$$" 424242 owner-contract 100 1
+  assert_ok "owner v2 stale heartbeat does not reclaim live owner" \
+    merv_owner_v2_matches "$_tol_lock" "$$" 424242 owner-contract "$MERV_DHCP_HOLD_PROC_ROOT"
+  assert_rc 1 "owner v2 wrong PID rejected" \
+    merv_owner_v2_matches "$_tol_lock" 9001 424242 owner-contract "$MERV_DHCP_HOLD_PROC_ROOT"
+  assert_rc 1 "owner v2 wrong start rejected" \
+    merv_owner_v2_matches "$_tol_lock" "$$" 424243 owner-contract "$MERV_DHCP_HOLD_PROC_ROOT"
+  assert_rc 1 "owner v2 wrong nonce rejected" \
+    merv_owner_v2_matches "$_tol_lock" "$$" 424242 other-owner "$MERV_DHCP_HOLD_PROC_ROOT"
+
+  write_fake_stat 9001 123456
+  assert_ok "owner v2 distinguishes a second live identity" \
+    merv_owner_v2_write_atomic "$_tol_lock" 9001 123456 second-owner 100 1
+  assert_ok "owner v2 live identity matches" \
+    merv_owner_v2_matches "$_tol_lock" 9001 123456 second-owner "$MERV_DHCP_HOLD_PROC_ROOT"
+  rm -rf "$MERV_DHCP_HOLD_PROC_ROOT/9001"
+  assert_rc 1 "owner v2 distinguishes a dead identity" \
+    merv_owner_v2_matches "$_tol_lock" 9001 123456 second-owner "$MERV_DHCP_HOLD_PROC_ROOT"
+}
+
+test_maintenance_lock_interop() {
+  selftest_reset || return 1
+  _tmi_root="$SELFTEST_ROOT/maintenance-lock-interop"
+  _tmi_lock="$_tmi_root/mervlan_maintenance.lock"
+  _tmi_recover="$MERV_BASE/functions/mervlan_recover.sh"
+  _tmi_base="$MERV_BASE"
+  _tmi_ok=1
+  rm -rf "$_tmi_root" 2>/dev/null || return 1
+  mkdir -p "$_tmi_root" || return 1
+
+  # Recovery must source and exercise its copied protocol even if no settings
+  # tree is available.  The generic library remains loaded only for the normal
+  # maintenance side of this interoperability fixture.
+  MERVLAN_RECOVERY_SOURCE_ONLY=1 MERVLAN_RECOVERY_LOCK_OVERRIDE="$_tmi_lock" \
+    MERV_BASE="$SELFTEST_ROOT/no-installed-settings" . "$_tmi_recover" || return 1
+  MERV_BASE="$_tmi_base"
+  export MERV_BASE
+  pass "standalone Recovery loads without installed settings libraries"
+
+  if merv_owner_lock_acquire "$_tmi_lock" 0 0 normal-maintenance &&
+     recovery_lock_read && [ "$RECOVERY_LOCK_FORMAT" = v2 ] &&
+     ! recovery_acquire_lock; then
+    pass "live normal v2 owner blocks standalone Recovery"
+  else
+    fail "live normal v2 owner blocks standalone Recovery"; _tmi_ok=0
+  fi
+  _tmi_normal_nonce="$MERV_LOCK_NONCE"
+  merv_owner_lock_release "$_tmi_lock" "$_tmi_normal_nonce" || { fail "normal v2 fixture release"; return 1; }
+
+  mkdir "$_tmi_lock" || return 1
+  merv_owner_v2_write_atomic "$_tmi_lock" 999999 1 dead-normal 1 1 || return 1
+  if recovery_acquire_lock && recovery_owner_v2_read "$_tmi_lock/owner" &&
+     [ "$RECOVERY_OWNER_PID" = "$$" ]; then
+    pass "Recovery reclaims dead normal v2 with a v2 owner"
+  else
+    fail "Recovery reclaims dead normal v2 with a v2 owner"; _tmi_ok=0
+  fi
+  _tmi_recovery_nonce="$RECOVERY_LOCK_NONCE"
+  if ! merv_owner_lock_acquire "$_tmi_lock" 0 0 normal-maintenance; then
+    pass "Recovery-created live v2 blocks normal maintenance"
+  else
+    fail "Recovery-created live v2 blocks normal maintenance"; _tmi_ok=0
+  fi
+  recovery_release_lock || { fail "Recovery-created v2 fixture release"; return 1; }
+
+  recovery_acquire_lock || { fail "dead Recovery v2 fixture acquire"; return 1; }
+  recovery_owner_v2_write_atomic 999998 1 dead-recovery 1 1 || return 1
+  RECOVERY_LOCK_OWNED=0
+  RECOVERY_LOCK_NONCE=''
+  if merv_owner_lock_acquire "$_tmi_lock" 0 0 normal-maintenance; then
+    pass "normal maintenance reclaims dead Recovery-created v2"
+  else
+    fail "normal maintenance reclaims dead Recovery-created v2"; _tmi_ok=0
+  fi
+  _tmi_normal_nonce="$MERV_LOCK_NONCE"
+  merv_owner_lock_release "$_tmi_lock" "$_tmi_normal_nonce" || { fail "normal dead Recovery fixture release"; return 1; }
+
+  recovery_acquire_lock || { fail "wrong nonce fixture acquire"; return 1; }
+  _tmi_recovery_nonce="$RECOVERY_LOCK_NONCE"
+  RECOVERY_LOCK_NONCE=wrong-nonce
+  if ! recovery_release_lock && recovery_owner_v2_read "$_tmi_lock/owner"; then
+    pass "wrong Recovery nonce preserves authoritative owner"
+  else
+    fail "wrong Recovery nonce preserves authoritative owner"; _tmi_ok=0
+  fi
+  RECOVERY_LOCK_NONCE="$_tmi_recovery_nonce"
+  recovery_release_lock || { fail "wrong nonce fixture cleanup"; return 1; }
+
+  mkdir "$_tmi_lock" || return 1
+  printf 'pid=%s\nproc_start_time=1\nowner_nonce=bad-v2\ncreated=1\n' "$$" > "$_tmi_lock/owner"
+  if ! recovery_acquire_lock; then
+    pass "malformed v2 owner fails closed in Recovery"
+  else
+    fail "malformed v2 owner fails closed in Recovery"; _tmi_ok=0
+  fi
+  rm -f "$_tmi_lock/owner" || return 1
+  rmdir "$_tmi_lock" || return 1
+
+  _tmi_start=$(recovery_proc_start "$$" 2>/dev/null) || return 1
+  mkdir "$_tmi_lock" || return 1
+  printf 'pid=%s\nstart=%s\nnonce=legacy-live\ncreated=1\n' "$$" "$_tmi_start" > "$_tmi_lock/owner"
+  if ! recovery_acquire_lock; then
+    pass "complete live four-field legacy owner is respected"
+  else
+    fail "complete live four-field legacy owner is respected"; _tmi_ok=0
+  fi
+  rm -f "$_tmi_lock/owner" || return 1
+  rmdir "$_tmi_lock" || return 1
+
+  mkdir "$_tmi_lock" || return 1
+  printf 'pid=999997\nstart=1\nnonce=legacy-dead\ncreated=1\n' > "$_tmi_lock/owner"
+  if recovery_acquire_lock; then
+    _tmi_legacy_quarantine=0
+    for _tmi_quarantine in "$_tmi_root"/mervlan_maintenance.lock.quarantine.dead.*; do
+      [ -d "$_tmi_quarantine" ] && _tmi_legacy_quarantine=1
+    done
+    [ "$_tmi_legacy_quarantine" -eq 1 ] && pass "dead four-field legacy owner is quarantined" || {
+      fail "dead four-field legacy owner is quarantined"; _tmi_ok=0;
+    }
+  else
+    fail "dead four-field legacy owner is reclaimed"; _tmi_ok=0
+  fi
+  recovery_release_lock || { fail "legacy dead fixture cleanup"; return 1; }
+
+  recovery_acquire_lock || { fail "release restoration fixture acquire"; return 1; }
+  _tmi_recovery_nonce="$RECOVERY_LOCK_NONCE"
+  : > "$_tmi_lock/release-obstruction"
+  if ! recovery_release_lock && recovery_owner_v2_read "$_tmi_lock/owner"; then
+    pass "failed Recovery release restores authoritative v2 owner"
+  else
+    fail "failed Recovery release restores authoritative v2 owner"; _tmi_ok=0
+  fi
+  rm -f "$_tmi_lock/release-obstruction" || return 1
+  RECOVERY_LOCK_NONCE="$_tmi_recovery_nonce"
+  recovery_release_lock || { fail "release restoration fixture cleanup"; return 1; }
+  return "$_tmi_ok"
+}
+
+test_lock_publication() {
+  selftest_reset || return 1
+  _tlp_root="$SELFTEST_ROOT/lock-publication"
+  _tlp_lock="$_tlp_root/claim.lock"
+  rm -rf "$_tlp_root" 2>/dev/null || return 1
+  mkdir -p "$_tlp_root" || return 1
+
+  assert_ok "generic acquisition publishes a complete owner" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  _tlp_nonce="$MERV_LOCK_NONCE"
+  [ -n "$_tlp_nonce" ] && merv_owner_v2_read "$_tlp_lock" &&
+    [ "$MERV_OWNER_V2_PID" = "$$" ] && [ "$MERV_OWNER_V2_NONCE" = "$_tlp_nonce" ] &&
+    pass "generic acquisition exposes exact owner outputs" ||
+    fail "generic acquisition exposes exact owner outputs"
+  _tlp_compat_ok=1
+  for _tlp_field in pid proc_start_time owner_nonce created heartbeat; do
+    [ -f "$_tlp_lock/$_tlp_field" ] || _tlp_compat_ok=0
+  done
+  [ "$_tlp_compat_ok" -eq 1 ] && pass "generic acquisition retains compatibility sidecars" ||
+    fail "generic acquisition retains compatibility sidecars"
+  assert_rc 1 "wrong nonce cannot release generic lock" \
+    merv_owner_lock_release "$_tlp_lock" wrong-nonce
+  assert_file "$_tlp_lock/owner" "wrong nonce preserves authoritative owner"
+  assert_rc 1 "live generic owner is never stolen because of age" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  assert_ok "generic owner releases by exact nonce" merv_owner_lock_release "$_tlp_lock" "$_tlp_nonce"
+  assert_no_file "$_tlp_lock" "exact generic release removes lock directory"
+
+  for _tlp_fault in identity compat-write compat-rename owner-temp-write owner-permissions owner-rename; do
+    MERV_OWNER_LOCK_FAULT="$_tlp_fault"
+    export MERV_OWNER_LOCK_FAULT
+    assert_rc 1 "publication fault $_tlp_fault fails acquisition" \
+      merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+    assert_no_file "$_tlp_lock" "publication fault $_tlp_fault leaves no active claim"
+    unset MERV_OWNER_LOCK_FAULT
+    export MERV_OWNER_LOCK_FAULT
+  done
+
+  MERV_OWNER_LOCK_FAULT=owner-temp-write,cleanup-rmdir
+  export MERV_OWNER_LOCK_FAULT
+  assert_rc 1 "claim cleanup obstruction fails acquisition" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  assert_no_file "$_tlp_lock" "cleanup obstruction leaves no active claim"
+  _tlp_quarantined=0
+  for _tlp_dir in "$_tlp_root"/.claim.lock.acquire-failed.*; do
+    [ -d "$_tlp_dir" ] || continue
+    _tlp_quarantined=1
+  done
+  [ "$_tlp_quarantined" -eq 1 ] && pass "failed claim is quarantined exactly" ||
+    fail "failed claim is quarantined exactly"
+
+  mkdir "$_tlp_lock" || return 1
+  _tlp_state=$(merv_owner_lock_state "$_tlp_lock")
+  [ "$_tlp_state" = incomplete-grace ] && pass "new incomplete claim is inside verified grace" ||
+    fail "new incomplete claim is inside verified grace (state=$_tlp_state)"
+  MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC=invalid
+  export MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC
+  _tlp_state=$(merv_owner_lock_state "$_tlp_lock")
+  [ "$_tlp_state" = incomplete-unknown ] && pass "unverifiable incomplete age fails closed" ||
+    fail "unverifiable incomplete age fails closed (state=$_tlp_state)"
+  MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC=0
+  export MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC
+  sleep 1
+  _tlp_state=$(merv_owner_lock_state "$_tlp_lock")
+  [ "$_tlp_state" = incomplete-expired ] && pass "expired incomplete claim is classified" ||
+    fail "expired incomplete claim is classified (state=$_tlp_state)"
+  assert_rc 1 "expired incomplete claim is not automatically reclaimed" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  rmdir "$_tlp_lock" || return 1
+  MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC=10
+  export MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC
+
+  mkdir "$_tlp_lock" || return 1
+  assert_ok "dead complete owner is published for reclaim fixture" \
+    merv_owner_v2_write_atomic "$_tlp_lock" 999999 1 dead-owner 1 1
+  assert_ok "dead complete owner is quarantined and reacquired" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  _tlp_dead_nonce="$MERV_LOCK_NONCE"
+  assert_ok "dead-owner reacquisition releases" merv_owner_lock_release "$_tlp_lock" "$_tlp_dead_nonce"
+
+  mkdir "$_tlp_lock" || return 1
+  assert_ok "reused PID fixture is published" \
+    merv_owner_v2_write_atomic "$_tlp_lock" "$$" 1 reused-owner 1 1
+  assert_ok "reused PID owner is quarantined and reacquired" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  _tlp_reused_nonce="$MERV_LOCK_NONCE"
+  assert_ok "reused-PID reacquisition releases" merv_owner_lock_release "$_tlp_lock" "$_tlp_reused_nonce"
+
+  mkdir "$_tlp_lock" || return 1
+  printf 'not an owner record\n' > "$_tlp_lock/owner"
+  assert_rc 1 "malformed complete state fails closed" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  rm -f "$_tlp_lock/owner" || return 1
+  rmdir "$_tlp_lock" || return 1
+
+  assert_ok "release obstruction fixture acquires" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  _tlp_release_nonce="$MERV_LOCK_NONCE"
+  : > "$_tlp_lock/release-obstruction"
+  assert_rc 1 "release obstruction restores authoritative owner" \
+    merv_owner_lock_release "$_tlp_lock" "$_tlp_release_nonce"
+  assert_ok "release obstruction keeps owner recoverable" merv_owner_v2_read "$_tlp_lock"
+  [ ! -e "$_tlp_lock/pid" ] && [ ! -e "$_tlp_lock/proc_start_time" ] &&
+    pass "failed release restores no obsolete compatibility sidecars" ||
+    fail "failed release restores no obsolete compatibility sidecars"
+  rm -f "$_tlp_lock/release-obstruction" || return 1
+  assert_ok "restored owner can release after obstruction clears" \
+    merv_owner_lock_release "$_tlp_lock" "$_tlp_release_nonce"
+
+  assert_ok "rapid reacquisition obtains first owner" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  _tlp_old_nonce="$MERV_LOCK_NONCE"
+  assert_ok "first rapid owner releases" merv_owner_lock_release "$_tlp_lock" "$_tlp_old_nonce"
+  assert_ok "rapid reacquisition obtains second owner" \
+    merv_owner_lock_acquire "$_tlp_lock" 0 0 publication
+  _tlp_new_nonce="$MERV_LOCK_NONCE"
+  assert_rc 1 "old nonce cannot release rapid reacquisition" \
+    merv_owner_lock_release "$_tlp_lock" "$_tlp_old_nonce"
+  assert_ok "current rapid owner releases" merv_owner_lock_release "$_tlp_lock" "$_tlp_new_nonce"
+}
+
+test_nonce_uniqueness() {
+  selftest_reset || return 1
+  _tn_ok=1
+  _tn_seen=""
+  _tn_seq_before="${MERV_IDENTITY_NONCE_SEQ:-}"
+  . "$MERV_BASE/settings/lib_identity.sh" || _tn_ok=0
+  [ "${MERV_IDENTITY_NONCE_SEQ:-}" = "$_tn_seq_before" ] &&
+    pass "identity library repeated sourcing is idempotent" || {
+      fail "identity library repeated sourcing is idempotent"
+      _tn_ok=0
+    }
+
+  if grep -q 'RANDOM' "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null; then
+    fail "identity nonce has no RANDOM dependency"
+    _tn_ok=0
+  else
+    pass "identity nonce has no RANDOM dependency"
+  fi
+
+  MERV_IDENTITY_NONCE_SEQ=0
+  unset MERV_IDENTITY_NONCE
+  _tn_i=1
+  while [ "$_tn_i" -le 100 ]; do
+    if merv_identity_nonce_next; then
+      _tn_nonce="$MERV_IDENTITY_NONCE"
+      if ! merv_identity_nonce_valid "$_tn_nonce"; then
+        fail "rapid nonce $_tn_i has valid format"
+        _tn_ok=0
+      fi
+      case " $_tn_seen " in
+        *" $_tn_nonce "*)
+          fail "rapid same-process nonces are unique"
+          _tn_ok=0
+          ;;
+        *) _tn_seen="$_tn_seen $_tn_nonce" ;;
+      esac
+    else
+      fail "rapid nonce $_tn_i generated in current shell"
+      _tn_ok=0
+    fi
+    _tn_i=$((_tn_i + 1))
+  done
+  [ "$(printf '%s' "$_tn_seen" | awk '{print NF}')" -eq 100 ] &&
+    pass "100 rapid same-process nonces are unique" || {
+      fail "100 rapid same-process nonces are unique"
+      _tn_ok=0
+    }
+
+  write_fake_stat 9001 123456
+  write_fake_stat 9002 0
+  if merv_identity_proc_start 9001 "$MERV_DHCP_HOLD_PROC_ROOT" >/dev/null 2>&1; then
+    pass "positive PID/start identity is readable"
+  else
+    fail "positive PID/start identity is readable"
+    _tn_ok=0
+  fi
+  if merv_identity_matches 9001 123456 "$MERV_DHCP_HOLD_PROC_ROOT"; then
+    pass "exact PID/start identity matches"
+  else
+    fail "exact PID/start identity matches"
+    _tn_ok=0
+  fi
+  for _tn_case in \
+    "zero PID:merv_identity_proc_start 0 $MERV_DHCP_HOLD_PROC_ROOT" \
+    "zero-padded PID:merv_identity_proc_start 00 $MERV_DHCP_HOLD_PROC_ROOT" \
+    "zero start:merv_identity_proc_start 9002 $MERV_DHCP_HOLD_PROC_ROOT" \
+    "missing start:merv_identity_matches 9001 '' $MERV_DHCP_HOLD_PROC_ROOT" \
+    "zero expected start:merv_identity_matches 9001 0 $MERV_DHCP_HOLD_PROC_ROOT" \
+    "mismatched start:merv_identity_matches 9001 654321 $MERV_DHCP_HOLD_PROC_ROOT"; do
+    _tn_label=${_tn_case%%:*}
+    _tn_cmd=${_tn_case#*:}
+    # The command strings contain only fixed test arguments, so this keeps the
+    # selector readable while retaining assert-style diagnostics.
+    if sh -c ". \"$MERV_BASE/settings/lib_identity.sh\"; $_tn_cmd" >/dev/null 2>&1; then
+      fail "identity rejects $_tn_label"
+      _tn_ok=0
+    else
+      pass "identity rejects $_tn_label"
+    fi
+  done
+
+  _tn_one="$SELFTEST_ROOT/nonce-parallel.1"
+  _tn_two="$SELFTEST_ROOT/nonce-parallel.2"
+  rm -f "$_tn_one" "$_tn_two"
+  MERV_IDENTITY_LIB="$MERV_BASE/settings/lib_identity.sh" sh -c '
+    . "$MERV_IDENTITY_LIB" || exit 2
+    _tn_start=$(merv_identity_current_start) || exit 3
+    printf "%s:%s\n" "$$" "$_tn_start"
+    sleep 1
+  ' > "$_tn_one" 2>/dev/null &
+  _tn_p1=$!
+  MERV_IDENTITY_LIB="$MERV_BASE/settings/lib_identity.sh" sh -c '
+    . "$MERV_IDENTITY_LIB" || exit 2
+    _tn_start=$(merv_identity_current_start) || exit 3
+    printf "%s:%s\n" "$$" "$_tn_start"
+    sleep 1
+  ' > "$_tn_two" 2>/dev/null &
+  _tn_p2=$!
+  sleep 1
+  _tn_id1=$(sed -n '1p' "$_tn_one" 2>/dev/null)
+  _tn_id2=$(sed -n '1p' "$_tn_two" 2>/dev/null)
+  _tn_pid1=${_tn_id1%%:*}
+  _tn_start1=${_tn_id1#*:}
+  _tn_pid2=${_tn_id2%%:*}
+  _tn_start2=${_tn_id2#*:}
+  if merv_identity_positive_uint "$_tn_pid1" &&
+     merv_identity_positive_uint "$_tn_start1" &&
+     merv_identity_positive_uint "$_tn_pid2" &&
+     merv_identity_positive_uint "$_tn_start2"; then
+    pass "parallel process PID/start identities are positive"
+  else
+    fail "parallel process PID/start identities are positive"
+    _tn_ok=0
+  fi
+  [ -n "$_tn_id1" ] && [ "$_tn_id1" != "$_tn_id2" ] &&
+    pass "parallel processes differ through PID/start identity" || {
+      fail "parallel processes differ through PID/start identity"
+      _tn_ok=0
+    }
+  wait "$_tn_p1" 2>/dev/null || _tn_ok=0
+  wait "$_tn_p2" 2>/dev/null || _tn_ok=0
+  return "$_tn_ok"
 }
 
 test_lock_reclaim() {
@@ -460,6 +1003,137 @@ test_lock_reclaim() {
     fail "incomplete lock quarantine missing"
   assert_ok "reclaimed incomplete lock releases by nonce" \
     merv_dhcp_state_lock_release "$_tlr_incomplete_nonce"
+}
+
+test_dhcp_incomplete_lock() {
+  selftest_reset || return 1
+  _tdil_lock="$SELFTEST_STATE/state.lock"
+
+  # A just-published empty claim must remain protected long enough for its
+  # writer to complete. Its owner removes it, after which this waiter may
+  # acquire; a premature quarantine would leave an incomplete quarantine.
+  mkdir "$_tdil_lock" || return 1
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC=30
+  export MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+  (
+    if type usleep >/dev/null 2>&1; then usleep 200000; else sleep 1; fi
+    rmdir "$_tdil_lock"
+  ) &
+  assert_ok "fresh empty DHCP claim is protected, then released by publisher" \
+    merv_dhcp_state_lock_acquire
+  _tdil_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  assert_ok "fresh empty claim successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  # Expired incomplete state is never granted a PID-only exception.
+  mkdir "$_tdil_lock" || return 1
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC=0
+  export MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+  assert_ok "expired empty DHCP claim is quarantined" merv_dhcp_state_lock_acquire
+  _tdil_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  _tdil_found=0
+  for _tdil_quarantine in "$SELFTEST_STATE"/state.lock.incomplete-stale.*; do
+    [ -d "$_tdil_quarantine" ] || continue
+    _tdil_found=1
+  done
+  [ "$_tdil_found" -eq 1 ] && pass "expired empty claim quarantine retained" ||
+    fail "expired empty claim quarantine missing"
+  assert_ok "expired empty claim successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  mkdir "$_tdil_lock" || return 1
+  printf '%s\n' "$$" > "$_tdil_lock/pid"
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC=30
+  export MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+  (
+    if type usleep >/dev/null 2>&1; then usleep 200000; else sleep 1; fi
+    rm -f "$_tdil_lock/pid"
+    rmdir "$_tdil_lock"
+  ) &
+  assert_ok "fresh PID-only DHCP claim is temporarily protected" \
+    merv_dhcp_state_lock_acquire
+  _tdil_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  assert_ok "fresh PID-only successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  mkdir "$_tdil_lock" || return 1
+  printf '%s\n' "$$" > "$_tdil_lock/pid"
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC=0
+  export MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+  assert_ok "expired PID-only DHCP claim is quarantined" merv_dhcp_state_lock_acquire
+  _tdil_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  assert_ok "expired PID-only successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  mkdir "$_tdil_lock" || return 1
+  printf '%s\n' "$$" > "$_tdil_lock/pid"
+  printf '424242\n' > "$_tdil_lock/proc_start_time"
+  printf '1\n' > "$_tdil_lock/created_epoch"
+  printf 'live-owner\n' > "$_tdil_lock/owner_nonce"
+  assert_rc 2 "complete live DHCP owner is never stolen" merv_dhcp_state_lock_acquire
+  rm -f "$_tdil_lock/pid" "$_tdil_lock/proc_start_time" "$_tdil_lock/created_epoch" "$_tdil_lock/owner_nonce"
+  rmdir "$_tdil_lock" || return 1
+
+  mkdir "$_tdil_lock" || return 1
+  printf '999999\n1\n1\ndead-owner\n' | {
+    IFS= read -r _tdil_pid
+    IFS= read -r _tdil_start
+    IFS= read -r _tdil_created
+    IFS= read -r _tdil_dead_nonce
+    printf '%s\n' "$_tdil_pid" > "$_tdil_lock/pid"
+    printf '%s\n' "$_tdil_start" > "$_tdil_lock/proc_start_time"
+    printf '%s\n' "$_tdil_created" > "$_tdil_lock/created_epoch"
+    printf '%s\n' "$_tdil_dead_nonce" > "$_tdil_lock/owner_nonce"
+  }
+  assert_ok "dead complete DHCP owner is quarantined" merv_dhcp_state_lock_acquire
+  _tdil_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  assert_ok "dead-owner successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  mkdir "$_tdil_lock" || return 1
+  printf '%s\n' "$$" > "$_tdil_lock/pid"
+  printf '1\n' > "$_tdil_lock/proc_start_time"
+  printf '1\n' > "$_tdil_lock/created_epoch"
+  printf 'reused-owner\n' > "$_tdil_lock/owner_nonce"
+  assert_ok "reused-PID DHCP owner is quarantined" merv_dhcp_state_lock_acquire
+  _tdil_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+  assert_rc 2 "wrong DHCP state-lock nonce is rejected" \
+    merv_dhcp_state_lock_release wrong-nonce
+  : > "$_tdil_lock/release-obstruction"
+  assert_rc 2 "release obstruction restores complete DHCP ownership" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+  _tdil_restored=1
+  [ "$(cat "$_tdil_lock/pid" 2>/dev/null)" = "$$" ] || _tdil_restored=0
+  [ "$(cat "$_tdil_lock/proc_start_time" 2>/dev/null)" = 424242 ] || _tdil_restored=0
+  [ "$(cat "$_tdil_lock/created_epoch" 2>/dev/null)" -gt 0 ] 2>/dev/null || _tdil_restored=0
+  [ "$(cat "$_tdil_lock/owner_nonce" 2>/dev/null)" = "$_tdil_nonce" ] || _tdil_restored=0
+  [ "$_tdil_restored" -eq 1 ] && pass "release obstruction keeps exact owner fields recoverable" ||
+    fail "release obstruction did not restore exact owner fields"
+  rm -f "$_tdil_lock/release-obstruction" || return 1
+  assert_ok "restored DHCP owner releases after obstruction clears" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+  unset MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+  export MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+}
+
+test_router_portability() {
+  selftest_reset || return 1
+  _trp_lib="$MERV_BASE/settings/lib_mervqt.sh"
+  _trp_update="$MERV_BASE/functions/update_mervlan.sh"
+  if grep -q 'stat -c' "$_trp_lib" "$_trp_update" 2>/dev/null; then
+    fail "DHCP and GUI Update portability paths have no stat -c dependency"
+  else
+    pass "DHCP and GUI Update portability paths have no stat -c dependency"
+  fi
+  mkdir "$SELFTEST_STATE/state.lock" || return 1
+  _trp_epoch=$(merv_dhcp_state_lock_timestamp "$SELFTEST_STATE/state.lock" 2>/dev/null)
+  case "$_trp_epoch" in ''|*[!0-9]*) fail "portable DHCP timestamp is validated" ;; *) pass "portable DHCP timestamp is validated" ;; esac
+  assert_rc 1 "unreadable DHCP state-lock timestamp fails closed" \
+    merv_dhcp_state_lock_incomplete_age "$SELFTEST_STATE/missing.lock"
+  [ "${MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON:-}" = incomplete-age-timestamp-unreadable ] &&
+    pass "unreadable timestamp preserves exact internal reason" ||
+    fail "unreadable timestamp reason was lost"
+  rmdir "$SELFTEST_STATE/state.lock" || return 1
 }
 
 test_ready_owner_count() {
@@ -752,6 +1426,25 @@ test_boot_handoff() {
     merv_dhcp_handoff_parent_release "$_tbh_parent" boot-handoff-1
   assert_ok "verified boot manager releases its lease" merv_dhcp_hold_release "$_tbh_child"
   assert_ok "healthy boot completion clears exact hold" merv_dhcp_hold_rules_absent
+
+  selftest_reset || return 1
+  assert_ok "live completed boot parent acquires" merv_dhcp_hold_acquire boot-watchdog boot-live-parent
+  _tbh_live_parent="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "live completed boot handoff publishes" merv_dhcp_handoff_request "$_tbh_live_parent" manager boot-live-handoff
+  assert_ok "live completed boot parent waits" merv_dhcp_hold_mark_handoff_wait "$_tbh_live_parent" boot-live-handoff
+  assert_ok "live completed boot successor acquires" merv_dhcp_hold_acquire manager boot-live-child boot-live-parent
+  _tbh_live_child="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "live completed boot successor acknowledges" merv_dhcp_handoff_ack boot-live-handoff boot-live-parent "$_tbh_live_child"
+  assert_ok "live completed boot successor mutates" merv_dhcp_hold_mark_mutating "$_tbh_live_child" bridge-cleanup
+  assert_ok "live completed boot successor verifies" merv_dhcp_hold_mark_verified "$_tbh_live_child" boot-live-verification
+  assert_ok "live completed boot handoff completes" merv_dhcp_handoff_child_verified boot-live-handoff "$_tbh_live_child" boot-live-verification
+  assert_ok "live completed boot reconciliation is idempotent" merv_dhcp_hold_reconcile boot-live-reconcile
+  [ -d "$SELFTEST_STATE/owners/$_tbh_live_parent" ] &&
+    pass "live completed boot parent remains owned until process exits" ||
+    fail "live completed boot parent remains owned until process exits"
+  assert_ok "live completed boot parent releases explicitly" merv_dhcp_handoff_parent_release "$_tbh_live_parent" boot-live-handoff
+  assert_ok "live completed boot successor releases explicitly" merv_dhcp_hold_release "$_tbh_live_child"
+  assert_ok "live completed boot reconciliation clears exact hold" merv_dhcp_hold_rules_absent
 
   selftest_reset || return 1
   assert_ok "unsafe-timeout boot watchdog acquires" merv_dhcp_hold_acquire boot-watchdog boot-timeout
@@ -1059,10 +1752,140 @@ test_post_apply() {
     pass "node collection uses the synced local observation backend" ||
     fail "node collection uses the synced local observation backend"
   if [ -f "$MERV_BASE/functions/collect_clients.sh" ]; then
-    grep -q 'post_apply_worker.sh run-wait' "$MERV_BASE/functions/collect_clients.sh" &&
+    { grep -Fq 'post_apply_worker.sh" run-wait' "$MERV_BASE/functions/collect_clients.sh" ||
+      grep -Fq "post_apply_worker.sh' run-wait" "$MERV_BASE/functions/collect_clients.sh"; } &&
       pass "cluster collection waits for the node coordinator generation" ||
       fail "cluster collection waits for the node coordinator generation"
   fi
+}
+
+test_observation_lock() {
+  selftest_reset || return 1
+  observation_reset || return 1
+  _tol_ok=1
+  _tol_worker="$MERV_OBSERVATION_ROOT/worker.lock"
+  _tol_request="$MERV_OBSERVATION_ROOT/request.lock"
+
+  MERV_OBSERVATION_PROC_ROOT="$SELFTEST_ROOT/missing-proc"
+  export MERV_OBSERVATION_PROC_ROOT
+  if observation_worker request snapshot >/dev/null 2>&1; then
+    fail "observation start lookup failure blocks acquisition"; _tol_ok=0
+  else
+    pass "observation start lookup failure blocks acquisition"
+  fi
+  [ ! -e "$_tol_request" ] && pass "failed identity lookup leaves no claim" || {
+    fail "failed identity lookup leaves no claim"; _tol_ok=0;
+  }
+
+  MERV_OBSERVATION_PROC_ROOT="$SELFTEST_ROOT/zero-proc"
+  mkdir -p "$MERV_OBSERVATION_PROC_ROOT/$$" || return 1
+  {
+    printf '%s (observation zero-start) S' "$$"
+    _tol_field=4
+    while [ "$_tol_field" -le 21 ]; do printf ' 0'; _tol_field=$((_tol_field + 1)); done
+    printf ' 0\n'
+  } > "$MERV_OBSERVATION_PROC_ROOT/$$/stat" || return 1
+  if observation_worker request snapshot >/dev/null 2>&1; then
+    fail "observation start time zero is rejected"; _tol_ok=0
+  else
+    pass "observation start time zero is rejected"
+  fi
+  MERV_OBSERVATION_PROC_ROOT=/proc
+  export MERV_OBSERVATION_PROC_ROOT
+
+  MERV_OWNER_LOCK_FAULT=compat-write
+  export MERV_OWNER_LOCK_FAULT
+  if observation_worker request snapshot >/dev/null 2>&1; then
+    fail "failed observation publication is reported"; _tol_ok=0
+  else
+    pass "failed observation publication is reported"
+  fi
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  [ ! -e "$_tol_request" ] && pass "failed observation publication leaves no unknown claim" || {
+    fail "failed observation publication leaves no unknown claim"; _tol_ok=0;
+  }
+
+  observation_worker request snapshot >/dev/null || return 1
+  merv_owner_lock_acquire "$_tol_worker" 0 0 observation-lock || return 1
+  _tol_live_nonce="$MERV_LOCK_NONCE"
+  observation_worker run >/dev/null 2>&1
+  [ -f "$_tol_worker/owner" ] && pass "live observation owner is not stolen" || {
+    fail "live observation owner is not stolen"; _tol_ok=0;
+  }
+  merv_owner_lock_release "$_tol_worker" "$_tol_live_nonce" || return 1
+
+  mkdir "$_tol_worker" || return 1
+  merv_owner_v2_write_atomic "$_tol_worker" 999999 1 dead-observation 1 1 || return 1
+  observation_worker run >/dev/null 2>&1 || return 1
+  _tol_dead_quarantine=0
+  for _tol_dir in "$MERV_OBSERVATION_ROOT"/.worker.lock.dead.*; do
+    [ -d "$_tol_dir" ] && _tol_dead_quarantine=1
+  done
+  [ "$_tol_dead_quarantine" -eq 1 ] && pass "dead observation owner is quarantined" || {
+    fail "dead observation owner is quarantined"; _tol_ok=0;
+  }
+  [ "$(observation_number snapshot_completed_generation)" = 1 ] &&
+    pass "dead-owner observation resumes pending generation" || {
+      fail "dead-owner observation resumes pending generation"; _tol_ok=0;
+    }
+
+  observation_reset || return 1
+  observation_worker request snapshot >/dev/null || return 1
+  mkdir "$_tol_worker" || return 1
+  merv_owner_v2_write_atomic "$_tol_worker" "$$" 1 reused-observation 1 1 || return 1
+  observation_worker run >/dev/null 2>&1 || return 1
+  _tol_reused_quarantine=0
+  for _tol_dir in "$MERV_OBSERVATION_ROOT"/.worker.lock.reused.*; do
+    [ -d "$_tol_dir" ] && _tol_reused_quarantine=1
+  done
+  [ "$_tol_reused_quarantine" -eq 1 ] && pass "reused observation PID is quarantined" || {
+    fail "reused observation PID is quarantined"; _tol_ok=0;
+  }
+
+  merv_owner_lock_acquire "$_tol_request" 0 0 observation-lock || return 1
+  _tol_nonce="$MERV_LOCK_NONCE"
+  assert_rc 1 "wrong observation nonce is rejected" \
+    merv_owner_lock_release "$_tol_request" wrong-observation-nonce
+  assert_file "$_tol_request/owner" "wrong observation nonce preserves owner"
+  : > "$_tol_request/release-obstruction"
+  assert_rc 1 "observation release obstruction is reported" \
+    merv_owner_lock_release "$_tol_request" "$_tol_nonce"
+  assert_ok "observation release obstruction restores owner" \
+    merv_owner_v2_read "$_tol_request"
+  rm -f "$_tol_request/release-obstruction" || return 1
+  merv_owner_lock_release "$_tol_request" "$_tol_nonce" || return 1
+
+  observation_reset || return 1
+  observation_worker request snapshot >/dev/null || return 1
+  : > "$SELFTEST_ROOT/obs-snapshot-kill-worker"
+  observation_worker run >/dev/null 2>&1
+  [ "$(observation_number snapshot_completed_generation)" = 0 ] &&
+    pass "interrupted observation does not advance completion" || {
+      fail "interrupted observation does not advance completion"; _tol_ok=0;
+    }
+  rm -f "$SELFTEST_ROOT/obs-snapshot-kill-worker" || return 1
+
+  MERV_UPDATE_MAINTENANCE_LOCK="$SELFTEST_ROOT/observation-maintenance.lock"
+  export MERV_UPDATE_MAINTENANCE_LOCK
+  merv_owner_lock_acquire "$MERV_UPDATE_MAINTENANCE_LOCK" 0 0 observation-maintenance || return 1
+  _tol_maint_nonce="$MERV_LOCK_NONCE"
+  observation_reset || return 1
+  if observation_worker request snapshot >/dev/null 2>&1; then
+    fail "maintenance-blocked observation is refused"; _tol_ok=0
+  else
+    pass "maintenance-blocked observation is refused"
+  fi
+  _tol_requested=$(observation_number snapshot_requested_generation)
+  [ -n "$_tol_requested" ] || _tol_requested=0
+  [ "$_tol_requested" = 0 ] &&
+    pass "maintenance-blocked observation does not increment generation" || {
+      fail "maintenance-blocked observation does not increment generation"; _tol_ok=0;
+    }
+  merv_owner_lock_release "$MERV_UPDATE_MAINTENANCE_LOCK" "$_tol_maint_nonce" || return 1
+  unset MERV_UPDATE_MAINTENANCE_LOCK
+  export MERV_UPDATE_MAINTENANCE_LOCK
+  return "$_tol_ok"
 }
 
 test_observation_timeouts() {
@@ -1167,6 +1990,33 @@ test_observation_concurrency() {
     fail "reclaimed worker completes pending generation"
 }
 
+test_observation_resume_progress() {
+  selftest_reset || return 1
+  observation_reset || return 1
+  _torp_previous_root="${MERV_PROGRESS_ROOT:-}"
+  _torp_token="resume-progress-contract"
+  MERV_PROGRESS_ROOT="$SELFTEST_ROOT/resume-progress"
+  MERV_OBS_RESUME_PROGRESS_TOKEN="$_torp_token"
+  export MERV_PROGRESS_ROOT MERV_OBS_RESUME_PROGRESS_TOKEN
+  case "$MERV_PROGRESS_ROOT" in "$SELFTEST_ROOT"/*) ;; *) return 1 ;; esac
+  rm -rf "$MERV_PROGRESS_ROOT" 2>/dev/null || return 1
+  observation_worker request snapshot collect >/dev/null || return 1
+  assert_ok "resume observation worker drains queued work" observation_worker run
+  _torp_progress="$MERV_PROGRESS_ROOT/$_torp_token.json"
+  if [ -s "$_torp_progress" ] &&
+     grep -Fq '"action":"sshtrustresume_vlanmgr"' "$_torp_progress" &&
+     grep -Fq '"phase":"collect"' "$_torp_progress" &&
+     grep -Fq '"message":"Refreshing client inventory..."' "$_torp_progress"; then
+    pass "resume collection relays coordinator phases to its loading task"
+  else
+    fail "resume collection relays coordinator phases to its loading task"
+  fi
+  rm -rf "$MERV_PROGRESS_ROOT" 2>/dev/null || return 1
+  MERV_PROGRESS_ROOT="$_torp_previous_root"
+  unset MERV_OBS_RESUME_PROGRESS_TOKEN
+  export MERV_PROGRESS_ROOT
+}
+
 test_atomic_publication() {
   _tap_file="$MERV_BASE/functions/collect_clients.sh"
   if [ -f "$_tap_file" ]; then
@@ -1187,6 +2037,46 @@ test_atomic_publication() {
     grep -q 'MERV_MAC_SNAPSHOT_ALLOW_EMPTY=1' "$MERV_BASE/functions/post_apply_worker.sh" &&
     pass "manual reset mode is confined to coordinated complete snapshot" ||
     fail "manual reset mode is confined to coordinated complete snapshot"
+  grep -q 'json_validate_file "$OUT_WORK"' "$MERV_BASE/functions/collect_clients.sh" &&
+    grep -q 'json_validate_file "$MAIN_JSON"' "$MERV_BASE/functions/collect_clients.sh" &&
+    pass "client artifacts are validated before publication" ||
+    fail "client artifacts are validated before publication"
+}
+
+test_json_validation() {
+  _tjv_valid="$SELFTEST_ROOT/client-valid.json"
+  _tjv_invalid="$SELFTEST_ROOT/client-invalid.json"
+  cat > "$_tjv_valid" <<'EOF'
+{
+  "generated": "2026-08-03T15:00:00",
+  "run_id": "run-1",
+  "nodes": [
+    {
+      "generated": "2026-08-03T15:00:00",
+      "router": "Main Router",
+      "ip": "192.168.1.1",
+      "vlans": [
+        {
+          "id": "189",
+          "interfaces": [],
+          "clients": [
+            {"mac": "e4:2a:ac:5d:48:b6", "source_iface": "eth0.189", "source_type": "trunk-tagged", "source_port": "eth0", "fdb_age": 8, "location_confidence": "relayed", "active": false, "locked": true, "override": false, "unshielded": false, "stale": false, "location_status": "relay_only", "diagnostic": true, "duplicate": true}
+          ]
+        }
+      ]
+    }  ],
+  "stale_clients": [
+    {"mac": "0c:54:15:06:67:1a", "name": "laptop", "active": false, "locked": false, "override": false, "unshielded": true, "stale": true}
+  ]
+}
+EOF
+  printf '%s\n' '{"nodes":[]}{"nodes":[]}' > "$_tjv_invalid"
+  assert_ok "valid client JSON passes the shared validator" json_validate_file "$_tjv_valid"
+  assert_rc 1 "concatenated client JSON is rejected" json_validate_file "$_tjv_invalid"
+  grep -q 'json_validate_file "$OUT_TARGET"' "$MERV_BASE/functions/collect_local_clients.sh" 2>/dev/null ||
+    grep -q 'json_validate_file "$OUT"' "$MERV_BASE/functions/collect_local_clients.sh" &&
+    pass "local client artifacts use the shared validator" ||
+    fail "local client artifacts use the shared validator"
 }
 
 test_client_refresh_contract() {
@@ -1209,9 +2099,10 @@ test_client_refresh_contract() {
     pass "non-cron collection callers remain enabled" ||
     fail "non-cron collection callers remain enabled"
 
-  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "15"' "$_tcr_settings" &&
-    grep -q 'HTML_CLIENT_REFRESH_MINUTES: "15"' "$_tcr_html" &&
+  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "30"' "$_tcr_settings" &&
+    grep -q 'HTML_CLIENT_REFRESH_MINUTES: "30"' "$_tcr_html" &&
     grep -q 'clientAutoRefreshCooldownMs' "$_tcr_html" &&
+    grep -q 'clientGeneratedMs(snapshot)' "$_tcr_html" &&
     grep -q 'CLIENTS_AUTO_REFRESH_MINUTES_MAX = 1440' "$_tcr_html" &&
     pass "HTML client refresh setting has default and bounded parser" ||
     fail "HTML client refresh setting has default and bounded parser"
@@ -1267,7 +2158,11 @@ test_manager_ownership() {
   fi
   _tmo_acquire=$(grep -n 'merv_dhcp_hold_acquire manager' "$_tmo_file" | head -n1 | cut -d: -f1)
   _tmo_mutate=$(grep -n 'merv_dhcp_hold_mark_mutating.*MANAGER_DHCP_TOKEN' "$_tmo_file" | head -n1 | cut -d: -f1)
-  _tmo_cleanup=$(grep -n '^[[:space:]]*cleanup_existing_config[[:space:]]*$' "$_tmo_file" | head -n1 | cut -d: -f1)
+  # The production caller intentionally checks the cleanup return status with
+  # `if ! cleanup_existing_config`; match the call rather than only a bare
+  # command so this ordering contract remains valid after error handling is
+  # made explicit.
+  _tmo_cleanup=$(grep -n 'if ! cleanup_existing_config' "$_tmo_file" | head -n1 | cut -d: -f1)
   case "$_tmo_acquire:$_tmo_mutate:$_tmo_cleanup" in *[!0-9:]*|'::'|*::*)
     fail "manager lease ordering locations found"
     ;;
@@ -1328,6 +2223,10 @@ test_node_job_ssh_temp() {
   MERV_SSH_RETRIES=1
   MERV_SSH_TEST_PATHS="$_tnst_root/paths"
   merv_ssh_precheck() { return 0; }
+  # The production wrapper now requires a verified host-key record before it
+  # creates the client known_hosts file.  This test replaces that boundary
+  # because it exercises only worker-local stderr allocation and cleanup.
+  merv_ssh_prepare_known_host() { return 0; }
   get_node_ssh_port() { printf '22\n'; }
   get_node_ssh_user() { printf 'admin\n'; }
   _merv_timeout_run() { _tnst_sec="$1"; shift; "$@"; }
@@ -1543,6 +2442,7 @@ test_node_worker_timeout() {
 
 test_execute_node_runner_contract() {
   _tener_file="$MERV_BASE/functions/execute_nodes.sh"
+  _tener_verify=$(sed -n '/^verify_settings_conf_on_node() {/,/^sync_settings_conf_for_node() {/p' "$_tener_file" 2>/dev/null)
   grep -q 'MERV_EXEC_NODES_LOCK_STALE_SEC' "$_tener_file" &&
     grep -q 'mervlan_node_runner.sh' "$_tener_file" &&
     grep -q 'execute_status_valid' "$_tener_file" &&
@@ -1560,6 +2460,13 @@ test_execute_node_runner_contract() {
     ! grep -q '/tmp/mervlan_tmp/results/node_complete' "$_tener_file" &&
     pass "execute uses run-specific detached runner status" ||
     fail "execute uses run-specific detached runner status"
+  if printf '%s\n' "$_tener_verify" | grep -Fq 'type sha256sum >/dev/null 2>&1' &&
+     printf '%s\n' "$_tener_verify" | grep -Fq 'type md5sum >/dev/null 2>&1' &&
+     ! printf '%s\n' "$_tener_verify" | grep -Fq 'command -v'; then
+    pass "node Apply exact settings verification avoids the unavailable command builtin"
+  else
+    fail "node Apply exact settings verification avoids the unavailable command builtin"
+  fi
 }
 
 sync_job_test_handler() {
@@ -1597,6 +2504,8 @@ test_sync_node_pool() {
 
 test_sync_node_parallel_contract() {
   _tsnc_file="$MERV_BASE/functions/sync_nodes.sh"
+  _tsnc_verify=$(sed -n '/^sync_verify_batch_manifest()/,/^verify_batch_on_node()/p' "$_tsnc_file" 2>/dev/null)
+  _tsnc_worker=$(sed -n '/^sync_node_worker()/,/^sync_copy_worker_log_for_view()/p' "$_tsnc_file" 2>/dev/null)
   grep -q 'sync_node_worker()' "$_tsnc_file" &&
     grep -q 'mnj_nodes_validate' "$_tsnc_file" &&
     grep -q 'mnj_pool_run.*sync' "$_tsnc_file" &&
@@ -1610,6 +2519,26 @@ test_sync_node_parallel_contract() {
     ! grep -q 'for d in /jffs/addons/mervlan_backups/.mervlan.new' "$_tsnc_file" &&
     pass "sync uses isolated bounded staged workers" ||
     fail "sync uses isolated bounded staged workers"
+
+  if printf '%s\n' "$_tsnc_verify" | grep -Fq 'merv_ssh_stream_stdin "$_vbm_id" "$_vbm_ip" "$_vbm_cmd"' &&
+     printf '%s\n' "$_tsnc_verify" | grep -Fq '.sync-verify.${_vbm_tag}.manifest' &&
+     printf '%s\n' "$_tsnc_verify" | grep -Fq 'SYNC_BATCH_EXACT_OK|' &&
+     printf '%s\n' "$_tsnc_verify" | grep -Fq 'SYNC_BATCH_EXACT_FAIL|' &&
+     ! printf '%s\n' "$_tsnc_verify" | grep -Fq 'verify_file_on_node'; then
+    pass "sync streams exact staged-file verification through one bounded SSH command"
+  else
+    fail "sync streams exact staged-file verification through one bounded SSH command"
+  fi
+
+  if grep -Fq 'prepare_remote_sync_stage()' "$_tsnc_file" &&
+     grep -Fq 'MERV_SSH_SKIP_PING=1' "$_tsnc_file" &&
+     grep -Fq 'SYNC_STAGE_DIRS_PREPARED=1' "$_tsnc_file" &&
+     printf '%s\n' "$_tsnc_worker" | grep -Fq 'pull_node_hardware "$node_ip" "$node_id" "$SYNC_NODE_ACTIVATION_OUTPUT"' &&
+     grep -Fq 'SYNC_NODE_ACTIVATION_OUTPUT="$_asn_result"' "$_tsnc_file"; then
+    pass "sync combines staging and hardware metadata in bounded verified commands"
+  else
+    fail "sync combines staging and hardware metadata in bounded verified commands"
+  fi
 }
 
 test_apmo_completion_contract() {
@@ -1682,6 +2611,501 @@ test_action_lifecycle_contract() {
   return "$_talc_ok"
 }
 
+test_action_parent_ownership() {
+  selftest_reset || return 1
+  _tapo_lock="$SELFTEST_ROOT/action-parent.lock"
+  _tapo_ok=1
+  unset MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+    MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+  assert_ok "action wrapper acquires a self-owned lock" merv_action_lock_enter "$_tapo_lock"
+  _tapo_mode="$MERV_ACTION_LOCK_MODE"
+  _tapo_nonce="$MERV_ACTION_LOCK_NONCE"
+  _tapo_start="$MERV_ACTION_LOCK_START"
+  [ "$_tapo_mode" = self ] && pass "action wrapper records self ownership" || { fail "action wrapper records self ownership"; _tapo_ok=0; }
+  assert_ok "action wrapper exports exact parent context" merv_action_lock_export_child_context
+  assert_ok "matching parent context is authenticated" merv_action_lock_parent_owned "$_tapo_lock"
+  MERV_ACTION_LOCK_PARENT_PID=999999
+  assert_rc 1 "wrong parent PID is rejected" merv_action_lock_parent_owned "$_tapo_lock"
+  MERV_ACTION_LOCK_PARENT_PID="$$"
+  MERV_ACTION_LOCK_PARENT_START=1
+  assert_rc 1 "wrong parent start is rejected" merv_action_lock_parent_owned "$_tapo_lock"
+  MERV_ACTION_LOCK_PARENT_START="$_tapo_start"
+  MERV_ACTION_LOCK_PARENT_NONCE=wrong-parent-nonce
+  assert_rc 1 "wrong parent nonce is rejected without fallback" merv_action_lock_parent_owned "$_tapo_lock"
+  MERV_ACTION_LOCK_PARENT_NONCE="$_tapo_nonce"
+  mv "$_tapo_lock/owner" "$_tapo_lock/owner.missing"
+  assert_rc 1 "missing parent owner is rejected" merv_action_lock_parent_owned "$_tapo_lock"
+  mv "$_tapo_lock/owner.missing" "$_tapo_lock/owner"
+  printf '%s\n' malformed-owner > "$_tapo_lock/owner"
+  assert_rc 1 "malformed parent owner is rejected" merv_action_lock_parent_owned "$_tapo_lock"
+  merv_owner_v2_write_atomic "$_tapo_lock" "$$" "$_tapo_start" "$_tapo_nonce" 1 1 || { fail "parent owner fixture restore"; _tapo_ok=0; }
+  MERV_ACTION_LOCK_PARENT_START=1
+  assert_rc 1 "PID-reuse parent identity is rejected" merv_action_lock_parent_owned "$_tapo_lock"
+  MERV_ACTION_LOCK_PARENT_START="$_tapo_start"
+  assert_ok "parent-mode leave is a no-op" merv_action_lock_leave "$_tapo_lock" "$_tapo_nonce" "$_tapo_start" parent
+  [ -d "$_tapo_lock" ] && pass "parent-mode leave retains owner record" || { fail "parent-mode leave retains owner record"; _tapo_ok=0; }
+  assert_rc 1 "self release rejects wrong supplied start" merv_action_lock_leave "$_tapo_lock" "$_tapo_nonce" 1 self
+  [ -d "$_tapo_lock" ] && pass "wrong-start release retains owner record" || { fail "wrong-start release retains owner record"; _tapo_ok=0; }
+  assert_ok "self owner releases by exact nonce" merv_action_lock_leave "$_tapo_lock" "$_tapo_nonce" "$_tapo_start" self
+  [ ! -e "$_tapo_lock" ] && pass "action lock is removed after self release" || { fail "action lock is removed after self release"; _tapo_ok=0; }
+  unset MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+    MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+  return "$_tapo_ok"
+}
+
+test_action_lock_failure() {
+  selftest_reset || return 1
+  _talf_root="$SELFTEST_ROOT/action-lock-failure"
+  _talf_ok=1
+  mkdir -p "$_talf_root/state" "$_talf_root/public/actions" || return 1
+  ACTION_ACK_FILE="$_talf_root/public/action_result.json"
+  ACTION_ACK_DIR="$_talf_root/public/actions"
+  ACTION_ACK_INTERNAL_FILE="$_talf_root/state/action_ack.json"
+  ACTION_ACK_PENDING_DIR="$_talf_root/state/pending"
+  MERV_STATE_ROOT="$_talf_root/state"
+  export ACTION_ACK_FILE ACTION_ACK_DIR ACTION_ACK_INTERNAL_FILE ACTION_ACK_PENDING_DIR MERV_STATE_ROOT
+  unset LIB_ACTION_ACK_LOADED
+  . "$MERV_BASE/settings/lib_action_ack.sh" || return 1
+
+  _talf_event="$_talf_root/event.lock"
+  merv_owner_lock_acquire "$_talf_event" 0 0 action-lock-failure || return 1
+  _talf_live_nonce="$MERV_LOCK_NONCE"
+  merv_action_lock_enter "$_talf_event"
+  _talf_rc=$?
+  [ "$_talf_rc" -eq 3 ] && [ "${MERV_ACTION_LOCK_LAST_FAILURE:-}" = action-lock-busy ] &&
+    pass "live event lock is classified busy" || { fail "live event lock is classified busy"; _talf_ok=0; }
+  action_ack_lock_failure live-event sync_vlanmgr "$_talf_rc" event || _talf_ok=0
+  grep -q '"status":"busy"' "$_talf_root/public/actions/live-event.json" 2>/dev/null &&
+    grep -q 'action-lock-busy' "$_talf_root/public/actions/live-event.json" 2>/dev/null &&
+    pass "live event lock publishes one busy terminal result" || { fail "live event lock publishes one busy terminal result"; _talf_ok=0; }
+  merv_owner_lock_release "$_talf_event" "$_talf_live_nonce" || return 1
+
+  _talf_bad="$_talf_root/bad-event.lock"
+  mkdir -p "$_talf_bad"; printf '%s\n' malformed > "$_talf_bad/owner"
+  merv_action_lock_enter "$_talf_bad"
+  _talf_rc=$?
+  [ "$_talf_rc" -eq 4 ] && [ "${MERV_ACTION_LOCK_LAST_FAILURE:-}" = action-lock-owner-unknown ] &&
+    pass "malformed event lock is classified owner-unknown" || { fail "malformed event lock is classified owner-unknown"; _talf_ok=0; }
+  action_ack_lock_failure bad-event sync_vlanmgr "$_talf_rc" event || _talf_ok=0
+  grep -q '"status":"error"' "$_talf_root/public/actions/bad-event.json" 2>/dev/null &&
+    grep -q 'action-lock-owner-unknown' "$_talf_root/public/actions/bad-event.json" 2>/dev/null &&
+    pass "malformed event lock publishes one owner-unknown terminal result" || { fail "malformed event lock terminal result"; _talf_ok=0; }
+
+  _talf_global="$_talf_root/global.lock"
+  merv_owner_lock_acquire "$_talf_global" 0 0 action-lock-failure || return 1
+  _talf_live_nonce="$MERV_LOCK_NONCE"
+  merv_action_lock_enter "$_talf_global"
+  _talf_rc=$?
+  action_ack_lock_failure live-global execute_vlanmgr "$_talf_rc" global || _talf_ok=0
+  [ "$_talf_rc" -eq 3 ] && grep -q 'action-lock-busy' "$_talf_root/public/actions/live-global.json" 2>/dev/null &&
+    pass "live global lock is classified busy" || { fail "live global lock is classified busy"; _talf_ok=0; }
+  merv_owner_lock_release "$_talf_global" "$_talf_live_nonce" || return 1
+
+  _talf_bad_global="$_talf_root/bad-global.lock"
+  mkdir -p "$_talf_bad_global"; printf '%s\n' malformed > "$_talf_bad_global/owner"
+  merv_action_lock_enter "$_talf_bad_global"
+  _talf_rc=$?
+  action_ack_lock_failure bad-global execute_vlanmgr "$_talf_rc" global || _talf_ok=0
+  [ "$_talf_rc" -eq 4 ] && grep -q 'action-lock-owner-unknown' "$_talf_root/public/actions/bad-global.json" 2>/dev/null &&
+    pass "malformed global lock is classified owner-unknown" || { fail "malformed global lock is classified owner-unknown"; _talf_ok=0; }
+
+  _talf_parent="$_talf_root/parent.lock"
+  merv_owner_lock_acquire "$_talf_parent" 0 0 action-lock-failure || return 1
+  _talf_live_nonce="$MERV_LOCK_NONCE"; _talf_live_start="$MERV_LOCK_START"
+  MERV_ACTION_LOCK_PARENT_HELD=1 MERV_ACTION_LOCK_PARENT_PID="$$" \
+    MERV_ACTION_LOCK_PARENT_START=1 MERV_ACTION_LOCK_PARENT_NONCE="$_talf_live_nonce"
+  merv_action_lock_enter "$_talf_parent"
+  _talf_rc=$?
+  [ "$_talf_rc" -eq 4 ] && [ "${MERV_ACTION_LOCK_LAST_FAILURE:-}" = action-lock-parent-invalid ] &&
+    pass "invalid parent is classified separately" || { fail "invalid parent is classified separately"; _talf_ok=0; }
+  action_ack_lock_failure invalid-parent execute_vlanmgr "$_talf_rc" global || _talf_ok=0
+  grep -q 'action-lock-parent-invalid' "$_talf_root/public/actions/invalid-parent.json" 2>/dev/null &&
+    pass "invalid parent publishes one terminal error" || { fail "invalid parent terminal error"; _talf_ok=0; }
+  unset MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+  merv_owner_lock_release "$_talf_parent" "$_talf_live_nonce" || return 1
+
+  action_ack_stage_ok staged-save save_vlanmgr '{"local_saved":"1"}' 'Settings saved.' '[]' || _talf_ok=0
+  action_ack_discard_staged staged-save || _talf_ok=0
+  action_ack_error staged-save save_vlanmgr '{"local_saved":"1"}' 'Cleanup failed.' '["action-lock-cleanup-failed"]' action-lock-cleanup-failed || _talf_ok=0
+  [ ! -e "$_talf_root/state/pending/staged-save.json" ] &&
+    grep -q '"status":"error"' "$_talf_root/public/actions/staged-save.json" 2>/dev/null &&
+    ! grep -q '"status":"ok"' "$_talf_root/public/actions/staged-save.json" 2>/dev/null &&
+    pass "staged Save success is discarded after cleanup failure" || { fail "staged Save success is discarded after cleanup failure"; _talf_ok=0; }
+
+  grep -q 'return 75' "$MERV_BASE/functions/service-event-handler.sh" &&
+    grep -q 'action-lock-owner-unknown' "$MERV_BASE/settings/lib_action_ack.sh" &&
+    pass "lock refusal paths return nonzero and expose stable classifications" || { fail "lock refusal paths return nonzero and expose stable classifications"; _talf_ok=0; }
+  unset ACTION_ACK_FILE ACTION_ACK_DIR ACTION_ACK_INTERNAL_FILE ACTION_ACK_PENDING_DIR MERV_STATE_ROOT
+  return "$_talf_ok"
+}
+
+test_direct_manager_save_overlap() {
+  selftest_reset || return 1
+  _tdm_lock="$SELFTEST_ROOT/direct-manager-save.lock"
+  _tdm_manager="$SELFTEST_ROOT/direct-manager.sh"
+  _tdm_save="$SELFTEST_ROOT/direct-save.sh"
+  _tdm_manager_ready="$SELFTEST_ROOT/direct-manager.ready"
+  _tdm_save_ready="$SELFTEST_ROOT/direct-save.ready"
+  _tdm_ok=1
+  if grep -Fq 'merv_action_lock_enter' "$MERV_BASE/functions/mervlan_manager.sh" &&
+     grep -Fq 'merv_action_lock_enter' "$MERV_BASE/functions/save_settings.sh"; then
+    pass "direct manager and Save participate in the global action lock"
+  else
+    fail "direct manager and Save participate in the global action lock"
+    _tdm_ok=0
+  fi
+  cat > "$_tdm_manager" <<'ACTION_OVERLAP'
+#!/bin/sh
+. "$MERV_BASE/settings/lib_action_lock.sh" || exit 2
+merv_action_lock_enter "$1" || exit $?
+printf '%s\n' ready > "$2"
+sleep 3
+merv_action_lock_leave "$1" "$MERV_ACTION_LOCK_NONCE" "$MERV_ACTION_LOCK_START" "$MERV_ACTION_LOCK_MODE"
+ACTION_OVERLAP
+  cp "$_tdm_manager" "$_tdm_save" || return 1
+  chmod 700 "$_tdm_manager" "$_tdm_save" || return 1
+  rm -f "$_tdm_manager_ready" "$_tdm_save_ready"
+  MERV_BASE="$MERV_BASE" MERV_ACTION_LOCK_PARENT_HELD=0 "$_tdm_manager" "$_tdm_lock" "$_tdm_manager_ready" &
+  _tdm_manager_pid=$!
+  _tdm_wait=0
+  while [ ! -f "$_tdm_manager_ready" ] && [ "$_tdm_wait" -lt 30 ]; do sleep 1; _tdm_wait=$((_tdm_wait + 1)); done
+  if [ ! -f "$_tdm_manager_ready" ]; then
+    fail "direct manager overlap fixture became ready"
+    _tdm_ok=0
+  else
+    MERV_BASE="$MERV_BASE" MERV_ACTION_LOCK_PARENT_HELD=0 "$_tdm_save" "$_tdm_lock" "$_tdm_save_ready"
+    _tdm_rc=$?
+    [ "$_tdm_rc" -eq 3 ] && pass "direct Save overlap sees manager owner busy" || { fail "direct Save overlap sees manager owner busy (rc=$_tdm_rc)"; _tdm_ok=0; }
+    [ ! -f "$_tdm_save_ready" ] && pass "busy Save does not publish a child-ready marker" || { fail "busy Save does not publish a child-ready marker"; _tdm_ok=0; }
+  fi
+  wait "$_tdm_manager_pid" 2>/dev/null || :
+  MERV_BASE="$MERV_BASE" MERV_ACTION_LOCK_PARENT_HELD=0 "$_tdm_save" "$_tdm_lock" "$_tdm_save_ready"
+  _tdm_rc=$?
+  [ "$_tdm_rc" -eq 0 ] && pass "direct Save enters after manager releases" || { fail "direct Save enters after manager releases (rc=$_tdm_rc)"; _tdm_ok=0; }
+  return "$_tdm_ok"
+}
+
+test_update_lock_ownership() {
+  _tulo_update="$MERV_BASE/functions/update_mervlan.sh"
+  _tulo_handler="$MERV_BASE/functions/service-event-handler.sh"
+  _tulo_lock="$SELFTEST_ROOT/update-parent-action.lock"
+  _tulo_v2_lock="$SELFTEST_ROOT/update-v2.lock"
+  _tulo_ok=1
+
+  if grep -Fq 'merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"' "$_tulo_update" &&
+     grep -Fq 'merv_action_lock_export_child_context' "$_tulo_handler" &&
+     grep -Fq 'MERV_ACTION_LOCK_PARENT_NONCE' "$_tulo_handler"; then
+    pass "Update ignores only the dispatcher-owned global action lock"
+  else
+    fail "Update ignores only the dispatcher-owned global action lock"
+    _tulo_ok=0
+  fi
+
+  if (
+    MERV_ACTION_LOCK_PATH="$_tulo_lock"
+    . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+    merv_action_lock_enter "$_tulo_lock" || exit 1
+    _tulo_nonce="$MERV_ACTION_LOCK_NONCE"
+    _tulo_start="$MERV_ACTION_LOCK_START"
+    merv_action_lock_export_child_context || exit 1
+    merv_action_lock_parent_owned "$_tulo_lock" || exit 1
+    MERV_ACTION_LOCK_PARENT_NONCE=wrong
+    if merv_action_lock_parent_owned "$_tulo_lock"; then exit 1; fi
+    MERV_ACTION_LOCK_PARENT_NONCE="$_tulo_nonce"
+    : > "$_tulo_lock/.owner.tmp.crash" || exit 1
+    rm -f "$_tulo_lock/.owner.tmp.crash" || exit 1
+    merv_action_lock_leave "$_tulo_lock" "$_tulo_nonce" "$_tulo_start" self || exit 1
+    [ ! -e "$_tulo_lock" ] || exit 1
+  ); then
+    pass "Update parent-lock exemption requires matching identity and nonce"
+  else
+    fail "Update parent-lock exemption requires matching identity and nonce"
+    _tulo_ok=0
+  fi
+
+  if (
+    merv_owner_lock_acquire "$_tulo_v2_lock" 60 1 update-v2-test || exit 1
+    _tulo_v2_nonce="$MERV_LOCK_NONCE"
+    : > "$_tulo_v2_lock/.owner.tmp.crash" || exit 1
+    rm -f "$_tulo_v2_lock/.owner.tmp.crash" || exit 1
+    merv_owner_lock_release "$_tulo_v2_lock" "$_tulo_v2_nonce" || exit 1
+    [ ! -e "$_tulo_v2_lock" ]
+  ); then
+    pass "Owner-lock release removes its validated owner record"
+  else
+    fail "Owner-lock release removes its validated owner record"
+    _tulo_ok=0
+  fi
+
+  return "$_tulo_ok"
+}
+
+test_update_exclusivity() {
+  _tue_root="$SELFTEST_ROOT/update-exclusivity"
+  _tue_ok=1
+  mkdir -p "$_tue_root" || return 1
+  MERV_STATE_ROOT="$_tue_root/state"
+  MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+  MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
+  MERV_UPDATE_MAINTENANCE_LOCK="$_tue_root/maintenance.lock"
+  export MERV_STATE_ROOT MERV_UPDATE_JOURNAL MERV_UPDATE_QUIESCE_FILE MERV_UPDATE_MAINTENANCE_LOCK
+  [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" || return 1
+
+  merv_update_journal_write update-exclusive quiescing ref 0 0 1 0 0 test || {
+    fail "update exclusivity journal fixture"; return 1;
+  }
+  merv_update_quiesce_begin update-exclusive || { fail "update exclusivity quiesce fixture"; return 1; }
+  merv_owner_lock_acquire "$MERV_UPDATE_MAINTENANCE_LOCK" 60 1 update-exclusive || {
+    fail "update exclusivity maintenance fixture"; return 1;
+  }
+  _tue_nonce="$MERV_LOCK_NONCE"; _tue_start="$MERV_LOCK_START"
+
+  unset MERV_UPDATE_OWNER_PID MERV_UPDATE_OWNER_START MERV_UPDATE_OWNER_NONCE
+  MERV_UPDATE_OWNER=1
+  if ! merv_update_owner_context_valid && merv_update_mutation_blocked; then
+    pass "bare Update owner flag is rejected and remains blocked"
+  else
+    fail "bare Update owner flag is rejected and remains blocked"; _tue_ok=0
+  fi
+  MERV_UPDATE_OWNER_PID="$$"; MERV_UPDATE_OWNER_START=wrong; MERV_UPDATE_OWNER_NONCE="$_tue_nonce"
+  if ! merv_update_owner_context_valid && merv_update_mutation_blocked; then
+    pass "wrong Update owner start is rejected"
+  else
+    fail "wrong Update owner start is rejected"; _tue_ok=0
+  fi
+  MERV_UPDATE_OWNER_START="$_tue_start"; MERV_UPDATE_OWNER_NONCE=wrong
+  if ! merv_update_owner_context_valid && merv_update_mutation_blocked; then
+    pass "wrong Update owner nonce is rejected"
+  else
+    fail "wrong Update owner nonce is rejected"; _tue_ok=0
+  fi
+  MERV_UPDATE_OWNER_PID="$$"; MERV_UPDATE_OWNER_START="$_tue_start"; MERV_UPDATE_OWNER_NONCE="$_tue_nonce"
+  if merv_update_owner_context_valid && ! merv_update_mutation_blocked; then
+    pass "valid Update child context is accepted"
+  else
+    fail "valid Update child context is accepted"; _tue_ok=0
+  fi
+  MERV_MAINTENANCE_SYNC=1; MERV_UPDATE_OWNER_NONCE=wrong
+  if ! merv_update_maintenance_sync_context_valid; then
+    pass "bare maintenance Sync intent is rejected"
+  else
+    fail "bare maintenance Sync intent is rejected"; _tue_ok=0
+  fi
+  MERV_UPDATE_OWNER_NONCE="$_tue_nonce"
+  if merv_update_maintenance_sync_context_valid; then
+    pass "authenticated maintenance Sync context is accepted"
+  else
+    fail "authenticated maintenance Sync context is accepted"; _tue_ok=0
+  fi
+  merv_owner_lock_release "$MERV_UPDATE_MAINTENANCE_LOCK" "$_tue_nonce" || {
+    fail "update exclusivity maintenance fixture release"; return 1;
+  }
+  unset MERV_UPDATE_OWNER MERV_UPDATE_OWNER_PID MERV_UPDATE_OWNER_START MERV_UPDATE_OWNER_NONCE MERV_MAINTENANCE_SYNC
+  _tue_parent_start=$(merv_identity_current_start 2>/dev/null || printf '')
+  MERV_UPDATE_RECOVERY=1 MERV_UPDATE_RECOVERY_RUN_ID=update-exclusive \
+    MERV_UPDATE_RECOVERY_PARENT_PID="$$" MERV_UPDATE_RECOVERY_PARENT_START="$_tue_parent_start"
+  if merv_update_recovery_context_valid; then
+    pass "matching boot recovery context is accepted"
+  else
+    fail "matching boot recovery context is accepted"; _tue_ok=0
+  fi
+  MERV_UPDATE_RECOVERY_RUN_ID=wrong
+  if ! merv_update_recovery_context_valid && merv_update_mutation_blocked; then
+    pass "mismatched recovery remains blocked during quiesce"
+  else
+    fail "mismatched recovery remains blocked during quiesce"; _tue_ok=0
+  fi
+  unset MERV_UPDATE_RECOVERY MERV_UPDATE_RECOVERY_RUN_ID MERV_UPDATE_RECOVERY_PARENT_PID MERV_UPDATE_RECOVERY_PARENT_START
+
+  if grep -n 'OBS_ACTION=' "$MERV_BASE/functions/post_apply_worker.sh" >/dev/null 2>&1 &&
+     grep -n 'merv_update_mutation_blocked' "$MERV_BASE/functions/post_apply_worker.sh" >/dev/null 2>&1 &&
+     grep -n 'OBS_SR=$((OBS_SR + 1))' "$MERV_BASE/functions/post_apply_worker.sh" >/dev/null 2>&1 &&
+     grep -Fq 'merv_update_maintenance_sync_context_valid' "$MERV_BASE/functions/sync_nodes.sh" &&
+     grep -Fq 'merv_update_mutation_blocked' "$MERV_BASE/functions/collect_clients.sh" &&
+     grep -Fq 'merv_update_mutation_blocked' "$MERV_BASE/functions/dropbear_sshkey_gen.sh"; then
+    pass "Update gates precede observation generation and direct mutations"
+  else
+    fail "Update gates precede observation generation and direct mutations"; _tue_ok=0
+  fi
+  merv_update_quiesce_clear || { fail "update exclusivity quiesce cleanup"; _tue_ok=0; }
+  merv_update_journal_clear || { fail "update exclusivity journal cleanup"; _tue_ok=0; }
+  return "$_tue_ok"
+}
+
+test_payload_contract() {
+  _tpc_update="$MERV_BASE/functions/update_mervlan.sh"
+  _tpc_install="$MERV_BASE/install.sh"
+  _tpc_sync="$MERV_BASE/functions/sync_nodes.sh"
+  _tpc_ok=1
+  if grep -Fq 'update_filter_source_tree "$topdir"' "$_tpc_update" &&
+     grep -Fq 'install_filter_source_tree "$topdir" "$work_dir"' "$_tpc_install" &&
+     grep -Fq 'UPDATE_BACKUP_SOURCE_DIR' "$_tpc_update"; then
+    pass "Install and Update filter source payloads before persistent staging"
+  else
+    fail "Install and Update filter source payloads before persistent staging"
+    _tpc_ok=0
+  fi
+  if grep -Fq 'dev-tools/tests/router/mervlan_selftest.sh' "$_tpc_update" &&
+     grep -Fq 'dev-tools/safety/mervlan_live_test_guard.sh' "$_tpc_update" &&
+     grep -Fq 'dev-tools/tests/router/mervlan_selftest.sh' "$_tpc_install" &&
+     grep -Fq 'dev-tools/safety/mervlan_live_test_guard.sh' "$_tpc_install" &&
+     grep -Fq 'dev-tools/tests/router/mervlan_selftest.sh' "$_tpc_sync" &&
+     grep -Fq 'dev-tools/safety/mervlan_live_test_guard.sh' "$_tpc_sync"; then
+    pass "Only approved executable router development tools are retained"
+  else
+    fail "Only approved executable router development tools are retained"
+    _tpc_ok=0
+  fi
+  if grep -Fq 'settings/lib_owner_lock.sh' "$_tpc_sync" &&
+     grep -Fq 'settings/lib_owner_lock.sh' "$_tpc_update" &&
+     grep -Fq 'settings/lib_owner_lock.sh' "$_tpc_install" &&
+     grep -Fq 'settings/lib_owner_lock.sh' "$SELFTEST_SCRIPT" &&
+     grep -A25 'FILES_TO_COPY_CHMOD_644=' "$_tpc_sync" | grep -Fq 'settings/lib_owner_lock.sh' &&
+     grep -A20 'for rel_path in' "$_tpc_update" | grep -Fq 'settings/lib_owner_lock.sh'; then
+    pass "Full runtime manifests include lib_owner_lock.sh"
+  else
+    fail "Full runtime manifests include lib_owner_lock.sh"
+    _tpc_ok=0
+  fi
+  if grep -Fq 'FILES_TO_COPY="settings/settings.json"' "$_tpc_sync" &&
+     grep -Fq 'FILES_TO_COPY_CHMOD_644="settings/settings.json"' "$_tpc_sync"; then
+    pass "Settings-only Sync Nodes remains limited to settings.json"
+  else
+    fail "Settings-only Sync Nodes remains limited to settings.json"
+    _tpc_ok=0
+  fi
+  return "$_tpc_ok"
+}
+
+test_update_download_retry() {
+  _tudr_root="$SELFTEST_ROOT/update-download-retry"
+  _tudr_update="$MERV_BASE/functions/update_mervlan.sh"
+  _tudr_helper="$_tudr_root/download-helper.sh"
+  _tudr_curl="$_tudr_root/fake-curl.sh"
+  _tudr_ok=1
+  rm -rf "$_tudr_root" 2>/dev/null || return 1
+  mkdir -p "$_tudr_root" || return 1
+  sed -n '/^download_update_archive() {/,/^}/p' "$_tudr_update" > "$_tudr_helper" || return 1
+  [ -s "$_tudr_helper" ] || return 1
+
+  if grep -Fq '"$CURL_BIN" -fsL --connect-timeout 15 --max-time 300' "$_tudr_helper" &&
+     ! grep -Fq -- '--retry' "$_tudr_helper" &&
+     grep -Fq 'download_update_archive "$GITHUB_URL" "$ARCHIVE"' "$_tudr_update" &&
+     grep -Fq 'fail_update downloading "Download failed after 5 attempts"' "$_tudr_update"; then
+    pass "update download helper owns retries and preserves download failure lifecycle"
+  else
+    fail "update download helper owns retries and preserves download failure lifecycle"
+    _tudr_ok=0
+  fi
+
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' 'count=$(cat "$TUDR_CURL_COUNT" 2>/dev/null || printf 0)'
+    printf '%s\n' 'count=$((count + 1))'
+    printf '%s\n' 'printf "%s\\n" "$count" > "$TUDR_CURL_COUNT"'
+    printf '%s\n' 'out=""'
+    printf '%s\n' 'while [ "$#" -gt 0 ]; do'
+    printf '%s\n' '  case "$1" in -o) shift; out="${1:-}" ;; esac'
+    printf '%s\n' '  shift'
+    printf '%s\n' 'done'
+    printf '%s\n' '[ -n "$out" ] || exit 64'
+    printf '%s\n' 'outcome=$(sed -n "${count}p" "$TUDR_CURL_OUTCOMES")'
+    printf '%s\n' 'case "$outcome" in'
+    printf '%s\n' '  success) printf "archive-%s\\n" "$count" > "$out"; exit 0 ;;'
+    printf '%s\n' '  empty) : > "$out"; exit 0 ;;'
+    printf '%s\n' '  partial-fail) printf "partial-%s\\n" "$count" > "$out"; exit 6 ;;'
+    printf '%s\n' '  fail) exit 6 ;;'
+    printf '%s\n' '  *) exit 64 ;;'
+    printf '%s\n' 'esac'
+  } > "$_tudr_curl" || return 1
+  chmod 700 "$_tudr_curl" || return 1
+
+  if (
+    . "$_tudr_helper" || exit 1
+    info() { printf 'INFO: %s\n' "$*" >> "$TUDR_LOG"; }
+    warn() { printf 'WARN: %s\n' "$*" >> "$TUDR_LOG"; }
+    error() { printf 'ERROR: %s\n' "$*" >> "$TUDR_LOG"; }
+    sleep() { printf '%s\n' "$1" >> "$TUDR_SLEEPS"; }
+    mv() {
+      [ "${TUDR_MV_FAIL:-0}" = 1 ] && return 1
+      /bin/mv "$@"
+    }
+    tudr_run_case() {
+      TUDR_CASE="$1"
+      shift
+      TUDR_CASE_ROOT="$_tudr_root/$TUDR_CASE"
+      rm -rf "$TUDR_CASE_ROOT" || return 1
+      mkdir -p "$TUDR_CASE_ROOT" || return 1
+      TUDR_CURL_OUTCOMES="$TUDR_CASE_ROOT/outcomes"
+      TUDR_CURL_COUNT="$TUDR_CASE_ROOT/curl.count"
+      TUDR_LOG="$TUDR_CASE_ROOT/log"
+      TUDR_SLEEPS="$TUDR_CASE_ROOT/sleeps"
+      TUDR_MV_FAIL="${TUDR_FORCE_MV_FAILURE:-0}"
+      export TUDR_CURL_OUTCOMES TUDR_CURL_COUNT
+      printf '%s\n' "$@" > "$TUDR_CURL_OUTCOMES" || return 1
+      : > "$TUDR_CURL_COUNT" || return 1
+      : > "$TUDR_LOG" || return 1
+      : > "$TUDR_SLEEPS" || return 1
+      CURL_BIN="$_tudr_curl"
+      download_update_archive 'https://example.invalid/mervlan.tar.gz' "$TUDR_CASE_ROOT/archive"
+      TUDR_CASE_RC=$?
+      return 0
+    }
+    tudr_expect_sleeps() {
+      printf '%s\n' "$@" > "$TUDR_CASE_ROOT/expected-sleeps" || return 1
+      cmp -s "$TUDR_CASE_ROOT/expected-sleeps" "$TUDR_SLEEPS"
+    }
+
+    tudr_run_case immediate success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 1 ] &&
+      [ -s "$TUDR_CASE_ROOT/archive" ] && [ ! -s "$TUDR_SLEEPS" ] &&
+      grep -Fq 'Download completed successfully on attempt 1/5' "$TUDR_LOG" || exit 1
+
+    tudr_run_case transient fail fail success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 3 ] &&
+      tudr_expect_sleeps 1 2 &&
+      grep -Fq 'Download attempt 1/5 failed (curl rc=6)' "$TUDR_LOG" &&
+      grep -Fq 'Download completed successfully on attempt 3/5' "$TUDR_LOG" || exit 1
+
+    tudr_run_case fifth-success fail fail fail fail success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 5 ] &&
+      tudr_expect_sleeps 1 2 4 8 &&
+      [ "$(awk '{sum += $1} END {print sum+0}' "$TUDR_SLEEPS")" = 15 ] &&
+      grep -Fq 'Download completed successfully on attempt 5/5' "$TUDR_LOG" || exit 1
+
+    tudr_run_case exhausted fail fail fail fail fail || exit 1
+    [ "$TUDR_CASE_RC" -ne 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 5 ] &&
+      tudr_expect_sleeps 1 2 4 8 &&
+      [ ! -e "$TUDR_CASE_ROOT/archive" ] && [ ! -e "$TUDR_CASE_ROOT/archive.part" ] &&
+      grep -Fq 'Download failed after 5 attempts (curl rc=6)' "$TUDR_LOG" || exit 1
+
+    tudr_run_case partial-failure partial-fail success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 2 ] &&
+      [ "$(cat "$TUDR_CASE_ROOT/archive")" = 'archive-2' ] &&
+      [ ! -e "$TUDR_CASE_ROOT/archive.part" ] || exit 1
+
+    tudr_run_case empty-success empty success || exit 1
+    [ "$TUDR_CASE_RC" -eq 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 2 ] &&
+      tudr_expect_sleeps 1 && [ -s "$TUDR_CASE_ROOT/archive" ] &&
+      [ ! -e "$TUDR_CASE_ROOT/archive.part" ] || exit 1
+
+    TUDR_FORCE_MV_FAILURE=1
+    tudr_run_case publish-failure success || exit 1
+    TUDR_FORCE_MV_FAILURE=0
+    [ "$TUDR_CASE_RC" -ne 0 ] && [ "$(cat "$TUDR_CURL_COUNT")" = 1 ] &&
+      [ ! -e "$TUDR_CASE_ROOT/archive" ] && [ ! -e "$TUDR_CASE_ROOT/archive.part" ] &&
+      grep -Fq 'could not publish the completed archive' "$TUDR_LOG" || exit 1
+    exit 0
+  ); then
+    pass "update download retry contract covers success, retries, exhaustion, partials, empty output, and publish failure"
+  else
+    fail "update download retry contract covers success, retries, exhaustion, partials, empty output, and publish failure"
+    _tudr_ok=0
+  fi
+  rm -rf "$_tudr_root" 2>/dev/null || _tudr_ok=0
+  return "$_tudr_ok"
+}
+
 test_failure_propagation_contract() {
   _tfpc_ui="$MERV_BASE/www/index.html"
   _tfpc_handler="$MERV_BASE/functions/service-event-handler.sh"
@@ -1728,6 +3152,306 @@ test_failure_propagation_contract() {
   return "$_tfpc_ok"
 }
 
+test_ssh_outbound_contract() {
+  _tsoc_ssh="$MERV_BASE/settings/lib_ssh.sh"
+  _tsoc_probe="$MERV_BASE/functions/ssh_hostkey_probe.sh"
+  _tsoc_mac="$MERV_BASE/settings/mac_shield_snapshot.sh"
+  _tsoc_ok=1
+
+  # Commands and both stream variants must share the same verified precheck and
+  # private known_hosts hand-off.  This is the transport boundary for every
+  # router-to-node action; individual action code must never call dbclient.
+  if grep -Fq 'merv_ssh_require_verified_node' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_precheck "$_node_num" "$_node_ip"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_prepare_known_host "$_node_num" "$_node_ip" "$_port" "$_node_mac"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_precheck "$_mssf_node" "$_mssf_ip"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_prepare_known_host "$_mssf_node" "$_mssf_ip" "$_mssf_port" "$_mssf_mac"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_precheck "$_msss_node" "$_msss_ip"' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_prepare_known_host "$_msss_node" "$_msss_ip" "$_msss_port" "$_msss_mac"' "$_tsoc_ssh" &&
+     grep -Fq 'MERV_SSH_KNOWN_HOME=' "$_tsoc_ssh" &&
+     grep -Fq 'merv_ssh_release_known_host' "$_tsoc_ssh"; then
+    pass "all outbound SSH transports require a pinned host-key precheck"
+  else
+    fail "all outbound SSH transports require a pinned host-key precheck"
+    _tsoc_ok=0
+  fi
+
+  # The only runtime client references are the common wrapper, the isolated
+  # first-contact probe, and MAC Shield's capability check.  A new action that
+  # invokes the client directly must make this test fail until it is routed
+  # through lib_ssh.sh instead.
+  _tsoc_client_refs=$(grep -rl '\${MERV_SSH_CLIENT:-dbclient}' \
+    "$MERV_BASE/functions" "$MERV_BASE/settings" 2>/dev/null || :)
+  _tsoc_bad_refs=""
+  for _tsoc_file in $_tsoc_client_refs; do
+    case "$_tsoc_file" in
+      "$_tsoc_ssh"|"$_tsoc_probe"|"$_tsoc_mac") ;;
+      *) _tsoc_bad_refs="$_tsoc_bad_refs ${_tsoc_file##*/}" ;;
+    esac
+  done
+  _tsoc_literal=$(grep -R -n -E '^[[:space:]]*(if[[:space:]]+|then[[:space:]]+|else[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)?dbclient[[:space:]]' \
+    "$MERV_BASE/functions" "$MERV_BASE/settings" 2>/dev/null || :)
+  if [ -z "$_tsoc_bad_refs" ] && [ -z "$_tsoc_literal" ] &&
+     grep -Fq 'merv_has "${MERV_SSH_CLIENT:-dbclient}"' "$_tsoc_mac"; then
+    pass "all action paths use the shared SSH client wrapper"
+  else
+    fail "all action paths use the shared SSH client wrapper"
+    _tsoc_ok=0
+  fi
+
+  # -y is confined to a no-command, temporary-home host-key discovery probe;
+  # normal action traffic consumes the pin through lib_ssh.sh.
+  if grep -Fq '"$_shkp_client_path" -y -N -p' "$_tsoc_probe" &&
+     ! grep -E -q '(^|[[:space:]])-y([[:space:]]|$)' "$_tsoc_ssh"; then
+    pass "first-contact SSH acceptance is isolated from action traffic"
+  else
+    fail "first-contact SSH acceptance is isolated from action traffic"
+    _tsoc_ok=0
+  fi
+
+  _tsoc_preflight_ok=1
+  for _tsoc_check in \
+    'functions/collect_clients.sh|merv_ssh_preflight_node_set' \
+    'functions/execute_nodes.sh|merv_ssh_preflight_node_set' \
+    'functions/sync_nodes.sh|merv_ssh_preflight_node_set' \
+    'functions/mervlan_boot.sh|merv_ssh_preflight_configured_nodes' \
+    'functions/mervlan_backup.sh|merv_ssh_preflight_settings_file' \
+    'functions/update_mervlan.sh|merv_ssh_preflight_settings_file' \
+    'uninstall.sh|merv_ssh_preflight_node_set' \
+    'settings/mac_shield_snapshot.sh|merv_ssh_preflight_node_lines'; do
+    _tsoc_path=${_tsoc_check%%|*}
+    _tsoc_need=${_tsoc_check#*|}
+    if [ ! -f "$MERV_BASE/$_tsoc_path" ] || ! grep -Fq "$_tsoc_need" "$MERV_BASE/$_tsoc_path"; then
+      _tsoc_preflight_ok=0
+    fi
+  done
+  if [ "$_tsoc_preflight_ok" = 1 ]; then
+    pass "every node-changing SSH action preflights the complete configured set"
+  else
+    fail "every node-changing SSH action preflights the complete configured set"
+    _tsoc_ok=0
+  fi
+
+  _tsoc_target_settings="$SELFTEST_ROOT/ssh-preflight-target.json"
+  {
+    printf '%s\n' '{'
+    printf '%s\n' '  "NODE1": "192.0.2.1"'
+    printf '%s\n' '}'
+  } > "$_tsoc_target_settings" || return 1
+  if (
+    unset LIB_SSH_TRUST_LOADED
+    MERV_SSH_TRUST_TEST_MODE=1
+    export MERV_SSH_TRUST_TEST_MODE
+    . "$MERV_BASE/settings/lib_json.sh" || exit 1
+    . "$MERV_BASE/settings/lib_ssh_trust.sh" || exit 1
+    # var_settings.sh deliberately makes this read-only on the router.  The
+    # staged preflight must pass its file explicitly instead of rebinding it.
+    readonly SETTINGS_FILE
+    merv_ssh_preflight_node_lines() {
+      [ "$1" = '1 192.0.2.1' ] && [ "$2" = "$_tsoc_target_settings" ]
+    }
+    merv_ssh_preflight_settings_file "$_tsoc_target_settings"
+  ); then
+    pass "staged SSH preflight works when SETTINGS_FILE is read-only"
+  else
+    fail "staged SSH preflight works when SETTINGS_FILE is read-only"
+    _tsoc_ok=0
+  fi
+  rm -f "$_tsoc_target_settings" 2>/dev/null || return 1
+
+  return "$_tsoc_ok"
+}
+
+test_ssh_trust_contract() {
+  _tst_ui="$MERV_BASE/www/index.html"
+  _tst_handler="$MERV_BASE/functions/service-event-handler.sh"
+  _tst_action="$MERV_BASE/functions/ssh_trust_action.sh"
+  _tst_ack="$MERV_BASE/settings/lib_action_ack.sh"
+  _tst_parent="$MERV_BASE/mervlan.asp"
+  _tst_collect="$MERV_BASE/functions/collect_clients.sh"
+  _tst_worker="$MERV_BASE/functions/post_apply_worker.sh"
+  _tst_sync="$MERV_BASE/functions/sync_nodes.sh"
+  _tst_ssh="$MERV_BASE/settings/lib_ssh.sh"
+  _tst_boot="$MERV_BASE/functions/mervlan_boot.sh"
+  _tst_lib="$MERV_BASE/settings/lib_mervqt.sh"
+  _tst_ok=1
+
+  if grep -q 'sshTrustRegistryTab' "$_tst_ui" &&
+     grep -q 'needs_verification' "$_tst_ui" &&
+     grep -q 'revokeSshTrustNode' "$_tst_ui" &&
+     grep -q 'sshTrustRegistrySelectedSlots' "$_tst_ui" &&
+     grep -q 'Verify selected nodes' "$_tst_ui" &&
+     grep -Fq 'openSshTrustDecision' "$_tst_ui" &&
+     grep -Fq 'sshTrustOverlay' "$_tst_ui" &&
+     grep -Fq 'sshTrustPausedTray' "$_tst_ui" &&
+     grep -Fq 'sshTrustModalCountdown' "$_tst_ui" &&
+     grep -Fq 'MerVLAN loading paused' "$_tst_ui" &&
+     grep -Fq 'submitSshTrustAbort' "$_tst_ui" &&
+     grep -Fq 'pauseForSshTrust' "$_tst_ui" &&
+     grep -Fq 'waitsForSshTrustAck' "$_tst_ui" &&
+     grep -Fq 'sshTrustDecisionSelectedChallengeIds' "$_tst_ui" &&
+     grep -Fq 'Auto-abort in' "$_tst_ui" &&
+     grep -Fq '#sshTrustModal {' "$_tst_ui" &&
+     grep -Fq 'max-height: calc(100vh - 28px);' "$_tst_ui" &&
+     grep -Fq 'formPane.appendChild(overlay)' "$_tst_ui" &&
+     grep -Fq 'form-box--main.ssid-assign-view .ssh-trust-overlay' "$_tst_ui" &&
+     grep -Fq 'anchorModalToForm(tray);' "$_tst_ui" &&
+     grep -Fq 'anchorModalToForm(modal);' "$_tst_ui" &&
+     grep -Fq 'ssh-trust-paused-tray.modal--anchored' "$_tst_ui" &&
+     ! grep -Fq "submitSshTrustDecision('reject')" "$_tst_ui" &&
+     ! grep -Fq 'localSshKeyPairReady' "$_tst_ui"; then
+    pass "SSH UI scopes trust review to the addon, supports Assign view, and exposes selected trust, pause, countdown, abort, and revoke controls"
+  else
+    fail "SSH UI exposes discovery, selected trust, pause, countdown, abort, and revoke controls"
+    _tst_ok=0
+  fi
+
+  if grep -q 'sshtruststatus_vlanmgr_pgt_\*' "$_tst_handler" &&
+     grep -q 'get_ssh_trust_probe_node_slots' "$_tst_handler" &&
+     grep -q 'sshtrustprobe_vlanmgr_pgt_\*_nsl_\*' "$_tst_handler" &&
+     grep -Fq "tr '.' ' '" "$_tst_handler" &&
+     grep -Fq 'MERV_SSH_TRUST_NODE_SLOTS' "$_tst_handler" &&
+     grep -q 'sshtrustrevoke_vlanmgr_vrt_\*' "$_tst_handler" &&
+     grep -q 'sshtrustabort_vlanmgr_vrt_\*' "$_tst_handler" &&
+     grep -Fq 'sshtrustabort_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN=' "$_tst_handler" &&
+     grep -q 'dispatch_if_executable.*ssh_trust_action.sh' "$_tst_handler" &&
+     grep -Fq 'sh "$SCRIPT_PATH" "$@"' "$_tst_handler"; then
+    pass "service handler carries dot-delimited selected trust nodes through BusyBox sh"
+  else
+    fail "service handler carries selected trust nodes through BusyBox sh"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'nodeSlots' "$_tst_parent" &&
+     grep -Fq 'selectedNodeSlots.split(".")' "$_tst_parent" &&
+     grep -Fq '_nsl_' "$_tst_parent" &&
+     grep -Fq "tr '.' ' '" "$_tst_action" &&
+     grep -Fq 'trust_probe_apply_selected_slots' "$_tst_action"; then
+    pass "SSH trust selection is encoded, validated, and router-derived"
+  else
+    fail "SSH trust selection is encoded, validated, and router-derived"
+    _tst_ok=0
+  fi
+
+  if ! grep -Fq 'CUSTOM_SETTINGS_FILE=' "$_tst_action" &&
+     grep -Fq 'MERV_ACTION_ACK_PUBLISHED=0' "$_tst_action" &&
+     grep -Fq 'trust_request_pending_count' "$_tst_action" &&
+     grep -Fq 'trust_request_pending_result' "$_tst_action" &&
+     grep -Fq 'trust_selected_challenge_ids' "$_tst_action" &&
+     grep -Fq 'trust_abort()' "$_tst_action" &&
+     grep -Fq 'sshtrustabort_vlanmgr' "$_tst_action" &&
+     grep -Fq 'expires_in_sec' "$_tst_action" &&
+     grep -Fq 'action_ack_error' "$_tst_action"; then
+    pass "SSH trust worker supports paused partial trust, expiry, abort, and terminal fallback ack"
+  else
+    fail "SSH trust worker lacks paused partial trust, expiry, abort, or terminal fallback ack"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'MERV_ACTION_ACK_PUBLISHED=1' "$_tst_ack"; then
+    pass "SSH trust acknowledgements use valid JSON-safe wrapper defaults"
+  else
+    fail "SSH trust acknowledgements use valid JSON-safe wrapper defaults"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'collectclients_vlanmgr_pgt_*' "$_tst_handler" &&
+     ( grep -Fq 'MERV_ACTION_LOCK_PARENT_HELD=0' "$_tst_handler" ||
+       grep -Fq 'merv_action_lock_clear_child_context' "$_tst_handler" ) &&
+     grep -Fq 'obs_collection_trust_gate' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_SILENT_IF_VERIFIED=1' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_DECISION_EXIT=1' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_ORIGINAL_ACTION=collectclients_vlanmgr' "$_tst_collect" &&
+     grep -Fq 'collectclients_vlanmgr)' "$_tst_action" &&
+     grep -Fq 'SSH_TRUST_PROGRESS_TOKEN="${MERV_SSH_TRUST_PROGRESS_TOKEN:-$SSH_TRUST_TOKEN}"' "$_tst_action" &&
+     grep -Fq 'MERV_SSH_TRUST_PROGRESS_TOKEN="$_str_fresh"' "$_tst_action" &&
+     grep -Fq 'MERV_OBS_RESUME_PROGRESS_TOKEN="$SSH_TRUST_TOKEN"' "$_tst_action" &&
+     grep -Fq 'MERV_ACTION_ACK_PUBLISHED=1' "$_tst_action" &&
+     grep -Fq 'case "$_str_rc" in' "$_tst_action" &&
+     grep -Fq 'trust_mark_request "$_str_dir" failed' "$_tst_action" &&
+     grep -Fq 'obs_resume_progress_phase' "$_tst_worker" &&
+     grep -Fq 'merv_progress_phase "$_orpp_token" sshtrustresume_vlanmgr' "$_tst_worker" &&
+     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" request collect' "$_tst_action" &&
+     grep -Fq 'post_apply_worker.sh" run-wait "$_str_wait"' "$_tst_action"; then
+    pass "progress-backed client collection isolates verified probes and relays resume progress"
+  else
+    fail "progress-backed client collection isolates verified probes and relays resume progress"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'obs_trust_probe_progress_token()' "$_tst_worker" &&
+     grep -Fq 'MERV_SSH_TRUST_PROGRESS_TOKEN="$_octg_progress_token"' "$_tst_worker" &&
+     grep -Fq 'obs_trust_gate_grant' "$_tst_worker" &&
+     grep -Fq 'merv_node_list_digest' "$MERV_BASE/settings/lib_json.sh" &&
+     grep -Fq 'type md5sum' "$MERV_BASE/settings/lib_json.sh" &&
+     grep -Fq 'merv_node_list_digest' "$_tst_ssh" &&
+     grep -Fq 'merv_ssh_preflight_grant_fresh' "$_tst_ssh" &&
+     grep -Fq 'merv_ssh_preflight_grant_fresh' "$_tst_collect" &&
+     grep -Fq 'Reusing the verified SSH host-key preflight for this client refresh' "$_tst_collect" &&
+     grep -Fq 'frontend_owned: true' "$_tst_ui" &&
+     grep -Fq 'active.frontendOwned' "$_tst_ui"; then
+    pass "client refresh keeps its own progress while reusing a portable immediate trust preflight"
+  else
+    fail "client refresh keeps its own progress while reusing a portable immediate trust preflight"
+    _tst_ok=0
+  fi
+
+  _tst_digest_fallback=$( (
+    . "$MERV_BASE/settings/lib_json.sh"
+    merv_node_list() { printf '1 192.0.2.1\n'; }
+    cksum() { return 127; }
+    merv_node_list_digest
+  ) 2>/dev/null )
+  case "$_tst_digest_fallback" in
+    md5:[0-9A-Fa-f][0-9A-Fa-f]*) pass "node-set trust digest falls back when cksum is unavailable" ;;
+    *) fail "node-set trust digest falls back when cksum is unavailable"; _tst_ok=0 ;;
+  esac
+
+  if grep -Fq 'merv_ssh_require_verified_node' "$_tst_ssh" &&
+     grep -Fq 'case "$MERV_SSH_SKIP_PING" in' "$_tst_ssh"; then
+    pass "worker SSH ping optimization retains the host-key trust requirement"
+  else
+    fail "worker SSH ping optimization retains the host-key trust requirement"
+    _tst_ok=0
+  fi
+
+  if grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local' "$_tst_sync" &&
+     grep -Fq 'STAGED_NODE_FAIL' "$_tst_sync" &&
+     grep -Fq 'node-activation-failed' "$_tst_sync" &&
+     grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh' "$_tst_boot" &&
+     grep -Fq 'reconcile_legacy_boot_file_locks' "$_tst_boot" &&
+     grep -Fq 'merv_lock_quarantine_legacy_file' "$_tst_lib"; then
+    pass "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+  else
+    fail "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+    _tst_ok=0
+  fi
+
+  . "$_tst_lib"
+  _tst_legacy="$SELFTEST_ROOT/legacy-service-event.lock"
+  : > "$_tst_legacy"
+  MERV_LEGACY_LOCK_STALE_SEC=0
+  if merv_lock_quarantine_legacy_file "$_tst_legacy" boot-file &&
+     [ ! -e "$_tst_legacy" ] &&
+     find "$SELFTEST_ROOT" -name 'legacy-service-event.lock.legacy.quarantine.*' -print 2>/dev/null | grep -q .; then
+    pass "stale empty legacy lock is quarantined, not deleted"
+  else
+    fail "stale empty legacy lock is quarantined, not deleted"
+    _tst_ok=0
+  fi
+  _tst_legacy_nonempty="$SELFTEST_ROOT/legacy-nonempty.lock"
+  printf 'unknown\n' > "$_tst_legacy_nonempty"
+  if merv_lock_quarantine_legacy_file "$_tst_legacy_nonempty" boot-file; then
+    fail "non-empty legacy lock remains fail-closed"
+    _tst_ok=0
+  else
+    pass "non-empty legacy lock remains fail-closed"
+  fi
+  unset MERV_LEGACY_LOCK_STALE_SEC
+
+  return "$_tst_ok"
+}
+
 test_logging_polling_contract() {
   _tlpc_ui="$MERV_BASE/www/index.html"
   _tlpc_ok=1
@@ -1760,26 +3484,58 @@ test_logging_polling_contract() {
 test_apply_observation_contract() {
   _tao_exec="$MERV_BASE/functions/execute_nodes.sh"
   _tao_manager="$MERV_BASE/functions/mervlan_manager.sh"
+  _tao_worker="$MERV_BASE/functions/post_apply_worker.sh"
   _tao_ok=1
-  _tao_phase=$(sed -n '/# PHASE 4:/,/^fi$/p' "$_tao_exec" 2>/dev/null)
+  _tao_phase=$(sed -n '/# PHASE 4:/,/^echo ""$/p' "$_tao_exec" 2>/dev/null)
 
-  if printf '%s\n' "$_tao_phase" | grep -Fq 'if [ -x "$FUNCDIR/post_apply_worker.sh" ]; then' &&
+  if printf '%s\n' "$_tao_phase" | grep -Fq 'if [ -f "$FUNCDIR/post_apply_worker.sh" ]; then' &&
      ! printf '%s\n' "$_tao_phase" | grep -Fq 'MODE" != "nodesonly"' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq 'if [ "$overall_success" = "true" ] && [ "$local_success" = "true" ]; then' &&
+     printf '%s\n' "$_tao_phase" | grep -Fq 'Skipping post-apply observation until every node has reached terminal verified success' &&
      printf '%s\n' "$_tao_phase" | grep -Fq 'request snapshot collect' &&
      printf '%s\n' "$_tao_phase" | grep -Fq '"$FUNCDIR/post_apply_worker.sh" run-wait' &&
      printf '%s\n' "$_tao_phase" | grep -Fq 'overall_success=false'; then
-    pass "all node-runner Apply modes use one final client refresh phase"
+    pass "node Apply refreshes clients only after every node reaches terminal verified success"
   else
-    fail "all node-runner Apply modes use one final client refresh phase"
+    fail "node Apply refreshes clients only after every node reaches terminal verified success"
+    _tao_ok=0
+  fi
+
+  if grep -Fq '[ -f "$MERV_BASE/functions/collect_clients.sh" ]' "$_tao_worker" &&
+     grep -Fq 'sh "$MERV_BASE/functions/collect_clients.sh"' "$_tao_worker" &&
+     grep -Fq '[ -f "$MERV_BASE/functions/collect_local_clients.sh" ]' "$_tao_worker" &&
+     grep -Fq 'sh "$MERV_BASE/functions/collect_local_clients.sh"' "$_tao_worker"; then
+    pass "observation worker invokes shell collectors without relying on executable bits"
+  else
+    fail "observation worker invokes shell collectors without relying on executable bits"
+    _tao_ok=0
+  fi
+
+  if grep -Fq 'collect_execute_nodes_observation_grant_valid' "$MERV_BASE/functions/collect_clients.sh" &&
+     grep -Fq 'MERV_OBS_EXECUTE_NODES_OWNER_GRANT=1' "$_tao_exec" &&
+     grep -Fq 'MERV_OBS_EXECUTE_NODES_OWNER_NONCE' "$_tao_exec" &&
+     grep -Fq 'merv_process_identity_matches' "$MERV_BASE/functions/collect_clients.sh"; then
+    pass "node Apply final collection authenticates the exact execute_nodes owner"
+  else
+    fail "node Apply final collection authenticates the exact execute_nodes owner"
     _tao_ok=0
   fi
 
   if grep -Fq 'sh "$local_script" --no-collect' "$_tao_exec" &&
-     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" &&
+     grep -Fq 'MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" &&
      grep -Fq '"$FUNCDIR/post_apply_worker.sh" run-wait' "$_tao_manager"; then
     pass "local and no-node combined Apply paths avoid duplicate collection"
   else
     fail "local and no-node combined Apply paths avoid duplicate collection"
+    _tao_ok=0
+  fi
+
+  if grep -Fq 'if ! merv_mac_boot_init; then' "$_tao_manager" &&
+     grep -Fq 'if ! cleanup_existing_config; then' "$_tao_manager" &&
+     grep -Fq 'post-restart shield reload failed' "$_tao_manager"; then
+    pass "manager fails closed when strict MERV_MAC lifecycle verification fails"
+  else
+    fail "manager fails closed when strict MERV_MAC lifecycle verification fails"
     _tao_ok=0
   fi
 
@@ -1791,6 +3547,36 @@ test_apply_observation_contract() {
     pass "client refresh progress wording and failure paths are explicit"
   else
     fail "client refresh progress wording and failure paths are explicit"
+    _tao_ok=0
+  fi
+
+  _tao_release=$(grep -n 'if ! release_script_lock' "$_tao_manager" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_wait=$(grep -n 'MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh"' "$_tao_manager" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  case "$_tao_release:$_tao_wait" in
+    ''|*[!0-9:]*|*::)
+      fail "manager releases its configuration lock before observation wait"
+      _tao_ok=0
+      ;;
+    *)
+      if [ "$_tao_release" -lt "$_tao_wait" ]; then
+        pass "manager releases its configuration lock before observation wait"
+      else
+        fail "manager releases its configuration lock before observation wait"
+        _tao_ok=0
+      fi
+      ;;
+  esac
+
+  _tao_wrap="$MERV_BASE/functions/mervlan_boot_wrap.sh"
+  _tao_shield_clear=$(grep -n 'rm -f "$LOCKDIR/merv_boot_shield.active"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_boot_wait=$(grep -n 'run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  if grep -Fq 'if [ "$MERV_MANAGER_MODE" = "boot" ]' "$_tao_manager" &&
+     grep -Fq 'request snapshot collect' "$_tao_manager" &&
+     [ -n "$_tao_shield_clear" ] && [ -n "$_tao_boot_wait" ] &&
+     [ "$_tao_shield_clear" -lt "$_tao_boot_wait" ]; then
+    pass "Boot queues observation, tears down the shield, then runs the worker"
+  else
+    fail "Boot queues observation, tears down the shield, then runs the worker"
     _tao_ok=0
   fi
 
@@ -1807,6 +3593,8 @@ test_shell_syntax() {
   fi
   for _tss_file in \
     "$MERV_BASE/settings/lib_mervqt.sh" \
+    "$MERV_BASE/settings/lib_owner_lock.sh" \
+    "$MERV_BASE/settings/lib_action_lock.sh" \
     "$MERV_BASE/settings/lib_node_jobs.sh" \
     "$MERV_BASE/settings/var_settings.sh" \
     "$SELFTEST_SCRIPT" \
@@ -1818,6 +3606,7 @@ test_shell_syntax() {
     "$MERV_BASE/functions/heal_event.sh" \
     "$MERV_BASE/functions/mervlan_boot.sh" \
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
+    "$MERV_BASE/settings/mac_shield_snapshot.sh" \
     "$MERV_BASE/templates/mervlan_templates.sh"; do
     [ -f "$_tss_file" ] || { fail "shell syntax target missing: ${_tss_file##*/}"; _tss_bad=1; continue; }
     if sh -n "$_tss_file"; then pass "shell syntax ${_tss_file##*/}"; else fail "shell syntax ${_tss_file##*/}"; _tss_bad=1; fi
@@ -1832,7 +3621,7 @@ test_shell_syntax() {
   else
     pass "shell syntax sync_nodes.sh skipped on node-only installation"
   fi
-  for _tss_optional in collect_clients.sh collect_local_clients.sh mac_client_meta.sh mac_refresh.sh execute_nodes.sh update_mervlan.sh hw_probe.sh; do
+  for _tss_optional in collect_clients.sh collect_local_clients.sh mac_client_meta.sh mac_refresh.sh execute_nodes.sh update_mervlan.sh mervlan_backup.sh hw_probe.sh ssh_trust_action.sh dropbear_sshkey_gen.sh; do
     if [ -f "$MERV_BASE/functions/$_tss_optional" ]; then
       if sh -n "$MERV_BASE/functions/$_tss_optional"; then
         pass "shell syntax $_tss_optional"
@@ -1845,6 +3634,113 @@ test_shell_syntax() {
     fi
   done
   return "$_tss_bad"
+}
+
+test_signal_termination() {
+  _tst_root="$SELFTEST_ROOT/signal-termination"
+  _tst_fixture="$_tst_root/fixture.sh"
+  _tst_ok=1
+  rm -rf "$_tst_root" 2>/dev/null || return 1
+  mkdir -p "$_tst_root" || return 1
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' '. "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || exit 2'
+    printf '%s\n' 'root="${SIGNAL_TEST_ROOT:?}"; lock="$root/owner.lock"; result="$root/result"; cleanup_count="$root/cleanup.count"; child_pid=""; child_start=""; signal_handling=0'
+    printf '%s\n' 'cleanup() {'
+    printf '%s\n' '  rc=$?; count=$(cat "$cleanup_count" 2>/dev/null || printf 0); count=$((count + 1)); printf "%s\\n" "$count" > "$cleanup_count"'
+    printf '%s\n' '  if [ -n "$child_pid" ] && [ -n "$child_start" ] && merv_process_identity_matches "$child_pid" "$child_start" 2>/dev/null; then kill -TERM "$child_pid" 2>/dev/null || :; fi'
+    printf '%s\n' '  [ -n "$child_pid" ] && wait "$child_pid" 2>/dev/null || :'
+    printf '%s\n' '  if [ "${SIGNAL_TEST_FAIL_CLEANUP:-0}" = 1 ]; then printf "%s\\n" cleanup-failed > "$root/cleanup.failed"; else rm -f "$lock" 2>/dev/null || printf "%s\\n" cleanup-failed > "$root/cleanup.failed"; fi'
+    printf '%s\n' '  if [ ! -f "$result" ]; then printf "%s\\n" interrupted > "$result"; else printf "%s\\n" duplicate > "$root/result.duplicate"; fi'
+    printf '%s\n' '  return "$rc"'
+    printf '%s\n' '}'
+    printf '%s\n' 'handle_signal() { status="$1"; [ "$signal_handling" -eq 0 ] || exit "$status"; signal_handling=1; trap - INT TERM; printf "%s\\n" "$status" > "$root/signal.status"; exit "$status"; }'
+    printf '%s\n' 'trap - INT TERM; trap cleanup EXIT; trap "handle_signal 130" INT; trap "handle_signal 143" TERM'
+    printf '%s\n' ': > "$lock"; ( trap - EXIT INT TERM; exec sleep 3 ) & child_pid="$!"; child_start=$(merv_proc_start_time "$child_pid" 2>/dev/null || printf ""); printf "%s\\n" "$child_pid" > "$root/child.pid"; printf "%s\\n" "$child_start" > "$root/child.start"; case "${SIGNAL_TEST_SELF:-}" in INT) kill -INT "$$" ;; TERM) kill -TERM "$$" ;; esac; sleep 3; printf "%s\\n" success > "$result"; exit 0'
+  } > "$_tst_fixture" || return 1
+  chmod 700 "$_tst_fixture" || return 1
+
+  for _tst_signal_case in TERM:143 INT:130; do
+    _tst_signal=${_tst_signal_case%%:*}
+    _tst_expected=${_tst_signal_case#*:}
+    _tst_case="$_tst_root/$_tst_signal"
+    mkdir -p "$_tst_case" || { _tst_ok=0; continue; }
+    _tst_self_signal=""
+    [ "$_tst_signal" = INT ] && _tst_self_signal=INT
+    if [ -n "$_tst_self_signal" ]; then
+      SIGNAL_TEST_ROOT="$_tst_case" SIGNAL_TEST_SELF="$_tst_self_signal" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1
+      _tst_rc=$?
+    else
+      SIGNAL_TEST_ROOT="$_tst_case" SIGNAL_TEST_SELF="$_tst_self_signal" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1 &
+      _tst_pid=$!
+      sleep 1
+      _tst_parent_start=$(merv_proc_start_time "$_tst_pid" 2>/dev/null || printf '')
+      case "$_tst_parent_start" in
+        ''|*[!0-9]*)
+          fail "signal termination $_tst_signal parent identity is unverifiable"
+          _tst_ok=0
+          ;;
+        *)
+          if merv_process_identity_matches "$_tst_pid" "$_tst_parent_start" 2>/dev/null; then
+            kill -"$_tst_signal" "$_tst_pid" 2>/dev/null || :
+          else
+            fail "signal termination $_tst_signal parent identity changed before signal"
+            _tst_ok=0
+          fi
+          ;;
+      esac
+      wait "$_tst_pid" 2>/dev/null
+      _tst_rc=$?
+    fi
+    if [ "$_tst_rc" -eq "$_tst_expected" ]; then pass "signal termination $_tst_signal returns $_tst_expected"; else fail "signal termination $_tst_signal returns $_tst_expected (actual=$_tst_rc)"; _tst_ok=0; fi
+    [ "$(cat "$_tst_case/cleanup.count" 2>/dev/null)" = 1 ] && pass "signal termination $_tst_signal cleanup runs once" || { fail "signal termination $_tst_signal cleanup runs once"; _tst_ok=0; }
+    [ "$(cat "$_tst_case/result" 2>/dev/null)" = interrupted ] && pass "signal termination $_tst_signal publishes one interruption result" || { fail "signal termination $_tst_signal publishes one interruption result"; _tst_ok=0; }
+    [ ! -e "$_tst_case/result.duplicate" ] && [ "$(cat "$_tst_case/result" 2>/dev/null)" != success ] && pass "signal termination $_tst_signal prevents later success" || { fail "signal termination $_tst_signal prevents later success"; _tst_ok=0; }
+    [ ! -e "$_tst_case/owner.lock" ] && pass "signal termination $_tst_signal removes owner lock" || { fail "signal termination $_tst_signal removes owner lock"; _tst_ok=0; }
+    _tst_child=$(cat "$_tst_case/child.pid" 2>/dev/null)
+    [ -n "$_tst_child" ] && ! kill -0 "$_tst_child" 2>/dev/null && pass "signal termination $_tst_signal reconciles tracked child" || { fail "signal termination $_tst_signal reconciles tracked child"; _tst_ok=0; }
+  done
+
+  sleep 3 &
+  _tst_reuse_pid=$!
+  _tst_reuse_start=$(merv_proc_start_time "$_tst_reuse_pid" 2>/dev/null || printf '')
+  case "$_tst_reuse_start" in
+    ''|*[!0-9]*|0)
+      fail "signal termination PID reuse fixture has no positive start time"
+      _tst_ok=0
+      ;;
+    *)
+      _tst_wrong_start=$((_tst_reuse_start + 1))
+      if ! merv_process_identity_matches "$_tst_reuse_pid" "$_tst_wrong_start" 2>/dev/null && kill -0 "$_tst_reuse_pid" 2>/dev/null; then
+        pass "signal termination rejects PID reuse with mismatched start time"
+      else
+        fail "signal termination rejects PID reuse with mismatched start time"
+        _tst_ok=0
+      fi
+      ;;
+  esac
+  if merv_process_identity_matches "$_tst_reuse_pid" "$_tst_reuse_start" 2>/dev/null; then
+    kill "$_tst_reuse_pid" 2>/dev/null || :
+  else
+    fail "signal termination rejects PID reuse with mismatched start time"
+    _tst_ok=0
+  fi
+  wait "$_tst_reuse_pid" 2>/dev/null || :
+
+  mkdir -p "$_tst_root/cleanup-failure"
+  SIGNAL_TEST_ROOT="$_tst_root/cleanup-failure" SIGNAL_TEST_FAIL_CLEANUP=1 MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1 &
+  _tst_pid=$!
+  _tst_parent_start=$(merv_proc_start_time "$_tst_pid" 2>/dev/null || printf '')
+  sleep 1
+  if merv_process_identity_matches "$_tst_pid" "$_tst_parent_start" 2>/dev/null; then
+    kill -TERM "$_tst_pid" 2>/dev/null || :
+  else
+    fail "signal termination cleanup-failure parent identity changed before signal"
+    _tst_ok=0
+  fi
+  wait "$_tst_pid" 2>/dev/null || :
+  [ -f "$_tst_root/cleanup-failure/cleanup.failed" ] && pass "signal termination exposes cleanup failure" || { fail "signal termination exposes cleanup failure"; _tst_ok=0; }
+  return "$_tst_ok"
 }
 
 test_live_audit() {
@@ -1877,8 +3773,16 @@ run_one() {
     dhcp-api) test_dhcp_api ;;
     dhcp-ebtables-failures) test_dhcp_ebtables_failures ;;
     dhcp-rule-exactness) test_dhcp_rule_exactness ;;
+    l2-guard-dump) test_l2_guard_dump_contract ;;
+    mac-shield-lifecycle) test_mac_shield_lifecycle ;;
     process-identity) test_process_identity ;;
+    owner-lock-contract) test_owner_lock_contract ;;
+    maintenance-lock-interop) test_maintenance_lock_interop ;;
+    lock-publication) test_lock_publication ;;
+    nonce-uniqueness) test_nonce_uniqueness ;;
     lock-reclaim) test_lock_reclaim ;;
+    dhcp-incomplete-lock) test_dhcp_incomplete_lock ;;
+    router-portability) test_router_portability ;;
     dhcp-owners) test_dhcp_owners ;;
     dhcp-phases) test_dhcp_phases ;;
     dhcp-crash-points) test_dhcp_crash_points ;;
@@ -1889,10 +3793,13 @@ run_one() {
     recovery) test_recovery ;;
     failsafe-status) test_failsafe_status ;;
     post-apply) test_post_apply ;;
+    observation-lock) test_observation_lock ;;
     observation-timeouts) test_observation_timeouts ;;
     observation-concurrency) test_observation_concurrency ;;
+    observation-resume-progress) test_observation_resume_progress ;;
     observation-generations) test_observation_generations ;;
     atomic-publication) test_atomic_publication ;;
+    json-validation) test_json_validation ;;
     client-refresh-contract) test_client_refresh_contract ;;
     manager-ownership) test_manager_ownership ;;
     node-job-logging) test_node_job_logging ;;
@@ -1905,10 +3812,20 @@ run_one() {
     sync-node-parallel) test_sync_node_parallel_contract ;;
     apmo-completion) test_apmo_completion_contract ;;
     action-lifecycle) test_action_lifecycle_contract ;;
+    action-parent-ownership) test_action_parent_ownership ;;
+    action-lock-failure) test_action_lock_failure ;;
+    direct-manager-save-overlap) test_direct_manager_save_overlap ;;
+    update-lock-ownership) test_update_lock_ownership ;;
+    update-exclusivity) test_update_exclusivity ;;
+    update-download-retry) test_update_download_retry ;;
+    payload-contract) test_payload_contract ;;
     failure-propagation) test_failure_propagation_contract ;;
+    ssh-outbound) test_ssh_outbound_contract ;;
+    ssh-trust) test_ssh_trust_contract ;;
     logging-polling) test_logging_polling_contract ;;
     apply-observation) test_apply_observation_contract ;;
     shell-syntax) test_shell_syntax ;;
+    signal-termination) test_signal_termination ;;
     live-audit) test_live_audit ;;
     *)
       printf 'Unknown selftest: %s\n' "$1" >&2
@@ -1947,13 +3864,13 @@ if [ "$SELFTEST_ACTION" = "_fault-child" ]; then
 fi
 
 if [ "$SELFTEST_ACTION" = all ]; then
-  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness \
-    process-identity lock-reclaim dhcp-owners dhcp-phases dhcp-crash-points \
+  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness l2-guard-dump mac-shield-lifecycle \
+    process-identity nonce-uniqueness owner-lock-contract maintenance-lock-interop lock-publication lock-reclaim dhcp-incomplete-lock router-portability dhcp-owners dhcp-phases dhcp-crash-points \
     heal-handoff boot-handoff duplicate-events manager-ownership \
-    settle-watchdog recovery failsafe-status post-apply observation-concurrency \
-    observation-timeouts observation-generations atomic-publication client-refresh-contract \
+    settle-watchdog recovery failsafe-status post-apply observation-lock observation-concurrency \
+    observation-timeouts observation-generations observation-resume-progress atomic-publication json-validation client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle failure-propagation logging-polling apply-observation shell-syntax live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity update-download-retry payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax signal-termination live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

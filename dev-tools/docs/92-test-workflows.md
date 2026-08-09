@@ -25,6 +25,11 @@ device, use the installed path and the device's `/bin/sh`. Passing on
 PowerShell, Bash, or a modern Linux shell does not prove ASUSWRT BusyBox
 compatibility. Check command availability before adding a dependency.
 
+For an ownership/lifecycle round, also sweep for duplicate identity/nonce,
+v2 owner, unsafe trap, unsupported `stat`, and unvalidated lock-cleanup
+mechanics. Remaining matches must be named compatibility or specialized DHCP,
+node-job, Recovery, or observation policy rather than ignored.
+
 ## 3. Router selftest
 
 The maintained suite is:
@@ -33,7 +38,18 @@ The maintained suite is:
 sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh shell-syntax
 sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh action-lifecycle
 sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh client-refresh-contract
-sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh all
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh signal-termination
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh nonce-uniqueness
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh owner-lock-contract
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh lock-publication
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh action-parent-ownership
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh direct-manager-save-overlap
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh update-exclusivity
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh action-lock-failure
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh dhcp-incomplete-lock
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh router-portability
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh maintenance-lock-interop
+sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh observation-lock
 ```
 
 Use the narrowest case first. The suite uses fake ebtables and a state root
@@ -44,6 +60,11 @@ a newly added case.
 If `all` exceeds the host command limit, retain its output, check for children,
 locks, recovery state, and leaked selftest directories, then run affected
 focused cases. Report `INCONCLUSIVE`, not PASS.
+
+The explicit `all` selector is a final broad gate, not a substitute for the
+focused contract checks above. Do not run `all`, `live-audit`, Apply, Update,
+or other disruptive paths as part of a non-disruptive documentation or static
+round; retain the reason and focused evidence instead.
 
 Useful focused groups are DHCP Hold/ownership (`dhcp-api`, `dhcp-owners`,
 `dhcp-phases`), recovery/healing (`heal-handoff`, `boot-handoff`, `recovery`),

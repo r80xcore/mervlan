@@ -13,6 +13,12 @@ Every mode must end with exactly one coordinated snapshot/client refresh. The
 loading task remains active until that final observation generation completes.
 The progress phase is `Refreshing client inventory...`.
 
+Each asynchronous action has one authenticated owner and one terminal result.
+Busy, malformed, unknown-owner, invalid-parent, and cleanup-failure outcomes
+are explicit failures; an accepted token is never left running because a
+worker disappeared. INT/TERM handlers terminate after bounded child
+reconciliation and cannot resume normal work after cleanup.
+
 Main + Nodes and Nodes Only use `execute_nodes.sh` Phase 4. A direct local
 manager run performs the same request and waits through `post_apply_worker.sh
 run-wait`. Combined runs pass `--no-collect` to the local manager so collection
@@ -25,6 +31,17 @@ through the parent/service action path. The UI waits for acknowledged backend
 completion and, where applicable, verifies that persisted settings match the
 requested managed values before releasing the action state.
 
+When `AUTO_SYNC_SETTINGS` is enabled and a save changes node-relevant
+settings, the local save reaches a terminal acknowledgement first. The UI
+then starts a separate `syncsettings_vlanmgr` action, which owns its own
+progress panel and complete-set SSH preflight. If host-key trust is required,
+that settings-only action pauses for review and resumes as settings-only; it
+must not fall back to a full Sync Nodes deployment. Changes limited to
+`AUTO_SYNC_SETTINGS`, `HTML_CLIENT_REFRESH_MINUTES`, or `EXPERIMENTAL` remain
+local and do not start the node action. APMO uses the same settings-only
+follow-up after its override/probe sequence. Boot Enable retains its existing
+system-wide synchronization behavior.
+
 ## Sync Nodes
 
 `sync_nodes.sh` validates the node list, stages a curated runtime subset,
@@ -32,12 +49,30 @@ verifies each staged installation, activates it atomically, and reports
 per-node terminal results. The main router is validated first. Node-specific
 settings and hardware identity are preserved.
 
+The full runtime manifest includes `settings/lib_owner_lock.sh` with mode
+0644, and staged validation checks it. Settings-only Sync remains a
+`settings/settings.json`-only operation; developer documentation and evidence
+are never copied to nodes.
+
 ## Refresh Clients
 
 Manual and page-load refreshes request the observation coordinator. The worker
 serializes snapshot and collection generations, and the WebUI waits for fresh
 client data or a bounded, visible timeout. Health cron normally requests a
 snapshot only; it does not turn into a recurring client collection job.
+
+When a paused client refresh resumes after SSH trust enrollment, the resume
+action remains the browser-visible progress owner. Its nested host-key recheck
+uses an isolated child progress record, while the observation coordinator
+relays queued, configuration-wait, snapshot, and collection phases back to the
+resume action. This prevents a verified recheck from leaving a false running
+progress record or making queued snapshot work look like a stalled resume.
+
+For a normal progress-backed refresh, the browser owns the meaningful client
+stages and ignores transient nested SSH-probe progress. A verified parent
+preflight grants only the immediately spawned, unchanged node set a short-lived
+reuse token, avoiding a second full host-key probe before collection. Each
+node command still enforces its pinned host key independently.
 
 ## APMO, MAC Shield, and metadata
 
@@ -51,9 +86,26 @@ snapshot only; it does not turn into a recurring client collection job.
 ## Update, restore, keys, and service actions
 
 Maintenance actions use the shared loading/progress lifecycle and bounded
-polling. Update/restore activation is staged and validated; SSH key generation
-and service checks report explicit terminal success or failure. Restore, undo,
-and other disruptive actions require the appropriate human-controlled gate.
+polling. Update/restore activation is staged and validated; Update records a
+durable phase journal, performs a measured RAM/tmp-space check, enters an
+explicit maintenance-quiesce state before extraction, and keeps the manager,
+healer, boot wrapper, Save/APMO, Apply, and ordinary node-sync workers from
+starting new mutations during that window. The normal addon backup/archive and
+activation recovery paths remain the only router-side copies owned by the
+addon; lifecycle journals and retry markers contain metadata only.
+
+Update child context is authenticated against the live maintenance owner;
+`MERV_UPDATE_OWNER=1` by itself is only an untrusted hint. Boot recovery is a
+separate journal-bound path, and a failed or interrupted cleanup preserves the
+owner/quiesce state for reconciliation instead of reporting success.
+
+Update retries transient node reachability failures within a bounded
+pre-mutation window and reports trust, authentication, malformed configuration,
+and remote-runtime failures separately. A boot-time node outage creates one
+owned delayed reconciliation marker for the health cron; it does not create an
+untracked background sleep or retry indefinitely. SSH key generation and
+service checks report explicit terminal success or failure. Restore, undo, and
+other disruptive actions require the appropriate human-controlled gate.
 
 ## UI action matrix
 

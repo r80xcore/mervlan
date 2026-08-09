@@ -1,9 +1,10 @@
-# File: lib_node_jobs.sh || version="0.72.2"
+# File: lib_node_jobs.sh || version="0.72.3"
 # Bounded POSIX/BusyBox node-job helper.  Parents own locks and aggregation;
 # workers own only their job directories and one atomic terminal result.
 [ -n "${LIB_NODE_JOBS_LOADED:-}" ] && return 0 2>/dev/null
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
+[ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" || return 1
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" || return 1
 
 mnj_safe_token() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; return 0; }
@@ -44,27 +45,35 @@ mnj_nodes_validate() {
 mnj_result_validate() {
   _mnj_rf="$1" _mnj_node="$2" _mnj_phase="$3"
   [ -f "$_mnj_rf" ] || return 1
-  MNJ_RESULT_STATE=""; MNJ_RESULT_NODE=""; MNJ_RESULT_PHASE=""; MNJ_RESULT_STARTED=""; MNJ_RESULT_COMPLETED=""; MNJ_RESULT_REASON=""
-  _mnj_a=0; _mnj_b=0; _mnj_c=0; _mnj_d=0; _mnj_e=0; _mnj_f=0
+  MNJ_RESULT_FORMAT=""; MNJ_RESULT_STATE=""; MNJ_RESULT_NODE=""; MNJ_RESULT_PHASE=""; MNJ_RESULT_STARTED=""; MNJ_RESULT_COMPLETED=""; MNJ_RESULT_REASON=""
+  MNJ_RESULT_OWNER_PID=""; MNJ_RESULT_OWNER_START=""; MNJ_RESULT_OWNER_NONCE=""
+  _mnj_a=0; _mnj_b=0; _mnj_c=0; _mnj_d=0; _mnj_e=0; _mnj_f=0; _mnj_g=0; _mnj_h=0; _mnj_i=0; _mnj_j=0
   while IFS= read -r _mnj_line || [ -n "$_mnj_line" ]; do
     case "$_mnj_line" in *=*) _mnj_k=${_mnj_line%%=*}; _mnj_v=${_mnj_line#*=} ;; *) return 1;; esac
     case "$_mnj_k" in
-      state) [ "$_mnj_a" = 0 ] || return 1; _mnj_a=1; MNJ_RESULT_STATE=$_mnj_v ;;
-      node_id) [ "$_mnj_b" = 0 ] || return 1; _mnj_b=1; MNJ_RESULT_NODE=$_mnj_v ;;
-      phase) [ "$_mnj_c" = 0 ] || return 1; _mnj_c=1; MNJ_RESULT_PHASE=$_mnj_v ;;
-      started_epoch) [ "$_mnj_d" = 0 ] || return 1; _mnj_d=1; MNJ_RESULT_STARTED=$_mnj_v ;;
-      completed_epoch) [ "$_mnj_e" = 0 ] || return 1; _mnj_e=1; MNJ_RESULT_COMPLETED=$_mnj_v ;;
-      reason) [ "$_mnj_f" = 0 ] || return 1; _mnj_f=1; MNJ_RESULT_REASON=$_mnj_v ;;
+      format_version) [ "$_mnj_a" = 0 ] || return 1; _mnj_a=1; MNJ_RESULT_FORMAT=$_mnj_v ;;
+      state) [ "$_mnj_b" = 0 ] || return 1; _mnj_b=1; MNJ_RESULT_STATE=$_mnj_v ;;
+      node_id) [ "$_mnj_c" = 0 ] || return 1; _mnj_c=1; MNJ_RESULT_NODE=$_mnj_v ;;
+      phase) [ "$_mnj_d" = 0 ] || return 1; _mnj_d=1; MNJ_RESULT_PHASE=$_mnj_v ;;
+      started_epoch) [ "$_mnj_e" = 0 ] || return 1; _mnj_e=1; MNJ_RESULT_STARTED=$_mnj_v ;;
+      completed_epoch) [ "$_mnj_f" = 0 ] || return 1; _mnj_f=1; MNJ_RESULT_COMPLETED=$_mnj_v ;;
+      reason) [ "$_mnj_g" = 0 ] || return 1; _mnj_g=1; MNJ_RESULT_REASON=$_mnj_v ;;
+      owner_pid) [ "$_mnj_h" = 0 ] || return 1; _mnj_h=1; MNJ_RESULT_OWNER_PID=$_mnj_v ;;
+      owner_start) [ "$_mnj_i" = 0 ] || return 1; _mnj_i=1; MNJ_RESULT_OWNER_START=$_mnj_v ;;
+      owner_nonce) [ "$_mnj_j" = 0 ] || return 1; _mnj_j=1; MNJ_RESULT_OWNER_NONCE=$_mnj_v ;;
       *) return 1 ;;
     esac
   done < "$_mnj_rf"
-  [ "$_mnj_a$_mnj_b$_mnj_c$_mnj_d$_mnj_e$_mnj_f" = 111111 ] || return 1
+  [ "$_mnj_a$_mnj_b$_mnj_c$_mnj_d$_mnj_e$_mnj_f$_mnj_g$_mnj_h$_mnj_i$_mnj_j" = 1111111111 ] || return 1
+  [ "$MNJ_RESULT_FORMAT" = 2 ] || return 1
   case "$MNJ_RESULT_STATE" in ok|failed|timeout) ;; *) return 1;; esac
   merv_is_valid_node_id "$MNJ_RESULT_NODE" && [ "$MNJ_RESULT_NODE" = "$_mnj_node" ] &&
     mnj_safe_token "$MNJ_RESULT_PHASE" && [ "$MNJ_RESULT_PHASE" = "$_mnj_phase" ] &&
     mnj_positive "$MNJ_RESULT_STARTED" && mnj_positive "$MNJ_RESULT_COMPLETED" &&
     [ "$MNJ_RESULT_COMPLETED" -ge "$MNJ_RESULT_STARTED" ] 2>/dev/null &&
-    mnj_safe_token "$MNJ_RESULT_REASON"
+    mnj_safe_token "$MNJ_RESULT_REASON" &&
+    mnj_positive "$MNJ_RESULT_OWNER_PID" && mnj_positive "$MNJ_RESULT_OWNER_START" &&
+    mnj_safe_token "$MNJ_RESULT_OWNER_NONCE"
 }
 
 mnj_publish_result() {
@@ -74,11 +83,27 @@ mnj_publish_result() {
   case "$_mnj_state" in ok|failed|timeout) ;; *) return 1;; esac
   _mnj_now=$(date +%s 2>/dev/null || printf '')
   mnj_positive "$_mnj_now" || return 1
+  _mnj_owner_pid="${MNJ_WORK_OWNER_PID:-$$}"
+  if [ -n "${MNJ_WORK_OWNER_START:-}" ]; then
+    _mnj_owner_start="$MNJ_WORK_OWNER_START"
+  else
+    _mnj_owner_start=$(merv_identity_current_start 2>/dev/null || printf '')
+  fi
+  if [ -n "${MNJ_WORK_OWNER_NONCE:-}" ]; then
+    _mnj_owner_nonce="$MNJ_WORK_OWNER_NONCE"
+  else
+    _mnj_owner_nonce=""
+    if merv_identity_nonce_next 2>/dev/null; then
+      _mnj_owner_nonce="$MERV_IDENTITY_NONCE"
+    fi
+  fi
+  mnj_positive "$_mnj_owner_pid" && mnj_positive "$_mnj_owner_start" && mnj_safe_token "$_mnj_owner_nonce" || return 1
   _mnj_tmp="$_mnj_dir/.result.$$.${MNJ_RESULT_SEQ:-0}"
   MNJ_RESULT_SEQ=$(( ${MNJ_RESULT_SEQ:-0} + 1 ))
   umask 077
-  printf 'state=%s\nnode_id=%s\nphase=%s\nstarted_epoch=%s\ncompleted_epoch=%s\nreason=%s\n' \
-    "$_mnj_state" "$_mnj_node" "$_mnj_phase" "$_mnj_started" "$_mnj_now" "$_mnj_reason" > "$_mnj_tmp" || return 1
+  printf 'format_version=2\nstate=%s\nnode_id=%s\nphase=%s\nstarted_epoch=%s\ncompleted_epoch=%s\nreason=%s\nowner_pid=%s\nowner_start=%s\nowner_nonce=%s\n' \
+    "$_mnj_state" "$_mnj_node" "$_mnj_phase" "$_mnj_started" "$_mnj_now" "$_mnj_reason" \
+    "$_mnj_owner_pid" "$_mnj_owner_start" "$_mnj_owner_nonce" > "$_mnj_tmp" || return 1
   mnj_result_validate "$_mnj_tmp" "$_mnj_node" "$_mnj_phase" || { rm -f "$_mnj_tmp"; return 1; }
   mv "$_mnj_tmp" "$_mnj_dir/result" || { rm -f "$_mnj_tmp"; return 1; }
 }
@@ -122,6 +147,14 @@ mnj_worker() {
   trap - EXIT INT TERM
   MNJ_WORK_STARTED=$(date +%s 2>/dev/null || printf '')
   mnj_positive "$MNJ_WORK_STARTED" || return 2
+  MNJ_WORK_OWNER_PID="$$"
+  MNJ_WORK_OWNER_START=$(merv_identity_current_start 2>/dev/null || printf '')
+  MNJ_WORK_OWNER_NONCE=""
+  if merv_identity_nonce_next 2>/dev/null; then
+    MNJ_WORK_OWNER_NONCE="$MERV_IDENTITY_NONCE"
+  fi
+  mnj_positive "$MNJ_WORK_OWNER_PID" && mnj_positive "$MNJ_WORK_OWNER_START" && mnj_safe_token "$MNJ_WORK_OWNER_NONCE" || return 2
+  export MNJ_WORK_OWNER_PID MNJ_WORK_OWNER_START MNJ_WORK_OWNER_NONCE
   LOG_chan_cli="$MNJ_WORK_DIR/cli.log"; LOG_chan_vlan="$MNJ_WORK_DIR/vlan.log"
   MERV_NODE_JOB_DIR="$MNJ_WORK_DIR"; MERV_SSH_TMPDIR="$MNJ_WORK_DIR/ssh"
   export LOG_chan_cli LOG_chan_vlan MERV_NODE_JOB_DIR MERV_SSH_TMPDIR
@@ -211,7 +244,7 @@ mnj_pool_run() {
     MNJ_POOL_DIR=$(mnj_job_dir "$MNJ_POOL_ROOT" "$MNJ_POOL_NODE" "$MNJ_POOL_PHASE") || return 2
     [ ! -e "$MNJ_POOL_DIR" ] || return 2
     mkdir -p "$MNJ_POOL_DIR" || return 2
-    ( mnj_worker "$MNJ_POOL_DIR" "$MNJ_POOL_NODE" "$MNJ_POOL_PHASE" "$MNJ_POOL_HANDLER" "$MNJ_POOL_NODE" "$MNJ_POOL_IP" ) &
+    ( mnj_worker "$MNJ_POOL_DIR" "$MNJ_POOL_NODE" "$MNJ_POOL_PHASE" "$MNJ_POOL_HANDLER" "$MNJ_POOL_NODE" "$MNJ_POOL_IP" ) </dev/null &
     _mnj_pid=$!; _mnj_start=$(merv_proc_start_time "$_mnj_pid" 2>/dev/null || printf '')
     case "$_mnj_start" in
       ''|*[!0-9]*)
@@ -232,6 +265,96 @@ mnj_pool_run() {
   mnj_pool_progress
   for _mnj_dir in "$MNJ_POOL_ROOT"/node_*; do [ -d "$_mnj_dir" ] || continue; mnj_result_validate "$_mnj_dir/result" "${_mnj_dir##*/node_}" "$MNJ_POOL_PHASE" && [ "$MNJ_RESULT_STATE" = ok ] || MNJ_POOL_FAILURES=$((MNJ_POOL_FAILURES+1)); done
   [ "$MNJ_POOL_FAILURES" -eq 0 ]
+}
+
+# mnj_prepare_node_settings <main_settings_file> <target_node_id> <output_file> [node_hw_source_file]
+# Pure, testable settings-builder that transforms main settings.json into a complete,
+# final node-specific settings.json ready for transmission and digest verification.
+mnj_prepare_node_settings() {
+  _mpns_main="$1"
+  _mpns_node="$2"
+  _mpns_out="$3"
+  _mpns_hw_src="${4:-}"
+
+  [ -f "$_mpns_main" ] || return 1
+  merv_is_valid_node_id "$_mpns_node" || return 1
+  [ -n "$_mpns_out" ] || return 1
+
+  [ -n "${LIB_JSON_LOADED:-}" ] || . "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_json.sh" || return 1
+
+  _mpns_out_dir=$(dirname "$_mpns_out" 2>/dev/null || printf '')
+  if [ -n "$_mpns_out_dir" ] && [ "$_mpns_out_dir" != "." ]; then
+    mkdir -p "$_mpns_out_dir" 2>/dev/null || return 1
+  fi
+
+  _mpns_tmp="${_mpns_out}.tmp.$$"
+  cp "$_mpns_main" "$_mpns_tmp" 2>/dev/null || { rm -f "$_mpns_tmp" 2>/dev/null; return 1; }
+
+  # 1. Apply node identity flags locally
+  if ! json_set_flag "IS_NODE" "1" "$_mpns_tmp" || ! json_set_flag "NODE_ID" "$_mpns_node" "$_mpns_tmp"; then
+    rm -f "$_mpns_tmp" 2>/dev/null
+    return 1
+  fi
+  if grep -q '"General"[[:space:]]*:' "$_mpns_tmp" 2>/dev/null; then
+    json_set_section_value "General" "IS_NODE" "1" "$_mpns_tmp" 2>/dev/null || :
+    json_set_section_value "General" "NODE_ID" "$_mpns_node" "$_mpns_tmp" 2>/dev/null || :
+  fi
+
+  # 2. Preserve node-owned Hardware section if source file provided
+  if [ -n "$_mpns_hw_src" ] && [ -f "$_mpns_hw_src" ]; then
+    _mpns_node_hw=$(json_extract_hardware_section "$_mpns_hw_src" 2>/dev/null || printf '')
+    if [ -n "$_mpns_node_hw" ] && echo "$_mpns_node_hw" | grep -q '"Hardware"'; then
+      _mpns_hw_file="${_mpns_tmp}.hw.$$"
+      printf '%s\n' "$_mpns_node_hw" > "$_mpns_hw_file" 2>/dev/null
+      if json_replace_hardware_section "$_mpns_hw_file" "$_mpns_tmp"; then
+        rm -f "$_mpns_hw_file" 2>/dev/null
+      else
+        rm -f "$_mpns_hw_file" 2>/dev/null
+        rm -f "$_mpns_tmp" 2>/dev/null
+        return 1
+      fi
+    fi
+  fi
+
+  # 3. Apply trunk rules (unify trunk configuration for node backhaul)
+  _mpns_main_has_trunk="no"
+  _mpns_ti=1
+  while [ "$_mpns_ti" -le 8 ]; do
+    if [ "$(json_get_flag "TRUNK${_mpns_ti}" "0" "$_mpns_main")" = "1" ]; then
+      _mpns_main_has_trunk="yes"
+      break
+    fi
+    _mpns_ti=$((_mpns_ti + 1))
+  done
+
+  if [ "$_mpns_main_has_trunk" = "yes" ] && json_reset_trunks_section "$_mpns_tmp"; then
+    _mpns_vlan_scan_max=$(json_get_section_value "Hardware" "MAX_SSIDS" "$_mpns_tmp" 2>/dev/null)
+    case "$_mpns_vlan_scan_max" in
+      ''|0|*[!0-9]*)
+        _mpns_vlan_scan_max=$(json_get_section_value "Limits" "MAX_SSID_CAP" "$_mpns_tmp" 2>/dev/null)
+        case "$_mpns_vlan_scan_max" in ''|0|*[!0-9]*) _mpns_vlan_scan_max=16 ;; esac
+        ;;
+    esac
+    _mpns_vlan_list=""
+    _mpns_vi=1
+    while [ "$_mpns_vi" -le "$_mpns_vlan_scan_max" ]; do
+      _mpns_vid="$(json_get_flag "VLAN_$(printf '%02d' "$_mpns_vi")" "" "$_mpns_tmp")"
+      case "$_mpns_vid" in
+        ""|none|*[!0-9]*) ;;
+        *) _mpns_vlan_list="${_mpns_vlan_list}${_mpns_vlan_list:+,}${_mpns_vid}" ;;
+      esac
+      _mpns_vi=$((_mpns_vi + 1))
+    done
+    if [ -n "$_mpns_vlan_list" ]; then
+      json_set_flag "TRUNK1" "1" "$_mpns_tmp"
+      json_set_flag "TAGGED_TRUNK1" "$_mpns_vlan_list" "$_mpns_tmp"
+    fi
+  else
+    json_reset_trunks_section "$_mpns_tmp" 2>/dev/null || :
+  fi
+
+  mv "$_mpns_tmp" "$_mpns_out" 2>/dev/null || { rm -f "$_mpns_tmp" 2>/dev/null; return 1; }
+  return 0
 }
 
 LIB_NODE_JOBS_LOADED=1

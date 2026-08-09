@@ -111,6 +111,23 @@ that belongs in Authorized Keys. Never paste the private key, the contents of
   split into separate router-shell arguments. Prefer simple exact patterns or a
   carefully built single-quoted remote command, and check both output and exit
   status rather than assuming the intended quoting survived.
+- Lab observation (2026-08-01): the lab router does not provide `sha256sum`.
+  Use `openssl dgst -sha256 <file> | awk '{print $NF}'` for staged-transfer
+  hash checks after confirming OpenSSL is available; do not assume GNU/BusyBox
+  hash utilities are installed.
+- Lab observation (2026-08-01): the lab router has no `base64` applet. For a
+  staged opaque-script handoff, use `openssl enc -base64 -d -A`, construct the
+  decoded shell script with LF line endings, decode to a validated temporary
+  file, then execute that file. Do not use a bare decoder-to-`/bin/sh`
+  pipeline: without `pipefail`, an absent/failed decoder can make `/bin/sh`
+  exit successfully on empty input.
+- Lab observation (2026-08-01): the lab router also has no `cksum` applet.
+  Node-list trust gates must use a labelled `md5sum`/OpenSSL fallback when
+  `cksum` is unavailable, so digest values from different algorithms are never
+  compared as though they were interchangeable.
+- Lab observation (2026-08-01): the lab router has no `stat` applet. Do not
+  use file size or mtime metadata as a safe cache/change detector there; use a
+  current `openssl dgst -sha256` content stamp, or do the full validation.
 - A router-only UI/logging deployment does not authorize node synchronization. Deploy nodes only through the approved Sync Nodes flow when the task explicitly includes node rollout.
 - Before a disruptive device action, verify target, management path, current locks, manager/heal/watchdog/worker state, DHCP/MAC Shield state, and expected client placement.
 

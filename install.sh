@@ -12,13 +12,13 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.60"                      #
+#                    - File: install.sh || version="0.62"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
 # ============================================================================ #
 
-source /usr/sbin/helper.sh
+. /usr/sbin/helper.sh
 
 # ---- merv: portable `command -v` replacement ----
 if ! type merv_has >/dev/null 2>&1; then
@@ -124,6 +124,12 @@ else
     PUBLIC_DIR="/www/user/mervlan"
 fi
 
+if [ "$TEST_RUN" = "1" ]; then
+    MERV_STATE_ROOT="${MERV_STATE_ROOT_OVERRIDE:-/tmp/mervlan_tmp/test-run/state}"
+else
+    MERV_STATE_ROOT="${MERV_STATE_ROOT_OVERRIDE:-/jffs/addons/mervlan_state}"
+fi
+
 SOURCE_REF="refs/heads/${BRANCH}"
 SOURCE_DESCRIPTION="$BRANCH branch"
 GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/${SOURCE_REF}"
@@ -136,6 +142,7 @@ SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 INSTALL_PRESERVE_DIR=""
 INSTALL_ROLLBACK_DIR=""
 INSTALL_ROLLBACK_NEEDED=0
+INSTALL_FAILED_TREE=""
 INSTALL_FINISHED=0
 TEST_MENU_TREE_CREATED=0
 TEST_MENU_ENTRY_ADDED=0
@@ -946,7 +953,7 @@ detect_existing_installation() {
     local required marker
     INSTALL_STATE="absent"
     if settings_file_looks_valid "$ACTIVE_MERV_BASE/settings/settings.json"; then
-        for required in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh; do
+        for required in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh; do
             [ -f "$ACTIVE_MERV_BASE/$required" ] || { INSTALL_STATE="partial"; return 0; }
         done
         INSTALL_STATE="valid"
@@ -1261,6 +1268,37 @@ prepare_install_target() {
     fi
 }
 
+ensure_durable_state_root() {
+    case "$MERV_STATE_ROOT" in
+        /jffs/addons/mervlan_state|/jffs/addons/mervlan_state/*|/tmp/mervlan_tmp/test-run/state|/tmp/mervlan_tmp/test-run/state/*) ;;
+        *) RESULT_DETAIL="refusing unsafe durable state root: $MERV_STATE_ROOT"; return 1 ;;
+    esac
+    mkdir -p "$MERV_STATE_ROOT/ssh_trust" "$MERV_STATE_ROOT/ssh_trust/pending" \
+        "$MERV_STATE_ROOT/ssh_trust/requests" "$MERV_STATE_ROOT/ssh_trust/staging" \
+        "$MERV_STATE_ROOT/ssh_trust/quarantine" "$MERV_STATE_ROOT/ledgers" 2>/dev/null || return 1
+    chmod 700 "$MERV_STATE_ROOT" "$MERV_STATE_ROOT/ssh_trust" \
+        "$MERV_STATE_ROOT/ssh_trust/pending" "$MERV_STATE_ROOT/ssh_trust/requests" \
+        "$MERV_STATE_ROOT/ssh_trust/staging" "$MERV_STATE_ROOT/ssh_trust/quarantine" \
+        "$MERV_STATE_ROOT/ledgers" 2>/dev/null || return 1
+    printf 'mervlan-state-v1\n' > "$MERV_STATE_ROOT/.format" 2>/dev/null || return 1
+    chmod 600 "$MERV_STATE_ROOT/.format" 2>/dev/null || return 1
+    return 0
+}
+
+install_tree_valid() {
+    local _itv_root="$1" _itv_required
+    [ -d "$_itv_root" ] || return 1
+    for _itv_required in \
+        install.sh uninstall.sh mervlan.asp www/index.html \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh \
+        settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
+        functions/ssh_trust_action.sh
+    do
+        [ -f "$_itv_root/$_itv_required" ] || return 1
+    done
+    settings_file_looks_valid "$_itv_root/settings/settings.json"
+}
+
 merge_preserved_settings() {
     local old_file="$1" new_file="$2" kv_file merged_file count_file extracted merged
     [ -f "$old_file" ] || return 0
@@ -1383,8 +1421,16 @@ rollback_active_installation() {
     [ "$INSTALL_ROLLBACK_NEEDED" = "1" ] || return 0
     case "$INSTALL_ROLLBACK_DIR" in "$ADDON_DIR"/.mervlan-install-rollback.[0-9]*) ;; *) return 1 ;; esac
     [ "$MERV_BASE" = "/jffs/addons/mervlan" ] || return 1
-    rm -rf "$MERV_BASE" 2>/dev/null || :
-    mv "$INSTALL_ROLLBACK_DIR" "$MERV_BASE" 2>/dev/null || return 1
+    if [ -e "$MERV_BASE" ]; then
+        INSTALL_FAILED_TREE="$ADDON_DIR/.mervlan-install-incomplete.$$"
+        [ ! -e "$INSTALL_FAILED_TREE" ] || return 1
+        mv "$MERV_BASE" "$INSTALL_FAILED_TREE" 2>/dev/null || return 1
+    fi
+    if ! mv "$INSTALL_ROLLBACK_DIR" "$MERV_BASE" 2>/dev/null; then
+        [ -n "$INSTALL_FAILED_TREE" ] && [ -e "$INSTALL_FAILED_TREE" ] && mv "$INSTALL_FAILED_TREE" "$MERV_BASE" 2>/dev/null || :
+        return 1
+    fi
+    install_tree_valid "$MERV_BASE" || return 1
     INSTALL_ROLLBACK_NEEDED=0
 }
 
@@ -1633,6 +1679,7 @@ select_and_validate_tarball() {
             read action
             case "$action" in
               y|Y|yes|YES)
+                BRANCH="$branch"
                 SELECTED_TARBALL="$chosen"
                 return 0
                 ;;
@@ -1704,6 +1751,37 @@ cleanup_install_download_work() {
       ;;
   esac
   INSTALL_DOWNLOAD_WORK=""
+}
+
+# Filter the source snapshot before it is copied into the persistent addon.
+# Only the two executable router-side development tools are retained on a dev
+# install; documentation, plans, evidence, local harnesses, and archives stay
+# on the development computer.
+install_filter_source_tree() {
+    local root="$1" keep="$2"
+    [ -d "$root" ] || return 1
+    keep="$keep/.dev-tools-keep.$$"
+    rm -rf "$keep" 2>/dev/null || return 1
+    if [ "$BRANCH" = "dev" ]; then
+        mkdir -p "$keep/dev-tools/tests/router" "$keep/dev-tools/safety" 2>/dev/null || return 1
+        if [ -f "$root/dev-tools/tests/router/mervlan_selftest.sh" ]; then
+            cp -p "$root/dev-tools/tests/router/mervlan_selftest.sh" \
+                "$keep/dev-tools/tests/router/mervlan_selftest.sh" 2>/dev/null || return 1
+        fi
+        if [ -f "$root/dev-tools/safety/mervlan_live_test_guard.sh" ]; then
+            cp -p "$root/dev-tools/safety/mervlan_live_test_guard.sh" \
+                "$keep/dev-tools/safety/mervlan_live_test_guard.sh" 2>/dev/null || return 1
+        fi
+    fi
+    rm -rf "$root/dev-tools" "$root/.agent" "$root/.agents" \
+        "$root/.github/copilot-instructions.md" \
+        "$root/functions/sync_nodes.sh.bak" "$root/functions/wireless_backhaul.sh" \
+        "$root/roadmap.txt" "$root/puppeteer-config.json" 2>/dev/null || return 1
+    if [ -d "$keep/dev-tools" ]; then
+        cp -pR "$keep/dev-tools" "$root/dev-tools" 2>/dev/null || return 1
+    fi
+    rm -rf "$keep" 2>/dev/null || return 1
+    return 0
 }
 
 download_mervlan() {
@@ -1894,9 +1972,15 @@ download_mervlan() {
     echo "[download_mervlan] detected topdir (final): ${topdir:-<none>}"
 
   if [ -n "$topdir" ]; then
+        install_filter_source_tree "$topdir" "$work_dir" || {
+            echo "[download_mervlan] ERROR: developer-only payload filtering failed" >&2
+            RESULT_ARCHIVE="FAIL - payload filtering"
+            return 1
+        }
+        echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
-            functions/mervlan_boot.sh functions/hw_probe.sh settings/settings.json \
-            settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
+            settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
@@ -1927,7 +2011,7 @@ download_mervlan() {
             case "$base" in
                 log_settings.sh|var_settings.sh|\
                 lib_debug.sh|lib_json.sh|lib_ssh.sh|lib_action_ack.sh|\
-                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|\
+                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|lib_owner_lock.sh|\
                 lib_radio.sh|\
                 mervlan_templates.sh|mac_shield_snapshot.sh|\
                 lib_br0_guard.sh)
@@ -2017,6 +2101,7 @@ create_dirs_first_install() {
             return 1
         }
     done
+    ensure_durable_state_root || return 1
 }
 
 # create_link — Idempotent symlink helper for exposing logs/results via UI
@@ -2197,6 +2282,7 @@ if [ "$MODE" = "full" ]; then
     fi
     installer_phase_begin "Preserving existing installation data"
     mkdir -p "$TMP_DIR" 2>/dev/null || { RESULT_DETAIL="cannot create runtime staging"; exit 1; }
+    ensure_durable_state_root || { RESULT_DETAIL="cannot preserve durable state root"; exit 1; }
     prepare_preserved_files || { RESULT_EXISTING="FAIL - could not preserve user data"; exit 1; }
     prepare_install_target || { RESULT_FILES="FAIL - could not prepare target"; exit 1; }
     installer_phase_end
@@ -2347,7 +2433,6 @@ fi
 if [ "$MODE" = "tarball" ]; then
     prompt_ssh_user_override
     prompt_ssh_port_override
-    run_install_hardware_probe || exit 1
 fi
 
 # 3b. Copy Static assets to Public Dir
@@ -2380,15 +2465,20 @@ create_link "$MERV_BASE/settings/settings.json" "$PUBLIC_DIR/settings/settings.j
 # The SPA now reads the Hardware block from settings/settings.json directly;
 # keep the consolidated settings.json published for the UI.
 
-# Reinstall republishes the current source without running the full install
-# wizard. Refresh the generated public hardware catalog here so the APMO model
-# defaults always match the model definitions shipped by this source tree.
-if [ "$MODE" = "reinstall" ]; then
-    run_install_hardware_probe || {
-        RESULT_HARDWARE="FAIL - hardware profile refresh"
-        echo "[install] ERROR: Failed to refresh public hardware profiles" >&2
-        exit 1
-    }
+# Every real installation/recovery path must publish the generated hardware
+# catalog before final verification. It is not a static source asset and must
+# not be skipped by normal boot recovery after an interrupted update.
+if [ "$TEST_RUN" != "1" ]; then
+    case "$RESULT_HARDWARE" in
+        PASS*) : ;;
+        *)
+            run_install_hardware_probe || {
+                RESULT_HARDWARE="FAIL - hardware profile refresh"
+                echo "[install] ERROR: Failed to refresh public hardware profiles" >&2
+                exit 1
+            }
+            ;;
+    esac
 fi
 
 # 3c. Publish SSH public key for UI if it already exists (rename to .json for compatibility)
@@ -2579,13 +2669,14 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/hw_probe.sh settings/settings.json settings/lib_json.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do
     [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; }
 done
 settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings validation failed"; FINAL_STATUS=1; }
+[ -d "$MERV_STATE_ROOT/ssh_trust" ] || { RESULT_DETAIL="durable SSH trust state root missing"; FINAL_STATUS=1; }
 [ -f "$TMP_DIR/logs/cli_output.log" ] || { RESULT_DETAIL="runtime cli log missing"; FINAL_STATUS=1; }
 [ -f "$TMP_DIR/logs/vlan_manager.log" ] || { RESULT_DETAIL="runtime manager log missing"; FINAL_STATUS=1; }
 

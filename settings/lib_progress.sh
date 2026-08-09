@@ -21,6 +21,8 @@ LIB_PROGRESS_LOADED=1
 : "${MERV_PROGRESS_ROOT:=$TMPDIR/progress}"
 : "${MERV_PROGRESS_RETENTION_SEC:=3600}"
 : "${MERV_PROGRESS_STALE_SEC:=900}"
+: "${MERV_PROGRESS_MAX_FILES:=64}"
+: "${MERV_PROGRESS_QUARANTINE_MAX_FILES:=16}"
 
 _MERV_PROGRESS_SEQ=0
 
@@ -139,6 +141,18 @@ merv_progress_write() {
     _MERV_PROGRESS_SEQ=$((_MERV_PROGRESS_SEQ + 1))
     _mpw_tmp="${_mpw_path}.tmp.$$.$_MERV_PROGRESS_SEQ"
     _mpw_now="$(merv_progress_now)"
+    case "$_mpw_now" in ''|*[!0-9]*) _mpw_now=0 ;; esac
+    _mpw_started="${MERV_ACTION_PROGRESS_STARTED_AT:-}"
+    if [ -z "$_mpw_started" ] && [ -f "$_mpw_path" ]; then
+        _mpw_started=$(sed -n 's/.*"started_at"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_mpw_path" 2>/dev/null | head -n 1)
+    fi
+    case "$_mpw_started" in ''|*[!0-9]*) _mpw_started="$_mpw_now" ;; esac
+    _mpw_owner_pid="${MERV_ACTION_PROGRESS_PID:-}"
+    _mpw_owner_start="${MERV_ACTION_PROGRESS_OWNER_START:-}"
+    _mpw_owner_nonce="${MERV_ACTION_PROGRESS_NONCE:-}"
+    case "$_mpw_owner_pid" in ''|*[!0-9]*) _mpw_owner_pid=0 ;; esac
+    case "$_mpw_owner_start" in ''|*[!0-9]*) _mpw_owner_start=0 ;; esac
+    case "$_mpw_owner_nonce" in ''|*[!A-Za-z0-9._:-]*) _mpw_owner_nonce=unknown ;; esac
     _mpw_token_json="$(merv_progress_json_escape "$_mpw_token")"
     _mpw_action_json="$(merv_progress_json_escape "$_mpw_action")"
     _mpw_label_json="$(merv_progress_json_escape "$_mpw_label")"
@@ -149,7 +163,7 @@ merv_progress_write() {
     [ -n "$_mpw_error_json" ] && _mpw_error_field="\"$_mpw_error_json\""
 
     {
-        printf '{"format_version":1'
+        printf '{"format_version":2'
         printf ',"token":"%s"' "$_mpw_token_json"
         printf ',"action":"%s"' "$_mpw_action_json"
         printf ',"label":"%s"' "$_mpw_label_json"
@@ -161,8 +175,15 @@ merv_progress_write() {
         printf ',"percent":%s' "$_mpw_percent"
         printf ',"message":"%s"' "$_mpw_message_json"
         printf ',"error":%s' "$_mpw_error_field"
-        printf ',"updated_at":%s}\n' "$_mpw_now"
+        printf ',"started_at":%s,"owner_pid":%s,"owner_start":%s,"owner_nonce":"%s"' \
+            "$_mpw_started" "$_mpw_owner_pid" "$_mpw_owner_start" "$_mpw_owner_nonce"
+        printf ',"terminal_state":"%s","updated_at":%s}\n' "$_mpw_state" "$_mpw_now"
     } > "$_mpw_tmp" 2>/dev/null || {
+        rm -f "$_mpw_tmp" 2>/dev/null || :
+        return 1
+    }
+
+    chmod 644 "$_mpw_tmp" 2>/dev/null || {
         rm -f "$_mpw_tmp" 2>/dev/null || :
         return 1
     }
@@ -225,9 +246,66 @@ merv_progress_remove() {
 merv_progress_prune() {
     merv_progress_root_valid || return 2
     merv_progress_uint "${MERV_PROGRESS_RETENTION_SEC:-}" || return 2
-    _mpp_minutes=$((MERV_PROGRESS_RETENTION_SEC / 60))
-    [ "$_mpp_minutes" -gt 0 ] || _mpp_minutes=1
-    find "$MERV_PROGRESS_ROOT" -maxdepth 1 -type f -name '*.json' \
-        -mmin "+$_mpp_minutes" -exec rm -f {} \; 2>/dev/null || :
+    merv_progress_uint "${MERV_PROGRESS_MAX_FILES:-}" || return 2
+    merv_progress_uint "${MERV_PROGRESS_QUARANTINE_MAX_FILES:-}" || return 2
+    mkdir -p "$MERV_PROGRESS_ROOT" 2>/dev/null || return 1
+    _mpp_now=$(merv_progress_now); case "$_mpp_now" in ''|*[!0-9]*) return 2 ;; esac
+    _mpp_count=0; _mpp_terminal_count=0; _mpp_quarantine=0
+    _mpp_quarantine_dir="$MERV_PROGRESS_ROOT/quarantine"
+    _mpp_index="$MERV_PROGRESS_ROOT/.prune.$$"
+    _mpp_delete="$_mpp_index.delete"
+    ( umask 077; : > "$_mpp_index"; : > "$_mpp_delete" ) 2>/dev/null || return 1
+    for _mpp_existing_q in "$_mpp_quarantine_dir"/*; do
+        [ -e "$_mpp_existing_q" ] || continue
+        _mpp_quarantine=$((_mpp_quarantine + 1))
+    done
+    for _mpp_file in "$MERV_PROGRESS_ROOT"/*.json; do
+        [ -f "$_mpp_file" ] || continue
+        _mpp_count=$((_mpp_count + 1))
+        _mpp_state=$(sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p' "$_mpp_file" 2>/dev/null | head -n 1)
+        _mpp_updated=$(sed -n 's/.*"updated_at"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_mpp_file" 2>/dev/null | head -n 1)
+        case "$_mpp_state:$_mpp_updated" in
+            complete:*|failed:*|stale:*)
+                case "$_mpp_updated" in ''|*[!0-9]*) continue ;; esac
+                if [ "$_mpp_now" -ge "$(( _mpp_updated + MERV_PROGRESS_RETENTION_SEC ))" ] 2>/dev/null; then
+                    rm -f "$_mpp_file" 2>/dev/null || { rm -f "$_mpp_index" "$_mpp_delete" 2>/dev/null || :; return 1; }
+                    _mpp_count=$((_mpp_count - 1))
+                else
+                    printf '%s\t%s\n' "$_mpp_updated" "${_mpp_file##*/}" >> "$_mpp_index" 2>/dev/null || { rm -f "$_mpp_index" "$_mpp_delete" 2>/dev/null || :; return 1; }
+                    _mpp_terminal_count=$((_mpp_terminal_count + 1))
+                fi
+                ;;
+            *)
+                # Running/unknown records are never deleted solely by age.
+                # A malformed record is quarantined as a bounded exact child.
+                case "$_mpp_state:$_mpp_updated" in
+                    :*|*:''|*:*[!0-9]*)
+                        if [ "$_mpp_quarantine" -lt "$MERV_PROGRESS_QUARANTINE_MAX_FILES" ]; then
+                            mkdir -p "$_mpp_quarantine_dir" 2>/dev/null || return 1
+                            _mpp_q="${_mpp_quarantine_dir}/${_mpp_file##*/}.$$.${_mpp_quarantine}"
+                            mv "$_mpp_file" "$_mpp_q" 2>/dev/null || { rm -f "$_mpp_index" "$_mpp_delete" 2>/dev/null || :; return 1; }
+                            _mpp_quarantine=$((_mpp_quarantine + 1))
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
+    done
+    # Keep only the newest bounded set of validated terminal records. Running,
+    # unknown, and malformed records are never selected for this deletion pass.
+    if [ "$_mpp_terminal_count" -gt "${MERV_PROGRESS_MAX_FILES:-0}" ] 2>/dev/null; then
+        _mpp_excess=$((_mpp_terminal_count - MERV_PROGRESS_MAX_FILES))
+        sort -n -k1,1 "$_mpp_index" 2>/dev/null | awk -v n="$_mpp_excess" 'NR <= n {print $2}' > "$_mpp_delete" 2>/dev/null || { rm -f "$_mpp_index" "$_mpp_delete" 2>/dev/null || :; return 1; }
+        while IFS= read -r _mpp_name || [ -n "$_mpp_name" ]; do
+            case "$_mpp_name" in
+                *.json)
+                    _mpp_target="$MERV_PROGRESS_ROOT/$_mpp_name"
+                    [ -f "$_mpp_target" ] || continue
+                    rm -f "$_mpp_target" 2>/dev/null || { rm -f "$_mpp_index" "$_mpp_delete" 2>/dev/null || :; return 1; }
+                    ;;
+            esac
+        done < "$_mpp_delete"
+    fi
+    rm -f "$_mpp_index" "$_mpp_delete" 2>/dev/null || return 1
     return 0
 }

@@ -40,7 +40,7 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED LIB_SSH_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED LIB_SSH_LOADED LIB_ACTION_LOCK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ]            || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ]            || . "$MERV_BASE/settings/log_settings.sh"
@@ -48,6 +48,8 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ]              || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_SSH_LOADED:-}" ]                 || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || true
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ]        || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ]       || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ]    || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 if ! type merv_action_progress_init >/dev/null 2>&1; then
   merv_action_progress_init() { :; }
@@ -59,6 +61,48 @@ fi
 DRY_RUN="no"
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macclientmeta_vlanmgr" "Save Client Metadata" \
   "Preparing client metadata..."
+if merv_update_mutation_blocked; then
+  merv_action_progress_fail "Client metadata save refused while Update maintenance is active"
+  exit 75
+fi
+META_SIGNAL_HANDLING=0
+meta_handle_signal() {
+  _meta_signal_status="$1"
+  [ "${META_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_meta_signal_status"
+  META_SIGNAL_HANDLING=1
+  trap - INT TERM
+  if type merv_action_progress_fail >/dev/null 2>&1; then
+    merv_action_progress_fail "Client metadata save interrupted; no success result was published"
+  fi
+  error -c cli,vlan "Client Metadata: interrupted (rc=$_meta_signal_status); stopping before normal completion"
+  exit "$_meta_signal_status"
+}
+trap 'meta_handle_signal 130' INT
+trap 'meta_handle_signal 143' TERM
+
+META_ACTION_LOCK_PATH="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+if ! merv_action_lock_enter "$META_ACTION_LOCK_PATH"; then
+  merv_action_progress_fail "Another mutating action is already running"
+  exit 75
+fi
+META_ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+META_ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_NONCE"
+META_ACTION_LOCK_START="$MERV_ACTION_LOCK_START"
+merv_action_lock_export_child_context || exit 75
+META_ACTION_LOCK_RELEASED=0
+meta_release_action_lock() {
+  _meta_action_exit_rc=$?
+  if [ "${META_ACTION_LOCK_RELEASED:-0}" -eq 0 ]; then
+    if merv_action_lock_leave "$META_ACTION_LOCK_PATH" "$META_ACTION_LOCK_NONCE" "$META_ACTION_LOCK_START" "$META_ACTION_LOCK_MODE" >/dev/null 2>&1; then
+      META_ACTION_LOCK_RELEASED=1
+    else
+      error -c cli,vlan "Client Metadata cleanup could not release the global action lock"
+      [ "$_meta_action_exit_rc" -eq 0 ] && _meta_action_exit_rc=75
+    fi
+  fi
+  return "$_meta_action_exit_rc"
+}
+trap 'meta_release_action_lock' EXIT
 
 # ---------------------------------------------------------------- Main guard --
 # Override DB is materialized + pushed from the main router; the name DB is a
@@ -75,10 +119,27 @@ fi
 META_LOCK="$LOCKDIR/mac_client_meta.lock"
 META_LOCK_ACQUIRED=0
 if type merv_lock_acquire >/dev/null 2>&1; then
-  mkdir -p "$LOCKDIR" 2>/dev/null || :
+  mkdir -p "$LOCKDIR" 2>/dev/null || { error -c cli,vlan "Client Metadata: lock directory unavailable"; exit 1; }
   if merv_lock_acquire "$META_LOCK" "${MERV_CLIENT_META_LOCK_STALE_SEC:-60}" 0 "mac_client_meta"; then
     META_LOCK_ACQUIRED=1
-    trap '[ "$META_LOCK_ACQUIRED" -eq 1 ] && merv_lock_release "$META_LOCK" 2>/dev/null' EXIT INT TERM
+    META_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    meta_release_lock() {
+      _meta_exit_rc=$?
+      if [ "${META_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+        if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
+          META_LOCK_ACQUIRED=0
+        else
+          error -c cli,vlan "Client Metadata cleanup could not release its owner lock"
+          _meta_exit_rc=1
+        fi
+      fi
+      META_ACTION_LOCK_RELEASED=0
+      meta_release_action_lock
+      _meta_action_rc=$?
+      [ "$_meta_action_rc" -eq 0 ] || _meta_exit_rc=75
+      return "$_meta_exit_rc"
+    }
+    trap 'meta_release_lock' EXIT
   else
     merv_action_progress_fail "Another client metadata save is already running"
     info -c cli,vlan "Client Metadata: another save is in progress — skipping"
@@ -194,8 +255,12 @@ fi
 # Release the metadata writer lock before entering the observation coordinator:
 # global ordering is observation lock before operation-specific locks.
 if [ "$META_LOCK_ACQUIRED" -eq 1 ]; then
-  merv_lock_release "$META_LOCK" 2>/dev/null || :
-  META_LOCK_ACQUIRED=0
+  if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
+    META_LOCK_ACQUIRED=0
+  else
+    error -c cli,vlan "Client Metadata: could not release its owner lock; observation refresh was not started"
+    exit 1
+  fi
 fi
 
 # Rebuild through the one generation coordinator. Foreground execution ensures
@@ -203,9 +268,9 @@ fi
 _collect=skip
 merv_action_progress_phase "Refreshing client inventory..."
 if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
-  if MERV_OBS_NO_AUTOSTART=1 "$MERV_BASE/functions/post_apply_worker.sh" \
+  if MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" \
        request collect >/dev/null 2>&1 &&
-     "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
+     sh "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
     _collect=ok
   else
     _collect=failed

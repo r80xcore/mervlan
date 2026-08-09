@@ -22,19 +22,40 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED
+   unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_ACTION_LOCK_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 # =========================================== End of MerVLAN environment setup #
 
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "genkey_vlanmgr" "Generate SSH Keys" "Preparing SSH key generation..."
 
+if merv_update_mutation_blocked; then
+    merv_action_progress_fail "SSH key generation refused while Update maintenance is active"
+    exit 75
+fi
+
+KEY_ACTION_LOCK_PATH="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+if ! merv_action_lock_enter "$KEY_ACTION_LOCK_PATH"; then
+    merv_action_progress_fail "Another mutating action is already running"
+    exit 75
+fi
+KEY_ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+KEY_ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_NONCE"
+KEY_ACTION_LOCK_START="$MERV_ACTION_LOCK_START"
+merv_action_lock_export_child_context || exit 75
+
 ssh_key_progress_exit() {
     _progress_rc=$?
+    if ! merv_action_lock_leave "$KEY_ACTION_LOCK_PATH" "$KEY_ACTION_LOCK_NONCE" "$KEY_ACTION_LOCK_START" "$KEY_ACTION_LOCK_MODE" >/dev/null 2>&1; then
+        [ "$_progress_rc" -eq 0 ] && _progress_rc=75
+        printf '%s\n' "[ERROR] SSH key action-lock cleanup failed; lock retained for recovery" >&2
+    fi
     if [ "$_progress_rc" -eq 0 ]; then
         merv_action_progress_complete "SSH keys ready"
     else

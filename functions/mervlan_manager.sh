@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.2"                #
+#             - File: mervlan_manager.sh || version="0.72.5"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -23,14 +23,17 @@
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
-  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_STP_LOADED LIB_MERVQT_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
+  unset VAR_SETTINGS_LOADED LOG_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSID_FILTER_LOADED LIB_STP_LOADED LIB_MERVQT_LOADED LIB_OWNER_LOCK_LOADED LIB_ACTION_LOCK_LOADED LIB_MAC_SHIELD_SNAPSHOT_LOADED
 fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_STP_LOADED:-}" ] || . "$MERV_BASE/settings/lib_stp.sh"
+[ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh"
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
@@ -79,6 +82,12 @@ done
 
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "apply_vlanmgr" "Apply VLAN" \
   "Preparing VLAN apply..."
+
+if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
+  info -c cli,vlan "Manager refused: Update maintenance is active"
+  merv_action_progress_fail "Apply refused while Update maintenance is active"
+  exit 75
+fi
 
 # Boot mode: ensure log directories and files exist before any logging
 # This is critical because install.sh may not have run yet on first boot
@@ -202,7 +211,7 @@ run_trunk_if_configured() {
   fi
 
   if DRY_RUN="$DRY_RUN" UPLINK_PORT="$UPLINK_PORT" DEFAULT_BRIDGE="$DEFAULT_BRIDGE" MAX_TRUNKS=8 \
-      "$FUNCDIR/mervlan_trunk.sh"; then
+      sh "$FUNCDIR/mervlan_trunk.sh"; then
     TRUNK_APPLIED=1
     return 0
   fi
@@ -396,30 +405,45 @@ else
 fi
 
 LOCK_ACQUIRED=0
+ACTION_LOCK_ACQUIRED=0
+ACTION_LOCK_MODE="none"
+ACTION_LOCK_NONCE=""
+ACTION_LOCK_START=""
 MANAGER_DHCP_TOKEN=""
 MANAGER_RUN_ID=""
 MANAGER_EXIT_REASON="process-exit"
 MANAGER_RUNTIME_OWNED=0
 
 acquire_script_lock() {
-  # Prevent concurrent runs from stomping on bridges/interfaces. The lock
-  # primitive (mkdir + pid + created stamp + kill -0 liveness + stale reclaim)
-  # lives in lib_mervqt.sh so heal, MERV_MAC refresh and this manager all share
-  # one proven implementation. Without it, a crashed/killed manager would leave
-  # a directory that blocks every future heal forever.
+  # Prevent concurrent runs from stomping on bridges/interfaces. The owner-aware
+  # identity/nonce primitive lives in lib_owner_lock.sh so heal, MAC Shield refresh,
+  # and this manager share one contract. Live owners are never reclaimed by age;
+  # unknown metadata fails closed.
   [ "$DRY_RUN" = "yes" ] && return 0
   [ -n "$LOCK_PATH" ] || return 0
+
+  ACTION_LOCK_PATH="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+  if ! merv_action_lock_enter "$ACTION_LOCK_PATH"; then
+    error -c cli,vlan "Could not acquire global action lock; aborting"
+    exit 75
+  fi
+  ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+  [ "$ACTION_LOCK_MODE" = self ] && ACTION_LOCK_ACQUIRED=1
+  ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_NONCE"
+  ACTION_LOCK_START="$MERV_ACTION_LOCK_START"
+  merv_action_lock_export_child_context || {
+    error -c cli,vlan "Could not export authenticated action ownership; aborting"
+    exit 75
+  }
 
   # Courtesy yield to an in-flight heal: heal is non-blocking and short-lived,
   # so a single brief wait lets it finish reading interface state before we
   # start mutating bridges. This is a BEST-EFFORT yield only — we NEVER abort
-  # or reclaim heal's lock here. A crashed heal that left vlan_event.lock behind
-  # must not delay or block the manager beyond this one short sleep, so we do
-  # not loop, do not honour 'stale', and do not exit. This deliberately keeps
-  # the manager's escape surface unchanged: the manager always proceeds.
-  if type merv_lock_state >/dev/null 2>&1; then
-    case "$(merv_lock_state "$LOCKDIR/vlan_event.lock")" in
-      active|unknown_recent)
+  # or reclaim heal's lock here. The final owner-aware acquisition below is
+  # authoritative: active or unknown ownership is never bypassed by this wait.
+  if type merv_owner_lock_state >/dev/null 2>&1; then
+    case "$(merv_owner_lock_state "$LOCKDIR/vlan_event.lock")" in
+      live|unknown)
         info -c cli,vlan "Manager: heal in flight — yielding briefly before apply"
         sleep 3
         ;;
@@ -428,8 +452,9 @@ acquire_script_lock() {
 
   local stale
   stale="${MERV_MANAGER_LOCK_STALE_SEC:-420}"
-  if merv_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
+  if merv_owner_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
     LOCK_ACQUIRED=1
+    MANAGER_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     if [ "${MERV_ACTION_RUNTIME_OWNER:-0}" != "1" ] &&
        type merv_action_runtime_start >/dev/null 2>&1 &&
        merv_action_runtime_start "apply_vlanmgr" "Apply VLAN" \
@@ -445,21 +470,30 @@ acquire_script_lock() {
 release_script_lock() {
   # No-op in dry-run
   [ "$DRY_RUN" = "yes" ] && return 0
-  [ "$LOCK_ACQUIRED" -eq 1 ] || return
-  merv_lock_release "$LOCK_PATH"
-  LOCK_ACQUIRED=0
+  _rsl_failed=0
+  if [ "$LOCK_ACQUIRED" -eq 1 ]; then
+    if merv_owner_lock_release "$LOCK_PATH" "$MANAGER_LOCK_NONCE"; then
+      LOCK_ACQUIRED=0
+    else
+      _rsl_failed=1
+      error -c cli,vlan "Could not release mervlan_manager owner lock; recovery is required"
+    fi
+  fi
+  if [ "$ACTION_LOCK_ACQUIRED" -eq 1 ]; then
+    if merv_action_lock_leave "${ACTION_LOCK_PATH:-$MERV_ACTION_LOCK_PATH}" "$ACTION_LOCK_NONCE" "$ACTION_LOCK_START" "$ACTION_LOCK_MODE"; then
+      ACTION_LOCK_ACQUIRED=0
+      merv_action_lock_clear_child_context
+    else
+      _rsl_failed=1
+      error -c cli,vlan "Could not release global action lock; recovery is required"
+    fi
+  fi
+  [ "$_rsl_failed" -eq 0 ]
 }
 
 cleanup_on_exit() {
     _cleanup_rc=$?
-    if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
-       [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
-      if [ "$_cleanup_rc" -eq 0 ]; then
-        merv_action_progress_complete "Apply complete"
-      else
-        merv_action_progress_fail "Apply failed; see the VLAN log for details"
-      fi
-    fi
+    _cleanup_failed=0
     if [ -n "${MANAGER_DHCP_TOKEN:-}" ]; then
       _cleanup_reason="${MANAGER_EXIT_REASON:-exit}-${_cleanup_rc}"
       if merv_dhcp_hold_abandon "$MANAGER_DHCP_TOKEN" "$_cleanup_reason"; then
@@ -468,11 +502,26 @@ cleanup_on_exit() {
         error -c cli,vlan "Manager cleanup could not resolve its DHCP lease; reconciliation queued"
       fi
     fi
-    [ "${MANAGER_RUNTIME_OWNED:-0}" -eq 1 ] &&
-      merv_action_runtime_finish 2>/dev/null || :
+    if [ "${MANAGER_RUNTIME_OWNED:-0}" -eq 1 ] && ! merv_action_runtime_finish 2>/dev/null; then
+      _cleanup_failed=1
+      error -c cli,vlan "Manager cleanup could not release the action-runtime marker"
+    fi
     # Remove per-execution change log file
-    [ -f "$CHANGE_LOG" ] && rm -f "$CHANGE_LOG"
-    release_script_lock
+    if [ -f "$CHANGE_LOG" ] && ! rm -f "$CHANGE_LOG" 2>/dev/null; then
+      _cleanup_failed=1
+      error -c cli,vlan "Manager cleanup could not remove its change log"
+    fi
+    release_script_lock || _cleanup_failed=1
+    [ "$_cleanup_failed" -eq 0 ] || _cleanup_rc=1
+    if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
+       [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
+      if [ "$_cleanup_rc" -eq 0 ]; then
+        merv_action_progress_complete "Apply complete"
+      else
+        merv_action_progress_fail "Apply failed; see the VLAN log for details"
+      fi
+    fi
+    return "$_cleanup_rc"
 }
 trap 'MANAGER_EXIT_REASON=signal-int; exit 130' INT
 trap 'MANAGER_EXIT_REASON=signal-term; exit 143' TERM
@@ -1753,6 +1802,20 @@ merv_manager_final_security_check() {
     bad=1
   fi
 
+  # The bridge placement checks below are not sufficient on their own: a
+  # successful apply must also prove that both owner chains, both parent
+  # jumps, and every exact DROP rule match the expected state.  Any missing,
+  # duplicated, or extra rule is a security failure.
+  if type merv_l2_guard_verify_exact >/dev/null 2>&1; then
+    if ! merv_l2_guard_verify_exact; then
+      error -c cli,vlan "SECURITY FAIL: exact L2 guard-chain verification failed"
+      bad=1
+    fi
+  else
+    error -c cli,vlan "SECURITY FAIL: L2 guard verifier unavailable"
+    bad=1
+  fi
+
   i=1
   while [ "$i" -le "$MAX_SSIDS" ]; do
     ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
@@ -2141,7 +2204,10 @@ main() {
 
   # Boot mode: restore MERV_MAC shield from JFFS checkpoint before first apply
   if [ "$MERV_MANAGER_MODE" = "boot" ]; then
-    merv_mac_boot_init
+    if ! merv_mac_boot_init; then
+      error -c cli,vlan "MERV_MAC: boot shield restore failed; aborting before VLAN mutation"
+      return 1
+    fi
   fi
 
   # Log startup information
@@ -2193,7 +2259,10 @@ main() {
       return 1
     fi
   fi
-  cleanup_existing_config
+  if ! cleanup_existing_config; then
+    error -c cli,vlan "MERV_MAC: shield initialization or VLAN cleanup failed; aborting before bridge configuration"
+    return 1
+  fi
   merv_action_progress_update cleanup 1 1 25 "Cleaning previous VLAN configuration..."
 
   # Configuration phase 1: Attach Ethernet LAN ports to appropriate bridges
@@ -2290,7 +2359,10 @@ main() {
       done
       [ "$_post_qt_count" -gt 0 ] && \
         info -c cli,vlan "MERV_QT: re-armed for $_post_qt_count interface(s) post-restart"
-      ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
+      if ! ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"; then
+        error -c cli,vlan "MERV_MAC: post-restart shield reload failed; aborting before final verification"
+        return 1
+      fi
     fi
 
     # Bridge-only sweep after shields are re-armed, before the settle sleep.
@@ -2374,6 +2446,17 @@ main() {
     fi
   fi
 
+  # The configuration mutation phase is complete: final placement passed and
+  # the manager's DHCP lease is released.  Observation deliberately defers
+  # while this lock is active, so release the manager/configuration lock before
+  # waiting for the post-apply worker.  The EXIT cleanup remains a fallback for
+  # every earlier failure, but normal client refresh must never depend on the
+  # observation timeout to retire this owner.
+  if ! release_script_lock; then
+    MANAGER_EXIT_REASON="configuration-lock-release-failed"
+    return 1
+  fi
+
   # Summary: display final configuration status
   show_configuration_summary
 
@@ -2382,16 +2465,29 @@ main() {
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "Dry-run mode; skipping VLAN client list refresh (collect_clients.sh)"
   elif [ "$MERV_IS_NODE" = "1" ]; then
-    "$FUNCDIR/post_apply_worker.sh" request snapshot >/dev/null 2>&1 || \
+    sh "$FUNCDIR/post_apply_worker.sh" request snapshot >/dev/null 2>&1 || \
       warn -c cli,vlan "Node post-apply snapshot request failed"
   elif [ "$SKIP_COLLECT" = "yes" ]; then
     info -c cli,vlan "Parallel mode; cluster observation will follow node verification"
   elif [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
     merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
     info -c cli,vlan "Refreshing client inventory after apply..."
-    if MERV_OBS_NO_AUTOSTART=1 "$FUNCDIR/post_apply_worker.sh" \
+    if [ "$MERV_MANAGER_MODE" = "boot" ]; then
+      # Queue boot observation without starting its worker. The boot wrapper
+      # retires the shield/handoff after this process exits, then runs the
+      # bounded worker so it cannot wait behind its own boot protection.
+      if MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
+           request snapshot collect >/dev/null 2>&1; then
+        info -c cli,vlan "VLAN client list refresh queued for post-shield boot work"
+      else
+        _manager_observation_rc=$?
+        warn -c cli,vlan "Post-apply observation request failed in boot mode (rc=$_manager_observation_rc)"
+        MANAGER_EXIT_REASON="post-apply-observation-request-failed"
+        return 1
+      fi
+    elif MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
          request snapshot collect >/dev/null 2>&1 &&
-       "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
+       sh "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
       info -c cli,vlan "✓ VLAN client list refresh completed"
     else
       _manager_observation_rc=$?

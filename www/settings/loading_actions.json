@@ -1,6 +1,18 @@
 {
   "version": 1,
   "actions": {
+    "syncsettings_vlanmgr": {
+      "label": "Syncing settings to node(s)...",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "phases": [
+        { "id": "preflight", "label": "Preparing settings synchronization", "start": 0, "end": 15 },
+        { "id": "nodes", "label": "Synchronizing settings to nodes", "start": 15, "end": 80 },
+        { "id": "verify", "label": "Verifying node settings", "start": 80, "end": 95 },
+        { "id": "complete", "label": "Finishing", "start": 95, "end": 100 }
+      ]
+    },
     "sync_vlanmgr": {
       "label": "Sync Nodes",
       "display": "panel",
@@ -102,6 +114,38 @@
         { "id": "complete", "label": "SSH keys ready", "start": 90, "end": 100 }
       ]
     },
+    "repairmain_vlanmgr": {
+      "label": "Repairing update components",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "timeout_ms": 300000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing repair", "start": 0, "end": 10 },
+        { "id": "manifest", "label": "Loading repair manifest", "start": 10, "end": 20 },
+        { "id": "download", "label": "Downloading repair components", "start": 20, "end": 70 },
+        { "id": "validate", "label": "Validating repair components", "start": 70, "end": 82 },
+        { "id": "publish", "label": "Replacing update components", "start": 82, "end": 97 },
+        { "id": "complete", "label": "Repair complete", "start": 97, "end": 100 }
+      ]
+    },
+    "repairdev_vlanmgr": {
+      "label": "Repairing update components",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "timeout_ms": 300000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing repair", "start": 0, "end": 10 },
+        { "id": "manifest", "label": "Loading repair manifest", "start": 10, "end": 20 },
+        { "id": "download", "label": "Downloading repair components", "start": 20, "end": 70 },
+        { "id": "validate", "label": "Validating repair components", "start": 70, "end": 82 },
+        { "id": "publish", "label": "Replacing update components", "start": 82, "end": 97 },
+        { "id": "complete", "label": "Repair complete", "start": 97, "end": 100 }
+      ]
+    },
     "apply_vlanmgr": {
       "label": "Apply VLAN",
       "display": "panel",
@@ -151,6 +195,75 @@
         { "id": "wait", "label": "Waiting for nodes to finish", "start": 75, "end": 90 },
         { "id": "verify", "label": "Verifying node completion", "start": 90, "end": 97 },
         { "id": "complete", "label": "Node apply complete", "start": 97, "end": 100 }
+      ]
+    },
+    "sshtrustprobe_vlanmgr": {
+      "label": "Verify SSH Host Keys",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "capability", "label": "Checking SSH trust capability", "start": 0, "end": 20 },
+        { "id": "probe", "label": "Probing configured node host keys", "start": 20, "end": 75 },
+        { "id": "publish", "label": "Publishing trust decision", "start": 75, "end": 100 }
+      ]
+    },
+    "sshtrustenroll_vlanmgr": {
+      "label": "Enroll SSH Host Keys",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "revalidate", "label": "Revalidating presented host keys", "start": 0, "end": 45 },
+        { "id": "commit", "label": "Committing selected host keys", "start": 45, "end": 85 },
+        { "id": "complete", "label": "SSH trust enrollment complete", "start": 85, "end": 100 }
+      ]
+    },
+    "sshtrustresume_vlanmgr": {
+      "label": "Resume MerVLAN Action",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "validate", "label": "Validating one-use resume", "start": 0, "end": 20 },
+        { "id": "dispatch", "label": "Rechecking and resuming the action", "start": 20, "end": 85 },
+        { "id": "complete", "label": "Resumed action complete", "start": 85, "end": 100 }
+      ]
+    },
+    "sshtruststatus_vlanmgr": {
+      "label": "Read SSH Trust Status",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "read", "label": "Reading trusted device records", "start": 0, "end": 60 },
+        { "id": "configured", "label": "Checking configured nodes", "start": 60, "end": 100 }
+      ]
+    },
+    "sshtrustrevoke_vlanmgr": {
+      "label": "Revoke SSH Trust",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "stage", "label": "Removing the selected host-key pin", "start": 0, "end": 80 },
+        { "id": "complete", "label": "SSH trust revocation complete", "start": 80, "end": 100 }
+      ]
+    },
+    "sshtrustabort_vlanmgr": {
+      "label": "Abort SSH Trust Action",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "cancel", "label": "Cancelling the paused SSH trust action", "start": 0, "end": 85 },
+        { "id": "complete", "label": "SSH trust action aborted", "start": 85, "end": 100 }
       ]
     }
   }
