@@ -408,7 +408,7 @@ dispatch_if_executable() {
     sync_vlanmgr|syncsettings_vlanmgr|apply_vlanmgr)
       MERV_PROGRESS_TOKEN="$(get_progress_request_token)"
       ;;
-    save_vlanmgr_pgt_*|sync_vlanmgr_pgt_*|syncsettings_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*|macrefresh_vlanmgr_pgt_*|macclientmeta_vlanmgr_pgt_*|collectclients_vlanmgr_pgt_*|sshtrustprobe_vlanmgr_pgt_*|sshtruststatus_vlanmgr_pgt_*|sshtrustrevoke_vlanmgr_pgt_*)
+    save_vlanmgr_pgt_*|sync_vlanmgr_pgt_*|syncsettings_vlanmgr_pgt_*|apply_vlanmgr_pgt_*|executenodes_vlanmgr_pgt_*|executenodesonly_vlanmgr_pgt_*|genkey_vlanmgr_pgt_*|macrefresh_vlanmgr_pgt_*|macclientmeta_vlanmgr_pgt_*|collectclients_vlanmgr_pgt_*|repairmain_vlanmgr_pgt_*|repairdev_vlanmgr_pgt_*|sshtrustprobe_vlanmgr_pgt_*|sshtruststatus_vlanmgr_pgt_*|sshtrustrevoke_vlanmgr_pgt_*)
       MERV_PROGRESS_TOKEN="$(get_progress_action_token "${RAW:-}")"
       ;;
     sshtrustprobe_vlanmgr_vrt_*) MERV_PROGRESS_TOKEN="$(get_verified_action_token "${TYPE}_${EVENT}" sshtrustprobe_vlanmgr)" ;;
@@ -449,7 +449,7 @@ dispatch_if_executable() {
   logger -t "VLANMgr" "handler: event lock acquired action=$_se_key token=${MERV_PROGRESS_TOKEN:-none}"
   _se_global_needed=0
   case "$SCRIPT_PATH" in
-    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/hw_probe.sh|*/update_mervlan.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh|*/mac_client_meta.sh|*/dropbear_sshkey_gen.sh) _se_global_needed=1 ;;
+    */mervlan_manager.sh|*/execute_nodes.sh|*/sync_nodes.sh|*/save_settings.sh|*/hw_probe.sh|*/update_mervlan.sh|*/update_mervlan_repair.sh|*/backup_mervlan.sh|*/mervlan_recover.sh|*/mac_refresh.sh|*/mervlan_boot.sh|*/ssh_trust_action.sh|*/mac_client_meta.sh|*/dropbear_sshkey_gen.sh) _se_global_needed=1 ;;
   esac
   _se_global_nonce=""; _se_global_start=""
   if [ "$_se_global_needed" -eq 1 ]; then
@@ -731,6 +731,14 @@ case "${TYPE}_${EVENT}" in
   updatedev_vlanmgr)
     # Update MerVLAN addon from development channel (triggered by update request)
     dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan.sh" update dev
+    ;;
+  repairmain_vlanmgr|repairmain_vlanmgr_pgt_*)
+    # Repair only the main-branch update/runtime components before a separate update.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" main
+    ;;
+  repairdev_vlanmgr|repairdev_vlanmgr_pgt_*)
+    # Repair only the dev-branch update/runtime components before a separate update.
+    dispatch_if_executable "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" dev
     ;;
   updateref_vlanmgr_*)
     _encoded_update_request="$(decode_update_ref_action "${TYPE}_${EVENT}")"

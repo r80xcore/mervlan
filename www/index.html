@@ -712,7 +712,7 @@
         <select id="dryRunToggle" name="DRY_RUN"            style="display:none;"><option value="no">no</option><option value="yes">yes</option></select>
         <select id="ensToggle"   name="ENABLE_NATIVE_SSID"  style="display:none;"><option value="0">0</option><option value="1">1</option></select>
         <div class="button-row button-row-actions">
-          <button type="button" class="button_gen" onclick="uploadSettingsAndSave()" title="Upload settings.json and save (no CGI)">Save</button>
+          <button type="button" class="button_gen" onclick="uploadSettingsAndSave()" title="Save the current MerVLAN configuration.">Save</button>
           <button type="button" class="button_gen" onclick="loadSettings()" title="Load current values">Load</button>
           <button type="button" class="button_gen danger" onclick="clearFields()" title="Clear all fields (unsaved)">Clear</button>
         </div>
@@ -722,8 +722,8 @@
         <div class="form-box controls-panel">
           <h2>MerVLAN Deployment</h2>
       <div class="button-row button-row-main">
-        <button type="button" class="button_gen" onclick="handleApplyClick(this)" title="Run vlan_manager locally">Apply VLAN</button>
-        <button type="button" class="button_gen" id="syncNodesBtn" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync settings to nodes and apply">Sync Nodes</button>
+        <button type="button" class="button_gen" onclick="handleApplyClick(this)" title="Run MerVLAN Manager and apply the current VLAN configuration.">Apply VLAN</button>
+        <button type="button" class="button_gen" id="syncNodesBtn" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync MerVLAN files and settings to configured nodes.">Sync Nodes</button>
         <button type="button" class="button_gen" id="sshInstallBtn" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
 
         </div>
@@ -732,11 +732,11 @@
       <div class="form-box form-box--legend">
         <div class="legend">
           <div class="legend__row">
-            <span class="legend__item"><span class="legend__icon">✅</span><span class="legend__label">Valid</span></span>
-            <span class="legend__item"><span class="legend__icon">❎</span><span class="legend__label">Unconfigured</span></span>
-            <span class="legend__item"><span class="legend__icon">🟩</span><span class="legend__label">Pending</span></span>
-            <span class="legend__item"><span class="legend__icon">❌</span><span class="legend__label">Missing</span></span>
-            <span class="legend__item"><span class="legend__icon">🟡</span><span class="legend__label">Duplicate</span></span>
+            <span class="legend__item" title="Configured and matches the saved configuration."><span class="legend__icon">✅</span><span class="legend__label">Valid</span></span>
+            <span class="legend__item" title="No configuration is set for this row."><span class="legend__icon">❎</span><span class="legend__label">Unconfigured</span></span>
+            <span class="legend__item" title="Changed in the UI and not yet saved."><span class="legend__icon">🟩</span><span class="legend__label">Pending</span></span>
+            <span class="legend__item" title="Configuration is incomplete or contains an invalid required value."><span class="legend__icon">❌</span><span class="legend__label">Missing</span></span>
+            <span class="legend__item" title="This VLAN ID is used more than once. This is allowed if intentional; MerVLAN supports multiple assignments to the same VLAN."><span class="legend__icon">🟡</span><span class="legend__label">Duplicate</span></span>
           </div>
         </div>
       </div>
@@ -777,7 +777,7 @@
             class="experimental-version"
             id="experimentalVersionBadge"
             aria-live="polite"
-            title="Show version and update options"
+            title="Show update and restore options."
           ></button>
         </div>
 
@@ -850,7 +850,7 @@
                 </div>
                 <div id="vlanOverview" class="clients-body"></div>
                 <div class="clients-footer">
-                  <button type="button" id="editClientMetaBtn" class="button_gen" title="Edit friendly client names and unlock selected MACs from the MAC shield." onclick="toggleClientMetaEdit()">Edit Metadata</button>
+                  <button type="button" id="editClientMetaBtn" class="button_gen" title="Edit friendly client names and configure MAC shield Unlock overrides." onclick="toggleClientMetaEdit()">Edit Metadata</button>
                   <label class="clients-toggle" title="Show observations that are not the active location for a device — relayed trunk/backhaul copies and relay-only diagnostic rows. Hidden by default."><input type="checkbox" id="clientsShowInactive" onchange="toggleClientsShowInactive(this)"> Show inactive / relayed</label>
                   <button type="button" class="button_gen" title="Rebuild the MAC shield from currently connected VLAN clients. Use after moving a device from VLAN to br0 to clear its old lock instead of waiting for it to expire." onclick="runMacRefresh()">Rebuild MAC Shield</button>
                 </div>
@@ -919,9 +919,10 @@
               </ol>
               <div class="ssh-key-wrapper">
                 <textarea id="sshKeyContent" class="ssh-key-textarea" readonly></textarea>
-                <button id="copyKey" class="copy-key-btn" title="Copy key">📋</button>
+                <button id="copyKey" class="copy-key-btn" title="Copy key" disabled>📋</button>
                 <span id="copyTooltip" class="copy-key-tooltip">Copied!</span>
               </div>
+              <p id="sshKeyStatus" class="muted" aria-live="polite">SSH key has not been loaded yet.</p>
             </div>
 
             <div class="modal__section">
@@ -964,7 +965,7 @@
 
           <div id="sshKeyActions" class="modal__actions">
             <button class="button_gen" onclick="triggerAction('genkey_vlanmgr', this, 'Generate SSH keys')" title="Generate a pair of SSH keys">Generate Keys</button>
-            <button class="button_gen" onclick="fetchSSHKey()" title="Load the generated key">Load</button>
+            <button class="button_gen" id="sshKeyLoadBtn" onclick="fetchSSHKey()" title="Load the generated key">Load</button>
           </div>
         </div>
 
@@ -1074,6 +1075,14 @@
           <strong>Clear existing logs before update</strong>
         </label>
         <p class="channel-capability-hint">When unchecked, existing history is retained subject to the configured log limits. Clearing occurs inside the locked update transaction, so the complete new update remains logged.</p>
+      </div>
+
+      <div class="modal__section">
+        <label class="backup-checkbox-label" for="repairBeforeUpdate">
+          <input type="checkbox" id="repairBeforeUpdate">
+          <strong>Repair update components before update</strong>
+        </label>
+        <p id="repairBeforeUpdateHint" class="channel-capability-hint">Downloads and restores the MerVLAN update/runtime components before starting the update. Settings, keys, backups and user data are not changed.</p>
       </div>
 
       <div class="modal__section">
@@ -2585,6 +2594,7 @@
           HW_SETTINGS.TABLES_READY = true;
           HW_SETTINGS.LAST_MAX_SSIDS = HW_SETTINGS.MAX_SSIDS;
           HW_SETTINGS.LAST_MAX_ETH_PORTS = overallMax;
+          refreshFormStatuses();
         }
         </script>
 
@@ -2596,6 +2606,7 @@ const tooltip   = document.getElementById('copyTooltip');
 // Copy to clipboard with tooltip (without selecting text)
 copyBtn.addEventListener('click', (e) => {
   e.preventDefault();
+  if (copyBtn.disabled || textarea.getAttribute('aria-busy') === 'true' || textarea.dataset.loaded !== 'true') return;
   
   // Create temporary element to copy from
   const tempTextArea = document.createElement('textarea');
@@ -2637,18 +2648,33 @@ function showTooltip() {
 </script>
 
 <script>
+    const MANAGED_VLAN_MIN = 2;
+    const MANAGED_VLAN_MAX = 4094;
+
+    function isManagedVlan(value) {
+      const text = String(value == null ? '' : value).trim();
+      if (!/^\d+$/.test(text)) return false;
+      const number = Number(text);
+      return Number.isInteger(number) && number >= MANAGED_VLAN_MIN && number <= MANAGED_VLAN_MAX;
+    }
+
+    function managedVlanNumber(value) {
+      return isManagedVlan(value) ? Number(String(value).trim()) : null;
+    }
+
     const TOOLTIP = {
       SSID: "Enter a valid SSID (1–32 characters, must exist in ASUS Merlin GUI)",
-      VLAN: "Enter VLAN ID (2–4096).",
+      VLAN: `Enter VLAN ID (${MANAGED_VLAN_MIN}–${MANAGED_VLAN_MAX}).`,
       NODE: "Enter node IP (format: 192.168.x.x)",
       APISO: "Enable/disable AP isolation for this SSID",
       STATUS_OK: "✅ Configured and saved",
       STATUS_NOT: "❎ Not configured",
       STATUS_EDIT: "🟩 Edited but not saved",
       STATUS_ERR: "❌ Missing/invalid value",
-      STATUS_DUP: "🟡 Duplicate VLAN ID detected"
+      STATUS_DUP: "🟡 Duplicate VLAN ID; reuse is allowed when intentional"
     };
     const statusTooltips = {"✅":TOOLTIP.STATUS_OK,"❎":TOOLTIP.STATUS_NOT,"🟩":TOOLTIP.STATUS_EDIT,"❌":TOOLTIP.STATUS_ERR,"🟡":TOOLTIP.STATUS_DUP};
+    const DUPLICATE_VLAN_TOOLTIP = "Duplicate VLAN ID; reuse is allowed when intentional.";
     const NODE_DISABLED_TOOLTIP = "Configure node(s) first!";
     const MERLIN_SAVE_PAYLOAD_LIMIT = 8000;
     function getDefaultNodeAlias(index){
@@ -2775,6 +2801,7 @@ function showTooltip() {
         if(status) status.textContent = value ? "✅" : "❎";
       }
       validateAllVlans();
+      refreshFormStatuses();
     }
 
     function updateLanTargetButtons(){
@@ -2897,6 +2924,7 @@ function showTooltip() {
       updateLanProductIdBadge(CURRENT_LAN_TARGET);
       updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
+      refreshFormStatuses();
     }
 
     function setupLanTargetButtons(){
@@ -3043,8 +3071,8 @@ function showTooltip() {
         const vlanValue = vlanInput ? vlanInput.value.trim() : "";
         const ssidValid = ssidValue.length >= 1 && ssidValue.length <= 32 &&
                          ssidValue !== "unused-placeholder";
-        const vlanNum = parseInt(vlanValue, 10);
-        const vlanValid = !isNaN(vlanNum) && vlanNum >= 1 && vlanNum <= 4094;
+        const vlanNum = managedVlanNumber(vlanValue);
+        const vlanValid = vlanNum !== null;
         const rowActive = ssidValid && vlanValid;
 
         // For MAIN: require SSID + VLAN
@@ -3104,6 +3132,7 @@ function showTooltip() {
 
     const nodeDependentButtons = [];
     let CURRENT_SETTINGS_CACHE = null;
+    let PERSISTED_SETTINGS_FLAT_BASELINE = null;
     let CURRENT_SETTINGS_STRUCTURED = null;
     let CURRENT_SETTINGS_SHAPE = "flat";
     function initNodeDependentButtons(){
@@ -3152,8 +3181,275 @@ function showTooltip() {
       setNodeButtonsEnabled(hasConfiguredNodes(settings));
       updateSSIDAssignCheckboxes();
     }
-    function updateStatusTooltips(){ document.querySelectorAll(".status").forEach(el=>{ const i=el.textContent.trim(); if(statusTooltips[i]) el.title=statusTooltips[i]; else el.removeAttribute("title"); }); }
-    function markEdited(index){ const el=document.getElementById("status"+index); if(el){ el.textContent="🟩"; updateStatusTooltips(); } }
+    function updateStatusTooltips(){ document.querySelectorAll(".status").forEach(el=>{ const i=el.textContent.trim(); if(el.dataset.statusTooltip){ el.title=el.dataset.statusTooltip; } else if(statusTooltips[i]) el.title=statusTooltips[i]; else el.removeAttribute("title"); }); }
+    const STATUS_SYMBOLS = Object.freeze({
+      saved: "\u2705",
+      empty: "\u274e",
+      changed: "\ud83d\udfe9",
+      invalid: "\u274c",
+      duplicate: "\ud83d\udfe1"
+    });
+
+    function cloneFlatSettingsBaseline(source){
+      if(!source || typeof source !== "object" || Array.isArray(source)) return null;
+      try {
+        return JSON.parse(JSON.stringify(source));
+      } catch(_){
+        return Object.assign({}, source);
+      }
+    }
+
+    // This is the only writer for the saved-status baseline.  Form edits update
+    // CURRENT_SETTINGS_CACHE for serialization, but must never rewrite this copy.
+    function updatePersistedSettingsBaseline(source){
+      const cloned = cloneFlatSettingsBaseline(source);
+      if(cloned) PERSISTED_SETTINGS_FLAT_BASELINE = cloned;
+      return cloned;
+    }
+
+    function normalizeStatusText(value){
+      const raw = String(value == null ? "" : value).trim();
+      if(!raw || raw.toLowerCase() === "none" || raw.toLowerCase() === "unused-placeholder") return "";
+      return raw;
+    }
+
+    function normalizeStatusVlan(value){
+      const raw = normalizeStatusText(value);
+      if(!raw) return "";
+      const number = managedVlanNumber(raw);
+      return number === null ? raw : String(number);
+    }
+
+    function normalizeStatusAlias(value, index){
+      return normalizeStatusText(value) || getDefaultNodeAlias(index);
+    }
+
+    function normalizeStatusAssignment(value){
+      const parts = normalizeSsidAssignString(value || defaultSSIDAssign())
+        .split(",")
+        .map(part => String(part || "none").trim().toUpperCase());
+      const assigned = new Set(parts);
+      return nodeTokens(true).map(token => assigned.has(token) ? token : "none").join(",");
+    }
+
+    function normalizeStatusTrunkList(value){
+      const raw = normalizeStatusText(value);
+      if(!raw) return "none";
+      const values = uniqueCompactList(raw.split(",").map(part => {
+        const item = String(part || "").trim();
+        const number = managedVlanNumber(item);
+        return number === null ? item : String(number);
+      }));
+      return values.length ? values.join(",") : "none";
+    }
+
+    function statusSnapshotEqual(left, right){
+      if(!left || !right) return false;
+      const leftKeys = Object.keys(left);
+      const rightKeys = Object.keys(right);
+      if(leftKeys.length !== rightKeys.length) return false;
+      return leftKeys.every(key => {
+        const a = left[key];
+        const b = right[key];
+        if(a && typeof a === "object" && b && typeof b === "object") return statusSnapshotEqual(a, b);
+        return a === b;
+      });
+    }
+
+    function setStatusSymbol(id, symbol){
+      const element = document.getElementById(id);
+      if(element){
+        element.textContent = symbol;
+        if(symbol !== STATUS_SYMBOLS.duplicate) delete element.dataset.statusTooltip;
+      }
+    }
+
+    function duplicateVlanMatchesSaved(field){
+      const baseline = PERSISTED_SETTINGS_FLAT_BASELINE;
+      const key = field && field.name;
+      if(!baseline || !key || !Object.prototype.hasOwnProperty.call(baseline, key)) return null;
+      return normalizeStatusVlan(field.value) === normalizeStatusVlan(baseline[key]);
+    }
+
+    function duplicateVlanTooltip(field){
+      const matchesSaved = duplicateVlanMatchesSaved(field);
+      if(matchesSaved === true) return `${DUPLICATE_VLAN_TOOLTIP} This value matches the saved configuration.`;
+      if(matchesSaved === false) return `${DUPLICATE_VLAN_TOOLTIP} This is an unsaved current value.`;
+      return DUPLICATE_VLAN_TOOLTIP;
+    }
+
+    function setDuplicateStatusSymbol(id, field){
+      setStatusSymbol(id, STATUS_SYMBOLS.duplicate);
+      const element = document.getElementById(id);
+      if(element) element.dataset.statusTooltip = duplicateVlanTooltip(field);
+    }
+
+    function currentSsidStatusSnapshot(index){
+      const idx = String(index).padStart(2, "0");
+      const ssidInput = document.querySelector(`input[name="SSID_${idx}"]`);
+      const vlanInput = document.querySelector(`input[name="VLAN_${idx}"]`);
+      const apisoSelect = document.querySelector(`select[name="APISO_${idx}"]`);
+      const assignments = nodeTokens(true).map(token => {
+        const checkbox = document.querySelector(`input[name="SSIDassign_${idx}_${token}"]`);
+        return checkbox && checkbox.checked ? token : "none";
+      }).join(",");
+      return {
+        ssid: normalizeStatusText(ssidInput ? ssidInput.value : ""),
+        vlan: normalizeStatusVlan(vlanInput ? vlanInput.value : ""),
+        apiso: String(apisoSelect ? apisoSelect.value : "0"),
+        assignments
+      };
+    }
+
+    function persistedSsidStatusSnapshot(index){
+      const base = PERSISTED_SETTINGS_FLAT_BASELINE || {};
+      const idx = String(index).padStart(2, "0");
+      return {
+        ssid: normalizeStatusText(base[`SSID_${idx}`]),
+        vlan: normalizeStatusVlan(base[`VLAN_${idx}`]),
+        apiso: String(base[`APISO_${idx}`] ?? "0"),
+        assignments: normalizeStatusAssignment(base[`SSIDassign_${idx}`])
+      };
+    }
+
+    function currentNodeStatusSnapshot(index){
+      const input = document.querySelector(`input[name="NODE${index}"]`);
+      const aliasInput = document.getElementById(`node${index}AliasField`);
+      const aliasLabel = document.querySelector(`.node-label[data-node-index="${index}"]`);
+      return {
+        ip: normalizeStatusText(input ? input.value : ""),
+        alias: normalizeStatusAlias(aliasInput ? aliasInput.value : (aliasLabel ? aliasLabel.textContent : ""), index)
+      };
+    }
+
+    function persistedNodeStatusSnapshot(index){
+      const base = PERSISTED_SETTINGS_FLAT_BASELINE || {};
+      return {
+        ip: normalizeStatusText(base[`NODE${index}`]),
+        alias: normalizeStatusAlias(base[`NODE${index}_ALIAS`], index)
+      };
+    }
+
+    function currentLanStatusSnapshot(index){
+      const input = document.querySelector(`.lan-vlan-input[data-lan-port="${index}"]`);
+      let trunk = { enabled: "0", tagged: "none", untagged: "none" };
+      if(CURRENT_LAN_TARGET === "main"){
+        const values = collectTrunkValues(index);
+        trunk = {
+          enabled: values.enabled ? "1" : "0",
+          tagged: normalizeStatusTrunkList(values.taggedValue),
+          untagged: normalizeStatusTrunkList(values.untagValue)
+        };
+      }
+      return {
+        vlan: normalizeStatusVlan(input ? input.value : ""),
+        trunk
+      };
+    }
+
+    function persistedLanStatusSnapshot(index){
+      const base = PERSISTED_SETTINGS_FLAT_BASELINE || {};
+      const key = getLanFlatKey(CURRENT_LAN_TARGET, index);
+      let trunk = { enabled: "0", tagged: "none", untagged: "none" };
+      if(CURRENT_LAN_TARGET === "main"){
+        const enabled = String(base[`TRUNK${index}`] ?? "0") === "1" && String(base.EXPERIMENTAL ?? "0") === "1";
+        trunk = {
+          enabled: enabled ? "1" : "0",
+          tagged: enabled ? normalizeStatusTrunkList(base[`TAGGED_TRUNK${index}`]) : "none",
+          untagged: enabled ? normalizeStatusTrunkList(base[`UNTAGGED_TRUNK${index}`]) : "none"
+        };
+      }
+      return {
+        vlan: normalizeStatusVlan(base[key]),
+        trunk
+      };
+    }
+
+    function statusNodeIpIsValid(value){
+      return /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(value);
+    }
+
+    function statusTrunkListIsValid(value){
+      const normalized = normalizeStatusTrunkList(value);
+      if(normalized === "none") return true;
+      return normalized.split(",").every(part => managedVlanNumber(part) !== null);
+    }
+
+    function refreshSsidStatus(index){
+      const current = currentSsidStatusSnapshot(index);
+      const saved = persistedSsidStatusSnapshot(index);
+      const vlanInput = document.querySelector(`input[name="VLAN_${String(index).padStart(2, "0")}"]`);
+      const currentConfigured = !!(current.ssid || current.vlan);
+      const savedConfigured = !!(saved.ssid || saved.vlan);
+      if(!currentConfigured){
+        setStatusSymbol(`status${index}`, savedConfigured ? STATUS_SYMBOLS.changed : STATUS_SYMBOLS.empty);
+        return;
+      }
+      const validSsid = current.ssid.length >= 1 && current.ssid.length <= 32;
+      const validVlan = managedVlanNumber(current.vlan) !== null;
+      if(!current.ssid || !current.vlan || !validSsid || !validVlan){
+        setStatusSymbol(`status${index}`, STATUS_SYMBOLS.invalid);
+        return;
+      }
+      if(vlanInput && vlanInput.classList.contains("duplicate")){
+        setDuplicateStatusSymbol(`status${index}`, vlanInput);
+        return;
+      }
+      setStatusSymbol(`status${index}`, statusSnapshotEqual(current, saved) ? STATUS_SYMBOLS.saved : STATUS_SYMBOLS.changed);
+    }
+
+    function refreshNodeStatus(index){
+      const current = currentNodeStatusSnapshot(index);
+      const saved = persistedNodeStatusSnapshot(index);
+      const defaultAlias = getDefaultNodeAlias(index);
+      const currentAliasCustom = current.alias !== defaultAlias;
+      const savedConfigured = !!saved.ip || saved.alias !== defaultAlias;
+      if(!current.ip){
+        if(!currentAliasCustom){
+          setStatusSymbol(`statusNODE${index}`, savedConfigured ? STATUS_SYMBOLS.changed : STATUS_SYMBOLS.empty);
+          return;
+        }
+        setStatusSymbol(`statusNODE${index}`, statusSnapshotEqual(current, saved) ? STATUS_SYMBOLS.saved : STATUS_SYMBOLS.changed);
+        return;
+      }
+      if(!statusNodeIpIsValid(current.ip)){
+        setStatusSymbol(`statusNODE${index}`, STATUS_SYMBOLS.invalid);
+        return;
+      }
+      setStatusSymbol(`statusNODE${index}`, statusSnapshotEqual(current, saved) ? STATUS_SYMBOLS.saved : STATUS_SYMBOLS.changed);
+    }
+
+    function refreshLanStatus(index){
+      const current = currentLanStatusSnapshot(index);
+      const saved = persistedLanStatusSnapshot(index);
+      const vlanInput = document.querySelector(`.lan-vlan-input[data-lan-port="${index}"]`);
+      const currentConfigured = !!current.vlan || current.trunk.enabled === "1";
+      const savedConfigured = !!saved.vlan || saved.trunk.enabled === "1";
+      if(!currentConfigured){
+        setStatusSymbol(`statusLAN${index}`, savedConfigured ? STATUS_SYMBOLS.changed : STATUS_SYMBOLS.empty);
+        return;
+      }
+      if((current.vlan && managedVlanNumber(current.vlan) === null) ||
+         !statusTrunkListIsValid(current.trunk.tagged) ||
+         !statusTrunkListIsValid(current.trunk.untagged)){
+        setStatusSymbol(`statusLAN${index}`, STATUS_SYMBOLS.invalid);
+        return;
+      }
+      if(vlanInput && vlanInput.classList.contains("duplicate")){
+        setDuplicateStatusSymbol(`statusLAN${index}`, vlanInput);
+        return;
+      }
+      setStatusSymbol(`statusLAN${index}`, statusSnapshotEqual(current, saved) ? STATUS_SYMBOLS.saved : STATUS_SYMBOLS.changed);
+    }
+
+    function refreshFormStatuses(){
+      for(let i = 1; i <= effectiveMaxSsids(); i++) refreshSsidStatus(i);
+      for(let i = 1; i <= MAX_NODES; i++) refreshNodeStatus(i);
+      for(let i = 1; i <= getOverallMaxEthPorts(); i++) refreshLanStatus(i);
+      updateStatusTooltips();
+    }
+
+    function markEdited(index){ refreshFormStatuses(); }
 
     function toInt(s){ const n=parseInt(String(s).trim(),10); return Number.isFinite(n)?n:null; }
 
@@ -3195,11 +3491,7 @@ function showTooltip() {
         .map(part => part.replace(/\s+/g, "").trim())
         .filter(Boolean)
         .map(part => {
-          if(!/^\d+$/.test(part)) return null;
-          const num = toInt(part);
-          if(num === null) return null;
-          if(num < 2 || num > 4096) return null;
-          return String(num);
+          return isManagedVlan(part) ? String(Number(part)) : null;
         })
         .filter(Boolean);
     }
@@ -3242,15 +3534,28 @@ function showTooltip() {
 
     function validateSSIDField(input){
       const raw=input.value;
-      const v=raw; input.classList.remove("valid","invalid"); if(v.trim()==="") return; if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
+      const v=raw; input.classList.remove("valid","invalid");
+      if(v.trim()===""){
+        updateAPIsolationAvailability();
+        updateSSIDAssignCheckboxes();
+        refreshFormStatuses();
+        return;
+      }
+      if(v.length>=1 && v.length<=32) input.classList.add("valid"); else input.classList.add("invalid");
       updateAPIsolationAvailability();
       updateSSIDAssignCheckboxes();
+      refreshFormStatuses();
     }
     function validateNodeField(input){
       const raw=input.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned){ const d=raw.length-cleaned.length; const s=(input.selectionStart||cleaned.length)-d; const e=(input.selectionEnd||cleaned.length)-d; input.value=cleaned; try{ input.setSelectionRange(s,e);}catch{} }
-      const v=cleaned.trim(); input.classList.remove("valid","invalid"); if(v==="") return;
+      const v=cleaned.trim(); input.classList.remove("valid","invalid");
+      if(v===""){
+        refreshFormStatuses();
+        return;
+      }
       const ip=/^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
       if(ip.test(v)) input.classList.add("valid"); else input.classList.add("invalid");
+      refreshFormStatuses();
     }
     function validateAllVlans(){
       // Collect ALL VLAN inputs from the entire page: SSIDs, main LAN, and all node LAN tabs
@@ -3258,7 +3563,13 @@ function showTooltip() {
       const fields=document.querySelectorAll('input[name*="VLAN"], input[name*="_ETH"][name*="_VLAN"]');
       
       // Clean whitespace from all fields
-      fields.forEach(f=>{ const raw=f.value, cleaned=raw.replace(/\s+/g,""); if(raw!==cleaned) f.value=cleaned; });
+      fields.forEach(f=>{
+        const raw=f.value, cleaned=raw.replace(/\s+/g,"");
+        if(raw!==cleaned) f.value=cleaned;
+        // Validation may be called repeatedly after a duplicate is fixed;
+        // restore the canonical VLAN hint before applying fresh results.
+        f.title = TOOLTIP.VLAN;
+      });
       
       // IMPORTANT: Always clear validation classes from all fields first
       fields.forEach(f=>f.classList.remove("valid","invalid","duplicate"));
@@ -3281,8 +3592,8 @@ function showTooltip() {
       fields.forEach(f=>{ 
         const raw=f.value.trim().toLowerCase(); 
         if(raw===""||raw==="none") return; 
-        const num=toInt(raw); 
-        if(!Number.isFinite(num)||num<2||num>4096){ f.classList.add("invalid"); return; } 
+        const num = managedVlanNumber(raw);
+        if(num === null){ f.classList.add("invalid"); return; }
         if(!groups.has(num)) groups.set(num,[]); 
         groups.get(num).push(f); 
       });
@@ -3301,8 +3612,8 @@ function showTooltip() {
           // This cache key is from a different tab, check it for duplicates
           const raw = (CURRENT_SETTINGS_CACHE[cacheKey] || "").trim().toLowerCase();
           if(raw==="" || raw==="none") return;
-          const num = toInt(raw);
-          if(!Number.isFinite(num) || num<2 || num>4096) return;
+          const num = managedVlanNumber(raw);
+          if(num === null) return;
           
           if(!groups.has(num)) groups.set(num, []);
           groups.get(num).push(null); // null = cached entry from OTHER tab, not DOM
@@ -3316,8 +3627,8 @@ function showTooltip() {
       trunksTagged.forEach(sel => {
         Array.prototype.forEach.call(sel.options, opt => {
           if(opt.selected && opt.value && opt.value !== CUSTOM_VLAN_OPTION_VALUE){
-            const num = toInt(opt.value);
-            if(Number.isFinite(num) && num >= 2 && num <= 4096){
+            const num = managedVlanNumber(opt.value);
+            if(num !== null){
               if(!groups.has(num)) groups.set(num, []);
               groups.get(num).push(null);
             }
@@ -3328,8 +3639,8 @@ function showTooltip() {
       trunksUntagged.forEach(sel => {
         const val = sel.value;
         if(val && val !== CUSTOM_VLAN_OPTION_VALUE && val.toLowerCase() !== 'none'){
-          const num = toInt(val);
-          if(Number.isFinite(num) && num >= 2 && num <= 4096){
+          const num = managedVlanNumber(val);
+          if(num !== null){
             if(!groups.has(num)) groups.set(num, []);
             groups.get(num).push(null);
           }
@@ -3342,12 +3653,17 @@ function showTooltip() {
         const domFields = list.filter(f => f !== null);
         if(list.length>1){ 
           // Duplicate detected (including cache or trunks)
-          domFields.forEach(f=>{ f.classList.remove("valid"); f.classList.add("duplicate"); }); 
+          domFields.forEach(f=>{
+            f.classList.remove("valid");
+            f.classList.add("duplicate");
+            f.title = duplicateVlanTooltip(f);
+          });
         } else if(domFields.length === 1){ 
           // Single value in DOM with no conflicts
           domFields[0].classList.add("valid"); 
         }
       });
+      refreshFormStatuses();
     }
     function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); updateAPIsolationAvailability(); updateSSIDAssignCheckboxes(); }
 
@@ -3368,9 +3684,9 @@ function showTooltip() {
         const ssidValid = ssidValue.length >= 1 && ssidValue.length <= 32 && 
                          ssidValue !== "unused-placeholder";
         
-        // VLAN is valid if numeric and in range 1-4094
-        const vlanNum = parseInt(vlanValue, 10);
-        const vlanValid = !isNaN(vlanNum) && vlanNum >= 1 && vlanNum <= 4094;
+        // VLAN is valid only for a strict managed VLAN ID (2-4094).
+        const vlanNum = managedVlanNumber(vlanValue);
+        const vlanValid = vlanNum !== null;
         
         // Enable AP Isolation if BOTH are valid
         if (ssidValid && vlanValid) {
@@ -3634,16 +3950,16 @@ function showTooltip() {
       for(let i = 1; i <= maxSsids; i++){
         const idx = String(i).padStart(2, "0");
         const value = flat[`VLAN_${idx}`];
-        const n = toInt(value);
-        if(n && n >= 2 && n <= 4096){
+        const n = managedVlanNumber(value);
+        if(n !== null){
           collected.add(String(n));
         }
       }
       const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         const value = flat[`ETH${i}_VLAN`];
-        const n = toInt(value);
-        if(n && n >= 2 && n <= 4096){
+        const n = managedVlanNumber(value);
+        if(n !== null){
           collected.add(String(n));
         }
       }
@@ -3933,8 +4249,6 @@ function showTooltip() {
     function clearFields(){
       document.querySelectorAll("input[type=text]").forEach(el=>{ el.value=""; el.classList.remove("valid","invalid","duplicate"); });
       document.querySelectorAll("select").forEach(el=>{ el.selectedIndex=0; });
-      document.querySelectorAll(".status").forEach(el=>{ el.textContent="❌"; });
-      updateStatusTooltips();
       setNodeCollapse(false);
       const experimentalToggle = document.getElementById("experimentalToggle");
       if(experimentalToggle){
@@ -3988,6 +4302,7 @@ function showTooltip() {
       CURRENT_SETTINGS_STRUCTURED = null;
       CURRENT_SETTINGS_SHAPE = "flat";
       setNodeButtonsEnabled(false);
+      refreshFormStatuses();
     }
 
     const CLI_WELCOME_HTML = `
@@ -4340,13 +4655,13 @@ function toggleCliFullsize() {
     }
 
     function updateFlowLocksControls(state) {
-      return state === "checking" || state === "running" || state === "success" ||
+      return state === "checking" || state === "repairing" || state === "running" || state === "success" ||
         state === "detached" || state === "timeout";
     }
 
     function setUpdateControlsLocked(locked) {
       ["checkUpdateBtn", "versionChannelSelect", "releaseSelect", "customBranchInput",
-       "clearLogsBeforeUpdate", "versionRestoreTab"]
+       "clearLogsBeforeUpdate", "repairBeforeUpdate", "versionRestoreTab"]
         .forEach(id => {
           const el = document.getElementById(id);
           if (el) el.disabled = !!locked;
@@ -4361,7 +4676,7 @@ function toggleCliFullsize() {
 
     function setUpdateFlowState(state) {
       updateFlowState = state;
-      isUpdateInProgress = state === "checking" || state === "running";
+      isUpdateInProgress = state === "checking" || state === "repairing" || state === "running";
       setUpdateControlsLocked(updateFlowLocksControls(state));
 
       const button = document.getElementById("runUpdateBtn");
@@ -4369,13 +4684,19 @@ function toggleCliFullsize() {
       if (refreshButton) refreshButton.style.display = state === "success" ? "inline-block" : "none";
       if (!button) return;
 
-      button.classList.toggle("update-action--busy", state === "checking" || state === "running");
+      button.classList.toggle("update-action--busy", state === "checking" || state === "repairing" || state === "running");
       if (state === "checking") {
         button.style.display = updateActionIdleDisplay === "none" ? "inline-block" : updateActionIdleDisplay;
         button.textContent = "Checking...";
         button.disabled = true;
         button.setAttribute("aria-busy", "true");
         button.removeAttribute("aria-label");
+      } else if (state === "repairing") {
+        button.style.display = updateActionIdleDisplay === "none" ? "inline-block" : updateActionIdleDisplay;
+        button.textContent = "Repairing...";
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+        button.setAttribute("aria-label", "Repairing update components");
       } else if (state === "running") {
         button.style.display = updateActionIdleDisplay === "none" ? "inline-block" : updateActionIdleDisplay;
         button.disabled = true;
@@ -4933,9 +5254,9 @@ function renderClientMetaBadges(c){
 
   // Location confidence from the backend merge resolver.
   if (c.location_status === 'relay_only' || c.diagnostic)
-    badges.push('<span class="cm-badge cm-relay-only" title="Learned only through trunk/backhaul; hidden from active clients by default.">Relay-only</span>');
+    badges.push('<span class="cm-badge cm-relay-only" title="Relay-only (R/O): The device was seen only through a trunk/backhaul and no direct active location could be resolved. Hidden from active clients by default.">R/O</span>');
   else if (c.location_status === 'relayed')
-    badges.push('<span class="cm-badge cm-relayed" title="Learned through a trunk/backhaul — not directly attached here">R</span>');
+    badges.push('<span class="cm-badge cm-relayed" title="Relayed (R): This is an indirect observation through a trunk/backhaul; MerVLAN resolved the device\'s direct active location elsewhere.">R</span>');
   else if (c.location_status === 'ambiguous' || c.location_conflict)
     badges.push('<span class="cm-badge cm-ambiguous" title="Conflicting direct observations — active location could not be resolved">?</span>');
   else if (c.location_status === 'unknown')
@@ -4960,8 +5281,8 @@ function cmBuildEditorRow(mac, curName, isOverride, statusFlags){
   const badgeState = Object.assign({}, sf, { mac: mac, name: curName, override: !!isOverride });
   return `<div class="cm-erow" data-mac="${cmEscapeHtml(mac)}">`+
          `<span class="cm-mac muted">${cmEscapeHtml(mac)}</span>`+
-         `<input type="text" class="cm-name-input" maxlength="48" placeholder="(no name)" value="${cmEscapeHtml(curName||'')}" data-cm-name="${cmEscapeHtml(mac)}">`+
-         `<label class="cm-ovr-label" title="Unlock: when ticked, the MAC shield DROP rule for this device is suppressed cluster-wide. The device connects freely even if enrolled in the MAC shield database. Untick to re-enable the DROP rule on the next shield reload."><input type="checkbox" class="cm-ovr-input" data-cm-ovr="${cmEscapeHtml(mac)}"${isOverride?' checked':''}> Unlock</label>`+
+         `<input type="text" class="cm-name-input" maxlength="48" placeholder="(no name)" title="Set an optional friendly name for this client in MerVLAN. This does not change the device hostname or DNS name." value="${cmEscapeHtml(curName||'')}" data-cm-name="${cmEscapeHtml(mac)}">`+
+         `<label class="cm-ovr-label" title="Unlock: Exclude this MAC from MAC shield locking across the cluster so the device can roam between bridges without being blocked by MAC shield. Example: a trusted admin device that needs to move between the native LAN and VLAN networks. Normal VLAN and firewall policy still applies."><input type="checkbox" class="cm-ovr-input" data-cm-ovr="${cmEscapeHtml(mac)}"${isOverride?' checked':''}> Unlock</label>`+
          `<span class="cm-erow-badges">${renderClientMetaBadges(badgeState)}</span>`+
          `</div>`;
 }
@@ -5017,8 +5338,8 @@ function renderClientMetaEditor(data){
   let html = '<div class="cm-editor">';
   html += '<div class="cm-editor-head">Set display names and tick <strong>Unlock</strong> to suppress a device&#39;s MAC shield lock (DROP rule). Names cannot contain ";".</div>';
   html += '<div class="cm-add-row">'+
-          '<input type="text" id="cmAddMacInput" class="cm-add-input" maxlength="17" placeholder="Add MAC (aa:bb:cc:dd:ee:ff)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();cmAddOverrideMac();}">'+
-          '<button type="button" class="button_gen" onclick="cmAddOverrideMac()">Add</button>'+
+          '<input type="text" id="cmAddMacInput" class="cm-add-input" maxlength="17" placeholder="Add MAC (aa:bb:cc:dd:ee:ff)" title="Enter a MAC address to add an Unlock override, even if the device is not currently detected. Example: aa:bb:cc:dd:ee:ff." onkeydown="if(event.key===\'Enter\'){event.preventDefault();cmAddOverrideMac();}">'+
+          '<button type="button" class="button_gen" onclick="cmAddOverrideMac()" title="Add the entered MAC to the metadata editor and enable Unlock for it.">Add</button>'+
           '</div>';
   html += '<div class="cm-rows">';
   if (!rows.length){
@@ -5033,8 +5354,8 @@ function renderClientMetaEditor(data){
   }
   html += '</div>';
   html += '<div class="cm-editor-actions">'+
-          '<button type="button" class="button_gen" onclick="saveClientMeta(this)">Save Client Metadata</button>'+
-          '<button type="button" class="button_gen" onclick="toggleClientMetaEdit(false)">Cancel</button>'+
+          '<button type="button" class="button_gen" onclick="saveClientMeta(this)" title="Save client names and Unlock selections, apply the MAC shield changes, and refresh client information.">Save Client Metadata</button>'+
+          '<button type="button" class="button_gen" onclick="toggleClientMetaEdit(false)" title="Discard unsaved metadata changes and return to the client overview.">Cancel</button>'+
           '</div>';
   html += '</div>';
   el.innerHTML = html;
@@ -5044,7 +5365,12 @@ function renderClientMetaEditor(data){
 function toggleClientMetaEdit(forceState){
   CLIENT_META_EDIT = (typeof forceState === 'boolean') ? forceState : !CLIENT_META_EDIT;
   const btn = document.getElementById('editClientMetaBtn');
-  if (btn) btn.textContent = CLIENT_META_EDIT ? 'Close Editor' : 'Edit Metadata';
+  if (btn){
+    btn.textContent = CLIENT_META_EDIT ? 'Close Editor' : 'Edit Metadata';
+    btn.title = CLIENT_META_EDIT
+      ? 'Close the metadata editor without saving unsaved changes.'
+      : 'Edit friendly client names and configure MAC shield Unlock overrides.';
+  }
   if (CLIENT_META_EDIT){
     renderClientMetaEditor(LAST_CLIENTS_DATA);
   } else {
@@ -5714,6 +6040,10 @@ let sshTrustRegistrySelectedSlots = new Set();
 let sshTrustRegistrySelectionInitialized = false;
 let sshTrustRegistryBusy = false;
 let sshTrustProbeLastStartReason = '';
+let sshTrustRegistryRequestPromise = null;
+let sshKeyLoadSequence = 0;
+let sshKeyLoadPromise = null;
+let sshKeyLoadState = 'idle';
 
 function isMutatingActionLock(name) {
     return !/^(?:status|service-status|read-only|logs|log-refresh)$/.test(String(name || ''));
@@ -6505,6 +6835,9 @@ function triggerAction(actionScriptName, button, description) {
 
     let _svcSnapshot = null;
     let _svcTransactionActive = false;
+    let _svcSettingsLoadSequence = 0;
+    let _svcSettingsLoadPromise = null;
+    let _svcSettingsLoadState = 'idle';
     // Last successful status check result — persists for the page session so
     // reopening the modal still shows the previous check. Cleared on page reload.
     let _svcLastStatusData = null;
@@ -6642,12 +6975,20 @@ function triggerAction(actionScriptName, button, description) {
       _svcTransactionActive = busy;
       SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
         const control = document.getElementById(definition.controlId);
-        if (control) control.disabled = busy;
+        if (control) control.disabled = busy || _svcSettingsLoadState !== 'ready';
       });
-      ['svcSettingsApplyBtn', 'svcSettingsCancelBtn', 'svcStatusRefreshBtn'].forEach(id => {
-        const control = document.getElementById(id);
-        if (control) control.disabled = busy;
-      });
+      const applyBtn = document.getElementById('svcSettingsApplyBtn');
+      if (applyBtn) applyBtn.disabled = busy || _svcSettingsLoadState !== 'ready' || !_svcSnapshot;
+      const cancelBtn = document.getElementById('svcSettingsCancelBtn');
+      if (cancelBtn) cancelBtn.disabled = busy;
+      const refreshBtn = document.getElementById('svcStatusRefreshBtn');
+      if (refreshBtn) refreshBtn.disabled = busy || _svcSettingsLoadState !== 'ready';
+    }
+
+    function setServiceSettingsLoadState(state, message, status = '') {
+      _svcSettingsLoadState = state;
+      setServiceTransactionStatus(message || '', status);
+      setServiceSettingsBusy(_svcTransactionActive);
     }
 
     function applySettingChangesToForm(changes) {
@@ -6776,6 +7117,7 @@ function triggerAction(actionScriptName, button, description) {
         CURRENT_SETTINGS_SHAPE = 'flat';
         CURRENT_SETTINGS_CACHE = data;
       }
+      updatePersistedSettingsBaseline(CURRENT_SETTINGS_CACHE);
       return CURRENT_SETTINGS_CACHE;
     }
 
@@ -6799,9 +7141,35 @@ function triggerAction(actionScriptName, button, description) {
       if (!modal) return;
       ensureConfigViewForModal();
 
+      // Open immediately, then load authoritative settings into the visible
+      // shell. Controls remain disabled until this request reaches a terminal
+      // state, so a slow router cannot expose stale values for editing.
+      modal.style.display = 'block';
+      anchorModalToForm(modal);
+      scheduleHostIframeResize();
+      const overlay = document.getElementById('leftPanelOverlay');
+      if (overlay) {
+        overlay.classList.add('is-active');
+        overlay.style.display = 'block';
+        overlay.style.pointerEvents = 'auto';
+      }
+      syncInfoLatchVisibility();
+      if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;
+      const loadToken = ++_svcSettingsLoadSequence;
+      _svcSnapshot = null;
+      setServiceSettingsLoadState('loading', 'Loading authoritative settings...');
+
       // Always do a fresh load so all toggles reflect the last saved state on disk.
       // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
-      await loadSettings({ deferFill: true });
+      const settingsRequest = loadSettings({ deferFill: true });
+      _svcSettingsLoadPromise = settingsRequest;
+      const loaded = await settingsRequest;
+      if (loadToken === _svcSettingsLoadSequence) _svcSettingsLoadPromise = null;
+      if (loadToken !== _svcSettingsLoadSequence || modal.style.display === 'none') return false;
+      if (!loaded || !CURRENT_SETTINGS_CACHE) {
+        setServiceSettingsLoadState('error', 'Could not load settings.json from the router.', 'error');
+        return false;
+      }
 
       const cache = CURRENT_SETTINGS_CACHE || {};
 
@@ -6812,8 +7180,7 @@ function triggerAction(actionScriptName, button, description) {
       // Populate modal toggles — all read from the fresh cache
       // Snapshot initial state for dirty-diffing
       _svcSnapshot = captureServiceSettingsSnapshot(cache);
-      setServiceSettingsBusy(false);
-      setServiceTransactionStatus('');
+      setServiceSettingsLoadState('ready', 'Settings loaded.');
 
       // Reset Apply button
       const applyBtn = document.getElementById('svcSettingsApplyBtn');
@@ -6840,18 +7207,8 @@ function triggerAction(actionScriptName, button, description) {
         }
       }
 
-      // Show modal — same pattern as all other modals
-      modal.style.display = 'block';
-      anchorModalToForm(modal);
-      scheduleHostIframeResize();
-
-      const overlay = document.getElementById('leftPanelOverlay');
-      if (overlay) {
-        overlay.classList.add('is-active');
-        overlay.style.display = 'block';
-        overlay.style.pointerEvents = 'auto';
-      }
-      syncInfoLatchVisibility();
+      // The modal was made visible before the asynchronous settings load.
+      // Only its contents and controls need updating after the load completes.
     }
 
     function closeServiceSettingsModal() {
@@ -6859,6 +7216,9 @@ function triggerAction(actionScriptName, button, description) {
         setServiceTransactionStatus('Wait for the current settings transaction to finish.', 'warning');
         return;
       }
+      _svcSettingsLoadSequence++;
+      _svcSettingsLoadPromise = null;
+      _svcSettingsLoadState = 'idle';
       const modal = document.getElementById('serviceSettingsModal');
       if (modal) {
         modal.style.display = 'none';
@@ -6882,14 +7242,14 @@ function triggerAction(actionScriptName, button, description) {
 
     function markSvcSettingsDirty() {
       const applyBtn = document.getElementById('svcSettingsApplyBtn');
-      if (!applyBtn || _svcTransactionActive || !_svcSnapshot) return;
+      if (!applyBtn || _svcTransactionActive || _svcSettingsLoadState !== 'ready' || !_svcSnapshot) return;
       const changes = calculateServiceSettingsChanges(_svcSnapshot, readServiceSettingsControls());
       applyBtn.disabled = changes.length === 0;
       if (changes.length) setServiceTransactionStatus('');
     }
 
     async function applyServiceSettings() {
-      if (!_svcSnapshot || _svcTransactionActive) return;
+      if (!_svcSnapshot || _svcTransactionActive || _svcSettingsLoadState !== 'ready') return;
       const desiredValues = readServiceSettingsControls();
       const validationErrors = validateServiceSettings(desiredValues);
       if (validationErrors.length) {
@@ -7134,6 +7494,7 @@ async function checkForConfiguredNodes() {
     const settings = await response.json();
     const flat = isStructuredSettingsPayload(settings) ? normalizeToFlatSettings(settings) : settings;
     CURRENT_SETTINGS_CACHE = flat;
+    updatePersistedSettingsBaseline(flat);
     if (isStructuredSettingsPayload(settings)) {
       CURRENT_SETTINGS_STRUCTURED = settings;
       CURRENT_SETTINGS_SHAPE = "sectioned";
@@ -7333,6 +7694,7 @@ async function runMacRefresh() {
       updateExperimentalVisibility();
       updateAPIsolationAvailability();
       updateSSIDAssignCheckboxes();
+      refreshFormStatuses();
     }
 
     function deepEqualObjects(a, b) {
@@ -7475,7 +7837,7 @@ async function runMacRefresh() {
         CURRENT_SETTINGS_STRUCTURED = null;
         CURRENT_SETTINGS_SHAPE = "flat";
         setNodeButtonsEnabled(false);
-        return; 
+        return false;
       }
       let data; 
       try{ 
@@ -7486,7 +7848,7 @@ async function runMacRefresh() {
         CURRENT_SETTINGS_STRUCTURED = null;
         CURRENT_SETTINGS_SHAPE = "flat";
         setNodeButtonsEnabled(false);
-        return; 
+        return false;
       }
       if (isStructuredSettingsPayload(data)) {
         CURRENT_SETTINGS_STRUCTURED = data;
@@ -7497,9 +7859,10 @@ async function runMacRefresh() {
         CURRENT_SETTINGS_SHAPE = "flat";
         CURRENT_SETTINGS_CACHE = data;
       }
+      updatePersistedSettingsBaseline(CURRENT_SETTINGS_CACHE);
       if (deferFill) {
         updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
-        return;
+        return true;
       }
       // Update HW_SETTINGS from loaded data before generating tables
       const hwChanged = refreshHwSettingsFromCache();
@@ -7526,12 +7889,14 @@ async function runMacRefresh() {
       if (hwChanged) {
         appendCliText("UI refreshed: hardware values changed.\n", { scroll: "force" });
       }
+      return true;
     } catch(err){ 
       appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
       CURRENT_SETTINGS_CACHE = null;
       CURRENT_SETTINGS_STRUCTURED = null;
       CURRENT_SETTINGS_SHAPE = "flat";
       setNodeButtonsEnabled(false);
+      return false;
     }
   }
 
@@ -8591,9 +8956,15 @@ function setSshTrustRegistryMessage(message, state) {
 
 function setSshTrustRegistryBusy(busy) {
   sshTrustRegistryBusy = !!busy;
-  ['sshTrustRefreshBtn'].forEach(id => {
+  ['sshTrustRefreshBtn', 'sshTrustSelectAllBtn', 'sshTrustClearSelectionBtn', 'sshTrustProbeBtn'].forEach(id => {
     const button = document.getElementById(id);
     if (button) button.disabled = !!busy;
+  });
+  document.querySelectorAll('#sshTrustRegistryTrusted button.ssh-trust-registry-revoke').forEach(button => {
+    button.disabled = !!busy;
+  });
+  document.querySelectorAll('#sshTrustRegistryNeeds input[type="checkbox"]').forEach(input => {
+    input.disabled = !!busy;
   });
   updateSshTrustProbeButtonState();
 }
@@ -8626,17 +8997,21 @@ function updateSshTrustProbeButtonState() {
 }
 
 function selectAllSshTrustRegistryNodes() {
+  if (sshTrustRegistryBusy) return false;
   sshTrustRegistrySelectedSlots = new Set((sshTrustRegistryNeeds || []).map(node => Number(node.slot)));
   sshTrustRegistrySelectionInitialized = true;
   renderSshTrustRegistryList(document.getElementById('sshTrustRegistryNeeds'), sshTrustRegistryNeeds, 'needs');
   updateSshTrustProbeButtonState();
+  return true;
 }
 
 function clearSshTrustRegistryNodeSelection() {
+  if (sshTrustRegistryBusy) return false;
   sshTrustRegistrySelectedSlots.clear();
   sshTrustRegistrySelectionInitialized = true;
   renderSshTrustRegistryList(document.getElementById('sshTrustRegistryNeeds'), sshTrustRegistryNeeds, 'needs');
   updateSshTrustProbeButtonState();
+  return true;
 }
 
 function trustRegistryStatusLabel(status) {
@@ -8746,6 +9121,8 @@ function renderSshTrustRegistry(result) {
 }
 
 function refreshSshTrustRegistry() {
+  if (sshTrustRegistryRequestPromise) return sshTrustRegistryRequestPromise;
+  if (sshTrustRegistryRequestToken) return false;
   const parentWin = window.parent;
   if (!parentWin || typeof parentWin.MVM_trigger !== 'function') {
     setSshTrustRegistryMessage('The router action handler is unavailable.', 'error');
@@ -8753,16 +9130,26 @@ function refreshSshTrustRegistry() {
   }
   const token = `${createMerVLANLoadingToken()}-s${++sshTrustRegistryRequestSequence}`;
   sshTrustRegistryRequestToken = token;
+  // Keep a single in-flight marker until the authoritative result reaches a
+  // terminal branch. Repeated clicks reuse this marker and never submit a
+  // second sshtruststatus_vlanmgr request.
+  sshTrustRegistryRequestPromise = Promise.resolve(token);
   setSshTrustRegistryBusy(true);
   setSshTrustRegistryMessage('Loading router-owned SSH trust status…');
-  const submitted = parentWin.MVM_trigger('sshtruststatus_vlanmgr', {
-    progressToken: token,
-    loading: false,
-    skipRefresh: true,
-    waitSec: 0
-  });
+  let submitted;
+  try {
+    submitted = parentWin.MVM_trigger('sshtruststatus_vlanmgr', {
+      progressToken: token,
+      loading: false,
+      skipRefresh: true,
+      waitSec: 0
+    });
+  } catch (_) {
+    submitted = false;
+  }
   if (submitted === false) {
     if (sshTrustRegistryRequestToken === token) sshTrustRegistryRequestToken = '';
+    sshTrustRegistryRequestPromise = null;
     setSshTrustRegistryBusy(false);
     setSshTrustRegistryMessage('The SSH trust status request was rejected or another action is running.', 'error');
     return false;
@@ -8772,6 +9159,7 @@ function refreshSshTrustRegistry() {
     if (sshTrustRegistryRequestToken !== token) return;
     if (Date.now() >= deadline) {
       sshTrustRegistryRequestToken = '';
+      sshTrustRegistryRequestPromise = null;
       setSshTrustRegistryBusy(false);
       setSshTrustRegistryMessage('Timed out waiting for the router SSH trust status.', 'error');
       return;
@@ -8785,6 +9173,7 @@ function refreshSshTrustRegistry() {
         const ack = await response.json();
         if (ack && ack.request_token === token && ack.action === 'sshtruststatus_vlanmgr') {
           sshTrustRegistryRequestToken = '';
+          sshTrustRegistryRequestPromise = null;
           setSshTrustRegistryBusy(false);
           if (ack.status === 'ok' || ack.status === 'partial') {
             renderSshTrustRegistry(ack.result);
@@ -8803,6 +9192,10 @@ function refreshSshTrustRegistry() {
 
 function startSshTrustProbeFromModal() {
   if (trustDecisionPending) return false;
+  if (sshTrustRegistryBusy) {
+    setSshTrustRegistryMessage('Wait for the current SSH trust status request to finish.', 'warning');
+    return false;
+  }
   if (typeof scheduleSshTrustProbe !== 'function') {
     setSshTrustRegistryMessage('The SSH verification action is unavailable.', 'error');
     return false;
@@ -8827,6 +9220,10 @@ function startSshTrustProbeFromModal() {
 }
 
 function revokeSshTrustNode(node) {
+  if (sshTrustRegistryBusy) {
+    setSshTrustRegistryMessage('Wait for the current SSH trust status request to finish.', 'warning');
+    return false;
+  }
   const safeNode = trustRegistryNodeForDisplay(node, 'trusted');
   if (!safeNode || (safeNode.status !== 'verified' && safeNode.status !== 'expired')) return false;
   if (typeof window.confirm === 'function' && !window.confirm(`Revoke the SSH host-key pin for Node ${safeNode.slot}? The node must be verified again before the next SSH action.`)) return false;
@@ -8847,6 +9244,64 @@ function revokeSshTrustNode(node) {
     return false;
   }
   return true;
+}
+
+function setSshKeyLoadState(state, message, available = false) {
+  sshKeyLoadState = state;
+  const textarea = document.getElementById('sshKeyContent');
+  const status = document.getElementById('sshKeyStatus');
+  const copy = document.getElementById('copyKey');
+  const load = document.getElementById('sshKeyLoadBtn');
+  if (textarea) {
+    textarea.setAttribute('aria-busy', state === 'loading' ? 'true' : 'false');
+    textarea.dataset.loaded = available ? 'true' : 'false';
+  }
+  if (copy) copy.disabled = state === 'loading' || !available;
+  if (load) load.disabled = state === 'loading';
+  if (status) {
+    status.textContent = String(message || '');
+    status.classList.remove('is-success', 'is-warning', 'is-error');
+    if (state === 'ready') status.classList.add('is-success');
+    if (state === 'error') status.classList.add('is-error');
+  }
+}
+
+function loadSshKeyIntoModal(options = {}) {
+  const force = options && options.force === true;
+  if (sshKeyLoadPromise) return sshKeyLoadPromise;
+  const cached = document.getElementById('sshKeyContent');
+  if (!force && sshKeyLoadState === 'ready' && cached && cached.dataset.loaded === 'true') {
+    return Promise.resolve(true);
+  }
+  if (!force && sshKeyLoadState === 'error') return Promise.resolve(false);
+  const token = ++sshKeyLoadSequence;
+  setSshKeyLoadState('loading', 'Loading SSH key...');
+  const textarea = document.getElementById('sshKeyContent');
+  if (textarea) textarea.value = 'Loading SSH key...';
+  const request = fetch('.ssh/vlan_manager.json?_=' + Date.now(), { cache: 'no-store' })
+    .then(response => {
+      if (!response.ok) throw new Error('Key not found');
+      return response.text();
+    })
+    .then(key => {
+      if (token !== sshKeyLoadSequence) return false;
+      const target = document.getElementById('sshKeyContent');
+      if (target) target.value = key;
+      setSshKeyLoadState('ready', 'SSH key loaded.', true);
+      return true;
+    })
+    .catch(() => {
+      if (token !== sshKeyLoadSequence) return false;
+      const target = document.getElementById('sshKeyContent');
+      if (target) target.value = 'SSH key not available. Run "Generate Keys" first.';
+      setSshKeyLoadState('error', 'SSH key is not available. Generate keys, then load again.');
+      return false;
+    })
+    .finally(() => {
+      if (token === sshKeyLoadSequence) sshKeyLoadPromise = null;
+    });
+  sshKeyLoadPromise = request;
+  return request;
 }
 
 // Update the showSSHKeyModal function
@@ -8878,22 +9333,10 @@ function showSSHKeyModal() {
     overlay.style.pointerEvents = 'auto';
   }
   syncInfoLatchVisibility();
-  window.setTimeout(() => refreshSshTrustRegistry(), 0);
   };
 
-  fetch('.ssh/vlan_manager.json?' + Date.now())
-  .then(response => {
-    if (!response.ok) throw new Error('Key not found');
-    return response.text();
-  })
-  .then(key => {
-    document.getElementById('sshKeyContent').value = key;
-    showModal();
-  })
-  .catch(() => {
-    document.getElementById('sshKeyContent').value = 'SSH key not available. Run "Generate Keys" first.';
-    showModal();
-  });
+  showModal();
+  loadSshKeyIntoModal();
 }
 
 // Open VLAN Manager modal in top-level body to avoid being hidden by any parent
@@ -9067,7 +9510,7 @@ function setMaintenanceBusy(busy) {
   isUpdateInProgress = !!busy;
   ["versionUpdateTab", "versionRestoreTab", "refreshBackupsBtn", "restoreSelectedBtn",
    "deleteSelectedBackupBtn", "createManualBackupBtn", "deleteAllBackupsBtn", "manualBackupTag",
-   "undoRestoreBtn", "undoUpdateBtn", "clearLogsBeforeUpdate"]
+   "undoRestoreBtn", "undoUpdateBtn", "clearLogsBeforeUpdate", "repairBeforeUpdate"]
     .forEach(id => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -9577,6 +10020,13 @@ function openVersionModal() {
   }
   const clearLogsBeforeUpdate = document.getElementById("clearLogsBeforeUpdate");
   if (clearLogsBeforeUpdate) clearLogsBeforeUpdate.checked = false;
+  const repairBeforeUpdate = document.getElementById("repairBeforeUpdate");
+  if (repairBeforeUpdate) {
+    repairBeforeUpdate.checked = false;
+    repairBeforeUpdate.disabled = false;
+  }
+  const repairBeforeUpdateHint = document.getElementById("repairBeforeUpdateHint");
+  if (repairBeforeUpdateHint) repairBeforeUpdateHint.textContent = "Downloads and restores the MerVLAN update/runtime components before starting the update. Settings, keys, backups and user data are not changed.";
   updateChannelCapabilityHint("main");
 
   modal.style.display = "block";
@@ -10758,6 +11208,8 @@ function onChannelSelectChange() {
   const changelogToggleSection = document.getElementById("changelogToggleSection");
   const statusEl = document.getElementById("updateStatusText");
   const downgradeWarn = document.getElementById("downgradeWarning");
+  const repairBeforeUpdate = document.getElementById("repairBeforeUpdate");
+  const repairHint = document.getElementById("repairBeforeUpdateHint");
 
   if (detailsSection) detailsSection.style.display = "none";
   if (releaseSelectSection) releaseSelectSection.style.display = "none";
@@ -10784,11 +11236,19 @@ function onChannelSelectChange() {
   if (toggleBtn) toggleBtn.textContent = "Show Changelog";
 
   if (selectedChannel === "custom") {
+    if (repairBeforeUpdate) {
+      repairBeforeUpdate.checked = false;
+      repairBeforeUpdate.disabled = true;
+    }
+    if (repairHint) repairHint.textContent = "Repair-before-update is unavailable for Custom branches. Custom repair is CLI-only.";
     if (customBranchSection) customBranchSection.style.display = "block";
     if (detailsSection) detailsSection.style.display = "block";
     const comparisonEl = document.getElementById("updateComparisonText");
     if (comparisonEl) comparisonEl.textContent = "Enter a branch name, then click Install branch.";
     if (customBranchInput) setTimeout(() => customBranchInput.focus(), 50);
+  } else {
+    if (repairBeforeUpdate) repairBeforeUpdate.disabled = false;
+    if (repairHint) repairHint.textContent = "Downloads and restores the MerVLAN update/runtime components before starting the update. Settings, keys, backups and user data are not changed.";
   }
 }
 
@@ -10898,6 +11358,25 @@ function submitRefUpdateThroughParent(parentWin, ref, logPolicy) {
   return false;
 }
 
+async function repairUpdateComponentsBeforeUpdate(branch) {
+  const action = branch === "dev" ? "repairdev_vlanmgr" : "repairmain_vlanmgr";
+  let loadingTask = null;
+  const queued = await queueServiceAction(action, {
+    description: "Repairing MerVLAN update components",
+    cooldownMs: 0,
+    loadingOptions: { progressBacked: true, timeoutMs: 300000 },
+    afterSubmit: task => { loadingTask = task; }
+  });
+  if (!queued || !loadingTask || !loadingTask.completion) {
+    return { ok: false, message: "The repair action could not be started." };
+  }
+  const terminal = await loadingTask.completion;
+  if (!terminal || terminal.state !== "complete") {
+    return { ok: false, message: (terminal && terminal.message) || "Repair did not complete successfully." };
+  }
+  return { ok: true };
+}
+
 async function runUpdateFromModal(buttonEl) {
   if (!buttonEl) return;
 
@@ -10907,6 +11386,7 @@ async function runUpdateFromModal(buttonEl) {
   let ref = buttonEl.dataset.ref || "";
   let latest = buttonEl.dataset.latest || "";
   const clearLogsEl = document.getElementById("clearLogsBeforeUpdate");
+  const repairBeforeUpdateEl = document.getElementById("repairBeforeUpdate");
   const logPolicy = clearLogsEl && clearLogsEl.checked ? "clear" : "keep";
 
   // Custom targets are derived from the live controls at click time. Never
@@ -10934,6 +11414,21 @@ async function runUpdateFromModal(buttonEl) {
   }
 
   rememberUpdateAction(buttonEl);
+
+  const repairRequested = !!(repairBeforeUpdateEl && repairBeforeUpdateEl.checked && selectedChannel !== "custom");
+  if (repairRequested) {
+    const repairBranch = selectedChannel === "dev" ? "dev" : "main";
+    setUpdateFlowState("repairing");
+    const repairStatus = document.getElementById("updateStatusText");
+    if (repairStatus) { repairStatus.textContent = "Repairing update components before update..."; repairStatus.style.color = ""; }
+    const repair = await repairUpdateComponentsBeforeUpdate(repairBranch);
+    if (!repair.ok) {
+      setUpdateFlowState("failed");
+      if (repairStatus) { repairStatus.textContent = repair.message; repairStatus.style.color = "#ff8a8a"; }
+      return;
+    }
+    if (repairStatus) { repairStatus.textContent = "Repair complete. Starting update..."; repairStatus.style.color = "#7bd77b"; }
+  }
 
   // Custom branch: verify the branch exists on GitHub before triggering
   if (channel === "custom") {
@@ -10992,17 +11487,7 @@ async function runUpdateFromModal(buttonEl) {
 
 
 function fetchSSHKey() {
-    fetch('.ssh/vlan_manager.json?' + Date.now())
-        .then(response => {
-            if (!response.ok) throw new Error('Key not found');
-            return response.text();
-        })
-        .then(key => {
-            document.getElementById('sshKeyContent').value = key;
-        })
-        .catch(() => {
-            document.getElementById('sshKeyContent').value = 'Failed to load, SSH key not available. Run "Generate Keys" first.';
-        });
+    return loadSshKeyIntoModal({ force: true });
 }
 
 let sshTrustProbeScheduled = false;
@@ -11189,8 +11674,12 @@ async function waitForSettingsToMatch(expectedManaged, opts = {}) {
       lastManaged = managed;
 
       if (subset) {
-        if (subsetMismatchKey(expectedManaged, managed) === "") return true;
+        if (subsetMismatchKey(expectedManaged, managed) === "") {
+          updatePersistedSettingsBaseline(flat);
+          return true;
+        }
       } else if (shallowEqual(managed, expectedManaged)) {
+        updatePersistedSettingsBaseline(flat);
         return true;
       }
     } catch (e) {

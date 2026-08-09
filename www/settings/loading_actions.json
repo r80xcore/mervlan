@@ -114,6 +114,38 @@
         { "id": "complete", "label": "SSH keys ready", "start": 90, "end": 100 }
       ]
     },
+    "repairmain_vlanmgr": {
+      "label": "Repairing update components",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "timeout_ms": 300000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing repair", "start": 0, "end": 10 },
+        { "id": "manifest", "label": "Loading repair manifest", "start": 10, "end": 20 },
+        { "id": "download", "label": "Downloading repair components", "start": 20, "end": 70 },
+        { "id": "validate", "label": "Validating repair components", "start": 70, "end": 82 },
+        { "id": "publish", "label": "Replacing update components", "start": 82, "end": 97 },
+        { "id": "complete", "label": "Repair complete", "start": 97, "end": 100 }
+      ]
+    },
+    "repairdev_vlanmgr": {
+      "label": "Repairing update components",
+      "display": "panel",
+      "mode": "phase",
+      "poll_ms": 1000,
+      "timeout_ms": 300000,
+      "backend_owned": true,
+      "phases": [
+        { "id": "prepare", "label": "Preparing repair", "start": 0, "end": 10 },
+        { "id": "manifest", "label": "Loading repair manifest", "start": 10, "end": 20 },
+        { "id": "download", "label": "Downloading repair components", "start": 20, "end": 70 },
+        { "id": "validate", "label": "Validating repair components", "start": 70, "end": 82 },
+        { "id": "publish", "label": "Replacing update components", "start": 82, "end": 97 },
+        { "id": "complete", "label": "Repair complete", "start": 97, "end": 100 }
+      ]
+    },
     "apply_vlanmgr": {
       "label": "Apply VLAN",
       "display": "panel",

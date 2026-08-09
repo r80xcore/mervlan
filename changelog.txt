@@ -7,6 +7,39 @@ Improved: Resilient Update downloads
   after curl succeeds and the archive is non-empty, preventing interrupted
   downloads from reaching extraction.
 
+New: Emergency Update Repair
+- Added a standalone, manifest-driven repair command that restores validated
+  update/runtime program components from `main`, `dev`, or an advanced custom
+  branch without updating, applying configuration, or contacting nodes.
+- Repair stages and validates every download before publication, uses explicit
+  modes, preserves settings/keys/databases/backups, and rolls back a partial
+  replacement failure.
+- The Update modal can repair supported `main`/`dev` components first, waits
+  for a confirmed repair result, and only then starts the existing update.
+
+Improved: Modal loading and request lifecycle
+- SSH Key Install and Settings now open immediately with clear loading states
+  while their local configuration data is retrieved.
+- SSH key, Settings, and Trusted Devices status requests are single-flight,
+  guard against stale responses, and disable dependent controls while work is
+  in progress to prevent duplicate requests and action backlogs.
+- Opening SSH Key Install no longer submits a router SSH trust-status action;
+  Trusted Devices loads its cached or fresh status only when that tab is used.
+- Fixed a Settings-modal script parse regression that could leave the UI shell
+  visible while preventing form initialization and button handlers from loading.
+
+Improved: VLAN validation and configuration feedback
+- MerVLAN-managed VLAN entry now consistently accepts only strict decimal IDs
+  from 2 through 4094 across SSIDs, LAN ports, trunks, assignments, and
+  AP-Isolation availability.
+- Row indicators now compare the current form with an authoritative persisted
+  baseline, so pending edits, reverts, deletions, invalid rows, duplicate VLANs,
+  and Main/Node LAN tab switches report their real state.
+- Duplicate VLANs are presented as allowed-if-intentional warnings with current
+  field and row explanations instead of being described as invalid conflicts.
+- Refined action, legend, client-metadata, and relay-location tooltips; the
+  compact relay-only client badge is now `R/O` with clear distinction from `R`.
+
 Improved: Ownership, locking, and lifecycle safety
 - Unified normal process identity and nonce generation, including DHCP,
   action-progress, action-runtime, and node-job owners, without
