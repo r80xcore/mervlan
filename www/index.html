@@ -7199,7 +7199,12 @@ function triggerAction(actionScriptName, button, description) {
 
       // Always do a fresh load so all toggles reflect the last saved state on disk.
       // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
-      const settingsRequest = loadSettings({ deferFill: true });
+      const settingsRequest = loadSettings({
+        deferFill: true,
+        // The loader owns shared form/cache state, so its response must be
+        // current before it is allowed to publish anything beyond this modal.
+        shouldCommit: () => loadToken === _svcSettingsLoadSequence && modal.style.display !== 'none'
+      });
       _svcSettingsLoadPromise = settingsRequest;
       const loaded = await settingsRequest;
       if (loadToken === _svcSettingsLoadSequence) _svcSettingsLoadPromise = null;
@@ -7857,7 +7862,8 @@ async function runMacRefresh() {
     }
 
     async function loadSettings(opts = {}){
-    const { deferFill = false } = opts;
+    const { deferFill = false, shouldCommit = null } = opts;
+    const mayCommit = () => typeof shouldCommit !== "function" || shouldCommit();
     try{
       appendCliText("Loading settings.json...\n",{scroll:'force'});
       const r = await fetch(PATHS.SETTINGS+"?_="+Date.now(),{
@@ -7871,6 +7877,7 @@ async function runMacRefresh() {
       const t = await r.text();
       if(!r.ok){ 
         appendCliText(`Error: cannot load settings.json (${r.status})\n${t}\n`,{scroll:'force'}); 
+        if (!mayCommit()) return false;
         CURRENT_SETTINGS_CACHE = null;
         CURRENT_SETTINGS_STRUCTURED = null;
         CURRENT_SETTINGS_SHAPE = "flat";
@@ -7882,12 +7889,14 @@ async function runMacRefresh() {
         data = JSON.parse(t); 
       } catch(e){ 
         appendCliText("settings.json is not valid JSON:\n\n"+t+"\n",{scroll:'force'}); 
+        if (!mayCommit()) return false;
         CURRENT_SETTINGS_CACHE = null;
         CURRENT_SETTINGS_STRUCTURED = null;
         CURRENT_SETTINGS_SHAPE = "flat";
         setNodeButtonsEnabled(false);
         return false;
       }
+      if (!mayCommit()) return false;
       if (isStructuredSettingsPayload(data)) {
         CURRENT_SETTINGS_STRUCTURED = data;
         CURRENT_SETTINGS_SHAPE = "sectioned";
@@ -7930,6 +7939,7 @@ async function runMacRefresh() {
       return true;
     } catch(err){ 
       appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
+      if (!mayCommit()) return false;
       CURRENT_SETTINGS_CACHE = null;
       CURRENT_SETTINGS_STRUCTURED = null;
       CURRENT_SETTINGS_SHAPE = "flat";

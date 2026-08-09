@@ -151,4 +151,3 @@ else
 fi
 
 printf 'SUCCESS: All Node Settings Sync contract tests passed!\n'
-

@@ -39,10 +39,14 @@ grep -Fq "if (trustTab) refreshSshTrustRegistry();" "$UI_FILE" || fail 'Trusted 
 grep -Fq "['sshTrustRefreshBtn', 'sshTrustSelectAllBtn', 'sshTrustClearSelectionBtn', 'sshTrustProbeBtn']" "$UI_FILE" || fail 'trust loading controls are not guarded'
 
 settings_open=$(sed -n '/^    async function showServiceSettingsModal()/,/^    function closeServiceSettingsModal()/p' "$UI_FILE")
+settings_loader=$(sed -n '/^    async function loadSettings(opts = {}){/,/^    function toNone/p' "$UI_FILE")
 printf '%s\n' "$settings_open" | grep -Fq "modal.style.display = 'block';" || fail 'Settings modal is not opened synchronously'
 printf '%s\n' "$settings_open" | grep -Fq "setServiceSettingsLoadState('loading', 'Loading authoritative settings...')" || fail 'Settings loading state missing'
 printf '%s\n' "$settings_open" | grep -Fq "if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;" || fail 'Settings modal load is not single-flight'
 printf '%s\n' "$settings_open" | grep -Fq 'if (loadToken !== _svcSettingsLoadSequence || modal.style.display ===' || fail 'Settings stale-result guard missing'
+printf '%s\n' "$settings_open" | grep -Fq "shouldCommit: () => loadToken === _svcSettingsLoadSequence && modal.style.display !== 'none'" || fail 'Settings loader can publish a stale modal request'
+printf '%s\n' "$settings_loader" | grep -Fq 'const { deferFill = false, shouldCommit = null } = opts;' || fail 'settings loader has no publication guard'
+[ "$(printf '%s\n' "$settings_loader" | grep -Fc 'if (!mayCommit()) return false;')" -ge 3 ] || fail 'settings loader does not guard stale success and failure results'
 [ "$(printf '%s\n' "$settings_open" | grep -Fc "const overlay = document.getElementById('leftPanelOverlay');")" -eq 1 ] || fail 'Settings modal redeclares its overlay binding'
 ! grep -Fq 'settingsLoadInFlight' "$UI_FILE" || fail 'modal settings request leaks into normal settings loads'
 grep -Fq "_svcSettingsLoadState !== 'ready'" "$UI_FILE" || fail 'Settings controls are not gated on load completion'
