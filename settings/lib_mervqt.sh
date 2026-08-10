@@ -703,7 +703,20 @@ merv_dhcp_state_lock_acquire() {
         rmdir "$_mdla_lock" 2>/dev/null || :
         return 2
       }
-      _merv_dhcp_nonce || return 2
+      # mkdir is the exclusion/publication point.  If nonce generation fails
+      # before any canonical owner fields are published, retire only the
+      # exact claim created by this acquisition.  Leaving the empty
+      # directory behind would turn a transient generator failure into a
+      # permanent incomplete-owner block for every later transaction.
+      if ! _merv_dhcp_nonce; then
+        rmdir "$_mdla_lock" 2>/dev/null || {
+          # Do not remove files that appeared after our mkdir.  Preserve the
+          # exact claim for fail-closed reconciliation if an obstruction wins
+          # the race while publication is incomplete.
+          _merv_dhcp_log warn "DHCP state-lock nonce generation failed; exact incomplete claim could not be removed"
+        }
+        return 2
+      fi
       _mdla_nonce="$MERV_DHCP_NONCE"
       if printf '%s\n' "$_mdla_pid" > "$_mdla_lock/pid" 2>/dev/null &&
          printf '%s\n' "$_mdla_start" > "$_mdla_lock/proc_start_time" 2>/dev/null &&
@@ -1684,6 +1697,112 @@ merv_dhcp_handoff_parent_release() {
   return "$_mdhpr_rc"
 }
 
+# Abort a parent-owned handoff as one state-lock transaction.  This is used by
+# the boot watchdog's catchable-signal path; composing handoff_fail followed by
+# hold_abandon would leave a race in which the successor completes between the
+# two calls and the parent cleanup then removes an already-transferred lease.
+#
+# The helper authenticates the exact caller owner before every mutation.  A
+# completed, verified successor retires only the parent owner.  An incomplete
+# handoff is marked failed, converted to a DHCP failsafe, and then retired.
+# Any malformed/uncertain state is left in place and queued for reconciliation
+# so DHCP protection remains fail-closed.
+merv_dhcp_handoff_parent_abort() {
+  local _mdhpa_token="$1" _mdhpa_id="$2" _mdhpa_reason="${3:-interrupted-owner}"
+  local _mdhpa_nonce _mdhpa_now _mdhpa_rc
+  MERV_DHCP_HANDOFF_ABORT_STATE=uncertain
+  merv_dhcp_hold_valid_id "$_mdhpa_token" || return 1
+  merv_dhcp_hold_valid_id "$_mdhpa_id" || return 1
+  merv_dhcp_hold_valid_id "$_mdhpa_reason" || return 1
+  merv_dhcp_state_lock_acquire || return 2
+  _mdhpa_nonce="$MERV_DHCP_STATE_LOCK_NONCE"
+
+  _merv_dhcp_owner_is_caller_locked "$_mdhpa_token" || {
+    merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+    return 1
+  }
+  [ "$_MERV_DHCP_OWNER_PHASE" = handoff_wait ] &&
+    [ "$(cat "$_MERV_DHCP_OWNER_DIR/handoff_id" 2>/dev/null)" = "$_mdhpa_id" ] || {
+      merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+      return 1
+    }
+  _merv_dhcp_handoff_load_locked "$_mdhpa_id" || {
+    _merv_dhcp_queue_recovery_locked handoff-state-unreadable || :
+    merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+    return 2
+  }
+  [ "$_MERV_DHCP_HANDOFF_PARENT_TOKEN" = "$_mdhpa_token" ] || {
+    _merv_dhcp_queue_recovery_locked handoff-parent-mismatch || :
+    merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+    return 1
+  }
+
+  case "$_MERV_DHCP_HANDOFF_STATE" in
+    completed)
+      # Verify the successor while holding state.lock.  Do not remove the
+      # successor owner; only the exact watchdog parent claim is retired.
+      _merv_dhcp_handoff_ack_valid_locked "$_mdhpa_id" || {
+        _merv_dhcp_queue_recovery_locked invalid-successor || :
+        merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+        return 2
+      }
+      _mdhpa_now=$(date +%s 2>/dev/null || printf '0')
+      _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" parent_retired_epoch "$_mdhpa_now" || {
+        _merv_dhcp_queue_recovery_locked parent-retire-publication-failed || :
+        merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+        return 2
+      }
+      _merv_dhcp_record_remove_locked owners "$_mdhpa_token" || {
+        _merv_dhcp_queue_recovery_locked parent-retire-failed || :
+        merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+        return 2
+      }
+      _merv_dhcp_rules_reconcile_locked
+      _mdhpa_rc=$?
+      merv_dhcp_state_lock_release "$_mdhpa_nonce" || return 2
+      [ "$_mdhpa_rc" -eq 0 ] || return "$_mdhpa_rc"
+      MERV_DHCP_HANDOFF_ABORT_STATE=successor-verified
+      return 0
+      ;;
+    requested|acknowledged|failed)
+      # Mark the handoff failed before touching the parent owner.  If any
+      # publication/recovery step fails, leave the owner in place for the
+      # next reconciliation pass rather than releasing DHCP protection.
+      _mdhpa_now=$(date +%s 2>/dev/null || printf '0')
+      if [ "$_MERV_DHCP_HANDOFF_STATE" != failed ]; then
+        _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" failed_epoch "$_mdhpa_now" &&
+          _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" failure_reason "$_mdhpa_reason" &&
+          _merv_dhcp_atomic_field "$_MERV_DHCP_HANDOFF_DIR" handoff_state failed || {
+            _merv_dhcp_queue_recovery_locked handoff-failure-publication-failed || :
+            merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+            return 2
+          }
+      fi
+      _merv_dhcp_queue_recovery_locked handoff-failed || :
+      _merv_dhcp_failsafe_create_locked "$_MERV_DHCP_HANDOFF_PARENT_TYPE" \
+        "$_MERV_DHCP_HANDOFF_PARENT_RUN" handoff_wait "$_mdhpa_reason" "$_mdhpa_token" || {
+        merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+        return 2
+      }
+      _merv_dhcp_record_remove_locked owners "$_mdhpa_token" || {
+        merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+        return 2
+      }
+      _merv_dhcp_rules_reconcile_locked
+      _mdhpa_rc=$?
+      merv_dhcp_state_lock_release "$_mdhpa_nonce" || return 2
+      [ "$_mdhpa_rc" -eq 0 ] || return "$_mdhpa_rc"
+      MERV_DHCP_HANDOFF_ABORT_STATE=abandoned
+      return 0
+      ;;
+    *)
+      _merv_dhcp_queue_recovery_locked handoff-state-unknown || :
+      merv_dhcp_state_lock_release_or_report "$_mdhpa_nonce" || return 2
+      return 2
+      ;;
+  esac
+}
+
 merv_dhcp_handoff_child_verified() {
   local _mdhcv_id="$1" _mdhcv_token="$2" _mdhcv_verification="$3"
   local _mdhcv_nonce _mdhcv_now
@@ -2227,13 +2346,27 @@ merv_dhcp_hold_restore_if_active() {
 merv_observation_wait_idle() {
   local _mowi_max="${1:-120}" _mowi_elapsed=0
   local _mowi_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/observation/worker.lock"
-  local _mowi_pid _mowi_start _mowi_proc
+  local _mowi_state _mowi_proc
   case "$_mowi_max" in ''|*[!0-9]*) return 1 ;; esac
   _mowi_proc=$(merv_dhcp_proc_root 2>/dev/null || printf '/proc')
   while [ -d "$_mowi_lock" ]; do
-    _mowi_pid=$(cat "$_mowi_lock/pid" 2>/dev/null || printf '')
-    _mowi_start=$(cat "$_mowi_lock/proc_start_time" 2>/dev/null || printf '')
-    merv_process_identity_matches "$_mowi_pid" "$_mowi_start" "$_mowi_proc" 2>/dev/null || return 0
+    # Canonical owner-v2 state is authoritative.  Compatibility pid and
+    # proc_start_time sidecars may be absent or stale while the owner record
+    # remains live; sidecars must therefore never make a busy worker look idle.
+    _mowi_state=$(merv_owner_lock_state "$_mowi_lock" "$_mowi_proc" 2>/dev/null || printf 'unknown')
+    case "$_mowi_state" in
+      absent|dead|reused)
+        # Absent is idle.  A proven dead/reused owner is handed back to the
+        # normal owner-lock acquisition/reconciliation path.
+        return 0
+        ;;
+      live|incomplete-grace)
+        ;;
+      malformed|unknown|incomplete-expired|incomplete-unknown|*)
+        # Unknown or malformed publication is not evidence of idleness.
+        return 1
+        ;;
+    esac
     [ "$_mowi_elapsed" -lt "$_mowi_max" ] || return 1
     sleep 1
     _mowi_elapsed=$((_mowi_elapsed + 1))

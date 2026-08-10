@@ -52,8 +52,14 @@ merv_action_lock_export_child_context || exit 75
 
 ssh_key_progress_exit() {
     _progress_rc=$?
+    # This hook runs for every terminal path, including an explicit `exit`
+    # and a signal-derived shell status. Disable the hook before finalizing
+    # so the status-preserving exit below cannot recurse through EXIT.
+    trap - EXIT
+    _cleanup_rc=0
     if ! merv_action_lock_leave "$KEY_ACTION_LOCK_PATH" "$KEY_ACTION_LOCK_NONCE" "$KEY_ACTION_LOCK_START" "$KEY_ACTION_LOCK_MODE" >/dev/null 2>&1; then
-        [ "$_progress_rc" -eq 0 ] && _progress_rc=75
+        _cleanup_rc=75
+        [ "$_progress_rc" -eq 0 ] && _progress_rc=$_cleanup_rc
         printf '%s\n' "[ERROR] SSH key action-lock cleanup failed; lock retained for recovery" >&2
     fi
     if [ "$_progress_rc" -eq 0 ]; then
@@ -61,7 +67,10 @@ ssh_key_progress_exit() {
     else
         merv_action_progress_fail "SSH key generation failed"
     fi
-    return 0
+    # `return 0` here masks cleanup failures (and signal/generation failures)
+    # from callers waiting on this worker. Exit explicitly with the original
+    # failure, or the cleanup failure when the action itself had succeeded.
+    exit "$_progress_rc"
 }
 trap ssh_key_progress_exit EXIT
 

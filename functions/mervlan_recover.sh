@@ -448,6 +448,19 @@ recovery_reconcile() {
   recovery_target="$1"
   recovery_boot="$2"
   [ "$MERVLAN_RECOVERY_TEST_MODE" = "1" ] && return 0
+  # Reconciliation invokes the installed tree's public maintenance entry
+  # points.  Bind those children to this live recovery owner; the child guard
+  # still verifies the canonical owner file and PID/start identity.
+  MERV_MAINTENANCE_DELEGATED=1
+  MERV_MAINTENANCE_DELEGATION_KIND=recovery
+  MERV_RECOVERY_DELEGATION=1
+  MERV_MAINTENANCE_OWNER_PID="$$"
+  MERV_MAINTENANCE_OWNER_START="$RECOVERY_LOCK_START"
+  MERV_MAINTENANCE_OWNER_NONCE="$RECOVERY_LOCK_NONCE"
+  export MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
+    MERV_RECOVERY_DELEGATION \
+    MERV_MAINTENANCE_OWNER_PID MERV_MAINTENANCE_OWNER_START \
+    MERV_MAINTENANCE_OWNER_NONCE
   chmod 755 "$recovery_target"/*.sh "$recovery_target"/functions/*.sh 2>/dev/null || return 1
   chmod 644 "$recovery_target"/settings/*.sh "$recovery_target"/www/*.css "$recovery_target"/www/*.html 2>/dev/null || return 1
   sh "$recovery_target/uninstall.sh" reinstall >/dev/null 2>&1 || return 1

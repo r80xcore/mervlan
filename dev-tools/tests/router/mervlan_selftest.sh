@@ -3141,7 +3141,7 @@ test_failure_propagation_contract() {
      grep -q 'merv_action_progress_init' "$_tfpc_meta" &&
      grep -q 'exit 2' "$_tfpc_meta" &&
      grep -q '_meta_partial=1' "$_tfpc_meta" &&
-     grep -q 'Client metadata applied with warnings' "$_tfpc_meta" &&
+     grep -q 'Client metadata persisted, but MAC shield enforcement or follow-up work requires recovery' "$_tfpc_meta" &&
      ! grep -q '_name_pairs\|name entries:' "$_tfpc_meta"; then
     pass "MAC refresh and metadata actions publish terminal failure states"
   else

@@ -87,20 +87,54 @@ execute_nodes_reconcile_signal_children() {
     [ -n "${MNJ_S1_PID:-}" ] && mnj_reconcile_slot 1 failed parent-signal || :
     [ -n "${MNJ_S2_PID:-}" ] && mnj_reconcile_slot 2 failed parent-signal || :
   fi
-  if [ -n "${main_pid:-}" ] && [ -n "${main_start:-}" ] &&
-     type merv_process_identity_matches >/dev/null 2>&1 &&
-     merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; then
-    kill -TERM "$main_pid" 2>/dev/null || :
-    _ens_n=0
-    while [ "$_ens_n" -lt 5 ] && merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; do
-      sleep 1
-      _ens_n=$((_ens_n + 1))
-    done
-    if merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; then
-      kill -KILL "$main_pid" 2>/dev/null || :
-    fi
-    wait "$main_pid" 2>/dev/null || :
+  if [ -n "${main_pid:-}" ]; then
+    case "${main_start:-}" in
+      ''|*[!0-9]*)
+        # Identity publication failed. Do not signal by PID alone; wait for
+        # the direct child to terminate before releasing ownership.
+        wait "$main_pid" 2>/dev/null || :
+        main_pid=""
+        ;;
+      *)
+        if type merv_process_identity_matches >/dev/null 2>&1 &&
+           merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; then
+          kill -TERM "$main_pid" 2>/dev/null || :
+          _ens_n=0
+          while [ "$_ens_n" -lt 5 ] && merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; do
+            sleep 1
+            _ens_n=$((_ens_n + 1))
+          done
+          if merv_process_identity_matches "$main_pid" "$main_start" 2>/dev/null; then
+            kill -KILL "$main_pid" 2>/dev/null || :
+          fi
+          wait "$main_pid" 2>/dev/null || :
+        else
+          # A valid-looking start value is not enough when the identity
+          # helper is unavailable or the exact match cannot be established.
+          # Do not signal by PID alone; reap the direct child before cleanup.
+          wait "$main_pid" 2>/dev/null || :
+        fi
+        main_pid=""
+        ;;
+    esac
   fi
+  # Detached node runners intentionally outlive the SSH launch request. On
+  # cancellation, reconcile only exact configured node/run identities; the
+  # runner authenticates its child PID/start pair before terminating it.
+  execute_nodes_cancel_detached_nodes
+}
+
+execute_nodes_cancel_detached_nodes() {
+  [ -n "${APPLY_RUN_ID:-}" ] || return 0
+  _enc_nodes_file="${_exec_jobs_root:-}/ready"
+  [ -f "$_enc_nodes_file" ] || _enc_nodes_file="${_exec_nodes_file:-}"
+  [ -f "$_enc_nodes_file" ] || return 0
+  while IFS=' ' read -r _enc_node _enc_ip _enc_extra || [ -n "$_enc_node" ]; do
+    [ -n "$_enc_node" ] && [ -n "$_enc_ip" ] && [ -z "$_enc_extra" ] || continue
+    MERV_SSH_RETRIES=1 merv_ssh_exec "$_enc_node" "$_enc_ip" \
+      "sh '$MERV_BASE/functions/mervlan_node_runner.sh' cancel '$APPLY_RUN_ID' '$_enc_node'" \
+      >/dev/null 2>&1 || :
+  done < "$_enc_nodes_file"
 }
 
 execute_nodes_progress_cleanup() {
@@ -806,6 +840,11 @@ verify_node_completion() {
         fi
         sleep "${MERV_NODE_MARKER_POLL_SEC:-5}"
     done
+    # Detached runners are not tied to this SSH session. Reconcile the exact
+    # run/node identity before reporting timeout to the parent pool.
+    MERV_SSH_RETRIES=1 merv_ssh_exec "$node_id" "$node_ip" \
+      "sh '$MERV_BASE/functions/mervlan_node_runner.sh' cancel '$APPLY_RUN_ID' '$node_id'" \
+      >/dev/null 2>&1 || :
     fetch_node_runner_logs "$node_id" "$node_ip"
     return 1
 }
@@ -973,10 +1012,9 @@ execute_supervise_local_manager() {
     wait "$_eslm_pid" 2>/dev/null
     _eslm_wait_rc=$?
     [ "$_eslm_wait_rc" -eq 0 ] || info -c vlan "Execute: local manager wait returned rc=$_eslm_wait_rc; using its published result"
-    [ -f "$_eslm_rc_file" ] || return 125
-    _eslm_rc=$(sed -n '1p' "$_eslm_rc_file" 2>/dev/null)
-    case "$_eslm_rc" in ''|*[!0-9]*) return 125 ;; esac
-    return "$_eslm_rc"
+    # The tracked child is the manager itself, not a bookkeeping wrapper.
+    # Its wait status is the authoritative terminal result.
+    return "$_eslm_wait_rc"
 }
 
 # ============================================================================ #
@@ -1035,7 +1073,27 @@ elif [ -z "$READY_NODES" ]; then
         if [ -f "$local_script" ]; then
             # Keep collection in the shared final phase below so a no-node
             # combined run cannot publish the client inventory twice.
-            MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 && local_success=true || local_success=false
+            # Track the actual manager child even when there are no remote
+            # nodes. This keeps signal/timeout cancellation authenticated in
+            # the no-node path as well as the parallel path below.
+            MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 \
+              sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 &
+            main_pid=$!
+            main_start=$(merv_proc_start_time "$main_pid" 2>/dev/null || printf '')
+            case "$main_start" in
+              ''|*[!0-9]*)
+                error -c cli,vlan "ERROR: Could not record local manager process identity"
+                wait "$main_pid" 2>/dev/null || :
+                local_success=false
+                main_pid=""
+                ;;
+              *)
+                execute_supervise_local_manager "$main_pid" "$main_start" "" "${MERV_MAIN_MANAGER_MAX_SEC:-600}"
+                _main_supervise_rc=$?
+                [ "$_main_supervise_rc" -eq 0 ] && local_success=true || local_success=false
+                main_pid=""
+                ;;
+            esac
         fi
     fi
 else
@@ -1072,11 +1130,22 @@ else
         info -c cli,vlan "Launching execution on main router..."
         local_script="$(printf '%s' "$MERV_BASE/functions/mervlan_manager.sh" | tr -d '\r')"
         if [ -f "$local_script" ]; then
-            _main_rc_file="$TMPDIR/main_exec_rc.$$"
-            ( MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1; _main_child_rc=$?; _main_rc_tmp="${_main_rc_file}.tmp.$$"; printf '%s\n' "$_main_child_rc" > "$_main_rc_tmp" && mv -f "$_main_rc_tmp" "$_main_rc_file" ) &
+            # Track the manager process itself. A bookkeeping wrapper may die
+            # while its manager child continues mutating the router.
+            MERV_PROGRESS_TOKEN="" MERV_ACTION_RUNTIME_OWNER=1 \
+              sh "$local_script" --no-collect >>"$CLI_LOG" 2>&1 &
             main_pid=$!
             main_start=$(merv_proc_start_time "$main_pid" 2>/dev/null || printf '')
-            case "$main_start" in ''|*[!0-9]*) error -c cli,vlan "ERROR: Could not record local manager process identity"; kill "$main_pid" 2>/dev/null || :; wait "$main_pid" 2>/dev/null || :; local_success=false; main_pid="" ;; esac
+            case "$main_start" in
+              ''|*[!0-9]*)
+                error -c cli,vlan "ERROR: Could not record local manager process identity"
+                # The manager is a direct child, so waiting reaps it without
+                # issuing an unauthenticated PID kill.
+                wait "$main_pid" 2>/dev/null || :
+                local_success=false
+                main_pid=""
+                ;;
+            esac
         fi
     fi
     
@@ -1090,7 +1159,7 @@ else
     fi
     info -c cli,vlan "Waiting for all executions to complete..."
     if [ -n "${main_pid:-}" ]; then
-        execute_supervise_local_manager "$main_pid" "$main_start" "$_main_rc_file" "${MERV_MAIN_MANAGER_MAX_SEC:-600}"
+        execute_supervise_local_manager "$main_pid" "$main_start" "" "${MERV_MAIN_MANAGER_MAX_SEC:-600}"
         _main_supervise_rc=$?
         [ "$_main_supervise_rc" -eq 0 ] || local_success=false
     fi
@@ -1105,9 +1174,8 @@ else
     
     # Check if main router succeeded (if we ran it)
     if [ "$MODE" != "nodesonly" ]; then
-        if [ "${_main_supervise_rc:-125}" -eq 0 ] && [ -n "${_main_rc_file:-}" ] && [ -f "$_main_rc_file" ]; then
-            _main_rc=$(cat "$_main_rc_file" 2>/dev/null)
-            rm -f "$_main_rc_file" 2>/dev/null
+        if [ -n "${main_pid:-}" ]; then
+            _main_rc="${_main_supervise_rc:-1}"
             if [ "${_main_rc:-1}" = "0" ]; then
                 info -c cli,vlan "✓ Main router execution completed"
                 local_success=true

@@ -130,6 +130,70 @@ else
     MERV_STATE_ROOT="${MERV_STATE_ROOT_OVERRIDE:-/jffs/addons/mervlan_state}"
 fi
 
+# Maintenance admission is available from either the active installation or
+# this source tree.  The latter keeps a fresh install fail-closed when no
+# active addon tree exists yet.
+MERV_INSTALL_SCRIPT_DIR=""
+MERV_SELECTED_MERV_BASE="$MERV_BASE"
+case "$0" in
+    */*) MERV_INSTALL_SCRIPT_DIR=$(CDPATH= cd -- "${0%/*}" 2>/dev/null && pwd) ;;
+    *) MERV_INSTALL_SCRIPT_DIR=$(pwd 2>/dev/null) ;;
+esac
+if [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ]; then
+    . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || :
+elif [ -n "$MERV_INSTALL_SCRIPT_DIR" ] && [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" ]; then
+    MERV_BASE="$MERV_INSTALL_SCRIPT_DIR"
+    . "$MERV_INSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" 2>/dev/null || :
+    MERV_BASE="$MERV_SELECTED_MERV_BASE"
+fi
+if [ -r "$MERV_BASE/settings/lib_update_state.sh" ]; then
+    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || :
+elif [ -n "$MERV_INSTALL_SCRIPT_DIR" ] && [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_update_state.sh" ]; then
+    MERV_BASE="$MERV_INSTALL_SCRIPT_DIR"
+    . "$MERV_INSTALL_SCRIPT_DIR/settings/lib_update_state.sh" 2>/dev/null || :
+    MERV_BASE="$MERV_SELECTED_MERV_BASE"
+fi
+
+MERV_MAINTENANCE_ENTRY_REQUIRED=0
+case "$MODE" in
+    download|credentials) ;;
+    *) MERV_MAINTENANCE_ENTRY_REQUIRED=1 ;;
+esac
+MERV_MAINTENANCE_ENTRY_ADMITTED=0
+
+install_maintenance_admit() {
+    [ "$MERV_MAINTENANCE_ENTRY_REQUIRED" = "1" ] || return 0
+    type merv_maintenance_direct_admit >/dev/null 2>&1 || {
+        echo "[install] ERROR: maintenance ownership support is unavailable; refusing tree mutation" >&2
+        return 1
+    }
+    if ! merv_maintenance_direct_admit; then
+        echo "[install] ERROR: another MerVLAN maintenance operation is live or unverifiable; refusing install" >&2
+        return 1
+    fi
+    MERV_MAINTENANCE_ENTRY_ADMITTED=1
+    return 0
+}
+
+install_maintenance_release() {
+    [ "$MERV_MAINTENANCE_ENTRY_ADMITTED" = "1" ] || return 0
+    merv_maintenance_direct_release || {
+        echo "[install] ERROR: maintenance owner cleanup failed; recovery is required" >&2
+        return 1
+    }
+    MERV_MAINTENANCE_ENTRY_ADMITTED=0
+    return 0
+}
+
+install_maintenance_exit_handler() {
+    local _ime_status=$?
+    trap - EXIT
+    if ! install_maintenance_release; then
+        _ime_status=1
+    fi
+    exit "$_ime_status"
+}
+
 SOURCE_REF="refs/heads/${BRANCH}"
 SOURCE_DESCRIPTION="$BRANCH branch"
 GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/${SOURCE_REF}"
@@ -1556,6 +1620,10 @@ create_test_webui_page() {
 installer_exit_handler() {
     local status=$?
     trap - EXIT INT TERM
+    if ! install_maintenance_release; then
+        status=1
+        RESULT_DETAIL="maintenance owner cleanup failed; recovery is required"
+    fi
     if [ "$status" != "0" ]; then
         installer_record ERROR "Installer stopped during phase: $INSTALL_CURRENT_PHASE (exit=$status)"
         if [ -n "$RESULT_DETAIL" ]; then
@@ -2256,6 +2324,9 @@ verify_reinstall_projection() {
 INSTALL_LOG_POLICY="reset"
 [ "$MODE" = "reinstall" ] && INSTALL_LOG_POLICY="preserve"
 
+install_maintenance_admit || exit 1
+trap 'install_maintenance_exit_handler' EXIT
+
 if [ "$MODE" = "full" ]; then
     if ! run_full_install_wizard; then
         echo "[install] Installation cancelled. No changes were made."
@@ -2762,6 +2833,10 @@ fi
 
 if [ "$MODE" = "full" ]; then
     installer_phase_end
+fi
+if ! install_maintenance_release; then
+    FINAL_STATUS=1
+    RESULT_VERIFY="FAIL - maintenance owner cleanup"
 fi
 trap - EXIT INT TERM
 echo "[install] Installation complete!"

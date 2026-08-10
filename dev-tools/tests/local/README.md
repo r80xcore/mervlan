@@ -4,25 +4,18 @@ These tests use isolated temporary state and should not contact router or AP
 hardware. They exercise production libraries from the parent repository; they
 do not duplicate those libraries under `dev-tools`.
 
-Run them from the repository root:
+Run every current local test sequentially from the repository root:
 
 ```sh
-sh dev-tools/tests/local/action_progress_test.sh
-sh dev-tools/tests/local/loading_progress_test.sh
-sh dev-tools/tests/local/apmo_override_contract_test.sh
-sh dev-tools/tests/local/service_settings_contract_test.sh
-sh dev-tools/tests/local/modal_lifecycle_contract_test.sh
-sh dev-tools/tests/local/vlan_validation_contract_test.sh
-sh dev-tools/tests/local/vlan_status_contract_test.sh
-sh dev-tools/tests/local/vlan_duplicate_contract_test.sh
-sh dev-tools/tests/local/ui_tooltips_contract_test.sh
-sh dev-tools/tests/local/metadata_tooltips_contract_test.sh
-sh dev-tools/tests/local/relay_badges_contract_test.sh
-sh dev-tools/tests/local/save_local_only_sync_test.sh
-sh dev-tools/tests/local/update_lifecycle_contract_test.sh
-sh dev-tools/tests/local/update_repair_contract_test.sh
-sh dev-tools/tests/local/custom_branch_validation_contract_test.sh
+for test_script in dev-tools/tests/local/*_test.sh; do
+    printf '%s\n' "== $test_script =="
+    sh "$test_script" || exit $?
+done
 ```
+
+The glob includes every local test and compatibility wrapper currently checked
+into this directory, including the focused audit-remediation contracts. The
+loop is sequential so tests do not share mutable temporary state.
 
 Each script derives `MERV_BASE` from its own location unless it is explicitly
 set. It cleans its temporary state on exit; a failed or interrupted run still

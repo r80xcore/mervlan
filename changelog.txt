@@ -1,3 +1,27 @@
+mervlan v0.53.27-dev
+
+Fixed: Audit-remediation ownership and recovery contracts
+- Required MAC Shield callers now propagate strict local ebtables enforcement
+  failures; changed, forced, and intentional-empty snapshots do not report
+  success or push to nodes before local enforcement, and malformed event-owner
+  state blocks automatic MAC-precondition healing.
+- Parent/dispatcher workers retain authenticated PID/start/nonce ownership until
+  child termination or reconciliation. Detached node cancellation is bound to
+  its apply run, and direct install/update/recovery/uninstall tree changes share
+  the authenticated maintenance exclusion.
+- Settings Save builds and validates one staged candidate before one atomic
+  persistent commit. Public-settings publication failures are surfaced as
+  partial terminal state, while the UI uses an authoritative baseline and
+  fail-closed unknown-node/settings state for Apply.
+- Boot DHCP protection records token-owned watchdog/handoff state and preserves
+  recovery state on ambiguous interruption. SSH key cleanup now returns a
+  terminal nonzero status when action-lock cleanup fails.
+
+Maintenance: Focused offline regression coverage
+- Added local contracts for strict MAC Shield propagation, canonical ownership,
+  supervised lifecycle and cancellation, transactional settings/UI authority,
+  maintenance admission, DHCP watchdog recovery, and SSH cleanup status.
+
 mervlan v0.53.26-dev
 
 Improved: Resilient Update downloads

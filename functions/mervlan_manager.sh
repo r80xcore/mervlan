@@ -1690,9 +1690,12 @@ cleanup_existing_config() {
   [ "$DRY_RUN" != "yes" ] && [ "$_qt_count" -gt 0 ] && \
     info -c cli,vlan "MERV_QT: quarantine armed for $_qt_count wl*.* interface(s)"
 
-  # Arm MERV_MAC secondary shield from last-known db (init-only on first run).
-  # ebt_mac_shield_init_and_apply is idempotent: safe to call on every apply.
-  ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
+  # Strict local enforcement is a precondition for destructive bridge cleanup.
+  # The authenticated exit path retains DHCP failsafe semantics on failure.
+  if ! ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"; then
+    error -c cli,vlan "MERV_MAC: shield initialization failed; aborting before VLAN cleanup"
+    return 1
+  fi
 
   # --- ebtables: remove all MerVLAN trunk filter rules FIRST ---
   # Must run before bridge/VLAN teardown to prevent stale rules that reference
