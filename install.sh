@@ -163,6 +163,20 @@ MERV_MAINTENANCE_ENTRY_ADMITTED=0
 
 install_maintenance_admit() {
     [ "$MERV_MAINTENANCE_ENTRY_REQUIRED" = "1" ] || return 0
+
+    # v0.53.26 Update parents inherit the authenticated owner tuple and
+    # durable activated/quiesced state but do not export the newer descriptive
+    # delegation-kind marker.  Only the public/runtime reinstall child may
+    # bridge that narrow handoff; all other modes continue through the normal
+    # owner admission below.
+    if [ "$MODE" = "reinstall" ] &&
+       [ -z "${MERV_MAINTENANCE_DELEGATION_KIND:-}" ] &&
+       type merv_update_legacy_reinstall_context_valid >/dev/null 2>&1 &&
+       merv_update_legacy_reinstall_context_valid; then
+        MERV_MAINTENANCE_DELEGATION_KIND=update
+        export MERV_MAINTENANCE_DELEGATION_KIND
+    fi
+
     type merv_maintenance_direct_admit >/dev/null 2>&1 || {
         echo "[install] ERROR: maintenance ownership support is unavailable; refusing tree mutation" >&2
         return 1

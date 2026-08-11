@@ -67,8 +67,36 @@ if merv_maintenance_delegation_valid; then fail update-without-quiesce; fi
 merv_update_journal_write run-r5 extracting refs/heads/test 0 0 1 0 0 r5 || fail journal-write
 merv_update_quiesce_begin run-r5 || fail quiesce-write
 merv_maintenance_delegation_valid || fail update-delegation
+
+# A v0.53.26 Update parent has no delegation-kind marker, but after the target
+# tree is activated it still owns the live canonical record and the matching
+# durable journal/quiesce state.  Only that narrow public-refresh handoff is
+# accepted; the normal new-parent delegation remains unchanged.
+unset MERV_MAINTENANCE_DELEGATION_KIND
+merv_update_journal_write run-legacy activated refs/heads/test 0 0 1 1 0 legacy || fail legacy-journal-write
+merv_update_quiesce_begin run-legacy || fail legacy-quiesce-write
+merv_update_legacy_reinstall_context_valid || fail legacy-reinstall-context
+MERV_MAINTENANCE_DELEGATION_KIND=update
+merv_maintenance_delegation_valid || fail normal-update-delegation
+unset MERV_MAINTENANCE_DELEGATION_KIND
+
+# A stale/mismatched durable marker or forged owner tuple cannot bridge the
+# handoff, even while the process that owns the lock is still alive.
+merv_update_quiesce_begin stale-run || fail stale-quiesce-write
+if merv_update_legacy_reinstall_context_valid; then fail stale-quiesce-accepted; fi
+merv_update_quiesce_begin run-legacy || fail legacy-quiesce-restore
+MERV_UPDATE_OWNER_NONCE=forged
+if merv_update_legacy_reinstall_context_valid; then fail forged-legacy-context; fi
+MERV_UPDATE_OWNER_NONCE="$MERV_LOCK_NONCE"
 merv_owner_lock_release "$MERV_UPDATE_MAINTENANCE_LOCK" "$MERV_LOCK_NONCE" || fail update-owner-release
+if merv_update_legacy_reinstall_context_valid; then fail stale-owner-accepted; fi
 pass update-journal-and-quiesce-required
+
+# The compatibility bridge is source-guarded to the public/runtime reinstall
+# modes in both entry points; no full uninstall path may inherit it.
+grep -Fq 'if [ "$MODE" = "reinstall" ]' "$BASE_DIR/install.sh" || fail install-reinstall-guard
+grep -Fq 'if [ "$ACTION" = "reinstall" ]' "$BASE_DIR/uninstall.sh" || fail uninstall-reinstall-guard
+pass legacy-bridge-reinstall-only
 
 # Static uninstall ordering: two complete preflights precede remote deletion,
 # and local full-tree removal appears only after the remote operation.

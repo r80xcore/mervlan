@@ -153,6 +153,31 @@ merv_update_owner_context_valid() {
     "$MERV_UPDATE_OWNER_START" "$MERV_UPDATE_OWNER_NONCE"
 }
 
+# v0.53.26 Update parents predate the explicit delegation-kind marker.  After
+# activating a newer tree they still invoke only the public/runtime
+# `reinstall` children, inheriting the complete owner tuple and durable Update
+# state.  Keep this bridge deliberately narrower than normal delegation: the
+# caller must prove the marker is absent (so current parents use the normal
+# path), the canonical owner is still live, the quiesce run matches the active
+# journal, and activation has reached the durable `activated` phase.
+merv_update_legacy_reinstall_context_valid() {
+  local _mulr_run _mulr_quiesce_run
+  [ "${MERV_UPDATE_OWNER:-0}" = "1" ] || return 1
+  [ -z "${MERV_MAINTENANCE_DELEGATION_KIND:-}" ] || return 1
+  merv_update_owner_context_valid || return 1
+  merv_update_quiesce_active || return 1
+  merv_update_journal_active || return 1
+  [ "$(merv_update_journal_get phase unknown)" = "activated" ] || return 1
+  [ "$(merv_update_journal_get quiesced 0)" = "1" ] || return 1
+  [ "$(merv_update_journal_get activation_started 0)" = "1" ] || return 1
+
+  _mulr_run=$(merv_update_journal_get run_id "") || return 1
+  [ -n "$_mulr_run" ] || return 1
+  _mulr_quiesce_run=$(sed -n 's/^run_id=//p' "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | head -n 1)
+  [ "$_mulr_quiesce_run" = "$_mulr_run" ] || return 1
+  return 0
+}
+
 # Recovery is deliberately not an Update-owner bypass.  It is bound to the
 # interrupted journal and to the still-live boot parent, and is refused while
 # a live/unknown maintenance owner may still be operating.
