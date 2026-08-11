@@ -27,9 +27,9 @@
     }
 
     .form-box--experimental {
-      display: flex;
+      display: grid;
       align-items: center;
-      justify-content: space-between;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
       gap: 4px;
       padding-top: 2px;
       padding-bottom: 3px;
@@ -301,6 +301,11 @@
     .maintenance-status.is-success { color: #7bd77b; }
     .maintenance-status.is-warning { color: #ffaa6b; }
     .maintenance-status.is-error { color: #ff8a8a; }
+    .settings-authority-status {
+      min-height: 1.4em;
+      transition: opacity 0.4s ease;
+    }
+    .settings-authority-status.is-fading { opacity: 0; }
 
     #versionModal {
       max-height: calc(100vh - 32px);
@@ -399,7 +404,7 @@
     .maintenance-confirm-input-wrap { margin-bottom: 14px; }
     .maintenance-confirm-input-wrap label { display: block; margin-bottom: 5px; color: #ffb36b; }
     .maintenance-confirm-input { width: 100%; box-sizing: border-box; text-transform: none; }
-    .maintenance-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .maintenance-confirm-actions { display: flex; justify-content: center; gap: 8px; }
 
     #unsupportedModelModal .modal__actions {
       justify-content: center;
@@ -716,7 +721,7 @@
           <button type="button" class="button_gen" id="loadSettingsBtn" onclick="loadSettings()" title="Load current values (retry if settings are unavailable)">Load</button>
           <button type="button" class="button_gen danger" onclick="clearFields()" title="Clear all fields (unsaved)">Clear</button>
         </div>
-        <div id="settingsAuthorityStatus" role="status" aria-live="polite" style="margin-top:6px;color:#aaa;font-size:12px;"></div>
+        <div id="settingsAuthorityStatus" class="settings-authority-status" role="status" aria-live="polite" style="margin-top:6px;color:#aaa;font-size:12px;"></div>
       </div>
 
         <!-- MerVLAN Deployment -->
@@ -753,17 +758,18 @@
             title="Service and addon settings"
             onclick="showServiceSettingsModal()"
           >Settings</button>
-          <div id="mervlanLoadingSlot" class="mervlan-loading-slot" aria-hidden="true">
+          <div id="mervlanLoadingSlot" class="mervlan-loading-slot" aria-hidden="false">
             <button
               type="button"
               id="mervlanLoadingMini"
               class="mervlan-loading-mini"
-              aria-hidden="true"
+              data-state="idle"
+              aria-hidden="false"
               aria-label="Show MerVLAN loading details"
               title="Show MerVLAN loading details"
             >
               <span class="mervlan-loading-mini__dot" aria-hidden="true"></span>
-              <span id="mervlanLoadingMiniText" class="mervlan-loading-mini__text">Working...</span>
+              <span id="mervlanLoadingMiniText" class="mervlan-loading-mini__text" aria-live="polite">Idle</span>
             </button>
           </div>
           <button
@@ -3018,7 +3024,8 @@ function showTooltip() {
       const loadingBackdrop = document.getElementById("mervlanLoadingBackdrop");
       const loadingMini = document.getElementById("mervlanLoadingMini");
       const loadingOpen = !!(loadingBackdrop && loadingBackdrop.classList.contains("is-open"));
-      const loadingMinimized = !!(loadingMini && loadingMini.classList.contains("is-visible"));
+      const loadingMinimized = !!(loadingMini && loadingMini.classList.contains("is-visible") &&
+        loadingMini.dataset.state === "running");
       const modalOpen = MVM_INFO_MODAL_IDS.some(mvmIsModalVisible) ||
         mvmIsModalVisible("maintenanceConfirmOverlay");
 
@@ -3183,6 +3190,9 @@ function showTooltip() {
     let SETTINGS_AUTHORITY_CACHE_GENERATION = 0;
     let SETTINGS_NODE_STATE = 'unknown'; // configured | none | unknown
     let SETTINGS_AUTHORITY_ERROR = '';
+    let SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
+    let SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+    let SETTINGS_AUTHORITY_STATUS_GENERATION = 0;
 
     function settingsAuthorityIsReady() {
       return SETTINGS_AUTHORITY_STATE === 'ready' &&
@@ -3194,31 +3204,66 @@ function showTooltip() {
       return settingsAuthorityIsReady() ? SETTINGS_NODE_STATE : 'unknown';
     }
 
+    function clearSettingsAuthorityStatusTimers() {
+      if (SETTINGS_AUTHORITY_STATUS_HIDE_TIMER) {
+        clearTimeout(SETTINGS_AUTHORITY_STATUS_HIDE_TIMER);
+        SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
+      }
+      if (SETTINGS_AUTHORITY_STATUS_FADE_TIMER) {
+        clearTimeout(SETTINGS_AUTHORITY_STATUS_FADE_TIMER);
+        SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+      }
+    }
+
     function renderSettingsAuthorityState() {
       const status = document.getElementById('settingsAuthorityStatus');
       const saveBtn = document.getElementById('saveSettingsBtn');
       const applyBtn = document.getElementById('applyVlanBtn');
       const state = SETTINGS_AUTHORITY_STATE;
+      const renderGeneration = ++SETTINGS_AUTHORITY_STATUS_GENERATION;
+      clearSettingsAuthorityStatusTimers();
       let message = '';
       if (state === 'loading') {
-        message = 'Loading authoritative settings... Save and Apply are paused.';
+        message = 'Loading settings... Save and Apply are paused.';
       } else if (state === 'ready') {
         message = SETTINGS_NODE_STATE === 'configured'
-          ? 'Authoritative settings loaded. Configured nodes detected.'
+          ? 'Settings loaded. Nodes are configured.'
           : SETTINGS_NODE_STATE === 'none'
-            ? 'Authoritative settings loaded. No nodes are configured.'
-            : 'Authoritative settings loaded, but node configuration is invalid or unknown. Apply is blocked.';
+            ? 'Settings loaded. No nodes configured.'
+            : 'Settings loaded, but the node configuration is invalid. Apply is unavailable.';
       } else if (state === 'failed') {
         message = (SETTINGS_AUTHORITY_ERROR || 'Settings could not be loaded.') +
           ' Click Load to retry; visible values are not submittable.';
       } else {
-        message = 'Settings are not authoritative. Click Load before Save or Apply.';
+        message = 'Settings are not loaded. Click Load before Save or Apply.';
       }
       if (status) {
+        status.classList.remove('is-fading');
         status.textContent = message;
         status.dataset.state = state;
         status.style.color = state === 'failed' ? '#f28b82'
           : (state === 'ready' && SETTINGS_NODE_STATE !== 'unknown' ? '#8bc34a' : '#f0ad4e');
+
+        // A successful node classification is informational only. Keep it
+        // visible long enough to be read, then fade it without removing the
+        // status row from the layout. Every timer checks both the render
+        // generation and current state so a later load/error cannot be hidden
+        // by an older success timer.
+        const hideSuccess = state === 'ready' && SETTINGS_NODE_STATE !== 'unknown';
+        if (hideSuccess) {
+          SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = setTimeout(() => {
+            SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
+            if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION ||
+                SETTINGS_AUTHORITY_STATE !== 'ready' || SETTINGS_NODE_STATE === 'unknown') return;
+            status.classList.add('is-fading');
+            SETTINGS_AUTHORITY_STATUS_FADE_TIMER = setTimeout(() => {
+              SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+              if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION ||
+                  SETTINGS_AUTHORITY_STATE !== 'ready' || SETTINGS_NODE_STATE === 'unknown') return;
+              status.textContent = '';
+            }, 400);
+          }, 4000);
+        }
       }
       if (saveBtn) saveBtn.disabled = state !== 'ready';
       if (applyBtn) applyBtn.disabled = state !== 'ready' || SETTINGS_NODE_STATE === 'unknown';
@@ -3268,8 +3313,8 @@ function showTooltip() {
     function requireAuthoritativeSettings(action = 'this action') {
       if (settingsAuthorityIsReady()) return true;
       const message = SETTINGS_AUTHORITY_STATE === 'loading'
-        ? 'Settings are still loading; wait for the authoritative load to finish.'
-        : 'Authoritative settings are unavailable; click Load to retry before ' + action + '.';
+        ? 'Settings are still loading; wait for the load to finish.'
+        : 'Settings are unavailable. Click Load to retry before ' + action + '.';
       appendCliText(message + '\n', { scroll: 'force' });
       renderSettingsAuthorityState();
       return false;
@@ -6393,6 +6438,9 @@ const MerVLANLoading = (() => {
   let active = null;
   let pollTimer = null;
   let sequence = 0;
+  let lastTerminal = null;
+  let terminalStateTimer = null;
+  let terminalStateGeneration = 0;
 
   const el = id => document.getElementById(id);
   const getConfig = actionName => {
@@ -6403,6 +6451,94 @@ const MerVLANLoading = (() => {
   function clearTimers() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
+  }
+
+  function invalidateTerminalStateTimer() {
+    if (terminalStateTimer) clearTimeout(terminalStateTimer);
+    terminalStateTimer = null;
+    terminalStateGeneration++;
+  }
+
+  function setCompactState(state, label) {
+    const mini = el('mervlanLoadingMini');
+    const slot = el('mervlanLoadingSlot');
+    const row = mini && mini.closest('.form-box--experimental');
+    if (!mini) return;
+    const normalized = /^(idle|running|completed|failed)$/.test(String(state || ''))
+      ? String(state) : 'idle';
+    const prefix = normalized === 'running' ? 'Running' :
+      normalized === 'completed' ? 'Completed' :
+      normalized === 'failed' ? 'Failed' : 'Idle';
+    mini.classList.add('is-visible');
+    mini.dataset.state = normalized;
+    mini.setAttribute('aria-hidden', 'false');
+    mini.setAttribute('aria-label', normalized === 'idle'
+      ? 'Show the most recent MerVLAN action details'
+      : 'Show MerVLAN action details');
+    mini.title = normalized === 'idle'
+      ? 'Show the most recent MerVLAN action details'
+      : 'Show MerVLAN action details';
+    if (slot) slot.setAttribute('aria-hidden', 'false');
+    if (row) row.classList.toggle('experimental-row--loading', normalized === 'running');
+    const miniText = el('mervlanLoadingMiniText');
+    if (miniText) miniText.textContent = label || prefix;
+    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
+  }
+
+  function terminalSnapshotFor(activeAction, kind, message) {
+    const progress = el('mervlanLoadingProgress');
+    const percent = progress ? progress.getAttribute('aria-valuenow') : null;
+    const successful = kind === 'complete' || kind === 'partial';
+    return {
+      token: activeAction.token,
+      sequence: activeAction.sequence,
+      action: activeAction.action,
+      label: activeAction.label,
+      notice: activeAction.notice,
+      kind,
+      successful,
+      message: String(message || (successful ? 'Complete' : 'Action failed.')),
+      percent: percent === null ? null : Number(percent)
+    };
+  }
+
+  function renderTerminalSnapshot(snapshot) {
+    if (!snapshot) return false;
+    const actionEl = el('mervlanLoadingAction');
+    const error = el('mervlanLoadingError');
+    const closeButton = el('mervlanLoadingCloseBtn');
+    if (actionEl) actionEl.textContent = snapshot.label;
+    setNotice(snapshot.notice);
+    if (snapshot.successful) {
+      if (error) {
+        error.textContent = '';
+        error.classList.remove('is-visible');
+      }
+      setMessage(snapshot.message, 'Complete');
+      setProgress(100, 'determinate');
+    } else {
+      if (error) {
+        error.textContent = snapshot.message;
+        error.classList.add('is-visible');
+      }
+      setMessage(snapshot.kind === 'expired' ? 'Trust request expired.' : 'Action failed.');
+      if (snapshot.percent !== null && Number.isFinite(snapshot.percent)) {
+        setProgress(snapshot.percent, 'determinate');
+      }
+    }
+    if (closeButton) closeButton.style.display = '';
+    return true;
+  }
+
+  function scheduleCompletedIdle(snapshot) {
+    invalidateTerminalStateTimer();
+    const generation = terminalStateGeneration;
+    terminalStateTimer = window.setTimeout(() => {
+      terminalStateTimer = null;
+      if (generation !== terminalStateGeneration || active || !lastTerminal ||
+          lastTerminal.token !== snapshot.token || lastTerminal.sequence !== snapshot.sequence) return;
+      setCompactState('idle', 'Idle');
+    }, 5000);
   }
 
   async function fetchJsonBounded(url, timeoutMs = 2500) {
@@ -6425,15 +6561,17 @@ const MerVLANLoading = (() => {
   }
 
   function setMiniVisible(visible) {
-    const mini = el('mervlanLoadingMini');
-    const slot = el('mervlanLoadingSlot');
-    const row = mini && mini.closest('.form-box--experimental');
-    if (!mini) return;
-    mini.classList.toggle('is-visible', !!visible);
-    mini.setAttribute('aria-hidden', visible ? 'false' : 'true');
-    if (slot) slot.setAttribute('aria-hidden', visible ? 'false' : 'true');
-    if (row) row.classList.toggle('experimental-row--loading', !!visible);
-    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
+    if (active && !active.terminal) {
+      setCompactState('running', 'Running — ' + active.label);
+    } else if (active && active.terminal && lastTerminal) {
+      setCompactState(lastTerminal.successful ? 'completed' : 'failed',
+        (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
+    } else if (visible && lastTerminal) {
+      setCompactState(lastTerminal.successful ? 'completed' : 'failed',
+        (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
+    } else {
+      setCompactState('idle', 'Idle');
+    }
   }
 
   function setInfoVisible() {
@@ -6480,10 +6618,14 @@ const MerVLANLoading = (() => {
 
   function setMessage(message, fallback) {
     const phase = el('mervlanLoadingPhase');
-    const miniText = el('mervlanLoadingMiniText');
     const value = String(message || fallback || 'Working...');
     if (phase) phase.textContent = value;
-    if (miniText) miniText.textContent = value;
+    // Keep the permanent compact slot in step with the active action's
+    // current phase. Terminal snapshots own their text so a late phase update
+    // cannot overwrite Completed/Failed or restart their timers.
+    if (active && !active.terminal) {
+      setCompactState('running', value || active.label || 'Running');
+    }
   }
 
   function renderStart() {
@@ -6498,9 +6640,9 @@ const MerVLANLoading = (() => {
     }
     if (close) close.style.display = 'none';
     setNotice(active.notice);
+    setCompactState('running', 'Running — ' + active.label);
     setMessage('Starting ' + active.label.toLowerCase() + '...');
     setProgress(0, active.mode === 'phase' ? 'determinate' : active.mode);
-    setMiniVisible(false);
     setPanelOpen(true);
   }
 
@@ -6553,7 +6695,7 @@ const MerVLANLoading = (() => {
     clearTimers();
     if (typeof releaseActionLock === 'function') releaseActionLock(paused.action);
     setPanelOpen(false);
-    setMiniVisible(false);
+    setCompactState('idle', 'Idle');
     active = null;
     return true;
   }
@@ -6660,13 +6802,15 @@ const MerVLANLoading = (() => {
         unknown.classList.add('is-visible');
       }
       setMessage('Transport status is unknown; waiting for the router result.');
-      setMiniVisible(true);
+      setCompactState('running', 'Running — Waiting for router result');
       return true;
     }
     if (active.terminal) return false;
     active.terminal = true;
     active.state = kind === 'complete' || kind === 'partial' ? kind : 'failed';
     clearTimers();
+    invalidateTerminalStateTimer();
+    lastTerminal = terminalSnapshotFor(active, kind, message);
     if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
     if (typeof active.completionResolve === 'function') {
       active.completionResolve({
@@ -6686,7 +6830,7 @@ const MerVLANLoading = (() => {
       }
       setMessage(message, 'Complete');
       setProgress(100, 'determinate');
-      setMiniVisible(false);
+      setCompactState('completed', 'Completed — ' + active.label);
     } else {
       if (error) {
         error.textContent = String(message || 'Action failed.');
@@ -6694,9 +6838,14 @@ const MerVLANLoading = (() => {
       }
       if (closeButton) closeButton.style.display = '';
       setMessage(kind === 'expired' ? 'Trust request expired.' : (kind === 'trust-required' ? 'SSH trust decision required.' : 'Action failed.'));
-      setMiniVisible(true);
+      setCompactState('failed', 'Failed — ' + active.label);
     }
-    window.setTimeout(() => { if (active && active.terminal) close(); }, 450);
+    if (lastTerminal.successful) scheduleCompletedIdle(lastTerminal);
+    const terminalToken = active.token;
+    const terminalSequence = active.sequence;
+    window.setTimeout(() => {
+      if (active && active.token === terminalToken && active.sequence === terminalSequence && active.terminal) close();
+    }, 450);
     return true;
   }
 
@@ -6704,31 +6853,45 @@ const MerVLANLoading = (() => {
   function fail(message) { return finalize('failed', message); }
 
   function close() {
-    if (!active) return;
+    if (!active) {
+      setPanelOpen(false);
+      return;
+    }
     if (!active.terminal) {
       if (active.transportUnknown) {
         setPanelOpen(false);
-        setMiniVisible(true);
+        setCompactState('running', 'Running — Waiting for router result');
       }
       return;
     }
     clearTimers();
     setPanelOpen(false);
-    setMiniVisible(false);
+    if (lastTerminal) {
+      setCompactState(lastTerminal.successful ? 'completed' : 'failed',
+        (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
+    }
     active = null;
   }
 
   function minimize() {
-    if (!active || active.state !== 'running') return;
+    if (!active) {
+      if (lastTerminal) setPanelOpen(false);
+      return;
+    }
+    if (active.state !== 'running') return;
     active.minimized = true;
     setPanelOpen(false);
-    setMiniVisible(true);
+    setCompactState('running', 'Running — ' + active.label);
   }
 
   function restore() {
-    if (!active) return;
-    active.minimized = false;
-    setMiniVisible(false);
+    if (active) {
+      active.minimized = false;
+      setCompactState('running', 'Running — ' + active.label);
+      setPanelOpen(true);
+      return;
+    }
+    if (!lastTerminal || !renderTerminalSnapshot(lastTerminal)) return;
     setPanelOpen(true);
   }
 
@@ -6736,6 +6899,8 @@ const MerVLANLoading = (() => {
     const config = getConfig(actionName);
     if (!config || config.display !== 'panel') return null;
     if (active) return null;
+
+    invalidateTerminalStateTimer();
 
     const token = createMerVLANLoadingToken();
     let completionResolve;
@@ -7149,7 +7314,7 @@ function triggerAction(actionScriptName, button, description) {
 
     function applySettingChangesToForm(changes) {
       if (!requireAuthoritativeSettings('Apply settings')) {
-        throw new Error('Authoritative settings are unavailable; click Load to retry.');
+        throw new Error('Settings are unavailable. Click Load to retry.');
       }
       changes.forEach(change => {
         CURRENT_SETTINGS_CACHE[change.key] = change.desired;
@@ -7263,7 +7428,7 @@ function triggerAction(actionScriptName, button, description) {
     async function refreshSettingsCacheFromDisk() {
       const loaded = await loadSettings({ deferFill: true });
       if (!loaded || !settingsAuthorityIsReady()) {
-        throw new Error('Could not refresh authoritative settings after the transaction.');
+        throw new Error('Could not refresh settings after the transaction.');
       }
       return CURRENT_SETTINGS_CACHE;
     }
@@ -7304,7 +7469,7 @@ function triggerAction(actionScriptName, button, description) {
       if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;
       const loadToken = ++_svcSettingsLoadSequence;
       _svcSnapshot = null;
-      setServiceSettingsLoadState('loading', 'Loading authoritative settings...');
+      setServiceSettingsLoadState('loading', 'Loading settings...');
 
       // Always do a fresh load so all toggles reflect the last saved state on disk.
       // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
@@ -7460,7 +7625,7 @@ function triggerAction(actionScriptName, button, description) {
           }
         }
 
-        setServiceTransactionStatus('Refreshing authoritative settings…');
+        setServiceTransactionStatus('Refreshing settings…');
         await refreshSettingsCacheFromDisk();
         _svcSnapshot = captureServiceSettingsSnapshot();
         syncServiceSettingsControls();
@@ -7649,19 +7814,53 @@ async function checkForConfiguredNodes() {
   }
 }
 
+let vlanManagerRouteConfirmationInFlight = false;
+
+// Local Router Only and Nodes Only are both destructive choices when the
+// authoritative settings contain configured nodes. Keep their confirmation
+// and action submission in one guarded path so a second click cannot open a
+// competing prompt or submit a duplicate route before the first one settles.
+async function runConfirmedVlanManagerRoute(button, confirmationOptions, action) {
+  if (button && button.disabled) return false;
+  if (vlanManagerRouteConfirmationInFlight) return false;
+  vlanManagerRouteConfirmationInFlight = true;
+  const wasDisabled = !!(button && button.disabled);
+  if (button) button.disabled = true;
+  try {
+    const confirmed = await showMaintenanceConfirmation(confirmationOptions);
+    if (!confirmed) return false;
+    if (!settingsAuthorityIsReady() || getSettingsNodeState() !== 'configured') {
+      appendCliText('Apply blocked: authoritative settings or node state is unknown. Click Load to retry.\n', { scroll: 'force' });
+      return false;
+    }
+    closeVlanManagerModal();
+    return await action();
+  } finally {
+    vlanManagerRouteConfirmationInFlight = false;
+    if (button && button.dataset.mervlanAction !== 'apply_vlanmgr' &&
+        button.dataset.mervlanAction !== 'executenodesonly_vlanmgr') {
+      button.disabled = wasDisabled;
+      button.style.opacity = '';
+    }
+  }
+}
+
 // Run VLAN Manager locally only
 async function runVlanManagerLocal(button) {
   if (!requireAuthoritativeSettings('Apply')) return false;
-  if (getSettingsNodeState() !== 'none') {
-    appendCliText('Local-only Apply blocked: node state is not explicitly none.\n', { scroll: 'force' });
+  if (getSettingsNodeState() !== 'configured') {
+    appendCliText('Local-only Apply blocked: configured node state is unavailable.\n', { scroll: 'force' });
     return false;
   }
-  closeVlanManagerModal();
-  return queueServiceAction('apply_vlanmgr', {
+  return runConfirmedVlanManagerRoute(button, {
+    title: 'Apply on Router Only',
+    message: 'Run VLAN Manager on this router only?\n\nConfigured nodes will not be changed.',
+    confirmLabel: 'Apply Router Only'
+  }, () => queueServiceAction('apply_vlanmgr', {
     button,
     description: 'Run VLAN Manager (Local Only)',
     cooldownMs: 8000
-  });
+  }));
 }
 
 // Run VLAN Manager with nodes
@@ -7686,12 +7885,15 @@ async function runVlanManagerOnlyNodes(button) {
     appendCliText('Node-only Apply blocked: configured node state is unavailable.\n', { scroll: 'force' });
     return false;
   }
-  closeVlanManagerModal();
-  return queueServiceAction('executenodesonly_vlanmgr', {
+  return runConfirmedVlanManagerRoute(button, {
+    title: 'Apply on Nodes Only',
+    message: 'Run VLAN Manager on configured nodes only?\n\nThe router itself will not be changed.',
+    confirmLabel: 'Apply Nodes Only'
+  }, () => queueServiceAction('executenodesonly_vlanmgr', {
     button,
     description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
-  });
+  }));
 }
 
 async function runMacRefresh() {
@@ -7871,7 +8073,7 @@ async function runMacRefresh() {
     }
 
     function buildNormalSettingsPayloadForMerlin() {
-      if (!requireAuthoritativeSettings('Save')) throw new Error('Authoritative settings are unavailable; click Load to retry.');
+      if (!requireAuthoritativeSettings('Save')) throw new Error('Settings are unavailable. Click Load to retry.');
       const f = document.getElementById("settingsForm");
       const out = { vlanmgr_SAVE_SCOPE: "normal" };
 
@@ -7949,7 +8151,7 @@ async function runMacRefresh() {
     }
 
     function buildOverridePayloadForMerlin() {
-      if (!requireAuthoritativeSettings('saving hardware overrides')) throw new Error('Authoritative settings are unavailable; click Load to retry.');
+      if (!requireAuthoritativeSettings('saving hardware overrides')) throw new Error('Settings are unavailable. Click Load to retry.');
       const out = { vlanmgr_SAVE_SCOPE: "override" };
       if (CURRENT_SETTINGS_CACHE) {
         nodeTokens(true).forEach(t => {
@@ -8068,7 +8270,7 @@ async function runMacRefresh() {
     function toSSIDPlaceholder(s){ const v=String(s||"").trim(); return v===""?"unused-placeholder":v; }
     function formToSettingsJSON(){
       if (!requireAuthoritativeSettings('Save')) {
-        throw new Error('Authoritative settings are unavailable; click Load to retry.');
+        throw new Error('Settings are unavailable. Click Load to retry.');
       }
       const f = document.getElementById("settingsForm");
       const flat = {};
@@ -11919,7 +12121,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
 
   const result = await withActionLock(lockName, async () => {
     if (!requireAuthoritativeSettings('Save')) {
-      return { ok: false, changed: false, error: 'Authoritative settings are unavailable; click Load to retry.' };
+      return { ok: false, changed: false, error: 'Settings are unavailable. Click Load to retry.' };
     }
     stopPolling();
     const triggerBtn = btn instanceof HTMLElement ? btn : document.querySelector('button[onclick*="uploadSettingsAndSave"]');

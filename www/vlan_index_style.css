@@ -328,6 +328,19 @@ body {
 
 .form-box.form-box--experimental {
         border:0;
+        display:grid;
+        grid-template-columns:auto minmax(0, 1fr) auto auto;
+        justify-content:initial;
+        align-items:center;
+        gap:4px;
+}
+
+.form-box.form-box--experimental > #mervlanLoadingSlot {
+        min-width:0;
+}
+
+.form-box.form-box--experimental > #experimentalVersionBadge {
+        justify-self:end;
 }
 
 .vlan-table {
@@ -1815,7 +1828,7 @@ body {
 }
 
 .mervlan-loading-mini {
-        display:none;
+        display:flex;
         align-items:center;
         gap:7px;
         min-width:0;
@@ -1838,6 +1851,30 @@ body {
         margin-left:0;
 }
 
+.mervlan-loading-mini[data-state="idle"] {
+        color:#c5cdd1;
+        background:rgba(108,186,245,.06);
+        border-color:rgba(108,186,245,.24);
+}
+
+.mervlan-loading-mini[data-state="running"] {
+        color:#d8edf8;
+        background:rgba(108,186,245,.12);
+        border-color:rgba(108,186,245,.42);
+}
+
+.mervlan-loading-mini[data-state="completed"] {
+        color:#c9f3ce;
+        background:rgba(89,184,96,.12);
+        border-color:rgba(123,215,123,.42);
+}
+
+.mervlan-loading-mini[data-state="failed"] {
+        color:#ffd0d0;
+        background:rgba(192,57,43,.12);
+        border-color:rgba(255,138,138,.46);
+}
+
 .mervlan-loading-slot {
         display:flex;
         align-items:center;
@@ -1852,6 +1889,21 @@ body {
         background:#6cbaf5;
         border-radius:50%;
         animation:mervlan-loading-pulse 1.2s ease-in-out infinite;
+}
+
+.mervlan-loading-mini[data-state="idle"] .mervlan-loading-mini__dot {
+        background:#91a4ad;
+        animation:none;
+}
+
+.mervlan-loading-mini[data-state="completed"] .mervlan-loading-mini__dot {
+        background:#7bd77b;
+        animation:none;
+}
+
+.mervlan-loading-mini[data-state="failed"] .mervlan-loading-mini__dot {
+        background:#ff8a8a;
+        animation:none;
 }
 
 .mervlan-loading-mini__text {

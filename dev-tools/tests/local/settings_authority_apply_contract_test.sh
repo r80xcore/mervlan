@@ -27,12 +27,22 @@ require "loadGeneration !== SETTINGS_AUTHORITY_GENERATION" 'stale settings respo
 require "settings.json is not valid JSON." 'malformed settings terminal failure missing'
 require "settings.json did not contain a settings object." 'non-object settings failure missing'
 require "visible values are not submittable" 'failed-load recovery guidance missing'
-require "Authoritative settings are unavailable; click Load to retry" 'Save/Apply authority gate message missing'
+require "Settings are unavailable. Click Load to retry before" 'Save/Apply authority gate message missing'
+require "Loading settings... Save and Apply are paused." 'settings loading wording missing'
+require "Settings loaded. Nodes are configured." 'configured-node success wording missing'
+require "Settings loaded. No nodes configured." 'no-node success wording missing'
+require "Settings loaded, but the node configuration is invalid. Apply is unavailable." 'invalid-node success wording missing'
+require "SETTINGS_AUTHORITY_STATUS_HIDE_TIMER" 'success status hide timer missing'
+require "SETTINGS_AUTHORITY_STATUS_GENERATION" 'success status generation guard missing'
+require "status.classList.add('is-fading')" 'success status fade missing'
+require "}, 4000);" 'success status delay missing'
+require "}, 400);" 'success status fade duration missing'
 require "return getSettingsNodeState();" 'configured/none node state is explicit'
 require "return 'unknown';" 'unknown node state is explicit'
 require "Apply blocked: authoritative settings or node state is unknown" 'unknown Apply must block'
-require "getSettingsNodeState() !== 'none'" 'local Apply lacks explicit none guard'
 require "getSettingsNodeState() !== 'configured'" 'node-aware Apply lacks configured guard'
+require "function runConfirmedVlanManagerRoute" 'confirmed VLAN route helper missing'
+require "showMaintenanceConfirmation(confirmationOptions)" 'VLAN route confirmation is not using the shared confirmation dialog'
 require "function classifyConfiguredNodes(settings)" 'tri-state node classifier missing'
 require "return configured ? 'configured' : 'none';" 'empty/none node case does not remain explicit none'
 require "A nonempty malformed node value is not equivalent to no nodes" 'malformed node case is not fail-closed'
@@ -49,5 +59,13 @@ loader=$(sed -n '/^    async function loadSettings(opts = {}){/,/^    function t
 apply_block=$(sed -n '/^async function handleApplyClick(button)/,/^\/\/ Run VLAN Manager locally only/p' "$UI_FILE")
 printf '%s\n' "$apply_block" | grep -Fq "nodeState === 'unknown'" || fail 'Apply does not branch on unknown node state'
 printf '%s\n' "$apply_block" | grep -Fq "nodeState === 'configured'" || fail 'Apply does not branch on configured node state'
+
+local_apply=$(sed -n '/^async function runVlanManagerLocal(button)/,/^\/\/ Run VLAN Manager with nodes/p' "$UI_FILE")
+printf '%s\n' "$local_apply" | grep -Fq "getSettingsNodeState() !== 'configured'" || fail 'Local Router Only does not require configured nodes'
+printf '%s\n' "$local_apply" | grep -Fq 'runConfirmedVlanManagerRoute' || fail 'Local Router Only bypasses confirmation'
+
+nodes_only_apply=$(sed -n '/^async function runVlanManagerOnlyNodes(button)/,/^async function runMacRefresh/p' "$UI_FILE")
+printf '%s\n' "$nodes_only_apply" | grep -Fq "getSettingsNodeState() !== 'configured'" || fail 'Nodes Only does not require configured nodes'
+printf '%s\n' "$nodes_only_apply" | grep -Fq 'runConfirmedVlanManagerRoute' || fail 'Nodes Only bypasses confirmation'
 
 printf 'SETTINGS_AUTHORITY_APPLY_CONTRACT_OK\n'
