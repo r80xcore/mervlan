@@ -41,7 +41,7 @@ grep -Fq "['sshTrustRefreshBtn', 'sshTrustSelectAllBtn', 'sshTrustClearSelection
 settings_open=$(sed -n '/^    async function showServiceSettingsModal()/,/^    function closeServiceSettingsModal()/p' "$UI_FILE")
 settings_loader=$(sed -n '/^    async function loadSettings(opts = {}){/,/^    function toNone/p' "$UI_FILE")
 printf '%s\n' "$settings_open" | grep -Fq "modal.style.display = 'block';" || fail 'Settings modal is not opened synchronously'
-printf '%s\n' "$settings_open" | grep -Fq "setServiceSettingsLoadState('loading', 'Loading authoritative settings...')" || fail 'Settings loading state missing'
+printf '%s\n' "$settings_open" | grep -Fq "setServiceSettingsLoadState('loading', 'Loading settings...')" || fail 'Settings loading state missing'
 printf '%s\n' "$settings_open" | grep -Fq "if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;" || fail 'Settings modal load is not single-flight'
 printf '%s\n' "$settings_open" | grep -Fq 'if (loadToken !== _svcSettingsLoadSequence || modal.style.display ===' || fail 'Settings stale-result guard missing'
 printf '%s\n' "$settings_open" | grep -Fq "shouldCommit: () => loadToken === _svcSettingsLoadSequence && modal.style.display !== 'none'" || fail 'Settings loader can publish a stale modal request'

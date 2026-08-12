@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!-- index.html version="0.53.26-dev" -->
+  <!-- index.html version="0.53.27-dev" -->
   <meta charset="utf-8" />
   <title>MerVLAN Manager</title>
   <link rel="stylesheet" href="vlan_form_style.css" />
@@ -27,9 +27,9 @@
     }
 
     .form-box--experimental {
-      display: flex;
+      display: grid;
       align-items: center;
-      justify-content: space-between;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
       gap: 4px;
       padding-top: 2px;
       padding-bottom: 3px;
@@ -301,6 +301,11 @@
     .maintenance-status.is-success { color: #7bd77b; }
     .maintenance-status.is-warning { color: #ffaa6b; }
     .maintenance-status.is-error { color: #ff8a8a; }
+    .settings-authority-status {
+      min-height: 1.4em;
+      transition: opacity 0.4s ease;
+    }
+    .settings-authority-status.is-fading { opacity: 0; }
 
     #versionModal {
       max-height: calc(100vh - 32px);
@@ -399,7 +404,7 @@
     .maintenance-confirm-input-wrap { margin-bottom: 14px; }
     .maintenance-confirm-input-wrap label { display: block; margin-bottom: 5px; color: #ffb36b; }
     .maintenance-confirm-input { width: 100%; box-sizing: border-box; text-transform: none; }
-    .maintenance-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .maintenance-confirm-actions { display: flex; justify-content: center; gap: 8px; }
 
     #unsupportedModelModal .modal__actions {
       justify-content: center;
@@ -712,17 +717,18 @@
         <select id="dryRunToggle" name="DRY_RUN"            style="display:none;"><option value="no">no</option><option value="yes">yes</option></select>
         <select id="ensToggle"   name="ENABLE_NATIVE_SSID"  style="display:none;"><option value="0">0</option><option value="1">1</option></select>
         <div class="button-row button-row-actions">
-          <button type="button" class="button_gen" onclick="uploadSettingsAndSave()" title="Save the current MerVLAN configuration.">Save</button>
-          <button type="button" class="button_gen" onclick="loadSettings()" title="Load current values">Load</button>
+          <button type="button" class="button_gen" id="saveSettingsBtn" onclick="uploadSettingsAndSave()" title="Save the current MerVLAN configuration.">Save</button>
+          <button type="button" class="button_gen" id="loadSettingsBtn" onclick="loadSettings()" title="Load current values (retry if settings are unavailable)">Load</button>
           <button type="button" class="button_gen danger" onclick="clearFields()" title="Clear all fields (unsaved)">Clear</button>
         </div>
+        <div id="settingsAuthorityStatus" class="settings-authority-status" role="status" aria-live="polite" style="margin-top:6px;color:#aaa;font-size:12px;"></div>
       </div>
 
         <!-- MerVLAN Deployment -->
         <div class="form-box controls-panel">
           <h2>MerVLAN Deployment</h2>
       <div class="button-row button-row-main">
-        <button type="button" class="button_gen" onclick="handleApplyClick(this)" title="Run MerVLAN Manager and apply the current VLAN configuration.">Apply VLAN</button>
+        <button type="button" class="button_gen" id="applyVlanBtn" onclick="handleApplyClick(this)" title="Run MerVLAN Manager and apply the current VLAN configuration.">Apply VLAN</button>
         <button type="button" class="button_gen" id="syncNodesBtn" onclick="triggerAction('sync_vlanmgr', this, 'Sync Nodes')" title="Sync MerVLAN files and settings to configured nodes.">Sync Nodes</button>
         <button type="button" class="button_gen" id="sshInstallBtn" onclick="showSSHKeyModal()" title="Show SSH key installation options">SSH Key Install</button>          </div>
 
@@ -752,17 +758,18 @@
             title="Service and addon settings"
             onclick="showServiceSettingsModal()"
           >Settings</button>
-          <div id="mervlanLoadingSlot" class="mervlan-loading-slot" aria-hidden="true">
+          <div id="mervlanLoadingSlot" class="mervlan-loading-slot" aria-hidden="false">
             <button
               type="button"
               id="mervlanLoadingMini"
               class="mervlan-loading-mini"
-              aria-hidden="true"
+              data-state="idle"
+              aria-hidden="false"
               aria-label="Show MerVLAN loading details"
               title="Show MerVLAN loading details"
             >
               <span class="mervlan-loading-mini__dot" aria-hidden="true"></span>
-              <span id="mervlanLoadingMiniText" class="mervlan-loading-mini__text">Working...</span>
+              <span id="mervlanLoadingMiniText" class="mervlan-loading-mini__text" aria-live="polite">Idle</span>
             </button>
           </div>
           <button
@@ -3017,7 +3024,8 @@ function showTooltip() {
       const loadingBackdrop = document.getElementById("mervlanLoadingBackdrop");
       const loadingMini = document.getElementById("mervlanLoadingMini");
       const loadingOpen = !!(loadingBackdrop && loadingBackdrop.classList.contains("is-open"));
-      const loadingMinimized = !!(loadingMini && loadingMini.classList.contains("is-visible"));
+      const loadingMinimized = !!(loadingMini && loadingMini.classList.contains("is-visible") &&
+        loadingMini.dataset.state === "running");
       const modalOpen = MVM_INFO_MODAL_IDS.some(mvmIsModalVisible) ||
         mvmIsModalVisible("maintenanceConfirmOverlay");
 
@@ -3173,6 +3181,144 @@ function showTooltip() {
     let PERSISTED_SETTINGS_FLAT_BASELINE = null;
     let CURRENT_SETTINGS_STRUCTURED = null;
     let CURRENT_SETTINGS_SHAPE = "flat";
+    // Settings fetched from settings.json are authoritative only while the
+    // matching request generation is current and has reached `ready`.  The
+    // visible form is intentionally retained after a failure for recovery,
+    // but it is never a source for Save/Apply while this state is not ready.
+    let SETTINGS_AUTHORITY_STATE = 'unknown'; // loading | ready | failed | unknown
+    let SETTINGS_AUTHORITY_GENERATION = 0;
+    let SETTINGS_AUTHORITY_CACHE_GENERATION = 0;
+    let SETTINGS_NODE_STATE = 'unknown'; // configured | none | unknown
+    let SETTINGS_AUTHORITY_ERROR = '';
+    let SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
+    let SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+    let SETTINGS_AUTHORITY_STATUS_GENERATION = 0;
+
+    function settingsAuthorityIsReady() {
+      return SETTINGS_AUTHORITY_STATE === 'ready' &&
+        SETTINGS_AUTHORITY_CACHE_GENERATION === SETTINGS_AUTHORITY_GENERATION &&
+        !!CURRENT_SETTINGS_CACHE;
+    }
+
+    function getSettingsNodeState() {
+      return settingsAuthorityIsReady() ? SETTINGS_NODE_STATE : 'unknown';
+    }
+
+    function clearSettingsAuthorityStatusTimers() {
+      if (SETTINGS_AUTHORITY_STATUS_HIDE_TIMER) {
+        clearTimeout(SETTINGS_AUTHORITY_STATUS_HIDE_TIMER);
+        SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
+      }
+      if (SETTINGS_AUTHORITY_STATUS_FADE_TIMER) {
+        clearTimeout(SETTINGS_AUTHORITY_STATUS_FADE_TIMER);
+        SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+      }
+    }
+
+    function renderSettingsAuthorityState() {
+      const status = document.getElementById('settingsAuthorityStatus');
+      const saveBtn = document.getElementById('saveSettingsBtn');
+      const applyBtn = document.getElementById('applyVlanBtn');
+      const state = SETTINGS_AUTHORITY_STATE;
+      const renderGeneration = ++SETTINGS_AUTHORITY_STATUS_GENERATION;
+      clearSettingsAuthorityStatusTimers();
+      let message = '';
+      if (state === 'loading') {
+        message = 'Loading settings... Save and Apply are paused.';
+      } else if (state === 'ready') {
+        message = SETTINGS_NODE_STATE === 'configured'
+          ? 'Settings loaded. Nodes are configured.'
+          : SETTINGS_NODE_STATE === 'none'
+            ? 'Settings loaded. No nodes configured.'
+            : 'Settings loaded, but the node configuration is invalid. Apply is unavailable.';
+      } else if (state === 'failed') {
+        message = (SETTINGS_AUTHORITY_ERROR || 'Settings could not be loaded.') +
+          ' Click Load to retry; visible values are not submittable.';
+      } else {
+        message = 'Settings are not loaded. Click Load before Save or Apply.';
+      }
+      if (status) {
+        status.classList.remove('is-fading');
+        status.textContent = message;
+        status.dataset.state = state;
+        status.style.color = state === 'failed' ? '#f28b82'
+          : (state === 'ready' && SETTINGS_NODE_STATE !== 'unknown' ? '#8bc34a' : '#f0ad4e');
+
+        // A successful node classification is informational only. Keep it
+        // visible long enough to be read, then fade it without removing the
+        // status row from the layout. Every timer checks both the render
+        // generation and current state so a later load/error cannot be hidden
+        // by an older success timer.
+        const hideSuccess = state === 'ready' && SETTINGS_NODE_STATE !== 'unknown';
+        if (hideSuccess) {
+          SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = setTimeout(() => {
+            SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
+            if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION ||
+                SETTINGS_AUTHORITY_STATE !== 'ready' || SETTINGS_NODE_STATE === 'unknown') return;
+            status.classList.add('is-fading');
+            SETTINGS_AUTHORITY_STATUS_FADE_TIMER = setTimeout(() => {
+              SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+              if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION ||
+                  SETTINGS_AUTHORITY_STATE !== 'ready' || SETTINGS_NODE_STATE === 'unknown') return;
+              status.textContent = '';
+            }, 400);
+          }, 4000);
+        }
+      }
+      if (saveBtn) saveBtn.disabled = state !== 'ready';
+      if (applyBtn) applyBtn.disabled = state !== 'ready' || SETTINGS_NODE_STATE === 'unknown';
+      setNodeButtonsEnabled(state === 'ready' && SETTINGS_NODE_STATE === 'configured');
+    }
+
+    function beginSettingsAuthorityLoad() {
+      const generation = ++SETTINGS_AUTHORITY_GENERATION;
+      SETTINGS_AUTHORITY_CACHE_GENERATION = 0;
+      SETTINGS_AUTHORITY_STATE = 'loading';
+      SETTINGS_NODE_STATE = 'unknown';
+      SETTINGS_AUTHORITY_ERROR = '';
+      renderSettingsAuthorityState();
+      return generation;
+    }
+
+    function invalidateSettingsAuthority(state = 'failed', message = '') {
+      // Advance the generation so every in-flight response, including a
+      // delayed success from this failed request, is permanently stale.
+      SETTINGS_AUTHORITY_GENERATION++;
+      SETTINGS_AUTHORITY_STATE = state === 'failed' ? 'failed' : 'unknown';
+      SETTINGS_AUTHORITY_CACHE_GENERATION = 0;
+      SETTINGS_NODE_STATE = 'unknown';
+      SETTINGS_AUTHORITY_ERROR = message || '';
+      CURRENT_SETTINGS_CACHE = null;
+      CURRENT_SETTINGS_STRUCTURED = null;
+      CURRENT_SETTINGS_SHAPE = 'flat';
+      PERSISTED_SETTINGS_FLAT_BASELINE = null;
+      setNodeButtonsEnabled(false);
+      renderSettingsAuthorityState();
+    }
+
+    function commitSettingsAuthority(generation, flat, structured, shape) {
+      if (generation !== SETTINGS_AUTHORITY_GENERATION) return false;
+      CURRENT_SETTINGS_STRUCTURED = structured;
+      CURRENT_SETTINGS_SHAPE = shape;
+      CURRENT_SETTINGS_CACHE = flat;
+      SETTINGS_AUTHORITY_CACHE_GENERATION = generation;
+      SETTINGS_AUTHORITY_STATE = 'ready';
+      SETTINGS_NODE_STATE = classifyConfiguredNodes(flat);
+      SETTINGS_AUTHORITY_ERROR = '';
+      updatePersistedSettingsBaseline(flat);
+      renderSettingsAuthorityState();
+      return true;
+    }
+
+    function requireAuthoritativeSettings(action = 'this action') {
+      if (settingsAuthorityIsReady()) return true;
+      const message = SETTINGS_AUTHORITY_STATE === 'loading'
+        ? 'Settings are still loading; wait for the load to finish.'
+        : 'Settings are unavailable. Click Load to retry before ' + action + '.';
+      appendCliText(message + '\n', { scroll: 'force' });
+      renderSettingsAuthorityState();
+      return false;
+    }
     function initNodeDependentButtons(){
       var syncBtn = document.getElementById("syncNodesBtn");
       var sshBtn = document.getElementById("sshInstallBtn");
@@ -3184,7 +3330,7 @@ function showTooltip() {
         }
         nodeDependentButtons.push(btn);
       });
-      setNodeButtonsEnabled(hasConfiguredNodes(CURRENT_SETTINGS_CACHE));
+      setNodeButtonsEnabled(getSettingsNodeState() === 'configured');
     }
     function setNodeButtonsEnabled(enabled){
       var active = enabled ? true : false;
@@ -3203,21 +3349,35 @@ function showTooltip() {
         }
       });
     }
-    function hasConfiguredNodes(settings){
-      if(!settings) return false;
+    function classifyConfiguredNodes(settings){
+      if(!settings || typeof settings !== 'object' || Array.isArray(settings)) return 'unknown';
+      var configured = false;
       for(var i=1;i<=MAX_NODES;i++){
-        var key = "NODE"+i;
-        var raw = settings[key];
-        if(typeof raw !== "string") continue;
+        var raw = settings["NODE"+i];
+        if(raw == null) continue;
+        if(typeof raw !== 'string') return 'unknown';
         var trimmed = raw.trim();
         if(!trimmed || trimmed.toLowerCase() === "none") continue;
-        if(/^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(trimmed)) return true;
+        if(/^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(trimmed)) {
+          configured = true;
+        } else {
+          // A nonempty malformed node value is not equivalent to no nodes;
+          // fail closed so Apply cannot silently choose local-only mode.
+          return 'unknown';
+        }
       }
-      return false;
+      return configured ? 'configured' : 'none';
+    }
+    function hasConfiguredNodes(settings){
+      return classifyConfiguredNodes(settings) === 'configured';
     }
     function updateNodeButtonsFromSettings(settings){
-      setNodeButtonsEnabled(hasConfiguredNodes(settings));
+      if (settingsAuthorityIsReady() && settings === CURRENT_SETTINGS_CACHE) {
+        SETTINGS_NODE_STATE = classifyConfiguredNodes(settings);
+      }
+      setNodeButtonsEnabled(getSettingsNodeState() === 'configured');
       updateSSIDAssignCheckboxes();
+      renderSettingsAuthorityState();
     }
     function updateStatusTooltips(){ document.querySelectorAll(".status").forEach(el=>{ const i=el.textContent.trim(); if(el.dataset.statusTooltip){ el.title=el.dataset.statusTooltip; } else if(statusTooltips[i]) el.title=statusTooltips[i]; else el.removeAttribute("title"); }); }
     const STATUS_SYMBOLS = Object.freeze({
@@ -4336,10 +4496,9 @@ function showTooltip() {
       updateExperimentalVisibility();
       scheduleFormPaneWidthUpdate();
       scheduleHostIframeResize();
-      CURRENT_SETTINGS_CACHE = null;
-      CURRENT_SETTINGS_STRUCTURED = null;
-      CURRENT_SETTINGS_SHAPE = "flat";
-      setNodeButtonsEnabled(false);
+      // A cleared form has no authoritative cache.  Keep the visible blank
+      // draft, but require a fresh Load before any later Save/Apply.
+      invalidateSettingsAuthority('unknown', 'Settings form cleared.');
       refreshFormStatuses();
     }
 
@@ -5604,6 +5763,7 @@ function pollForFreshClientData(sinceMs, opts){
 }
 
 async function saveClientMeta(btn){
+  if (!requireAuthoritativeSettings('Save Client Metadata')) return false;
   // Collect editor inputs into an override set + name map.
   const overrides = new Set();
   const names = new Map();
@@ -5623,12 +5783,6 @@ async function saveClientMeta(btn){
   if (!(window.parent && typeof window.parent.MVM_save === 'function')){
     appendCliText('Save error: parent page handler not available.\n', {scroll:'force'});
     return;
-  }
-
-  // Update the cache so subsequent (unrelated) VLAN saves preserve these values.
-  if (typeof CURRENT_SETTINGS_CACHE === 'object' && CURRENT_SETTINGS_CACHE){
-    CURRENT_SETTINGS_CACHE.MAC_SHIELD_OVERRIDES = overridesStr;
-    CURRENT_SETTINGS_CACHE.CLIENT_NAME_OVERRIDES = namesStr;
   }
 
   disableBtnTemporarily(btn, CLIENT_META_SAVE_DELAY_MS + 4000);
@@ -5660,9 +5814,6 @@ async function saveClientMeta(btn){
   }
   if (metadataLoadingTask) metadataLoadingTask.phase('Saving metadata settings...', 30);
 
-  // Close the editor back to the normal overview.
-  toggleClientMetaEdit(false);
-
   // Verify settings.json actually persisted before applying. mac_client_meta.sh
   // reads settings.json, so triggering it before the save lands would make it
   // act on stale metadata and falsely report success. We only care that the two
@@ -5685,6 +5836,16 @@ async function saveClientMeta(btn){
   if (!persisted){
     if (metadataLoadingTask) metadataLoadingTask.fail('Metadata settings did not persist in time.');
     appendCliText('Client metadata: settings did not persist in time — skipping apply to avoid acting on stale state. Try Save again.\n', {scroll:'force'});
+    return;
+  }
+
+  // Re-read the public settings artifact before applying metadata.  A
+  // transport acceptance or a matching transient response is not enough to
+  // clear the editor draft when the durable reload itself fails.
+  const metadataReloaded = await loadSettings({ deferFill: true });
+  if (!metadataReloaded) {
+    if (metadataLoadingTask) metadataLoadingTask.fail('Client metadata saved, but settings reload failed.');
+    appendCliText('Client metadata: settings reload failed; keeping the editor draft.\n', {scroll:'force'});
     return;
   }
 
@@ -5717,10 +5878,12 @@ async function saveClientMeta(btn){
     doneMsg: 'Client metadata applied.',
     timeoutMsg: 'Client metadata apply is taking longer than expected; showing latest available.',
     onFresh: () => {
+      toggleClientMetaEdit(false);
       if (metadataLoadingTask) metadataLoadingTask.complete('Client metadata saved.');
     },
     onTimeout: () => {
-      if (metadataLoadingTask) metadataLoadingTask.complete('Client metadata saved; refresh is still catching up.');
+      if (metadataLoadingTask) metadataLoadingTask.fail('Client metadata apply did not reach a fresh inventory result.');
+      appendCliText('Client metadata apply did not reach a terminal refresh; keeping the editor draft.\n', {scroll:'force'});
     }
   });
 }
@@ -6275,6 +6438,9 @@ const MerVLANLoading = (() => {
   let active = null;
   let pollTimer = null;
   let sequence = 0;
+  let lastTerminal = null;
+  let terminalStateTimer = null;
+  let terminalStateGeneration = 0;
 
   const el = id => document.getElementById(id);
   const getConfig = actionName => {
@@ -6285,6 +6451,94 @@ const MerVLANLoading = (() => {
   function clearTimers() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
+  }
+
+  function invalidateTerminalStateTimer() {
+    if (terminalStateTimer) clearTimeout(terminalStateTimer);
+    terminalStateTimer = null;
+    terminalStateGeneration++;
+  }
+
+  function setCompactState(state, label) {
+    const mini = el('mervlanLoadingMini');
+    const slot = el('mervlanLoadingSlot');
+    const row = mini && mini.closest('.form-box--experimental');
+    if (!mini) return;
+    const normalized = /^(idle|running|completed|failed)$/.test(String(state || ''))
+      ? String(state) : 'idle';
+    const prefix = normalized === 'running' ? 'Running' :
+      normalized === 'completed' ? 'Completed' :
+      normalized === 'failed' ? 'Failed' : 'Idle';
+    mini.classList.add('is-visible');
+    mini.dataset.state = normalized;
+    mini.setAttribute('aria-hidden', 'false');
+    mini.setAttribute('aria-label', normalized === 'idle'
+      ? 'Show the most recent MerVLAN action details'
+      : 'Show MerVLAN action details');
+    mini.title = normalized === 'idle'
+      ? 'Show the most recent MerVLAN action details'
+      : 'Show MerVLAN action details';
+    if (slot) slot.setAttribute('aria-hidden', 'false');
+    if (row) row.classList.toggle('experimental-row--loading', normalized === 'running');
+    const miniText = el('mervlanLoadingMiniText');
+    if (miniText) miniText.textContent = label || prefix;
+    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
+  }
+
+  function terminalSnapshotFor(activeAction, kind, message) {
+    const progress = el('mervlanLoadingProgress');
+    const percent = progress ? progress.getAttribute('aria-valuenow') : null;
+    const successful = kind === 'complete' || kind === 'partial';
+    return {
+      token: activeAction.token,
+      sequence: activeAction.sequence,
+      action: activeAction.action,
+      label: activeAction.label,
+      notice: activeAction.notice,
+      kind,
+      successful,
+      message: String(message || (successful ? 'Complete' : 'Action failed.')),
+      percent: percent === null ? null : Number(percent)
+    };
+  }
+
+  function renderTerminalSnapshot(snapshot) {
+    if (!snapshot) return false;
+    const actionEl = el('mervlanLoadingAction');
+    const error = el('mervlanLoadingError');
+    const closeButton = el('mervlanLoadingCloseBtn');
+    if (actionEl) actionEl.textContent = snapshot.label;
+    setNotice(snapshot.notice);
+    if (snapshot.successful) {
+      if (error) {
+        error.textContent = '';
+        error.classList.remove('is-visible');
+      }
+      setMessage(snapshot.message, 'Complete');
+      setProgress(100, 'determinate');
+    } else {
+      if (error) {
+        error.textContent = snapshot.message;
+        error.classList.add('is-visible');
+      }
+      setMessage(snapshot.kind === 'expired' ? 'Trust request expired.' : 'Action failed.');
+      if (snapshot.percent !== null && Number.isFinite(snapshot.percent)) {
+        setProgress(snapshot.percent, 'determinate');
+      }
+    }
+    if (closeButton) closeButton.style.display = '';
+    return true;
+  }
+
+  function scheduleCompletedIdle(snapshot) {
+    invalidateTerminalStateTimer();
+    const generation = terminalStateGeneration;
+    terminalStateTimer = window.setTimeout(() => {
+      terminalStateTimer = null;
+      if (generation !== terminalStateGeneration || active || !lastTerminal ||
+          lastTerminal.token !== snapshot.token || lastTerminal.sequence !== snapshot.sequence) return;
+      setCompactState('idle', 'Idle');
+    }, 5000);
   }
 
   async function fetchJsonBounded(url, timeoutMs = 2500) {
@@ -6307,15 +6561,17 @@ const MerVLANLoading = (() => {
   }
 
   function setMiniVisible(visible) {
-    const mini = el('mervlanLoadingMini');
-    const slot = el('mervlanLoadingSlot');
-    const row = mini && mini.closest('.form-box--experimental');
-    if (!mini) return;
-    mini.classList.toggle('is-visible', !!visible);
-    mini.setAttribute('aria-hidden', visible ? 'false' : 'true');
-    if (slot) slot.setAttribute('aria-hidden', visible ? 'false' : 'true');
-    if (row) row.classList.toggle('experimental-row--loading', !!visible);
-    if (typeof syncInfoLatchVisibility === 'function') syncInfoLatchVisibility();
+    if (active && !active.terminal) {
+      setCompactState('running', 'Running — ' + active.label);
+    } else if (active && active.terminal && lastTerminal) {
+      setCompactState(lastTerminal.successful ? 'completed' : 'failed',
+        (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
+    } else if (visible && lastTerminal) {
+      setCompactState(lastTerminal.successful ? 'completed' : 'failed',
+        (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
+    } else {
+      setCompactState('idle', 'Idle');
+    }
   }
 
   function setInfoVisible() {
@@ -6362,10 +6618,14 @@ const MerVLANLoading = (() => {
 
   function setMessage(message, fallback) {
     const phase = el('mervlanLoadingPhase');
-    const miniText = el('mervlanLoadingMiniText');
     const value = String(message || fallback || 'Working...');
     if (phase) phase.textContent = value;
-    if (miniText) miniText.textContent = value;
+    // Keep the permanent compact slot in step with the active action's
+    // current phase. Terminal snapshots own their text so a late phase update
+    // cannot overwrite Completed/Failed or restart their timers.
+    if (active && !active.terminal) {
+      setCompactState('running', value || active.label || 'Running');
+    }
   }
 
   function renderStart() {
@@ -6380,9 +6640,9 @@ const MerVLANLoading = (() => {
     }
     if (close) close.style.display = 'none';
     setNotice(active.notice);
+    setCompactState('running', 'Running — ' + active.label);
     setMessage('Starting ' + active.label.toLowerCase() + '...');
     setProgress(0, active.mode === 'phase' ? 'determinate' : active.mode);
-    setMiniVisible(false);
     setPanelOpen(true);
   }
 
@@ -6435,7 +6695,7 @@ const MerVLANLoading = (() => {
     clearTimers();
     if (typeof releaseActionLock === 'function') releaseActionLock(paused.action);
     setPanelOpen(false);
-    setMiniVisible(false);
+    setCompactState('idle', 'Idle');
     active = null;
     return true;
   }
@@ -6542,13 +6802,15 @@ const MerVLANLoading = (() => {
         unknown.classList.add('is-visible');
       }
       setMessage('Transport status is unknown; waiting for the router result.');
-      setMiniVisible(true);
+      setCompactState('running', 'Running — Waiting for router result');
       return true;
     }
     if (active.terminal) return false;
     active.terminal = true;
     active.state = kind === 'complete' || kind === 'partial' ? kind : 'failed';
     clearTimers();
+    invalidateTerminalStateTimer();
+    lastTerminal = terminalSnapshotFor(active, kind, message);
     if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
     if (typeof active.completionResolve === 'function') {
       active.completionResolve({
@@ -6568,7 +6830,7 @@ const MerVLANLoading = (() => {
       }
       setMessage(message, 'Complete');
       setProgress(100, 'determinate');
-      setMiniVisible(false);
+      setCompactState('completed', 'Completed — ' + active.label);
     } else {
       if (error) {
         error.textContent = String(message || 'Action failed.');
@@ -6576,9 +6838,14 @@ const MerVLANLoading = (() => {
       }
       if (closeButton) closeButton.style.display = '';
       setMessage(kind === 'expired' ? 'Trust request expired.' : (kind === 'trust-required' ? 'SSH trust decision required.' : 'Action failed.'));
-      setMiniVisible(true);
+      setCompactState('failed', 'Failed — ' + active.label);
     }
-    window.setTimeout(() => { if (active && active.terminal) close(); }, 450);
+    if (lastTerminal.successful) scheduleCompletedIdle(lastTerminal);
+    const terminalToken = active.token;
+    const terminalSequence = active.sequence;
+    window.setTimeout(() => {
+      if (active && active.token === terminalToken && active.sequence === terminalSequence && active.terminal) close();
+    }, 450);
     return true;
   }
 
@@ -6586,31 +6853,45 @@ const MerVLANLoading = (() => {
   function fail(message) { return finalize('failed', message); }
 
   function close() {
-    if (!active) return;
+    if (!active) {
+      setPanelOpen(false);
+      return;
+    }
     if (!active.terminal) {
       if (active.transportUnknown) {
         setPanelOpen(false);
-        setMiniVisible(true);
+        setCompactState('running', 'Running — Waiting for router result');
       }
       return;
     }
     clearTimers();
     setPanelOpen(false);
-    setMiniVisible(false);
+    if (lastTerminal) {
+      setCompactState(lastTerminal.successful ? 'completed' : 'failed',
+        (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
+    }
     active = null;
   }
 
   function minimize() {
-    if (!active || active.state !== 'running') return;
+    if (!active) {
+      if (lastTerminal) setPanelOpen(false);
+      return;
+    }
+    if (active.state !== 'running') return;
     active.minimized = true;
     setPanelOpen(false);
-    setMiniVisible(true);
+    setCompactState('running', 'Running — ' + active.label);
   }
 
   function restore() {
-    if (!active) return;
-    active.minimized = false;
-    setMiniVisible(false);
+    if (active) {
+      active.minimized = false;
+      setCompactState('running', 'Running — ' + active.label);
+      setPanelOpen(true);
+      return;
+    }
+    if (!lastTerminal || !renderTerminalSnapshot(lastTerminal)) return;
     setPanelOpen(true);
   }
 
@@ -6618,6 +6899,8 @@ const MerVLANLoading = (() => {
     const config = getConfig(actionName);
     if (!config || config.display !== 'panel') return null;
     if (active) return null;
+
+    invalidateTerminalStateTimer();
 
     const token = createMerVLANLoadingToken();
     let completionResolve;
@@ -7030,7 +7313,9 @@ function triggerAction(actionScriptName, button, description) {
     }
 
     function applySettingChangesToForm(changes) {
-      if (!CURRENT_SETTINGS_CACHE) CURRENT_SETTINGS_CACHE = {};
+      if (!requireAuthoritativeSettings('Apply settings')) {
+        throw new Error('Settings are unavailable. Click Load to retry.');
+      }
       changes.forEach(change => {
         CURRENT_SETTINGS_CACHE[change.key] = change.desired;
         const hidden = change.definition.hiddenControlId ? document.getElementById(change.definition.hiddenControlId) : null;
@@ -7141,21 +7426,10 @@ function triggerAction(actionScriptName, button, description) {
     }
 
     async function refreshSettingsCacheFromDisk() {
-      const response = await fetch(PATHS.SETTINGS + '?_=' + Date.now(), {
-        cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
-      });
-      if (!response.ok) throw new Error('Could not refresh settings after the transaction (HTTP ' + response.status + ').');
-      const data = await response.json();
-      if (isStructuredSettingsPayload(data)) {
-        CURRENT_SETTINGS_STRUCTURED = data;
-        CURRENT_SETTINGS_SHAPE = 'sectioned';
-        CURRENT_SETTINGS_CACHE = flattenStructuredSettingsPayload(data);
-      } else {
-        CURRENT_SETTINGS_STRUCTURED = null;
-        CURRENT_SETTINGS_SHAPE = 'flat';
-        CURRENT_SETTINGS_CACHE = data;
+      const loaded = await loadSettings({ deferFill: true });
+      if (!loaded || !settingsAuthorityIsReady()) {
+        throw new Error('Could not refresh settings after the transaction.');
       }
-      updatePersistedSettingsBaseline(CURRENT_SETTINGS_CACHE);
       return CURRENT_SETTINGS_CACHE;
     }
 
@@ -7195,7 +7469,7 @@ function triggerAction(actionScriptName, button, description) {
       if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;
       const loadToken = ++_svcSettingsLoadSequence;
       _svcSnapshot = null;
-      setServiceSettingsLoadState('loading', 'Loading authoritative settings...');
+      setServiceSettingsLoadState('loading', 'Loading settings...');
 
       // Always do a fresh load so all toggles reflect the last saved state on disk.
       // deferFill=true refreshes CURRENT_SETTINGS_CACHE without touching the main form.
@@ -7351,7 +7625,7 @@ function triggerAction(actionScriptName, button, description) {
           }
         }
 
-        setServiceTransactionStatus('Refreshing authoritative settings…');
+        setServiceTransactionStatus('Refreshing settings…');
         await refreshSettingsCacheFromDisk();
         _svcSnapshot = captureServiceSettingsSnapshot();
         syncServiceSettingsControls();
@@ -7503,8 +7777,12 @@ async function handleApplyClick(button) {
       button.style.opacity = 0.6;
     }
     try {
-      const hasNodes = await checkForConfiguredNodes();
-      if (hasNodes) {
+      const nodeState = await checkForConfiguredNodes();
+      if (nodeState === 'unknown') {
+          appendCliText('Apply blocked: authoritative settings or node state is unknown. Click Load to retry.\n', { scroll: 'force' });
+          return false;
+      }
+      if (nodeState === 'configured') {
           showVlanManagerModal();
           return true;
       }
@@ -7524,49 +7802,74 @@ async function handleApplyClick(button) {
 
 // Check if any nodes are configured in settings.json
 async function checkForConfiguredNodes() {
-  if (hasConfiguredNodes(CURRENT_SETTINGS_CACHE)) {
-    return true;
-  }
+  if (settingsAuthorityIsReady()) return getSettingsNodeState();
+  if (SETTINGS_AUTHORITY_STATE === 'loading') return 'unknown';
   try {
-    const response = await fetch(PATHS.SETTINGS + "?_=" + Date.now());
-    if (!response.ok) {
-      setNodeButtonsEnabled(false);
-      return false;
-    }
-
-    const settings = await response.json();
-    const flat = isStructuredSettingsPayload(settings) ? normalizeToFlatSettings(settings) : settings;
-    CURRENT_SETTINGS_CACHE = flat;
-    updatePersistedSettingsBaseline(flat);
-    if (isStructuredSettingsPayload(settings)) {
-      CURRENT_SETTINGS_STRUCTURED = settings;
-      CURRENT_SETTINGS_SHAPE = "sectioned";
-    } else {
-      CURRENT_SETTINGS_STRUCTURED = null;
-      CURRENT_SETTINGS_SHAPE = "flat";
-    }
-    updateNodeButtonsFromSettings(flat);
-
-    return hasConfiguredNodes(flat);
+    const loaded = await loadSettings({ deferFill: true });
+    return loaded && settingsAuthorityIsReady() ? getSettingsNodeState() : 'unknown';
   } catch (error) {
     console.error("Error checking for configured nodes:", error);
     setNodeButtonsEnabled(false);
-    return false;
+    return 'unknown';
+  }
+}
+
+let vlanManagerRouteConfirmationInFlight = false;
+
+// Local Router Only and Nodes Only are both destructive choices when the
+// authoritative settings contain configured nodes. Keep their confirmation
+// and action submission in one guarded path so a second click cannot open a
+// competing prompt or submit a duplicate route before the first one settles.
+async function runConfirmedVlanManagerRoute(button, confirmationOptions, action) {
+  if (button && button.disabled) return false;
+  if (vlanManagerRouteConfirmationInFlight) return false;
+  vlanManagerRouteConfirmationInFlight = true;
+  const wasDisabled = !!(button && button.disabled);
+  if (button) button.disabled = true;
+  try {
+    const confirmed = await showMaintenanceConfirmation(confirmationOptions);
+    if (!confirmed) return false;
+    if (!settingsAuthorityIsReady() || getSettingsNodeState() !== 'configured') {
+      appendCliText('Apply blocked: authoritative settings or node state is unknown. Click Load to retry.\n', { scroll: 'force' });
+      return false;
+    }
+    closeVlanManagerModal();
+    return await action();
+  } finally {
+    vlanManagerRouteConfirmationInFlight = false;
+    if (button && button.dataset.mervlanAction !== 'apply_vlanmgr' &&
+        button.dataset.mervlanAction !== 'executenodesonly_vlanmgr') {
+      button.disabled = wasDisabled;
+      button.style.opacity = '';
+    }
   }
 }
 
 // Run VLAN Manager locally only
 async function runVlanManagerLocal(button) {
-  closeVlanManagerModal();
-  return queueServiceAction('apply_vlanmgr', {
+  if (!requireAuthoritativeSettings('Apply')) return false;
+  if (getSettingsNodeState() !== 'configured') {
+    appendCliText('Local-only Apply blocked: configured node state is unavailable.\n', { scroll: 'force' });
+    return false;
+  }
+  return runConfirmedVlanManagerRoute(button, {
+    title: 'Apply on Router Only',
+    message: 'Run VLAN Manager on this router only?\n\nConfigured nodes will not be changed.',
+    confirmLabel: 'Apply Router Only'
+  }, () => queueServiceAction('apply_vlanmgr', {
     button,
     description: 'Run VLAN Manager (Local Only)',
     cooldownMs: 8000
-  });
+  }));
 }
 
 // Run VLAN Manager with nodes
 async function runVlanManagerWithNodes(button) {
+  if (!requireAuthoritativeSettings('Apply')) return false;
+  if (getSettingsNodeState() !== 'configured') {
+    appendCliText('Apply with nodes blocked: configured node state is unavailable.\n', { scroll: 'force' });
+    return false;
+  }
   closeVlanManagerModal();
   return queueServiceAction('executenodes_vlanmgr', {
     button,
@@ -7577,12 +7880,20 @@ async function runVlanManagerWithNodes(button) {
 
 // Run VLAN Manager with nodes
 async function runVlanManagerOnlyNodes(button) {
-  closeVlanManagerModal();
-  return queueServiceAction('executenodesonly_vlanmgr', {
+  if (!requireAuthoritativeSettings('Apply')) return false;
+  if (getSettingsNodeState() !== 'configured') {
+    appendCliText('Node-only Apply blocked: configured node state is unavailable.\n', { scroll: 'force' });
+    return false;
+  }
+  return runConfirmedVlanManagerRoute(button, {
+    title: 'Apply on Nodes Only',
+    message: 'Run VLAN Manager on configured nodes only?\n\nThe router itself will not be changed.',
+    confirmLabel: 'Apply Nodes Only'
+  }, () => queueServiceAction('executenodesonly_vlanmgr', {
     button,
     description: 'Run VLAN Manager on Nodes Only',
     cooldownMs: 8000
-  });
+  }));
 }
 
 async function runMacRefresh() {
@@ -7762,6 +8073,7 @@ async function runMacRefresh() {
     }
 
     function buildNormalSettingsPayloadForMerlin() {
+      if (!requireAuthoritativeSettings('Save')) throw new Error('Settings are unavailable. Click Load to retry.');
       const f = document.getElementById("settingsForm");
       const out = { vlanmgr_SAVE_SCOPE: "normal" };
 
@@ -7839,6 +8151,7 @@ async function runMacRefresh() {
     }
 
     function buildOverridePayloadForMerlin() {
+      if (!requireAuthoritativeSettings('saving hardware overrides')) throw new Error('Settings are unavailable. Click Load to retry.');
       const out = { vlanmgr_SAVE_SCOPE: "override" };
       if (CURRENT_SETTINGS_CACHE) {
         nodeTokens(true).forEach(t => {
@@ -7863,7 +8176,20 @@ async function runMacRefresh() {
 
     async function loadSettings(opts = {}){
     const { deferFill = false, shouldCommit = null } = opts;
-    const mayCommit = () => typeof shouldCommit !== "function" || shouldCommit();
+    const loadGeneration = beginSettingsAuthorityLoad();
+    const failCurrentLoad = message => {
+      if (loadGeneration !== SETTINGS_AUTHORITY_GENERATION) return false;
+      invalidateSettingsAuthority('failed', message);
+      return false;
+    };
+    const mayCommit = () => {
+      if (loadGeneration !== SETTINGS_AUTHORITY_GENERATION) return false;
+      if (typeof shouldCommit === "function" && !shouldCommit()) {
+        failCurrentLoad('Settings load was cancelled before it became authoritative.');
+        return false;
+      }
+      return true;
+    };
     try{
       appendCliText("Loading settings.json...\n",{scroll:'force'});
       const r = await fetch(PATHS.SETTINGS+"?_="+Date.now(),{
@@ -7878,11 +8204,7 @@ async function runMacRefresh() {
       if(!r.ok){ 
         appendCliText(`Error: cannot load settings.json (${r.status})\n${t}\n`,{scroll:'force'}); 
         if (!mayCommit()) return false;
-        CURRENT_SETTINGS_CACHE = null;
-        CURRENT_SETTINGS_STRUCTURED = null;
-        CURRENT_SETTINGS_SHAPE = "flat";
-        setNodeButtonsEnabled(false);
-        return false;
+        return failCurrentLoad('Could not load settings.json from the router.');
       }
       let data; 
       try{ 
@@ -7890,22 +8212,22 @@ async function runMacRefresh() {
       } catch(e){ 
         appendCliText("settings.json is not valid JSON:\n\n"+t+"\n",{scroll:'force'}); 
         if (!mayCommit()) return false;
-        CURRENT_SETTINGS_CACHE = null;
-        CURRENT_SETTINGS_STRUCTURED = null;
-        CURRENT_SETTINGS_SHAPE = "flat";
-        setNodeButtonsEnabled(false);
-        return false;
+        return failCurrentLoad('settings.json is not valid JSON.');
+      }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        appendCliText('settings.json did not contain a settings object.\n', { scroll: 'force' });
+        if (!mayCommit()) return false;
+        return failCurrentLoad('settings.json did not contain a settings object.');
       }
       if (!mayCommit()) return false;
       if (isStructuredSettingsPayload(data)) {
-        CURRENT_SETTINGS_STRUCTURED = data;
-        CURRENT_SETTINGS_SHAPE = "sectioned";
-        CURRENT_SETTINGS_CACHE = flattenStructuredSettingsPayload(data);
+        const flat = flattenStructuredSettingsPayload(data);
+        if (!commitSettingsAuthority(loadGeneration, flat, data, 'sectioned')) return false;
       } else {
-        CURRENT_SETTINGS_STRUCTURED = null;
-        CURRENT_SETTINGS_SHAPE = "flat";
-        CURRENT_SETTINGS_CACHE = data;
+        if (!commitSettingsAuthority(loadGeneration, data, null, 'flat')) return false;
       }
+      // Keep the explicit load-site update alongside the authority commit;
+      // the persisted baseline is only refreshed after a current success.
       updatePersistedSettingsBaseline(CURRENT_SETTINGS_CACHE);
       if (deferFill) {
         updateNodeButtonsFromSettings(CURRENT_SETTINGS_CACHE);
@@ -7940,17 +8262,16 @@ async function runMacRefresh() {
     } catch(err){ 
       appendCliText("Error loading settings.json: "+err+"\n",{scroll:'force'}); 
       if (!mayCommit()) return false;
-      CURRENT_SETTINGS_CACHE = null;
-      CURRENT_SETTINGS_STRUCTURED = null;
-      CURRENT_SETTINGS_SHAPE = "flat";
-      setNodeButtonsEnabled(false);
-      return false;
+      return failCurrentLoad('Error loading settings.json: ' + err);
     }
   }
 
     function toNone(s){ const v=String(s||"").trim(); return v===""?"none":v; }
     function toSSIDPlaceholder(s){ const v=String(s||"").trim(); return v===""?"unused-placeholder":v; }
     function formToSettingsJSON(){
+      if (!requireAuthoritativeSettings('Save')) {
+        throw new Error('Settings are unavailable. Click Load to retry.');
+      }
       const f = document.getElementById("settingsForm");
       const flat = {};
       syncLanFieldsToCache(CURRENT_LAN_TARGET);
@@ -10653,10 +10974,12 @@ function applyAdvancedOverride() {
 
 async function queueAutomaticNodeSettingsSync(options = {}) {
   if (options.checkNodes !== false) {
-    const hasNodes = await checkForConfiguredNodes();
-    if (!hasNodes) {
+    const nodeState = await checkForConfiguredNodes();
+    if (nodeState !== 'configured') {
       if (options.announce !== false) {
-        appendCliText("Auto-sync skipped: no nodes are configured. Run Sync Nodes later after adding a node.\n", { scroll: "force" });
+        appendCliText(nodeState === 'unknown'
+          ? "Auto-sync blocked: authoritative node state is unknown. Click Load and retry.\n"
+          : "Auto-sync skipped: no nodes are configured. Run Sync Nodes later after adding a node.\n", { scroll: "force" });
       }
       return false;
     }
@@ -10740,9 +11063,6 @@ async function applyOverrideWithHwProbe(options = {}) {
       await settleCorrelatedTransport(saveSubmission, 'Override save');
       if (loadingTask) loadingTask.phase('Verifying saved overrides...', 45);
 
-      appendCliText("Clearing form fields...\n", { scroll: "force" });
-      clearFields();
-
       // Step 2: Wait for the correlated HW probe completion acknowledgement.
       appendCliText("Triggering HW profile refresh...\n", { scroll: "force" });
       if (loadingTask) loadingTask.phase('Detecting hardware profile...', 60);
@@ -10755,7 +11075,15 @@ async function applyOverrideWithHwProbe(options = {}) {
       // Step 3: Reload only after the probe has completed.
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
       if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
-      await loadSettings();
+      const reloaded = await loadSettings();
+      if (!reloaded) {
+        const error = 'Hardware overrides were acknowledged, but the verified reload failed.';
+        if (loadingTask) loadingTask.fail(error);
+        appendCliText(error + "\n", { scroll: "force" });
+        return;
+      }
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
       appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
       if (loadingTask) loadingTask.complete('Hardware overrides saved and profile refreshed.');
       if (loadingTask && loadingTask.completion) await loadingTask.completion;
@@ -10863,8 +11191,6 @@ async function applyOverrideSaveOnly(options = {}) {
         return;
       }
 
-      appendCliText("Clearing form fields...\n", { scroll: "force" });
-      clearFields();
       appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
       const ok = await waitForSettingsToMatch(expectedManaged, {
         timeoutMs: 25000,
@@ -10882,7 +11208,17 @@ async function applyOverrideSaveOnly(options = {}) {
       if (loadingTask) loadingTask.phase('Verifying saved overrides...', 65);
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
       if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
-      await loadSettings();
+      const reloaded = await loadSettings();
+      if (!reloaded) {
+        const error = 'Hardware overrides were acknowledged, but the verified reload failed.';
+        if (loadingTask) loadingTask.fail(error);
+        appendCliText(error + "\n", { scroll: "force" });
+        return;
+      }
+      if (ok) {
+        appendCliText("Clearing form fields...\n", { scroll: "force" });
+        clearFields();
+      }
       appendCliText(
         ok ? "Override save complete.\n"
            : "Override save: settings did not persist in time. Loaded latest available.\n",
@@ -11784,6 +12120,9 @@ async function uploadSettingsAndSave(btn, options = {}) {
   } = options;
 
   const result = await withActionLock(lockName, async () => {
+    if (!requireAuthoritativeSettings('Save')) {
+      return { ok: false, changed: false, error: 'Settings are unavailable. Click Load to retry.' };
+    }
     stopPolling();
     const triggerBtn = btn instanceof HTMLElement ? btn : document.querySelector('button[onclick*="uploadSettingsAndSave"]');
     if (triggerBtn) disableBtnTemporarily(triggerBtn, 5000);
@@ -11851,11 +12190,6 @@ async function uploadSettingsAndSave(btn, options = {}) {
         return { ok: false, changed: true, error };
       }
 
-      if (shouldClearForm) {
-        appendCliText('Clearing form fields...\n', { scroll: 'force' });
-        clearFields();
-      }
-
       if (loadingTask) loadingTask.phase('Waiting for settings to persist...', 50);
       appendCliText('Waiting for settings to persist...\n', { scroll: 'force' });
       if (loadingTask) loadingTask.phase('Verifying saved settings...', 75);
@@ -11865,12 +12199,6 @@ async function uploadSettingsAndSave(btn, options = {}) {
         scope: 'normal'
       });
 
-      if (reloadAfterSave) {
-        if (loadingTask) loadingTask.phase('Loading saved settings...', 90);
-        appendCliText('Reloading settings from disk...\n', { scroll: 'force' });
-        await loadSettings();
-      }
-
       if (!ok) {
         const error = 'Settings did not match the requested values before the save timeout.';
         if (loadingTask) loadingTask.fail(error);
@@ -11878,6 +12206,9 @@ async function uploadSettingsAndSave(btn, options = {}) {
         return { ok: false, changed: true, error };
       }
 
+      // The correlated backend acknowledgement is terminal truth for the
+      // Save.  Keep the editable draft intact until it confirms durable
+      // local persistence; transport acceptance alone is not sufficient.
       let nodeSyncStatus = 'unknown';
       let saveCompletionMessage = 'Saved settings loaded';
       if (saveRequestToken) {
@@ -11893,17 +12224,42 @@ async function uploadSettingsAndSave(btn, options = {}) {
           saveCompletionMessage = 'Settings saved locally; node sync failed';
           appendCliText('Settings saved locally, but node settings synchronization failed: ' +
             (saveAck.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
+          if (loadingTask) loadingTask.fail(saveAck.message || 'Settings save completed only partially.');
+          return { ok: false, changed: true, error: saveAck.message || 'Settings save completed only partially.' };
         } else if (!saveAck.ok) {
           nodeSyncStatus = 'unknown';
           saveCompletionMessage = 'Settings saved locally; node sync status unavailable';
           appendCliText('Settings saved locally, but node synchronization could not be confirmed: ' +
             (saveAck.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
+          if (loadingTask) loadingTask.fail(saveAck.message || 'Settings save acknowledgement was not successful.');
+          return { ok: false, changed: true, error: saveAck.message || 'Settings save acknowledgement was not successful.' };
         } else {
           nodeSyncStatus = saveAck.result && saveAck.result.node_sync
             ? String(saveAck.result.node_sync) : 'ok';
         }
         await settleCorrelatedTransport(saveSubmission, 'Settings save');
       }
+
+      if (reloadAfterSave) {
+        if (loadingTask) loadingTask.phase('Loading saved settings...', 90);
+        appendCliText('Reloading settings from disk...\n', { scroll: 'force' });
+        const reloaded = await loadSettings();
+        if (!reloaded) {
+          const error = 'Settings were acknowledged, but the verified reload failed.';
+          if (loadingTask) loadingTask.fail(error);
+          appendCliText('Save reload failed: ' + error + '\n', { scroll: 'force' });
+          return { ok: false, changed: true, error };
+        }
+      }
+
+      // Clear only after durable acknowledgement and verified reload.  Any
+      // rejection, timeout, partial result, or reload failure leaves the
+      // user's draft available for correction/retry.
+      if (shouldClearForm) {
+        appendCliText('Clearing form fields...\n', { scroll: 'force' });
+        clearFields();
+      }
+
       if (nodeSyncStatus === 'pending') {
         saveCompletionMessage = 'Settings saved locally; node synchronization queued';
       }

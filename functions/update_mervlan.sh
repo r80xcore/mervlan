@@ -311,7 +311,7 @@ restore_update_original_tree() {
 	fi
 	[ -f "$MERV_BASE/settings/settings.json" ] || return 1
 	if [ -x "$MERV_BASE/uninstall.sh" ] && [ -x "$MERV_BASE/install.sh" ]; then
-		run_update_step "rollback public uninstall" sh "$MERV_BASE/uninstall.sh" reinstall || return 1
+		run_update_step "rollback public uninstall" env MERV_UPDATE_OWNER=1 sh "$MERV_BASE/uninstall.sh" reinstall || return 1
 		run_update_step "rollback public install" env MERV_UPDATE_OWNER=1 sh "$MERV_BASE/install.sh" reinstall || return 1
 	fi
 	if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
@@ -1280,7 +1280,12 @@ if merv_owner_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenanc
 	MERV_UPDATE_OWNER_PID="$$"
 	MERV_UPDATE_OWNER_START="$UPDATE_MAINTENANCE_LOCK_START"
 	MERV_UPDATE_OWNER_NONCE="$UPDATE_MAINTENANCE_LOCK_NONCE"
-	export MERV_UPDATE_OWNER MERV_UPDATE_OWNER_PID MERV_UPDATE_OWNER_START MERV_UPDATE_OWNER_NONCE
+	# Child install/uninstall entry points authenticate this exact owner tuple;
+	# the kind marker is descriptive and never sufficient without the journal,
+	# quiesce state, and canonical owner match checked by lib_update_state.sh.
+	MERV_MAINTENANCE_DELEGATION_KIND=update
+	export MERV_UPDATE_OWNER MERV_UPDATE_OWNER_PID MERV_UPDATE_OWNER_START \
+		MERV_UPDATE_OWNER_NONCE MERV_MAINTENANCE_DELEGATION_KIND
 	if ! merv_update_owner_context_valid; then
 		fail_update lock "Could not authenticate the Update maintenance owner context"
 	fi
@@ -2017,7 +2022,7 @@ refresh_public_install() {
 		return 1
 	fi
 
-	if ! run_update_step "public uninstall" sh "$uninstall_script" reinstall; then
+	if ! run_update_step "public uninstall" env MERV_UPDATE_OWNER=1 sh "$uninstall_script" reinstall; then
 		warn -c cli,vlan "Public uninstall failed; install may be stale"
 		return 1
 	fi

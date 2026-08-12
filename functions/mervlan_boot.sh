@@ -835,14 +835,27 @@ case "$ACTION" in
       _boot_warnings='["One or more secondary enable operations failed"]'
     fi
 
-    # Arm MERV_MAC secondary shield from best available db (JFFS checkpoint or active)
-    type ebt_mac_shield_init_and_apply >/dev/null 2>&1 && {
-      ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"
-      info -c vlan,cli "MERV_MAC: secondary shield armed"
-    }
+    # Required local enforcement precedes propagation; a failed reload is an
+    # explicit partial recovery state, never a completed boot enable action.
+    _boot_mac_enforced=1
+    if type ebt_mac_shield_init_and_apply >/dev/null 2>&1; then
+      if ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)"; then
+        info -c vlan,cli "MERV_MAC: secondary shield armed"
+      else
+        _boot_mac_enforced=0
+        _boot_partial=1
+        _boot_warnings='["Boot enable is incomplete: local MAC Shield enforcement failed; recovery is required"]'
+        error -c vlan,cli "MERV_MAC: local shield enforcement failed; node boot enable propagation suppressed"
+      fi
+    else
+      _boot_mac_enforced=0
+      _boot_partial=1
+      _boot_warnings='["Boot enable is incomplete: MAC Shield enforcement is unavailable; recovery is required"]'
+      error -c vlan,cli "MERV_MAC: shield enforcement is unavailable; node boot enable propagation suppressed"
+    fi
 
     # Propagate enable action to all configured nodes via SSH
-    if ! handle_nodes_via_ssh "enable"; then
+    if [ "$_boot_mac_enforced" = "1" ] && ! handle_nodes_via_ssh "enable"; then
       _boot_partial=1
       _boot_warnings='["Boot enable succeeded locally; one or more nodes could not be reached"]'
     fi

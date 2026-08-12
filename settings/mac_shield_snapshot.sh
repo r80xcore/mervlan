@@ -638,13 +638,13 @@ merv_mac_merge_db() {
 # reboot or another service event. We now queue a heal — strictly gated to
 # avoid recursion or storms:
 #   - Skip if mervlan_manager is currently applying config
-#   - Skip if a heal is already in flight (vlan_event.lock present)
+#   - Gate on canonical vlan_event.lock owner state, never raw directory presence
 #   - Per-(LOCKDIR) debounce: at most one trigger per MERV_MAC_HEAL_TRIGGER_DEBOUNCE
 #     seconds (default 60s) regardless of how many snapshot ticks fire
 # Heal is launched fire-and-forget so the snapshot caller is never blocked.
 # ============================================================================
 merv_mac_maybe_trigger_heal_on_precondition_fail() {
-  local now last age debounce stamp
+  local now last age debounce stamp _heal_lock _heal_state _heal_recheck
 
   # Honour explicit opt-out for users who want logs only.
   [ "${MERV_MAC_HEAL_TRIGGER:-1}" = "0" ] && return 0
@@ -660,7 +660,7 @@ merv_mac_maybe_trigger_heal_on_precondition_fail() {
   # lib_mervqt is somehow not loaded in this context.
   if type merv_owner_lock_state >/dev/null 2>&1; then
     case "$(merv_owner_lock_state "$LOCKDIR/mervlan_manager.lock")" in
-      live|unknown)
+      live|unknown|malformed|incomplete-grace|incomplete-expired|incomplete-unknown)
         info -c vlan "MERV_MAC: precondition fail — heal not queued (mervlan_manager active)"
         return 0
         ;;
@@ -673,11 +673,54 @@ merv_mac_maybe_trigger_heal_on_precondition_fail() {
     return 0
   fi
 
-  # Don't pile on an in-flight heal — its own pre-entry checks will catch it.
-  if [ -d "$LOCKDIR/vlan_event.lock" ]; then
-    info -c vlan "MERV_MAC: precondition fail — heal not queued (heal already running)"
-    return 0
+  # Canonical owner-v2 state governs event recovery.  Reclaim only a complete
+  # dead/reused owner through its quarantine path; malformed, incomplete, and
+  # unverifiable claims block healing rather than looking absent.
+  _heal_lock="$LOCKDIR/vlan_event.lock"
+  if ! type merv_owner_lock_state >/dev/null 2>&1; then
+    warn -c vlan "MERV_MAC: precondition fail - recovery blocked (canonical event-owner state unavailable)"
+    return 1
   fi
+  _heal_state=$(merv_owner_lock_state "$_heal_lock" 2>/dev/null || printf 'unknown')
+  case "$_heal_state" in
+    absent)
+      ;;
+    live|incomplete-grace)
+      info -c vlan "MERV_MAC: precondition fail - heal not queued (event owner=$_heal_state)"
+      return 0
+      ;;
+    dead|reused)
+      # A replacement between state read and reconciliation remains protected.
+      _heal_recheck=$(merv_owner_lock_state "$_heal_lock" 2>/dev/null || printf 'unknown')
+      if [ "$_heal_recheck" != "$_heal_state" ]; then
+        case "$_heal_recheck" in
+          absent) ;;
+          live|incomplete-grace)
+            info -c vlan "MERV_MAC: precondition fail - heal not queued (event owner replaced=$_heal_recheck)"
+            return 0
+            ;;
+          *)
+            warn -c vlan "MERV_MAC: precondition fail - recovery blocked (event owner changed to $_heal_recheck)"
+            return 1
+            ;;
+        esac
+      else
+        if ! merv_owner_lock_quarantine "$_heal_lock" "$_heal_state"; then
+          warn -c vlan "MERV_MAC: precondition fail - recovery blocked (could not reconcile stale event owner=$_heal_state)"
+          return 1
+        fi
+        _heal_recheck=$(merv_owner_lock_state "$_heal_lock" 2>/dev/null || printf 'unknown')
+        if [ "$_heal_recheck" != absent ]; then
+          warn -c vlan "MERV_MAC: precondition fail - recovery blocked (event owner reconciliation left $_heal_recheck)"
+          return 1
+        fi
+      fi
+      ;;
+    incomplete-expired|incomplete-unknown|malformed|unknown|*)
+      warn -c vlan "MERV_MAC: precondition fail - recovery blocked (event owner=$_heal_state; manual reconciliation required)"
+      return 1
+      ;;
+  esac
 
   debounce="${MERV_MAC_HEAL_TRIGGER_DEBOUNCE:-60}"
   case "$debounce" in ''|*[!0-9]*) debounce=60 ;; esac
@@ -923,7 +966,18 @@ _NODES_
           rm -f "$_ae_jffs" 2>/dev/null
           _merv_mac_log warn "MERV_MAC: reset — JFFS checkpoint clear failed; active db remains valid but reboot may restore an older checkpoint"
         fi
-        ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"
+        if ! ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"; then
+          MERV_MAC_LAST_STATUS="apply_failed"; MERV_MAC_LAST_REASON="reset_local_enforcement_failed"
+          _merv_mac_set_counts
+          MERV_MAC_LAST_DB_COUNT=0
+          _merv_mac_log warn "MERV_MAC: reset committed but local shield enforcement failed (reason=$MERV_MAC_LAST_REASON); recovery is required"
+          rm -f "$snap_tmp" 2>/dev/null
+          if [ "$_snap_owned" = 1 ]; then
+            merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+            _snap_owned=0
+          fi
+          return 1
+        fi
         MERV_MAC_LAST_STATUS="empty"; MERV_MAC_LAST_REASON="reset_no_clients"
         _merv_mac_set_counts
         MERV_MAC_LAST_DB_COUNT=0
@@ -991,7 +1045,17 @@ _NODES_
   # Reload fires for a real change OR an explicit force-reload. Push to nodes
   # whenever we reload, so every unit's shield is reapplied/repaired.
   if [ "$MERV_MAC_LAST_CHANGED" = "1" ] || [ "$_snap_force_reload" = "1" ]; then
-    ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"
+    if ! ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"; then
+      MERV_MAC_LAST_STATUS="apply_failed"
+      MERV_MAC_LAST_REASON="local_enforcement_failed"
+      _merv_mac_set_counts
+      _merv_mac_log warn "MERV_MAC: database updated but local shield enforcement failed (reason=$MERV_MAC_LAST_REASON); node push suppressed and recovery is required"
+      if [ "$_snap_owned" = 1 ]; then
+        merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+        _snap_owned=0
+      fi
+      return 1
+    fi
     if [ -n "$_nodes" ]; then
   MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
       merv_mac_push_db_to_nodes "$_nodes"

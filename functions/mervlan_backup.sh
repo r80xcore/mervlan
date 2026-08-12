@@ -452,6 +452,18 @@ mb_acquire_lock() {
   if merv_owner_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
     MB_LOCK_OWNED=1
     MB_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    # Public refresh children must prove this exact live owner tuple.  A
+    # Boolean maintenance flag alone is intentionally not authority.
+    MERV_MAINTENANCE_DELEGATED=1
+    MERV_MAINTENANCE_DELEGATION_KIND=backup
+    MERV_BACKUP_DELEGATION=1
+    MERV_MAINTENANCE_OWNER_PID="$$"
+    MERV_MAINTENANCE_OWNER_START="${MERV_LOCK_START:-}"
+    MERV_MAINTENANCE_OWNER_NONCE="$MB_LOCK_NONCE"
+    export MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
+      MERV_BACKUP_DELEGATION \
+      MERV_MAINTENANCE_OWNER_PID MERV_MAINTENANCE_OWNER_START \
+      MERV_MAINTENANCE_OWNER_NONCE
     return 0
   fi
   return 1

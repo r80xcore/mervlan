@@ -210,6 +210,30 @@ mnr_run() {
   return "$_mnr_rc"
 }
 
+# Reconcile one detached manager by the authenticated PID/start identity in
+# its canonical status record.  This command is intentionally narrow: it does
+# not kill a process by PID alone and it never touches another run's marker.
+mnr_cancel() {
+  mnr_init_paths || return 2
+  mnr_status_validate_file "$MNR_STATUS_FILE" "$MNR_RUN_ID" "$MNR_NODE_ID" || return 2
+  case "$MNR_STATUS_STATE" in
+    complete|failed) return 0 ;;
+    started) ;;
+    *) return 2 ;;
+  esac
+  MNR_CHILD_PID="$MNR_STATUS_PID"
+  MNR_CHILD_START="$MNR_STATUS_START"
+  MNR_STARTED_EPOCH="$MNR_STATUS_STARTED"
+  mnr_stop_child
+  # The detached runner may publish a terminal marker concurrently. Re-read
+  # before publishing so cancellation cannot overwrite a completed manager.
+  if mnr_status_validate_file "$MNR_STATUS_FILE" "$MNR_RUN_ID" "$MNR_NODE_ID" &&
+     [ "$MNR_STATUS_STATE" = started ]; then
+    mnr_publish failed 143 runner-cancelled || return 2
+  fi
+  return 0
+}
+
 mnr_start() {
   mnr_init_paths || return 2
   mnr_prune_old_runs || return 2
@@ -238,5 +262,6 @@ case "$MNR_ACTION" in
   start) mnr_start ;;
   status) mnr_init_paths && mnr_status_validate_file "$MNR_STATUS_FILE" "$MNR_RUN_ID" "$MNR_NODE_ID" && cat "$MNR_STATUS_FILE" ;;
   run) mnr_run ;;
+  cancel) mnr_cancel ;;
   *) exit 2 ;;
 esac

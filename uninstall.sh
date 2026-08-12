@@ -55,6 +55,71 @@ SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 if [ -f "$MERV_BASE/settings/var_settings.sh" ]; then . "$MERV_BASE/settings/var_settings.sh" 2>/dev/null || :; fi
 if [ -f "$MERV_BASE/settings/lib_ssh.sh" ]; then . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :; fi
 
+# Tree-removing entry points must share the canonical maintenance owner.  A
+# recovery/update staged tree can supply these libraries even when the active
+# tree is temporarily absent.
+MERV_UNINSTALL_SCRIPT_DIR=""
+case "$0" in
+    */*) MERV_UNINSTALL_SCRIPT_DIR=$(CDPATH= cd -- "${0%/*}" 2>/dev/null && pwd) ;;
+    *) MERV_UNINSTALL_SCRIPT_DIR=$(pwd 2>/dev/null) ;;
+esac
+if [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ]; then
+    . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || :
+elif [ -n "$MERV_UNINSTALL_SCRIPT_DIR" ] && [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" ]; then
+    . "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" 2>/dev/null || :
+fi
+if [ -r "$MERV_BASE/settings/lib_update_state.sh" ]; then
+    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || :
+elif [ -n "$MERV_UNINSTALL_SCRIPT_DIR" ] && [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_update_state.sh" ]; then
+    . "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_update_state.sh" 2>/dev/null || :
+fi
+
+MERV_MAINTENANCE_ENTRY_ADMITTED=0
+uninstall_maintenance_admit() {
+    # v0.53.26 Update parents inherit the authenticated owner tuple and
+    # durable activated/quiesced state but do not export the newer descriptive
+    # delegation-kind marker.  Only the public/runtime reinstall child may
+    # bridge that narrow handoff; full/standard uninstall remains on the
+    # normal owner admission path and cannot use this compatibility grant.
+    if [ "$ACTION" = "reinstall" ] &&
+       [ -z "${MERV_MAINTENANCE_DELEGATION_KIND:-}" ] &&
+       type merv_update_legacy_reinstall_context_valid >/dev/null 2>&1 &&
+       merv_update_legacy_reinstall_context_valid; then
+        MERV_MAINTENANCE_DELEGATION_KIND=update
+        export MERV_MAINTENANCE_DELEGATION_KIND
+    fi
+
+    type merv_maintenance_direct_admit >/dev/null 2>&1 || {
+        echo "[uninstall] ERROR: maintenance ownership support is unavailable; refusing tree mutation" >&2
+        return 1
+    }
+    if ! merv_maintenance_direct_admit; then
+        echo "[uninstall] ERROR: another MerVLAN maintenance operation is live or unverifiable; refusing uninstall" >&2
+        return 1
+    fi
+    MERV_MAINTENANCE_ENTRY_ADMITTED=1
+    return 0
+}
+
+uninstall_maintenance_release() {
+    [ "$MERV_MAINTENANCE_ENTRY_ADMITTED" = "1" ] || return 0
+    merv_maintenance_direct_release || {
+        echo "[uninstall] ERROR: maintenance owner cleanup failed; recovery is required" >&2
+        return 1
+    }
+    MERV_MAINTENANCE_ENTRY_ADMITTED=0
+    return 0
+}
+
+uninstall_maintenance_exit_handler() {
+    local _ume_status=$?
+    trap - EXIT
+    if ! uninstall_maintenance_release; then
+        _ume_status=1
+    fi
+    exit "$_ume_status"
+}
+
 # ========================================================================== #
 # Helpers
 # ========================================================================== #
@@ -729,7 +794,6 @@ remove_nodes_full_install() {
     _rnf_nodes="$(merv_node_list 2>/dev/null || printf '')"
     [ -n "$_rnf_nodes" ] || return 0
     [ -f "$SSH_KEY" ] || return 1
-    preflight_full_uninstall_nodes || return 1
     _rnf_ok=1
     while IFS=' ' read -r _rnf_id _rnf_ip _rnf_extra || [ -n "$_rnf_id" ]; do
         [ -n "$_rnf_id" ] || continue
@@ -779,8 +843,24 @@ EOF
     return 0
 }
 
+uninstall_maintenance_admit || exit 1
+trap 'uninstall_maintenance_exit_handler' EXIT
+
 if [ "$ACTION" = "full" ]; then
     preflight_full_uninstall_nodes || exit 1
+    # Re-resolve and verify every configured node immediately before the first
+    # tree or settings mutation.  A node disappearing between these checks
+    # must leave the local control plane untouched.
+    if ! preflight_full_uninstall_nodes; then
+        echo "[uninstall] Full uninstall blocked: second complete node preflight failed; no local mutation performed" >&2
+        exit 1
+    fi
+    if ! remove_nodes_full_install; then
+        echo "[uninstall] Full uninstall partial failure: remote node removal failed; local control plane, settings, and trust were retained" >&2
+        logger -t "$LOGTAG" "Full uninstall partial failure; local control plane/settings/trust retained"
+        exit 1
+    fi
+    FULL_REMOTE_CLEANUP_DONE=1
 fi
 
 # Reinstall is an internal public/runtime reprovisioning mode.  Its caller owns
@@ -810,7 +890,7 @@ if [ "$ACTION" != "reinstall" ]; then
             if ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
                 logger -t "$LOGTAG" "WARNING: mervlan_boot.sh disable failed pre-uninstall"
             fi
-            if ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then
+            if [ "$ACTION" != "full" ] && ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then
                 logger -t "$LOGTAG" "WARNING: mervlan_boot.sh nodedisable failed pre-uninstall"
             fi
         else
@@ -904,7 +984,9 @@ if [ "$ACTION" != "reinstall" ]; then
         if has_configured_nodes; then
             node_count=$(list_configured_nodes | wc -w)
             echo "[uninstall] Removing hooks from $node_count configured node(s)"
-            if sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1; then
+            if [ "$ACTION" = "full" ]; then
+                echo "[uninstall] Node files were removed during the verified remote cleanup"
+            elif sh "$MERV_BASE/functions/mervlan_boot.sh" nodedisable >/dev/null 2>&1; then
                 echo "[uninstall] Node hooks removed successfully"
             else
                 echo "[uninstall] WARNING: Some node cleanup operations may have failed" >&2
@@ -941,17 +1023,11 @@ fi
 if [ "$ACTION" = "full" ]; then
     echo "[uninstall] Running full uninstall (removing all addon data)"
     logger -t "$LOGTAG" "Performing full uninstall (removing addon directories)"
-    FULL_NODE_CLEANUP_OK=1
-    if has_configured_nodes; then
-        node_count=$(list_configured_nodes | wc -w)
-        echo "[uninstall] Removing MerVLAN from $node_count configured node(s)"
-        if remove_nodes_full_install; then
-            echo "[uninstall] Verified node cleanup completed"
-        else
-            FULL_NODE_CLEANUP_OK=0
-            echo "[uninstall] WARNING: verified node cleanup failed; durable SSH trust state is preserved" >&2
-        fi
-    fi
+    FULL_NODE_CLEANUP_OK="${FULL_REMOTE_CLEANUP_DONE:-0}"
+    [ "$FULL_NODE_CLEANUP_OK" = "1" ] || {
+        echo "[uninstall] ERROR: verified remote cleanup was not completed; retaining local control plane" >&2
+        exit 1
+    }
     rm -rf /jffs/addons/mervlan 2>/dev/null
     rm -rf /tmp/mervlan_tmp 2>/dev/null
     rm -rf /www/user/mervlan 2>/dev/null
@@ -963,4 +1039,9 @@ if [ "$ACTION" = "full" ]; then
     fi
     echo "[uninstall] All addon files and data removed"
 fi
+if ! uninstall_maintenance_release; then
+    echo "[uninstall] ERROR: maintenance owner cleanup failed; recovery is required" >&2
+    exit 1
+fi
+trap - EXIT
 exit 0

@@ -129,7 +129,12 @@ merv_update_journal_requires_safe_boot() {
 }
 
 merv_update_maintenance_lock_path() {
-  printf '%s\n' "${MERV_UPDATE_MAINTENANCE_LOCK:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}"
+  if [ "${MERV_RECOVERY_DELEGATION:-0}" = "1" ] &&
+    [ -n "${MERVLAN_RECOVERY_LOCK_OVERRIDE:-}" ]; then
+    printf '%s\n' "$MERVLAN_RECOVERY_LOCK_OVERRIDE"
+  else
+    printf '%s\n' "${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${MERV_UPDATE_MAINTENANCE_LOCK:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}}"
+  fi
 }
 
 # A live Update child must present the exact canonical owner tuple.  In
@@ -146,6 +151,31 @@ merv_update_owner_context_valid() {
   _muoc_lock=$(merv_update_maintenance_lock_path) || return 1
   merv_owner_v2_matches "$_muoc_lock" "$MERV_UPDATE_OWNER_PID" \
     "$MERV_UPDATE_OWNER_START" "$MERV_UPDATE_OWNER_NONCE"
+}
+
+# v0.53.26 Update parents predate the explicit delegation-kind marker.  After
+# activating a newer tree they still invoke only the public/runtime
+# `reinstall` children, inheriting the complete owner tuple and durable Update
+# state.  Keep this bridge deliberately narrower than normal delegation: the
+# caller must prove the marker is absent (so current parents use the normal
+# path), the canonical owner is still live, the quiesce run matches the active
+# journal, and activation has reached the durable `activated` phase.
+merv_update_legacy_reinstall_context_valid() {
+  local _mulr_run _mulr_quiesce_run
+  [ "${MERV_UPDATE_OWNER:-0}" = "1" ] || return 1
+  [ -z "${MERV_MAINTENANCE_DELEGATION_KIND:-}" ] || return 1
+  merv_update_owner_context_valid || return 1
+  merv_update_quiesce_active || return 1
+  merv_update_journal_active || return 1
+  [ "$(merv_update_journal_get phase unknown)" = "activated" ] || return 1
+  [ "$(merv_update_journal_get quiesced 0)" = "1" ] || return 1
+  [ "$(merv_update_journal_get activation_started 0)" = "1" ] || return 1
+
+  _mulr_run=$(merv_update_journal_get run_id "") || return 1
+  [ -n "$_mulr_run" ] || return 1
+  _mulr_quiesce_run=$(sed -n 's/^run_id=//p' "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | head -n 1)
+  [ "$_mulr_quiesce_run" = "$_mulr_run" ] || return 1
+  return 0
 }
 
 # Recovery is deliberately not an Update-owner bypass.  It is bound to the
@@ -177,6 +207,76 @@ merv_update_recovery_context_valid() {
 merv_update_maintenance_sync_context_valid() {
   [ "${MERV_MAINTENANCE_SYNC:-0}" = "1" ] || return 1
   merv_update_owner_context_valid
+}
+
+# Direct install/uninstall entry points use this single delegated-owner
+# contract.  The environment is only an authenticated transport for the
+# exact canonical owner tuple; it is never authority by itself.  Update
+# children additionally require the durable journal/quiesce state that makes
+# it safe to mutate while the Update owner is live.  Backup and standalone
+# recovery children are bound to the same live owner record and explicit kind.
+merv_maintenance_delegation_valid() {
+  local _mmd_kind _mmd_lock
+  _mmd_kind="${MERV_MAINTENANCE_DELEGATION_KIND:-}"
+  _mmd_lock=$(merv_update_maintenance_lock_path) || return 1
+  case "$_mmd_kind" in
+    update)
+      merv_update_owner_context_valid || return 1
+      merv_update_quiesce_active || return 1
+      merv_update_journal_requires_safe_boot || return 1
+      ;;
+    backup|recovery)
+      [ "${MERV_MAINTENANCE_DELEGATED:-0}" = "1" ] || return 1
+      case "$_mmd_kind" in
+        backup) [ "${MERV_BACKUP_DELEGATION:-0}" = "1" ] || return 1 ;;
+        recovery) [ "${MERV_RECOVERY_DELEGATION:-0}" = "1" ] || return 1 ;;
+        *) return 1 ;;
+      esac
+      type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
+      type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
+      type merv_owner_v2_matches >/dev/null 2>&1 || return 1
+      merv_owner_v2_positive_uint "${MERV_MAINTENANCE_OWNER_PID:-}" || return 1
+      merv_owner_v2_positive_uint "${MERV_MAINTENANCE_OWNER_START:-}" || return 1
+      merv_owner_v2_nonce_valid "${MERV_MAINTENANCE_OWNER_NONCE:-}" || return 1
+      merv_owner_v2_matches "$_mmd_lock" \
+        "$MERV_MAINTENANCE_OWNER_PID" \
+        "$MERV_MAINTENANCE_OWNER_START" \
+        "$MERV_MAINTENANCE_OWNER_NONCE"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Acquire the shared maintenance owner for a standalone tree-mutating entry
+# point, or authenticate a delegated child already running under that owner.
+# Callers must invoke merv_maintenance_direct_release on every terminal path.
+merv_maintenance_direct_admit() {
+  local _mda_lock
+  _mda_lock=$(merv_update_maintenance_lock_path) || return 1
+  MERV_MAINTENANCE_ENTRY_OWNED=0
+  MERV_MAINTENANCE_ENTRY_DELEGATED=0
+  MERV_MAINTENANCE_ENTRY_LOCK="$_mda_lock"
+  if merv_maintenance_delegation_valid; then
+    MERV_MAINTENANCE_ENTRY_DELEGATED=1
+    return 0
+  fi
+  type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
+  merv_owner_lock_acquire "$_mda_lock" 1800 2 "mervlan_maintenance" || return 1
+  MERV_MAINTENANCE_ENTRY_NONCE="${MERV_LOCK_NONCE:-}"
+  MERV_MAINTENANCE_ENTRY_OWNED=1
+  return 0
+}
+
+merv_maintenance_direct_release() {
+  [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] || return 0
+  type merv_owner_lock_release >/dev/null 2>&1 || return 1
+  merv_owner_lock_release "${MERV_MAINTENANCE_ENTRY_LOCK:-}" \
+    "${MERV_MAINTENANCE_ENTRY_NONCE:-}" || return 1
+  MERV_MAINTENANCE_ENTRY_OWNED=0
+  MERV_MAINTENANCE_ENTRY_NONCE=""
+  return 0
 }
 
 # Normal mutating workers use this gate before touching settings, hooks, VLAN

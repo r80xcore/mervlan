@@ -29,6 +29,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || exit 1
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
@@ -46,6 +47,12 @@ if [ -f "$MERV_BASE/settings/lib_action_progress.sh" ]; then
 fi
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "save_vlanmgr" "Save Settings" \
     "Saving settings..."
+_save_candidate_dir=""
+_save_candidate=""
+_save_cleanup_candidate() {
+    [ -n "${_save_candidate:-}" ] && rm -f "${_save_candidate}" 2>/dev/null || :
+    [ -n "${_save_candidate_dir:-}" ] && rmdir "${_save_candidate_dir}" 2>/dev/null || :
+}
 _save_signal_handling=0
 _save_handle_signal() {
     _save_signal_status="$1"
@@ -93,6 +100,7 @@ if [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
             fi
             [ "$_save_exit_rc" -eq 0 ] && _save_exit_rc=75
         fi
+        _save_cleanup_candidate
         return "$_save_exit_rc"
     }
     trap '_save_release_lock' EXIT
@@ -199,22 +207,68 @@ TMP_KV="${RESULTDIR}/vlanmgr_kv.$$"
 TMP_SORTED="${RESULTDIR}/vlanmgr_sorted.$$"
 TMP_JSON="${RESULTDIR}/vlanmgr_json.$$"
 
+# Claim a nonce-bearing same-directory staging namespace atomically.  The
+# process nonce is required; PID alone is not sufficient for collision safety
+# after a fast restart or PID reuse.
+if ! merv_identity_nonce_next 2>/dev/null || [ -z "${MERV_IDENTITY_NONCE:-}" ]; then
+    error -c vlan "save_settings.sh: could not create a unique settings transaction identity"
+    exit 1
+fi
+_save_candidate_dir="${SETTINGSDIR}/.settings.json.save.${MERV_IDENTITY_NONCE}"
+if ! ( umask 077; mkdir "${_save_candidate_dir}" 2>/dev/null ); then
+    error -c vlan "save_settings.sh: settings transaction namespace is already claimed"
+    exit 1
+fi
+_save_candidate="${_save_candidate_dir}/candidate.json"
+
 # Truncate temporary files to empty state
 > "${TMP_KV}"
 > "${TMP_SORTED}"
 > "${TMP_JSON}"
 
+# Every setter below targets this same-filesystem candidate.  The
+# authoritative settings file is not touched until the single final rename
+# after all setters and validation have succeeded.
+if [ -e "${SETTINGS_FILE}" ]; then
+    [ -f "${SETTINGS_FILE}" ] || {
+        error -c vlan "save_settings.sh: authoritative settings path is not a regular file"
+        exit 1
+    }
+    cp -p "${SETTINGS_FILE}" "${_save_candidate}" 2>/dev/null || {
+        error -c vlan "save_settings.sh: failed to stage authoritative settings"
+        rm -f "${_save_candidate}"
+        exit 1
+    }
+else
+    printf '{\n}\n' > "${_save_candidate}" || {
+        error -c vlan "save_settings.sh: failed to create staged settings"
+        rm -f "${_save_candidate}"
+        exit 1
+    }
+fi
+chmod 600 "${_save_candidate}" 2>/dev/null || {
+    error -c vlan "save_settings.sh: failed to set staged settings mode"
+    rm -f "${_save_candidate}"
+    exit 1
+}
+json_validate_file "${_save_candidate}" 2>/dev/null || {
+    error -c vlan "save_settings.sh: authoritative settings are invalid; refusing mutation"
+    rm -f "${_save_candidate}"
+    exit 1
+}
+
 # Locked legacy fallback ledger.  Capture the external transport exactly once
 # before parsing it; no MerVLAN code rewrites or sorts the Merlin-owned file.
 if [ ! -f "${CUSTOM_SETTINGS_FILE}" ]; then
     error -c vlan "save_settings.sh: external custom settings transport is unavailable"
+    rm -f "${_save_candidate}" 2>/dev/null
     exit 1
 fi
-mkdir -p "${MERV_STATE_ROOT}/ledgers" 2>/dev/null || exit 1
+mkdir -p "${MERV_STATE_ROOT}/ledgers" 2>/dev/null || { rm -f "${_save_candidate}" 2>/dev/null; exit 1; }
 _save_ledger_tmp="${MERV_STATE_ROOT}/ledgers/custom_settings.$$"
-( umask 077; cp "${CUSTOM_SETTINGS_FILE}" "$_save_ledger_tmp" ) 2>/dev/null || { rm -f "$_save_ledger_tmp" 2>/dev/null; exit 1; }
-chmod 600 "$_save_ledger_tmp" 2>/dev/null || { rm -f "$_save_ledger_tmp" 2>/dev/null; exit 1; }
-mv -f "$_save_ledger_tmp" "${MERV_STATE_ROOT}/ledgers/custom_settings.latest" 2>/dev/null || { rm -f "$_save_ledger_tmp" 2>/dev/null; exit 1; }
+( umask 077; cp "${CUSTOM_SETTINGS_FILE}" "$_save_ledger_tmp" ) 2>/dev/null || { rm -f "$_save_ledger_tmp" "${_save_candidate}" 2>/dev/null; exit 1; }
+chmod 600 "$_save_ledger_tmp" 2>/dev/null || { rm -f "$_save_ledger_tmp" "${_save_candidate}" 2>/dev/null; exit 1; }
+mv -f "$_save_ledger_tmp" "${MERV_STATE_ROOT}/ledgers/custom_settings.latest" 2>/dev/null || { rm -f "$_save_ledger_tmp" "${_save_candidate}" 2>/dev/null; exit 1; }
 
 # Ensure custom_settings_file has correct version header
 ensure_custom_settings_header
@@ -225,6 +279,7 @@ sort_vlanmgr_block_in_custom_settings
 # Abort if custom_settings_file still doesn't exist after header ensure
 if [ ! -f "${CUSTOM_SETTINGS_FILE}" ]; then
     error -c vlan "save_settings.sh: ${CUSTOM_SETTINGS_FILE} not found even after ensure_custom_settings_header, abort"
+    rm -f "${_save_candidate}" 2>/dev/null
     exit 1
 fi
 
@@ -680,10 +735,80 @@ cp "${TMP_NORMAL}" "${TMP_SORTED}"
 # generic flat merge can update an existing nested key, but would append a
 # missing key at the document root.  Seed these newer General settings in the
 # correct section first so older installations migrate without losing shape.
+save_candidate_is_empty_object() {
+    awk '
+        {
+            line=$0
+            gsub(/[[:space:]]/, "", line)
+            if (line == "{") open_seen=1
+            else if (line == "}") close_seen=1
+            else if (line == "{}") { open_seen=1; close_seen=1 }
+            else if (line != "") invalid=1
+        }
+        END { exit !(open_seen && close_seen && !invalid) }
+    ' "${_save_candidate}" 2>/dev/null
+}
+
+seed_general_section_if_missing() {
+    if grep -q '"General"[[:space:]]*:' "${_save_candidate}" 2>/dev/null; then
+        return 0
+    fi
+    _sg_seed_tmp="${_save_candidate}.generalseed.${MERV_IDENTITY_NONCE}"
+    if save_candidate_is_empty_object; then
+        if printf '%s\n' \
+            '{' \
+            '  "General": {' \
+            '    "_description": "Global addon flags and behavior toggles",' \
+            '    "AUTO_SYNC_SETTINGS": "1",' \
+            '    "HTML_CLIENT_REFRESH_MINUTES": "30"' \
+            '  }' \
+            '}' > "${_sg_seed_tmp}" 2>/dev/null &&
+           mv "${_sg_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "${_sg_seed_tmp}" 2>/dev/null
+        return 1
+    fi
+    if awk '
+            BEGIN { seeded=0 }
+            {
+                if (!seeded && $0 ~ /^[[:space:]]*[{][[:space:]]*[}][[:space:]]*$/) {
+                    print "{"
+                    print "  \"General\": {"
+                    print "    \"_description\": \"Global addon flags and behavior toggles\","
+                    print "    \"AUTO_SYNC_SETTINGS\": \"1\","
+                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\""
+                    print "  }"
+                    print "}"
+                    seeded=1
+                    next
+                }
+                print
+                if (!seeded && $0 ~ /^[[:space:]]*[{][[:space:]]*$/) {
+                    print "  \"General\": {"
+                    print "    \"_description\": \"Global addon flags and behavior toggles\","
+                    print "    \"AUTO_SYNC_SETTINGS\": \"1\","
+                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\""
+                    print "  },"
+                    seeded=1
+                }
+            }
+            END { if (!seeded) exit 1 }
+        ' "${_save_candidate}" > "${_sg_seed_tmp}" 2>/dev/null && [ -s "${_sg_seed_tmp}" ] &&
+        mv "${_sg_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "${_sg_seed_tmp}" 2>/dev/null
+    return 1
+}
+
 seed_general_setting_from_normal_kv() {
     local _sg_key="$1" _sg_value
     _sg_value=$(awk -F '\t' -v key="$_sg_key" '$1 == key { print $2; found=1; exit } END { if (!found) exit 1 }' "${TMP_SORTED}") || return 0
-    json_set_section_value "General" "$_sg_key" "$_sg_value" "${SETTINGS_FILE}"
+    seed_general_section_if_missing || return 1
+    json_set_section_value "General" "$_sg_key" "$_sg_value" "${_save_candidate}" || return 1
+    _sg_observed=$(json_get_section_value "General" "$_sg_key" "${_save_candidate}" 2>/dev/null) || return 1
+    [ "$_sg_observed" = "$_sg_value" ] || return 1
 }
 
 if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
@@ -700,9 +825,9 @@ fi
 # Update the stored configuration in-place without overwriting unrelated keys. #
 # ============================================================================ #
 
-if ! json_apply_kv_file "${TMP_SORTED}" "${SETTINGS_FILE}"; then
-    error -c vlan "save_settings.sh: failed to update ${SETTINGS_FILE}"
-    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
+if ! json_apply_kv_file "${TMP_SORTED}" "${_save_candidate}"; then
+    error -c vlan "save_settings.sh: failed to stage settings update"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
     exit 1
 fi
 
@@ -710,6 +835,97 @@ fi
 # STEP 3.5: Apply Hardware_Override keys into nested section                   #
 # Map flat keys like OVERRIDE_MAIN_MAP_OVERRIDE → Hardware_Override.MAIN.MAP_OVERRIDE #
 # ============================================================================ #
+
+seed_hardware_override_if_missing() {
+    _sho_target="$1"
+    _sho_key="$2"
+    if grep -q '"Hardware_Override"[[:space:]]*:' "${_save_candidate}" 2>/dev/null; then
+        # An existing section may still lack this target.  The legacy setter
+        # no-ops in that case, so only claim success after the exact target/key
+        # is observable below.
+        return 0
+    fi
+    _sho_seed_tmp="${_save_candidate}.hwseed.${MERV_IDENTITY_NONCE}"
+    if save_candidate_is_empty_object; then
+        if printf '%s\n' \
+            '{' \
+            '  "Hardware_Override": {' \
+            '    "_description": "Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE10)",' \
+            "    \"${_sho_target}\": {" \
+            '      "MAP_OVERRIDE": "0",' \
+            '      "OVERRIDE_WAN": "eth0",' \
+            '      "OVERRIDE_MAX_ETH_PORTS": "0",' \
+            '      "OVERRIDE_LAN1": "none",' \
+            '      "OVERRIDE_LAN2": "none",' \
+            '      "OVERRIDE_LAN3": "none",' \
+            '      "OVERRIDE_LAN4": "none",' \
+            '      "OVERRIDE_LAN5": "none",' \
+            '      "OVERRIDE_LAN6": "none",' \
+            '      "OVERRIDE_LAN7": "none",' \
+            '      "OVERRIDE_LAN8": "none"' \
+            '    }' \
+            '  }' \
+            '}' > "${_sho_seed_tmp}" 2>/dev/null &&
+           mv "${_sho_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "${_sho_seed_tmp}" 2>/dev/null
+        return 1
+    fi
+    if awk -v target="$_sho_target" '
+            BEGIN { seeded=0 }
+            {
+                if (!seeded && $0 ~ /^[[:space:]]*[{][[:space:]]*[}][[:space:]]*$/) {
+                    print "{"
+                    print "  \"Hardware_Override\": {"
+                    print "    \"_description\": \"Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE10)\","
+                    print "    \"" target "\": {"
+                    print "      \"MAP_OVERRIDE\": \"0\","
+                    print "      \"OVERRIDE_WAN\": \"eth0\","
+                    print "      \"OVERRIDE_MAX_ETH_PORTS\": \"0\","
+                    print "      \"OVERRIDE_LAN1\": \"none\","
+                    print "      \"OVERRIDE_LAN2\": \"none\","
+                    print "      \"OVERRIDE_LAN3\": \"none\","
+                    print "      \"OVERRIDE_LAN4\": \"none\","
+                    print "      \"OVERRIDE_LAN5\": \"none\","
+                    print "      \"OVERRIDE_LAN6\": \"none\","
+                    print "      \"OVERRIDE_LAN7\": \"none\","
+                    print "      \"OVERRIDE_LAN8\": \"none\""
+                    print "    }"
+                    print "  }"
+                    print "}"
+                    seeded=1
+                    next
+                }
+                print
+                if (!seeded && $0 ~ /^[[:space:]]*[{][[:space:]]*$/) {
+                    print "  \"Hardware_Override\": {"
+                    print "    \"_description\": \"Optional manual WAN/LAN eth mapping override per device (MAIN and NODE1-NODE10)\","
+                    print "    \"" target "\": {"
+                    print "      \"MAP_OVERRIDE\": \"0\","
+                    print "      \"OVERRIDE_WAN\": \"eth0\","
+                    print "      \"OVERRIDE_MAX_ETH_PORTS\": \"0\","
+                    print "      \"OVERRIDE_LAN1\": \"none\","
+                    print "      \"OVERRIDE_LAN2\": \"none\","
+                    print "      \"OVERRIDE_LAN3\": \"none\","
+                    print "      \"OVERRIDE_LAN4\": \"none\","
+                    print "      \"OVERRIDE_LAN5\": \"none\","
+                    print "      \"OVERRIDE_LAN6\": \"none\","
+                    print "      \"OVERRIDE_LAN7\": \"none\","
+                    print "      \"OVERRIDE_LAN8\": \"none\""
+                    print "    }"
+                    print "  },"
+                    seeded=1
+                }
+            }
+            END { if (!seeded) exit 1 }
+        ' "${_save_candidate}" > "${_sho_seed_tmp}" 2>/dev/null && [ -s "${_sho_seed_tmp}" ] &&
+        mv "${_sho_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "${_sho_seed_tmp}" 2>/dev/null
+    return 1
+}
 
 if [ -s "${TMP_OVERRIDE}" ]; then
     _ovr_fail=0
@@ -728,14 +944,14 @@ if [ -s "${TMP_OVERRIDE}" ]; then
                 _ovr_field="${_ovr_rest#NODE${_ovr_num}_}"
                 case "$_ovr_num" in
                     ''|*[!0-9]*)
-                        warn -c vlan "save_settings.sh: unrecognised override key: $okey"; continue ;;
+                        warn -c vlan "save_settings.sh: unrecognised override key: $okey"; _ovr_fail=1; continue ;;
                 esac
                 if [ "$_ovr_num" -lt 1 ] || [ "$_ovr_num" -gt "${MERV_MAX_NODES:-10}" ]; then
-                    warn -c vlan "save_settings.sh: override node out of range: $okey"; continue
+                    warn -c vlan "save_settings.sh: override node out of range: $okey"; _ovr_fail=1; continue
                 fi
                 _ovr_target="NODE${_ovr_num}"
                 ;;
-            *) warn -c vlan "save_settings.sh: unrecognised override key: $okey"; continue ;;
+            *) warn -c vlan "save_settings.sh: unrecognised override key: $okey"; _ovr_fail=1; continue ;;
         esac
         # Re-prefix FIELD to match JSON key names (OVERRIDE_WAN, OVERRIDE_LAN1, etc.)
         # MAP_OVERRIDE stays as-is; WAN→OVERRIDE_WAN, MAX_ETH_PORTS→OVERRIDE_MAX_ETH_PORTS, LAN*→OVERRIDE_LAN*
@@ -743,13 +959,22 @@ if [ -s "${TMP_OVERRIDE}" ]; then
             MAP_OVERRIDE) _ovr_json_key="MAP_OVERRIDE" ;;
             *)            _ovr_json_key="OVERRIDE_${_ovr_field}" ;;
         esac
-        if ! json_set_section2_value "Hardware_Override" "$_ovr_target" "$_ovr_json_key" "$oval" "${SETTINGS_FILE}"; then
+        if ! seed_hardware_override_if_missing "$_ovr_target" "$_ovr_json_key" ||
+           ! json_set_section2_value "Hardware_Override" "$_ovr_target" "$_ovr_json_key" "$oval" "${_save_candidate}"; then
             warn -c vlan "save_settings.sh: failed to set Hardware_Override.$_ovr_target.$_ovr_json_key"
+            _ovr_fail=1
+        elif ! _ovr_observed=$(json_get_section2_value "Hardware_Override" "$_ovr_target" "$_ovr_json_key" "${_save_candidate}" 2>/dev/null) ||
+             [ "$_ovr_observed" != "$oval" ]; then
+            warn -c vlan "save_settings.sh: Hardware_Override.$_ovr_target.$_ovr_json_key verification failed"
             _ovr_fail=1
         fi
     done < "${TMP_OVERRIDE}"
     if [ "$_ovr_fail" = "0" ]; then
         info -c vlan "save_settings.sh: Hardware_Override keys applied"
+    else
+        error -c vlan "save_settings.sh: Hardware_Override setter failed; authoritative settings unchanged"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
     fi
 fi
 
@@ -768,14 +993,31 @@ if [ -s "${TMP_CLIENTMETA}" ]; then
     # when the section is absent. So if it is somehow missing, seed an empty
     # section first — and log it — so the keys below actually persist instead of
     # vanishing without a trace.
-    if ! grep -q '"ClientMeta"[[:space:]]*:' "${SETTINGS_FILE}" 2>/dev/null; then
+    if ! grep -q '"ClientMeta"[[:space:]]*:' "${_save_candidate}" 2>/dev/null; then
         warn -c vlan "save_settings.sh: ClientMeta section missing — seeding it before write"
-        _cm_seed_tmp="${SETTINGS_FILE}.cmseed.$$"
-        if awk '
+        _cm_seed_tmp="${_save_candidate}.cmseed.${MERV_IDENTITY_NONCE}"
+        if save_candidate_is_empty_object; then
+            if printf '%s\n' \
+                '{' \
+                '  "ClientMeta": {' \
+                '    "_description": "MAC shield override and client display name configuration",' \
+                '    "MAC_SHIELD_OVERRIDES": "",' \
+                '    "CLIENT_NAME_OVERRIDES": ""' \
+                '  }' \
+                '}' > "${_cm_seed_tmp}" 2>/dev/null &&
+               mv "${_cm_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
+                :
+            else
+                rm -f "${_cm_seed_tmp}" 2>/dev/null
+                error -c vlan "save_settings.sh: failed to seed ClientMeta section"
+                rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+                exit 1
+            fi
+        elif awk '
                 BEGIN { seeded=0 }
                 {
                     print
-                    if (!seeded && $0 ~ /^[[:space:]]*\{[[:space:]]*$/) {
+                    if (!seeded && $0 ~ /^[[:space:]]*[{][[:space:]]*$/) {
                         print "  \"ClientMeta\": {"
                         print "    \"_description\": \"MAC shield override and client display name configuration\","
                         print "    \"MAC_SHIELD_OVERRIDES\": \"\","
@@ -784,34 +1026,57 @@ if [ -s "${TMP_CLIENTMETA}" ]; then
                         seeded=1
                     }
                 }
-            ' "${SETTINGS_FILE}" > "${_cm_seed_tmp}" 2>/dev/null && [ -s "${_cm_seed_tmp}" ]; then
-            mv "${_cm_seed_tmp}" "${SETTINGS_FILE}" 2>/dev/null || rm -f "${_cm_seed_tmp}" 2>/dev/null
+            ' "${_save_candidate}" > "${_cm_seed_tmp}" 2>/dev/null && [ -s "${_cm_seed_tmp}" ]; then
+            mv "${_cm_seed_tmp}" "${_save_candidate}" 2>/dev/null || {
+                rm -f "${_cm_seed_tmp}" 2>/dev/null
+                error -c vlan "save_settings.sh: failed to seed ClientMeta section"
+                rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+                exit 1
+            }
         else
             rm -f "${_cm_seed_tmp}" 2>/dev/null
-            warn -c vlan "save_settings.sh: failed to seed ClientMeta section"
+            error -c vlan "save_settings.sh: failed to seed ClientMeta section"
+            rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+            exit 1
         fi
     fi
     _cm_fail=0
     while IFS="$(printf '\t')" read -r cmkey cmval; do
         [ -n "$cmkey" ] || continue
-        if ! json_set_section_value "ClientMeta" "$cmkey" "$cmval" "${SETTINGS_FILE}"; then
+        if ! json_set_section_value "ClientMeta" "$cmkey" "$cmval" "${_save_candidate}"; then
             warn -c vlan "save_settings.sh: failed to set ClientMeta.$cmkey"
+            _cm_fail=1
+        elif ! _cm_observed=$(json_get_section_value "ClientMeta" "$cmkey" "${_save_candidate}" 2>/dev/null) ||
+             [ "$_cm_observed" != "$cmval" ]; then
+            warn -c vlan "save_settings.sh: ClientMeta.$cmkey verification failed"
             _cm_fail=1
         fi
     done < "${TMP_CLIENTMETA}"
     if [ "$_cm_fail" = "0" ]; then
         info -c vlan "save_settings.sh: ClientMeta keys applied"
+    else
+        error -c vlan "save_settings.sh: ClientMeta setter failed; authoritative settings unchanged"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
     fi
 fi
 
 rm -f "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
 
-chmod 600 "${SETTINGS_FILE}"
-info -c vlan "save_settings.sh: updated ${SETTINGS_FILE}"
+chmod 600 "${_save_candidate}" 2>/dev/null || {
+    error -c vlan "save_settings.sh: failed to set staged settings mode"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+    exit 1
+}
+json_validate_file "${_save_candidate}" 2>/dev/null || {
+    error -c vlan "save_settings.sh: staged settings failed JSON validation"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+    exit 1
+}
 
 _save_node_sync_required="yes"
-if [ -n "${_save_node_sync_before_digest}" ] && [ -f "${SETTINGS_FILE}" ]; then
-    _save_node_sync_after_digest=$(merv_settings_node_sync_digest "${SETTINGS_FILE}" 2>/dev/null) ||
+if [ -n "${_save_node_sync_before_digest}" ] && [ -f "${_save_candidate}" ]; then
+    _save_node_sync_after_digest=$(merv_settings_node_sync_digest "${_save_candidate}" 2>/dev/null) ||
         _save_node_sync_after_digest="unavailable"
     if [ "${_save_node_sync_before_digest}" != "missing" ] &&
        [ "${_save_node_sync_before_digest}" != "unavailable" ] &&
@@ -831,34 +1096,25 @@ fi
 # JSON by copying the updated settings.json instead of flattening.             #
 # ============================================================================ #
 
-if grep -q '"General"[[:space:]]*:' "${SETTINGS_FILE}" 2>/dev/null || \
-   grep -q '"Hardware"[[:space:]]*:' "${SETTINGS_FILE}" 2>/dev/null; then
-    cp "${SETTINGS_FILE}" "${TMP_JSON}"
-else
-    echo "{" > "${TMP_JSON}"
-
-    # Count total lines to know when we've reached the last entry (no trailing comma)
-    LINECOUNT=$(wc -l < "${TMP_SORTED}")
-    COUNT=0
-
-    _save_tab=$(printf '\t')
-    while IFS="$_save_tab" read -r OUTKEY OUTVAL; do
-        COUNT=$((COUNT + 1))
-
-        # Escape backslashes and quotes in value to make valid JSON string literals
-        ESCAPED_VAL=$(json_escape_string "${OUTVAL}")
-
-        # Add comma after entries except the last one (valid JSON format)
-        if [ "${COUNT}" -lt "${LINECOUNT}" ]; then
-            printf '  "%s": "%s",\n' "${OUTKEY}" "${ESCAPED_VAL}" >> "${TMP_JSON}"
-        else
-            printf '  "%s": "%s"\n' "${OUTKEY}" "${ESCAPED_VAL}" >> "${TMP_JSON}"
-        fi
-    done < "${TMP_SORTED}"
-
-    # Close JSON object
-    echo "}" >> "${TMP_JSON}"
+if ! cp "${_save_candidate}" "${TMP_JSON}" 2>/dev/null; then
+    error -c vlan "save_settings.sh: failed to prepare public settings artifact"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${_save_candidate}"
+    exit 1
 fi
+json_validate_file "${TMP_JSON}" 2>/dev/null || {
+    error -c vlan "save_settings.sh: public settings artifact failed JSON validation"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${_save_candidate}"
+    exit 1
+}
+
+# One authoritative commit for this logical Save.  All failures above leave
+# the previous settings bytes untouched.
+if ! mv -f "${_save_candidate}" "${SETTINGS_FILE}" 2>/dev/null; then
+    error -c vlan "save_settings.sh: authoritative settings commit failed"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${_save_candidate}"
+    exit 1
+fi
+info -c vlan "save_settings.sh: updated ${SETTINGS_FILE}"
 
 # ============================================================================ #
 # ============================================================================ #
@@ -868,25 +1124,38 @@ fi
 # to load settings without special access. Warns if the public dir is missing  #
 # ============================================================================ #
 
+_save_public_status="ok"
+_save_public_reason=""
 if [ -n "${PUBLIC_MERV_BASE}" ]; then
-    # Attempt to create the public settings directory for web access
-    if mkdir -p "${PUBLIC_SETTINGS_DIR}" 2>/dev/null; then
-        # PUBLIC_SETTINGS_FILE is a symlink to SETTINGS_FILE (created by install.sh).
-        # cp follows symlinks on the destination, so this write goes to the same
-        # JFFS file already updated in step 3. It is a harmless idempotent sync
-        # that also handles the fallback case where the symlink was replaced by a
-        # regular file (e.g. by a cp from an older install.sh version).
-        cp "${TMP_JSON}" "${PUBLIC_SETTINGS_FILE}"
-        # Set world-readable permissions so the web UI can access it
-        chmod 644 "${PUBLIC_SETTINGS_FILE}"
-        info -c vlan,cli "Settings saved!"
-    else
-        # Directory creation failed; warn but don't abort (persistent copy already installed)
-        warn -c vlan "save_settings.sh: WARN can't mkdir ${PUBLIC_SETTINGS_DIR}"
+    if ! mkdir -p "${PUBLIC_SETTINGS_DIR}" 2>/dev/null; then
+        _save_public_status="failed"
+        _save_public_reason="public settings directory could not be created"
+    elif [ -L "${PUBLIC_SETTINGS_FILE}" ]; then
+        # Installer deployments use a symlink to the authoritative file.  Do
+        # not cp through it: the single authoritative mv above is the commit.
+        if ! cmp -s "${TMP_JSON}" "${PUBLIC_SETTINGS_FILE}" 2>/dev/null; then
+            _save_public_status="failed"
+            _save_public_reason="public settings symlink does not expose the committed bytes"
+        elif ! chmod 644 "${PUBLIC_SETTINGS_FILE}" 2>/dev/null; then
+            _save_public_status="failed"
+            _save_public_reason="public settings permissions could not be published"
+        fi
+    elif ! cp "${TMP_JSON}" "${PUBLIC_SETTINGS_FILE}" 2>/dev/null; then
+        _save_public_status="failed"
+        _save_public_reason="public settings copy failed"
+    elif ! chmod 644 "${PUBLIC_SETTINGS_FILE}" 2>/dev/null; then
+        _save_public_status="failed"
+        _save_public_reason="public settings permissions could not be published"
     fi
 else
-    # No public base directory configured; persistent copy installed but web UI won't see it
-    error -c vlan "save_settings.sh: WARN no public base dir available, skipping web copy"
+    _save_public_status="failed"
+    _save_public_reason="no public settings directory is configured"
+fi
+
+if [ "$_save_public_status" = "ok" ]; then
+    info -c vlan,cli "Settings saved!"
+else
+    warn -c vlan,cli "save_settings.sh: local settings committed, but $_save_public_reason"
 fi
 
 # ============================================================================ #
@@ -896,7 +1165,10 @@ fi
 # ============================================================================ #
 
 _save_node_sync_status="skipped"
-if [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "clientmeta" ]; then
+if [ "$_save_public_status" != "ok" ]; then
+    _save_node_sync_status="skipped-public-failure"
+fi
+if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "clientmeta" ]; then
     _auto_sync_flag=$(json_get_flag "AUTO_SYNC_SETTINGS" "" "${SETTINGS_FILE}" 2>/dev/null)
     _nodes_configured=""
     for _n_idx in 1 2 3 4 5 6 7 8 9 10; do
@@ -962,7 +1234,12 @@ if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 
         _save_ack_partial=action_ack_stage_partial
         _save_ack_ok=action_ack_stage_ok
     fi
-    if [ "$_save_node_sync_status" = "failed" ]; then
+    if [ "$_save_public_status" != "ok" ]; then
+        "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
+            '{"local_saved":"1","public_settings":"failed","node_sync":"skipped"}' \
+            "Settings saved locally, but public settings publication failed: $_save_public_reason" \
+            '["public-settings-publication-failed"]' >/dev/null 2>&1 || :
+    elif [ "$_save_node_sync_status" = "failed" ]; then
         "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
             '{"local_saved":"1","node_sync":"failed"}' \
             "Settings saved locally; node settings synchronization failed." \
@@ -976,7 +1253,13 @@ if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 
             "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \
             "Settings saved successfully." '[]' >/dev/null 2>&1 || :
     fi
-    merv_action_progress_complete "$([ "$_save_node_sync_status" = "failed" ] && printf '%s' 'Settings saved locally; node sync failed.' || printf '%s' 'Settings save complete.')"
+    if [ "$_save_public_status" != "ok" ]; then
+        merv_action_progress_fail "Settings saved locally, but public settings publication failed."
+    elif [ "$_save_node_sync_status" = "failed" ]; then
+        merv_action_progress_complete "Settings saved locally; node sync failed."
+    else
+        merv_action_progress_complete "Settings save complete."
+    fi
 fi
 
 # ============================================================================ #

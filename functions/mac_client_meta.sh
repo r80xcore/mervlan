@@ -35,7 +35,7 @@
 # Main-router only: a node run early-exits (override DB arrives via the shield
 # push, name DB is display-only and not meaningful on a node).
 #
-# Exit behaviour: always exits 0 — UI caller ignores exit codes.
+# Exit behaviour: partial recovery/failure exits nonzero for the progress owner.
 # ============================================================================ #
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
@@ -227,10 +227,23 @@ merv_action_progress_phase "Reloading MAC shield and synchronizing overrides..."
 if type ebt_mac_shield_init_and_apply >/dev/null 2>&1; then
   _best=$(merv_mac_best_db 2>/dev/null)
   if [ -n "$_best" ]; then
-    ebt_mac_shield_init_and_apply "$_best"
-    _shield_reload=ok
-    info -c cli,vlan "Client Metadata: local MAC shield reloaded"
+    if ebt_mac_shield_init_and_apply "$_best"; then
+      _shield_reload=ok
+      info -c cli,vlan "Client Metadata: local MAC shield reloaded"
+    else
+      _shield_reload=failed
+      _meta_partial=1
+      error -c cli,vlan "Client Metadata: override DB persisted but local MAC shield reload failed; node push and inventory refresh are suppressed pending recovery"
+    fi
+  else
+    _shield_reload=unavailable
+    _meta_partial=1
+    error -c cli,vlan "Client Metadata: override DB persisted but no MAC shield database is available for required reload"
   fi
+else
+  _shield_reload=unavailable
+  _meta_partial=1
+  error -c cli,vlan "Client Metadata: override DB persisted but MAC shield enforcement is unavailable"
 fi
 
 # ----------------------------------------------- Push override DB to nodes ----
@@ -238,7 +251,7 @@ fi
 # override set is consistent across the mesh. merv_mac_push_db_to_nodes streams
 # both the main MAC db and the override db, then reloads the node shield.
 _nodes_pushed=0
-if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ]; then
+if [ "$_shield_reload" = "ok" ] && [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ]; then
   _nodes=$(merv_mac_node_list 2>/dev/null)
   if [ -n "$_nodes" ]; then
     MERV_MAC_LAST_PUSH_TOTAL=0
@@ -266,8 +279,10 @@ fi
 # Rebuild through the one generation coordinator. Foreground execution ensures
 # the freshly-published JSON satisfies the UI freshness poll.
 _collect=skip
-merv_action_progress_phase "Refreshing client inventory..."
-if [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+if [ "$_shield_reload" = "ok" ]; then
+  merv_action_progress_phase "Refreshing client inventory..."
+fi
+if [ "$_shield_reload" = "ok" ] && [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
   if MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" \
        request collect >/dev/null 2>&1 &&
      sh "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
@@ -285,7 +300,7 @@ if [ "$_collect" = "failed" ]; then
   exit 2
 fi
 if [ "${_meta_partial:-0}" -ne 0 ]; then
-  merv_action_progress_fail "Client metadata applied with warnings; see the VLAN log for details"
+  merv_action_progress_fail "Client metadata persisted, but MAC shield enforcement or follow-up work requires recovery"
   exit 2
 fi
 info -c cli,vlan "Client Metadata: save complete"

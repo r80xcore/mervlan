@@ -159,8 +159,11 @@ _mode_shield_legacy() {
     [ -s "${MERV_MAC_DB_JFFS:-}" ]  && _db="$MERV_MAC_DB_JFFS"
     [ -z "$_db" ] && [ -s "${MERV_MAC_DB_ACTIVE:-}" ] && _db="$MERV_MAC_DB_ACTIVE"
     if [ -n "$_db" ]; then
-      ebt_mac_shield_init_and_apply "$_db" >/dev/null 2>&1 || true
-      info -c boot,vlan "Shield: MERV_MAC pre-armed from persistent db ($_db)"
+      if ebt_mac_shield_init_and_apply "$_db" >/dev/null 2>&1; then
+        info -c boot,vlan "Shield: MERV_MAC pre-armed from persistent db ($_db)"
+      else
+        warn -c boot,vlan "Shield: MERV_MAC pre-arm failed; DHCP hold remains active and manager enforcement is required"
+      fi
     else
       info -c boot,vlan "Shield: no persistent MERV_MAC db yet — first-boot/empty state"
     fi
@@ -223,36 +226,295 @@ _mode_shield_legacy() {
 
 # Token-owned boot watchdog. This is a separate script process (not a shell
 # subshell) so its lease identity is bound to its own PID and /proc start time.
+# Catchable interruption is handled here rather than relying on EXIT timing:
+# the durable DHCP owner/handoff record remains authoritative if this process
+# is killed uncatchably (SIGKILL/OOM).
+_merv_boot_watchdog_publish_state() {
+  local _mbwps_state="$1" _mbwps_tmp
+  [ -n "${_context_file:-}" ] || return 1
+  _mbwps_tmp="${_context_file}.tmp.$$"
+  {
+    printf 'parent_run_id=%s\n' "${_run_id:-}"
+    printf 'handoff_id=%s\n' "${_handoff_id:-}"
+    printf 'watchdog_state=%s\n' "$_mbwps_state"
+  } > "$_mbwps_tmp" 2>/dev/null &&
+    mv "$_mbwps_tmp" "$_context_file" 2>/dev/null
+}
+
+_merv_boot_watchdog_claim_marker() {
+  local _mbwcm_tmp="${_shield_marker}.tmp.$$"
+  printf 'run_id=%s\n' "${_run_id:-}" > "$_mbwcm_tmp" 2>/dev/null &&
+    mv "$_mbwcm_tmp" "$_shield_marker" 2>/dev/null
+}
+
+_merv_boot_watchdog_transient_matches() {
+  local _mbwtm_path="$1" _mbwtm_kind="$2" _mbwtm_start _mbwtm_pid
+  [ -e "$_mbwtm_path" ] || return 1
+  case "$_mbwtm_kind" in
+    marker)
+      [ "$(sed -n 's/^run_id=//p' "$_mbwtm_path" 2>/dev/null | head -n 1)" = "${_run_id:-}" ]
+      ;;
+    context)
+      [ "$(sed -n 's/^parent_run_id=//p' "$_mbwtm_path" 2>/dev/null | head -n 1)" = "${_run_id:-}" ] &&
+        [ "$(sed -n 's/^handoff_id=//p' "$_mbwtm_path" 2>/dev/null | head -n 1)" = "${_handoff_id:-}" ]
+      ;;
+    pid)
+      _mbwtm_pid=$(cat "$_mbwtm_path" 2>/dev/null || printf '')
+      [ "$_mbwtm_pid" = "$$" ]
+      ;;
+    pid-start)
+      _mbwtm_start=$(cat "$_mbwtm_path" 2>/dev/null || printf '')
+      type merv_proc_start_time >/dev/null 2>&1 || return 1
+      [ "$_mbwtm_start" = "$(merv_proc_start_time "$$" 2>/dev/null || printf '')" ]
+      ;;
+    ready)
+      _mbwtm_pid=$(cat "$_mbwtm_path" 2>/dev/null || printf '')
+      [ "$_mbwtm_pid" = "$$" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_merv_boot_watchdog_cleanup_one() {
+  local _mbwco_path="$1" _mbwco_kind="$2" _mbwco_tomb
+  [ -e "$_mbwco_path" ] || return 0
+  _merv_boot_watchdog_transient_matches "$_mbwco_path" "$_mbwco_kind" || return 1
+  _mbwco_tomb="${_mbwco_path}.cleanup.$$"
+  [ ! -e "$_mbwco_tomb" ] || return 1
+  # Rename first, then verify the renamed inode.  A replacement watchdog that
+  # atomically republishes the original path is left untouched at that path;
+  # the old inode is either removed or retained as a private tombstone.
+  mv "$_mbwco_path" "$_mbwco_tomb" 2>/dev/null || return 1
+  if _merv_boot_watchdog_transient_matches "$_mbwco_tomb" "$_mbwco_kind"; then
+    rm -f "$_mbwco_tomb" 2>/dev/null || return 1
+    return 0
+  fi
+  warn -c boot,vlan "Shield: watchdog transient replacement detected; retaining $_mbwco_path"
+  # Never overwrite a replacement at the public path.  Keep the mismatched
+  # old inode quarantined for the next reconciliation pass.
+  return 1
+}
+
+_merv_boot_watchdog_transient_lock_enter() {
+  type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
+  [ -n "${_watchdog_transient_lock:-}" ] || return 1
+  merv_owner_lock_acquire "$_watchdog_transient_lock" 30 30 boot-shield-transient
+}
+
+_merv_boot_watchdog_transient_lock_leave() {
+  type merv_owner_lock_release >/dev/null 2>&1 || return 1
+  [ -n "${_watchdog_transient_lock:-}" ] || return 1
+  merv_owner_lock_release "$_watchdog_transient_lock" "${MERV_LOCK_NONCE:-}"
+}
+
+_merv_boot_watchdog_cleanup_transients() {
+  local _mbwct_rc=0 _mbwct_locked=0
+  if [ "${_watchdog_transient_lock_held:-0}" -ne 1 ]; then
+    _merv_boot_watchdog_transient_lock_enter || return 1
+    _mbwct_locked=1
+  fi
+  _merv_boot_watchdog_cleanup_one "${_context_file:-}" context || _mbwct_rc=1
+  _merv_boot_watchdog_cleanup_one "${_ready_file:-}" ready || _mbwct_rc=1
+  _merv_boot_watchdog_cleanup_one "${_pid_file:-}" pid || _mbwct_rc=1
+  _merv_boot_watchdog_cleanup_one "${_pid_start_file:-}" pid-start || _mbwct_rc=1
+  _merv_boot_watchdog_cleanup_one "${_shield_marker:-}" marker || _mbwct_rc=1
+  [ "$_mbwct_locked" -eq 0 ] || _merv_boot_watchdog_transient_lock_leave || _mbwct_rc=1
+  return "$_mbwct_rc"
+}
+
+_merv_boot_watchdog_publish_state_if_owned() {
+  # The publication lock serializes this check with a replacement _mode_shield
+  # startup.  Never overwrite a context/pid publication that no longer proves
+  # this run; cleanup will retain that replacement for its owner.
+  if [ -e "${_context_file:-}" ] &&
+     ! _merv_boot_watchdog_transient_matches "$_context_file" context; then
+    return 1
+  fi
+  if [ -e "${_pid_file:-}" ] &&
+     ! _merv_boot_watchdog_transient_matches "$_pid_file" pid; then
+    return 1
+  fi
+  if [ -e "${_pid_start_file:-}" ] &&
+     ! _merv_boot_watchdog_transient_matches "$_pid_start_file" pid-start; then
+    return 1
+  fi
+  _merv_boot_watchdog_publish_state "$1"
+}
+
+_merv_boot_watchdog_cleanup() {
+  local _mbwc_reason="${1:-watchdog-cleanup}" _mbwc_rc=0
+  [ "${_watchdog_cleanup_done:-0}" -eq 0 ] || return "${_watchdog_cleanup_rc:-0}"
+  _watchdog_cleanup_done=1
+  # The DHCP helper publishes its handoff ID before returning.  If TERM lands
+  # in the caller's assignment window, consume that durable value rather than
+  # treating a requested handoff as a pre-handoff lease.
+  [ -n "${_handoff_id:-}" ] || _handoff_id="${MERV_DHCP_HANDOFF_ID:-}"
+
+  if [ -n "${_token:-}" ]; then
+    if [ -n "${_handoff_id:-}" ]; then
+      # This helper authenticates the parent while holding the DHCP state lock
+      # and serializes successor verification with parent retirement.  It never
+      # removes a successor owner.
+      if merv_dhcp_handoff_parent_abort "$_token" "$_handoff_id" "$_mbwc_reason" >/dev/null 2>&1; then
+        case "${MERV_DHCP_HANDOFF_ABORT_STATE:-uncertain}" in
+          successor-verified)
+            _watchdog_state=successor-verified
+            ;;
+          abandoned)
+            _watchdog_state=abandoned
+            ;;
+          *)
+            _watchdog_state=uncertain
+            _mbwc_rc=1
+            ;;
+        esac
+        case "${MERV_DHCP_HANDOFF_ABORT_STATE:-uncertain}" in
+          successor-verified|abandoned)
+            _token=""
+            ;;
+          *)
+            # A successful helper must still report a recognized terminal
+            # state before this process forgets its token.
+            _mbwc_rc=1
+            ;;
+        esac
+      else
+        # Identity, publication, or state-lock failure is not evidence that
+        # this process still owns the lease.  Leave durable state and marker
+        # files for fail-closed reconciliation rather than deleting a possible
+        # replacement claim.
+        _watchdog_state=uncertain
+        _mbwc_rc=1
+        warn -c boot,vlan "Shield: watchdog cleanup could not authenticate handoff ownership; DHCP state retained for reconciliation"
+      fi
+    elif [ "${_watchdog_handoff_inflight:-0}" -eq 1 ]; then
+      # The request may have created a durable handoff record, but its ID is
+      # not yet visible in this shell.  Preserve the exact owner/marker for
+      # reconciliation instead of abandoning an unknown handoff.
+      _watchdog_state=uncertain
+      _mbwc_rc=1
+      warn -c boot,vlan "Shield: watchdog interrupted during DHCP handoff publication; state retained for reconciliation"
+    elif merv_dhcp_hold_abandon "$_token" "$_mbwc_reason" >/dev/null 2>&1; then
+      _token=""
+      _watchdog_state=abandoned
+    else
+      _watchdog_state=uncertain
+      _mbwc_rc=1
+      warn -c boot,vlan "Shield: watchdog cleanup could not authenticate DHCP ownership; lease retained for reconciliation"
+    fi
+  elif [ "${_watchdog_owner_established:-0}" -eq 1 ]; then
+    # Acquisition returned success but did not publish a valid token.  The
+    # owner may still exist durably; do not delete its marker or claim that it
+    # was safely abandoned.
+    _watchdog_state=uncertain
+    _mbwc_rc=1
+    warn -c boot,vlan "Shield: watchdog acquired DHCP protection without a valid token; state retained for reconciliation"
+  fi
+
+  _watchdog_cleanup_rc="$_mbwc_rc"
+  if [ "$_mbwc_rc" -eq 0 ]; then
+    if _merv_boot_watchdog_transient_lock_enter; then
+      _watchdog_transient_lock_held=1
+      _merv_boot_watchdog_publish_state_if_owned "${_watchdog_state:-terminal-complete}" >/dev/null 2>&1 || _watchdog_cleanup_rc=1
+      _merv_boot_watchdog_cleanup_transients || _watchdog_cleanup_rc=1
+      _watchdog_transient_lock_held=0
+      _merv_boot_watchdog_transient_lock_leave || _watchdog_cleanup_rc=1
+    else
+      _watchdog_cleanup_rc=1
+    fi
+  else
+    # Unknown ownership is deliberately left durable.  The next boot/manager
+    # reconciliation pass will classify the exact stale claim and keep DHCP
+    # blocked until recovery is proven.
+    if _merv_boot_watchdog_transient_lock_enter; then
+      _watchdog_transient_lock_held=1
+      _merv_boot_watchdog_publish_state_if_owned uncertain >/dev/null 2>&1 || :
+      # Even when DHCP ownership is uncertain, remove only transient files that
+      # still prove this exact run and identity under the publication lock.
+      _merv_boot_watchdog_cleanup_transients || :
+      _watchdog_transient_lock_held=0
+      _merv_boot_watchdog_transient_lock_leave || :
+    fi
+  fi
+  _mbwc_rc="${_watchdog_cleanup_rc:-$_mbwc_rc}"
+  return "$_mbwc_rc"
+}
+
+_merv_boot_watchdog_signal() {
+  local _mbws_signal="$1" _mbws_rc=143
+  [ "$_mbws_signal" = INT ] && _mbws_rc=130
+  # Disable re-entry while cleanup authenticates and reconciles the exact
+  # owner.  This is only for catchable INT/TERM; SIGKILL/OOM remain covered by
+  # durable reconciliation, not by a claimed shell trap.
+  trap - INT TERM
+  _merv_boot_watchdog_cleanup "interrupted-${_mbws_signal}" >/dev/null 2>&1 || :
+  exit "$_mbws_rc"
+}
+
 _mode_shield_watchdog() {
   local _shield_marker="$2" _ready_file="$3" _context_file="$4" _max="$5"
   local _pid_file="$6" _pid_start_file="${6}.start" _run_id _handoff_id _token _elapsed=0 _verification
+  local _watchdog_state=starting _watchdog_cleanup_done=0 _watchdog_cleanup_rc=0 _watchdog_owner_established=1 _watchdog_handoff_inflight=0
+  local _watchdog_transient_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/merv_boot_shield.transient.lock"
+  local _watchdog_transient_lock_held=0
   case "$_max" in ''|*[!0-9]*) _max=480 ;; esac
+  trap '_merv_boot_watchdog_signal INT' INT
+  trap '_merv_boot_watchdog_signal TERM' TERM
   _run_id="boot-$(date +%s 2>/dev/null || echo 0)-$$"
+  _watchdog_state=owner-active
+  if ! _merv_boot_watchdog_transient_lock_enter; then
+    _watchdog_state=uncertain
+    trap - INT TERM
+    return 1
+  fi
+  if ! _merv_boot_watchdog_claim_marker; then
+    _merv_boot_watchdog_transient_lock_leave || :
+    _watchdog_state=uncertain
+    trap - INT TERM
+    return 1
+  fi
+  _merv_boot_watchdog_transient_lock_leave || {
+    _watchdog_state=uncertain
+    trap - INT TERM
+    return 1
+  }
   if ! merv_dhcp_hold_acquire boot-watchdog "$_run_id"; then
     warn -c boot,vlan "Shield: watchdog could not acquire boot lease"
+    _merv_boot_watchdog_cleanup acquire-failed >/dev/null 2>&1 || :
+    trap - INT TERM
     return 1
   fi
   _token="$MERV_DHCP_HOLD_TOKEN"
+  _merv_boot_watchdog_publish_state owner-active >/dev/null 2>&1 || :
+  _watchdog_handoff_inflight=1
   if ! merv_dhcp_handoff_request "$_token" manager; then
-    merv_dhcp_hold_abandon "$_token" boot-handoff-request-failed >/dev/null 2>&1 || :
+    _merv_boot_watchdog_cleanup boot-handoff-request-failed >/dev/null 2>&1 || :
+    trap - INT TERM
     return 1
   fi
   _handoff_id="$MERV_DHCP_HANDOFF_ID"
+  _watchdog_handoff_inflight=0
+  _watchdog_state=handoff-published
+  _merv_boot_watchdog_publish_state handoff-published >/dev/null 2>&1 || :
   if ! merv_dhcp_hold_mark_handoff_wait "$_token" "$_handoff_id"; then
-    merv_dhcp_hold_abandon "$_token" boot-handoff-wait-failed >/dev/null 2>&1 || :
+    _merv_boot_watchdog_cleanup boot-handoff-wait-failed >/dev/null 2>&1 || :
+    trap - INT TERM
     return 1
   fi
   {
     printf 'parent_run_id=%s\n' "$_run_id"
     printf 'handoff_id=%s\n' "$_handoff_id"
+    printf 'watchdog_state=%s\n' "$_watchdog_state"
   } > "${_context_file}.tmp.$$" 2>/dev/null &&
     mv "${_context_file}.tmp.$$" "$_context_file" 2>/dev/null || {
-      merv_dhcp_hold_abandon "$_token" boot-context-publish-failed >/dev/null 2>&1 || :
+      _merv_boot_watchdog_cleanup boot-context-publish-failed >/dev/null 2>&1 || :
+      trap - INT TERM
       return 1
     }
   printf '%s\n' "$$" > "${_ready_file}.tmp.$$" 2>/dev/null &&
     mv "${_ready_file}.tmp.$$" "$_ready_file" 2>/dev/null || {
-      merv_dhcp_hold_abandon "$_token" boot-ready-publish-failed >/dev/null 2>&1 || :
+      _merv_boot_watchdog_cleanup boot-ready-publish-failed >/dev/null 2>&1 || :
+      trap - INT TERM
       return 1
     }
 
@@ -262,19 +524,15 @@ _mode_shield_watchdog() {
     _elapsed=$((_elapsed + 1))
   done
 
-  # Boot ownership may retire only after the exact successor published its
-  # verified completion. A timeout or failed manager remains fail-closed.
-  if merv_dhcp_handoff_parent_release "$_token" "$_handoff_id"; then
-    _token=""
+  # Retire only through the atomic parent-abort helper.  A timeout or failed
+  # manager is converted to a durable failsafe; a verified successor retires
+  # only this watchdog's parent claim.
+  [ "$_elapsed" -lt "$_max" ] || warn -c boot,vlan "Shield: boot handoff timed out after ${_max}s"
+  _merv_boot_watchdog_cleanup boot-handoff-complete >/dev/null 2>&1 || :
+  [ "${_watchdog_state:-uncertain}" = successor-verified ] &&
     info -c boot,vlan "Shield: verified boot handoff completed ($_handoff_id)"
-  else
-    [ "$_elapsed" -lt "$_max" ] || warn -c boot,vlan "Shield: boot handoff timed out after ${_max}s"
-    merv_dhcp_handoff_fail "$_handoff_id" "$_token" boot-handoff-incomplete >/dev/null 2>&1 || :
-    merv_dhcp_hold_abandon "$_token" boot-handoff-incomplete >/dev/null 2>&1 || :
-    _token=""
-  fi
-  rm -f "$_shield_marker" "$_ready_file" "$_context_file" "$_pid_file" "$_pid_start_file" 2>/dev/null || :
-  return 0
+  trap - INT TERM
+  return "${_watchdog_cleanup_rc:-1}"
 }
 
 _mode_shield() {
@@ -284,6 +542,7 @@ _mode_shield() {
   local _shield_ready="$LOCKDIR/merv_boot_shield.ready"
   local _shield_context="$LOCKDIR/merv_boot_shield.handoff"
   local _max="${MERV_BOOT_SHIELD_MAX_SEC:-480}" _oldpid _oldstart _shield_pid _shield_start _ready_pid _ready_start _wait=0
+  local _watchdog_transient_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/merv_boot_shield.transient.lock"
   case "$_max" in ''|*[!0-9]*) _max=480 ;; esac
 
   if type merv_update_quiesce_active >/dev/null 2>&1 && merv_update_quiesce_active; then
@@ -301,6 +560,7 @@ _mode_shield() {
   type merv_boot_shield_lan_configured >/dev/null 2>&1 &&
     merv_boot_shield_lan_configured "$SETTINGS_FILE" || return 0
   mkdir -p "$LOCKDIR" 2>/dev/null || return 1
+  _merv_boot_watchdog_transient_lock_enter || return 1
 
   if [ -f "$_shield_pidf" ]; then
     _oldpid=$(cat "$_shield_pidf" 2>/dev/null || printf '')
@@ -310,12 +570,16 @@ _mode_shield() {
     if [ -n "$_oldpid" ] && [ -n "$_oldstart" ] &&
        merv_process_identity_matches "$_oldpid" "$_oldstart"; then
       info -c boot,vlan "Shield: token watchdog already active (pid=$_oldpid)"
+      _merv_boot_watchdog_transient_lock_leave || :
       return 0
     fi
     rm -f "$_shield_pidf" "$_shield_pid_startf" 2>/dev/null || :
   fi
   rm -f "$_shield_pidf" "$_shield_ready" "$_shield_context" 2>/dev/null || :
-  date +%s > "$_shield_marker" 2>/dev/null || return 1
+  if ! date +%s > "$_shield_marker" 2>/dev/null; then
+    _merv_boot_watchdog_transient_lock_leave || :
+    return 1
+  fi
   "$0" shield-watchdog "$_shield_marker" "$_shield_ready" "$_shield_context" "$_max" "$_shield_pidf" \
     </dev/null >/dev/null 2>&1 &
   _shield_pid=$!
@@ -323,6 +587,7 @@ _mode_shield() {
   case "$_shield_start" in ''|*[!0-9]*)
     kill -TERM "$_shield_pid" 2>/dev/null || :
     rm -f "$_shield_marker" "$_shield_pidf" "$_shield_pid_startf" 2>/dev/null || :
+    _merv_boot_watchdog_transient_lock_leave || :
     return 1
     ;;
   esac
@@ -330,6 +595,11 @@ _mode_shield() {
      ! printf '%s\n' "$_shield_start" > "$_shield_pid_startf" 2>/dev/null; then
     kill -TERM "$_shield_pid" 2>/dev/null || :
     rm -f "$_shield_marker" "$_shield_pidf" "$_shield_pid_startf" 2>/dev/null || :
+    _merv_boot_watchdog_transient_lock_leave || :
+    return 1
+  fi
+  if ! _merv_boot_watchdog_transient_lock_leave; then
+    kill -TERM "$_shield_pid" 2>/dev/null || :
     return 1
   fi
 
@@ -345,7 +615,14 @@ _mode_shield() {
     _wait=$((_wait + 1))
   done
   warn -c boot,vlan "Shield: watchdog readiness acknowledgement failed"
-  rm -f "$_shield_marker" 2>/dev/null || :
+  if _merv_boot_watchdog_transient_lock_enter; then
+    _ready_pid=$(cat "$_shield_pidf" 2>/dev/null || printf '')
+    _ready_start=$(cat "$_shield_pid_startf" 2>/dev/null || printf '')
+    if [ "$_ready_pid" = "$_shield_pid" ] && [ "$_ready_start" = "$_shield_start" ]; then
+      rm -f "$_shield_marker" 2>/dev/null || :
+    fi
+    _merv_boot_watchdog_transient_lock_leave || :
+  fi
   return 1
 }
 

@@ -510,6 +510,39 @@ dispatch_if_executable() {
     return "$_se_release_rc"
   }
   _se_cleanup_done=0
+  _se_worker_pid=""
+  _se_worker_start=""
+  _se_reconcile_worker() {
+    [ -n "${_se_worker_pid:-}" ] || return 0
+    # A published worker PID without its authenticated start identity is an
+    # unknown lifecycle state; never signal by PID alone.  Because the
+    # dispatcher launched this direct child, waiting is a safe way to reap it
+    # and establish termination before any lock cleanup is attempted.
+    if [ -z "${_se_worker_start:-}" ]; then
+      wait "$_se_worker_pid" 2>/dev/null
+      _se_worker_pid=""
+      return 0
+    fi
+    if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+      kill -TERM "$_se_worker_pid" 2>/dev/null || :
+      _se_n=0
+      while [ "$_se_n" -lt 5 ] && merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; do
+        sleep 1
+        _se_n=$((_se_n + 1))
+      done
+      if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+        kill -KILL "$_se_worker_pid" 2>/dev/null || :
+        sleep 1
+      fi
+    fi
+    if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+      return 1
+    fi
+    wait "$_se_worker_pid" 2>/dev/null || :
+    _se_worker_pid=""
+    _se_worker_start=""
+    return 0
+  }
   _se_signal_handling=0
   _se_signal_status=0
   _se_handle_signal() {
@@ -518,6 +551,13 @@ dispatch_if_executable() {
     _se_signal_handling=1
     trap - INT TERM
     logger -t "VLANMgr" "handler: action=$_se_key interrupted (rc=$_se_signal_status); stopping before normal completion"
+    _se_reconcile_worker
+    _se_worker_rc=$?
+    if [ "$_se_worker_rc" -ne 0 ]; then
+      logger -t "VLANMgr" "handler: supervised worker identity could not be reconciled; retaining dispatcher locks"
+      trap - EXIT
+      exit 75
+    fi
     _se_release_owner_locks
     _se_release_rc=$?
     if [ "${_se_ack_stage:-0}" -eq 1 ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_discard_staged >/dev/null 2>&1; then
@@ -541,20 +581,55 @@ dispatch_if_executable() {
     # Only workers whose dispatcher actually owns the global lock may inherit
     # the parent-held marker. Observation requests do not own that lock and
     # must let a nested SSH trust probe acquire it itself.
+    _se_export_rc=0
     if [ "$_se_global_needed" -eq 1 ]; then
-      merv_action_lock_export_child_context || {
-        logger -t "VLANMgr" "handler: could not export authenticated global lock context"
-        _se_script_rc=75
-      }
+      merv_action_lock_export_child_context || _se_export_rc=1
     else
       merv_action_lock_clear_child_context
     fi
-    MERV_ACTION_ACK_STAGE="$_se_ack_stage"
-    export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
-      MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
-      MERV_ACTION_ACK_STAGE
-    logger -t "VLANMgr" "handler: worker start action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} global=$_se_global_needed"
-    sh "$SCRIPT_PATH" "$@"
+    if [ "$_se_export_rc" -ne 0 ]; then
+      # An authenticated child context is part of the launch precondition.
+      # Refuse to start any worker when export fails.
+      logger -t "VLANMgr" "handler: could not export authenticated global lock context; worker was not launched"
+      merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+      merv_action_progress_fail "The action owner context was invalid; no work was started."
+      if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
+        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+          '{"reason":"child-context-export-failed"}' \
+          "The action owner context was invalid; no work was started." \
+          '["child-context-export-failed"]' child-context-export-failed >/dev/null 2>&1 || :
+      fi
+      _se_script_rc=75
+    else
+      MERV_ACTION_ACK_STAGE="$_se_ack_stage"
+      export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+        MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
+        MERV_ACTION_ACK_STAGE
+      logger -t "VLANMgr" "handler: worker start action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} global=$_se_global_needed"
+      # Execute the script as the supervised child itself.  The dispatcher
+      # records its authenticated PID/start identity before waiting, allowing
+      # signal reconciliation without descendant-wide kills.
+      sh "$SCRIPT_PATH" "$@" &
+      _se_worker_pid=$!
+      _se_worker_start=$(merv_proc_start_time "$_se_worker_pid" 2>/dev/null || printf '')
+      case "$_se_worker_start" in
+        ''|*[!0-9]*)
+          # Never issue an unauthenticated PID kill.  The direct child is
+          # reaped by wait; until that completes the dispatcher retains its
+          # locks and cannot publish terminal success.
+          wait "$_se_worker_pid" 2>/dev/null
+          _se_script_rc=75
+          _se_worker_pid=""
+          _se_worker_start=""
+          ;;
+        *)
+          wait "$_se_worker_pid" 2>/dev/null
+          _se_script_rc=$?
+          _se_worker_pid=""
+          _se_worker_start=""
+          ;;
+      esac
+    fi
   else
     logger -t "VLANMgr" "handler: missing script ${SCRIPT_PATH##*/}"
     _se_script_rc=1
