@@ -3319,6 +3319,10 @@ function showTooltip() {
     let SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
     let SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
     let SETTINGS_AUTHORITY_STATUS_GENERATION = 0;
+    // Rendering the authority state must be side-effect free.  The dirty
+    // snapshot is refreshed after a completed load or an explicit form edit;
+    // calculating it while a load is committing can re-enter form serialization.
+    let MAIN_PAGE_SAVE_DIRTY = false;
 
     function settingsAuthorityIsReady() {
       return SETTINGS_AUTHORITY_STATE === 'ready' &&
@@ -3349,7 +3353,7 @@ function showTooltip() {
       const renderGeneration = ++SETTINGS_AUTHORITY_STATUS_GENERATION;
       clearSettingsAuthorityStatusTimers();
       let message = '';
-      const mainPageDirty = state === 'ready' && mainPageSaveIsDirty();
+      const mainPageDirty = state === 'ready' && MAIN_PAGE_SAVE_DIRTY;
       if (state === 'loading') {
         message = 'Loading settings... Save and Apply are paused.';
       } else if (state === 'ready') {
@@ -3414,6 +3418,7 @@ function showTooltip() {
       SETTINGS_AUTHORITY_STATE = 'loading';
       SETTINGS_NODE_STATE = 'unknown';
       SETTINGS_AUTHORITY_ERROR = '';
+      MAIN_PAGE_SAVE_DIRTY = false;
       renderSettingsAuthorityState();
       return generation;
     }
@@ -3430,6 +3435,7 @@ function showTooltip() {
       CURRENT_SETTINGS_STRUCTURED = null;
       CURRENT_SETTINGS_SHAPE = 'flat';
       PERSISTED_SETTINGS_FLAT_BASELINE = null;
+      MAIN_PAGE_SAVE_DIRTY = false;
       setNodeButtonsEnabled(false);
       renderSettingsAuthorityState();
     }
@@ -3444,6 +3450,7 @@ function showTooltip() {
       SETTINGS_NODE_STATE = classifyConfiguredNodes(flat);
       SETTINGS_AUTHORITY_ERROR = '';
       updatePersistedSettingsBaseline(flat);
+      MAIN_PAGE_SAVE_DIRTY = false;
       renderSettingsAuthorityState();
       return true;
     }
@@ -3606,6 +3613,7 @@ function showTooltip() {
     }
 
     function refreshMainSaveNeededState() {
+      MAIN_PAGE_SAVE_DIRTY = settingsAuthorityIsReady() && mainPageSaveIsDirty();
       renderSettingsAuthorityState();
     }
 
