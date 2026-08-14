@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.5"                #
+#             - File: mervlan_manager.sh || version="0.72.6"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -193,6 +193,18 @@ detect_trunks_configured() {
     idx=$((idx + 1))
   done
   return 1
+}
+
+run_wan_native() {
+  _rwn_mode="${1:-apply}"
+
+  if [ ! -x "$FUNCDIR/mervlan_wan.sh" ]; then
+    error -c cli,vlan "WAN Native: required helper $FUNCDIR/mervlan_wan.sh is missing or not executable"
+    return 1
+  fi
+
+  DRY_RUN="$DRY_RUN" UPLINK_PORT="$UPLINK_PORT" DEFAULT_BRIDGE="$DEFAULT_BRIDGE" NODE_ID="$NODE_ID" \
+    sh "$FUNCDIR/mervlan_wan.sh" "$_rwn_mode"
 }
 
 run_trunk_if_configured() {
@@ -1722,13 +1734,19 @@ cleanup_existing_config() {
     fi
   done
 
-  # Remove VLAN interfaces (eth0.100, eth0.200, etc.)
-  # Parse ip link output for VLAN sub-interfaces (format: "eth0.100@eth0")
-  ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E "^${UPLINK_PORT}\\.[0-9]+(@|$)" | cut -d'@' -f1 | while read -r vif; do
+  # Remove ordinary uplink VLAN interfaces (eth0.100, eth0.200, etc.).
+  # A VLAN upper that is currently a member of br0 is the live WAN-native
+  # management/backhaul path and MUST survive generic cleanup.  mervlan_wan.sh
+  # owns its later migration or restoration to the ASUS physical path.
+  ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E "^${UPLINK_PORT}\.[0-9]+(@|$)" | cut -d'@' -f1 | while read -r vif; do
+    [ -n "$vif" ] || continue
+    if member_of_bridge "$DEFAULT_BRIDGE" "$vif"; then
+      info -c cli,vlan "Preserving live WAN Native transport $vif during VLAN cleanup"
+      continue
+    fi
     if [ "$DRY_RUN" = "yes" ]; then
       echo "[DRY-RUN] ip link del $vif"
     else
-      # Delete VLAN interface
       ip link del "$vif" 2>/dev/null
       info -c cli,vlan "Removed VLAN interface $vif"
       track_change "Removed VLAN interface $vif"
@@ -2248,6 +2266,19 @@ main() {
     i=$((i+1))
   done
 
+  # WAN Native preflight is read-only and must pass before any bridge mutation.
+  # This catches invalid/range/conflict settings while the original ASUS/native
+  # transport is still untouched.
+  if type merv_node_validate_wan_native_management >/dev/null 2>&1 && \
+     ! merv_node_validate_wan_native_management "$SETTINGS_FILE"; then
+    error -c cli,vlan "WAN Native: managed node endpoint validation failed: ${MERV_SSH_LAST_DETAIL:-missing WAN Native management endpoint}"
+    return 1
+  fi
+  if ! run_wan_native validate; then
+    error -c cli,vlan "WAN Native: preflight validation failed; aborting before VLAN cleanup"
+    return 1
+  fi
+
   # Cleanup phase: remove old VLAN infrastructure from previous runs
   # Enable the iface→VID cache for the duration of the apply hot path. The
   # cache is shared by ebt_quarantine_ensure_expected_rules, merv_managed_wl_ifaces
@@ -2267,6 +2298,14 @@ main() {
     return 1
   fi
   merv_action_progress_update cleanup 1 1 25 "Cleaning previous VLAN configuration..."
+
+  # Converge the native WAN transport before creating ordinary VLAN uplinks.
+  # Generic cleanup preserved any live br0 uplink upper, so changes such as
+  # VLAN 10 -> VLAN 20 or VLAN 10 -> ASUS can be migrated transactionally here.
+  if ! run_wan_native apply; then
+    error -c cli,vlan "WAN Native: initial transport convergence failed"
+    return 1
+  fi
 
   # Configuration phase 1: Attach Ethernet LAN ports to appropriate bridges
   if [ -n "$ETH_PORTS" ]; then
@@ -2392,13 +2431,25 @@ main() {
 
   }
 
-  run_trunk_if_configured
+  if ! run_trunk_if_configured; then
+    error -c cli,vlan "Trunk configuration failed; aborting before WAN Native reapply and final verification"
+    return 1
+  fi
+
+  # ASUS switch/wireless rc may restore the physical uplink to br0. Re-assert
+  # WAN Native after all rc work and trunk creation, then verify it separately
+  # in the final fail-closed gate.
+  if ! run_wan_native apply; then
+    error -c cli,vlan "WAN Native: post-restart transport convergence failed"
+    return 1
+  fi
 
   merv_native_auth_audit
 
   if [ "$DRY_RUN" != "yes" ]; then
     merv_action_progress_update verify 1 2 90 "Running final VLAN security verification..."
-    if [ "${MANAGER_SETTLE_VERIFIED:-0}" -eq 1 ] && merv_manager_final_security_check; then
+    if [ "${MANAGER_SETTLE_VERIFIED:-0}" -eq 1 ] && \
+       merv_manager_final_security_check && run_wan_native verify; then
       merv_action_progress_update verify 2 2 95 "Final VLAN security verification passed..."
       _manager_verification="${MANAGER_RUN_ID}-final-$(date +%s 2>/dev/null || echo 0)"
       if ! merv_dhcp_hold_mark_verified "$MANAGER_DHCP_TOKEN" "$_manager_verification"; then

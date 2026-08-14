@@ -322,7 +322,13 @@
       function enhanceRenderedHelp() {
         styleGitHubAlerts();
         prepareLinks();
-        contentEl.scrollTop = 0;
+        var sectionId = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
+        var target = sectionId ? document.getElementById(sectionId) : null;
+        if (target && typeof target.scrollIntoView === "function") {
+          target.scrollIntoView({ block: "start" });
+        } else {
+          contentEl.scrollTop = 0;
+        }
       }
 
       function prepareDiagramImages(root) {

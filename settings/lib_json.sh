@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_json.sh || version="0.56"                         #
+#                - File: lib_json.sh || version="0.57"                         #
 # ============================================================================ #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -466,7 +466,9 @@ json_get_section2_value() {
 
 json_set_section2_value() {
     # json_set_section2_value <section1> <section2> <key> <value> [file]
-    # Update a key inside a two-level nested section without touching other keys.
+    # Update or insert a key inside an existing two-level nested section
+    # without touching unrelated keys. A missing section is a caller error;
+    # silently returning success would make settings migrations unreliable.
     section1="$1"
     section2="$2"
     key="$3"
@@ -488,7 +490,7 @@ json_set_section2_value() {
             gsub(/[^{}]/, "", t)
             return gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
         }
-        BEGIN { in1=0; in2=0; depth=0; depth1=0; depth2=0; replaced=0 }
+        BEGIN { in1=0; in2=0; depth=0; depth1=0; depth2=0; replaced=0; pending="" }
         {
             line=$0
 
@@ -500,25 +502,52 @@ json_set_section2_value() {
             if (in1 && !in2 && line ~ ("\""sec2"\"[[:space:]]*:[[:space:]]*\{")) {
                 in2=1
                 depth2=depth + count_braces(line)
+                print line
+                depth += count_braces($0)
+                next
             }
 
-            if (in2 && !replaced) {
-                if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
+            if (in2) {
+                new_depth=depth + count_braces($0)
+                if (!replaced && line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
                     gsub("\""key"\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\""key"\": \""val"\"", line)
                     replaced=1
                 }
+                if (new_depth < depth2) {
+                    if (!replaced) {
+                        if (pending != "") {
+                            if (pending !~ /,[[:space:]]*$/) sub(/[[:space:]]*$/, ",", pending)
+                            print pending
+                            pending=""
+                        }
+                        printf "      \"%s\": \"%s\"\n", key, val
+                        replaced=1
+                    } else if (pending != "") {
+                        print pending
+                        pending=""
+                    }
+                    print line
+                    depth=new_depth
+                    in2=0
+                    if (in1 && depth < depth1) in1=0
+                    next
+                }
+                if (replaced) {
+                    if (pending != "") { print pending; pending="" }
+                    print line
+                } else {
+                    if (pending != "") print pending
+                    pending=line
+                }
+                depth=new_depth
+                next
             }
 
             print line
-
             depth += count_braces($0)
-            if (in2 && depth < depth2) {
-                in2=0
-            }
-            if (in1 && depth < depth1) {
-                in1=0
-            }
+            if (in1 && depth < depth1) in1=0
         }
+        END { if (pending != "") print pending; if (!replaced) exit 1 }
     ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
 
     mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }

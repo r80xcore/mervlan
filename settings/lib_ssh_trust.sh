@@ -747,7 +747,9 @@ merv_ssh_hostkey_probe() {
   _mshkp_slot="$1"; _mshkp_host=$(merv_ssh_trust_normalize_host "$2") || { MERV_SSH_TRUST_LAST_REASON=invalid-endpoint; return 3; }
   _mshkp_port=$(merv_ssh_trust_normalize_port "$3") || { MERV_SSH_TRUST_LAST_REASON=invalid-port; return 3; }
   _mshkp_mac=$(merv_ssh_trust_mac_or_none "$4") || { MERV_SSH_TRUST_LAST_REASON=invalid-mac; return 3; }
-  _mshkp_node=$(merv_ssh_trust_node_id "$_mshkp_slot" "$_mshkp_mac" "$_mshkp_host" "$_mshkp_port") || return 3
+  _mshkp_canonical="${5:-$_mshkp_host}"
+  _mshkp_canonical=$(merv_ssh_trust_normalize_host "$_mshkp_canonical") || { MERV_SSH_TRUST_LAST_REASON=invalid-endpoint; return 3; }
+  _mshkp_node=$(merv_ssh_trust_node_id "$_mshkp_slot" "$_mshkp_mac" "$_mshkp_canonical" "$_mshkp_port") || return 3
   MERV_SSH_TRUST_LAST_REASON=""; MERV_SSH_TRUST_LAST_STATUS=""
   if [ -n "${MERV_SSH_TEST_PROBE_FILE:-}" ] && [ -f "$MERV_SSH_TEST_PROBE_FILE" ]; then
     _mshkp_line=$(awk -F '\t' -v n="$_mshkp_node" '$1==n {print; exit}' "$MERV_SSH_TEST_PROBE_FILE" 2>/dev/null)
@@ -785,7 +787,7 @@ merv_ssh_hostkey_probe() {
   merv_ssh_trust_find "$_mshkp_node"
   _mshkp_find_rc=$?
   if [ "$_mshkp_find_rc" -eq 0 ]; then
-    if [ "$SSH_TRUST_HOST" = "$_mshkp_host" ] && [ "$SSH_TRUST_PORT" = "$_mshkp_port" ] && [ "$SSH_TRUST_FINGERPRINT" = "$_mshkp_fp" ] && [ "$SSH_TRUST_PUBLIC_KEY" = "$_mshkp_key" ]; then
+    if [ "$SSH_TRUST_HOST" = "$_mshkp_canonical" ] && [ "$SSH_TRUST_PORT" = "$_mshkp_port" ] && [ "$SSH_TRUST_FINGERPRINT" = "$_mshkp_fp" ] && [ "$SSH_TRUST_PUBLIC_KEY" = "$_mshkp_key" ]; then
       MERV_SSH_TRUST_LAST_STATUS=verified; return 0
     fi
     MERV_SSH_TRUST_LAST_REASON=key-or-endpoint-changed; MERV_SSH_TRUST_LAST_STATUS=changed; return 8
@@ -818,7 +820,9 @@ merv_ssh_require_verified_node() {
   _msrv_slot="$1"; _msrv_host=$(merv_ssh_trust_normalize_host "$2") || { MERV_SSH_TRUST_LAST_REASON=invalid-endpoint; return 3; }
   _msrv_port=$(merv_ssh_trust_normalize_port "$3") || return 3
   _msrv_mac=$(merv_ssh_trust_mac_or_none "$4") || return 3
-  _msrv_node=$(merv_ssh_trust_node_id "$_msrv_slot" "$_msrv_mac" "$_msrv_host" "$_msrv_port") || return 3
+  _msrv_canonical="${5:-$_msrv_host}"
+  _msrv_canonical=$(merv_ssh_trust_normalize_host "$_msrv_canonical") || return 3
+  _msrv_node=$(merv_ssh_trust_node_id "$_msrv_slot" "$_msrv_mac" "$_msrv_canonical" "$_msrv_port") || return 3
   merv_ssh_trust_find "$_msrv_node"; _msrv_find_rc=$?
   if [ "$_msrv_find_rc" -ne 0 ]; then
     [ "$_msrv_find_rc" -eq 1 ] && MERV_SSH_TRUST_LAST_REASON=ssh-trust-required && return 6
@@ -826,13 +830,17 @@ merv_ssh_require_verified_node() {
     MERV_SSH_TRUST_LAST_REASON=trust-record-invalid
     return 2
   fi
-  [ "$SSH_TRUST_HOST" = "$_msrv_host" ] && [ "$SSH_TRUST_PORT" = "$_msrv_port" ] || { MERV_SSH_TRUST_LAST_REASON=endpoint-changed; return 8; }
+  # A node with a stable pinned MAC keeps one trust identity while WAN Native
+  # changes its reachable address.  The caller may pass an alternate endpoint
+  # only after proving it is configured for this slot; the trust record itself
+  # must still be anchored to the canonical ASUS/recovery endpoint.
+  [ "$SSH_TRUST_HOST" = "$_msrv_canonical" ] && [ "$SSH_TRUST_PORT" = "$_msrv_port" ] || { MERV_SSH_TRUST_LAST_REASON=endpoint-changed; return 8; }
   [ "${MERV_SSH_CAPABILITY_PROVEN:-0}" = "1" ] || [ "${MERV_SSH_TEST_MODE:-0}" = "1" ] || { MERV_SSH_TRUST_LAST_REASON=capability-unknown; return 7; }
   return 0
 }
 
 merv_ssh_preflight_node_set() {
-  _msp_file="$1"; [ -f "$_msp_file" ] || return 2
+  _msp_file="$1"; _msp_settings="${2:-${SETTINGS_FILE:-}}"; [ -f "$_msp_file" ] || return 2
   _msp_nodes=' '; _msp_eps=' '; _msp_lines=''
   while IFS=' ' read -r _msp_slot _msp_host _msp_mac _msp_extra || [ -n "$_msp_slot" ]; do
     [ -z "$_msp_extra" ] || return 2
@@ -858,33 +866,37 @@ merv_ssh_preflight_node_set() {
   while IFS=' ' read -r _msp_slot _msp_host _msp_mac _msp_extra || [ -n "$_msp_slot" ]; do
     [ -n "$_msp_slot" ] || continue
     [ -z "$_msp_extra" ] || return 2
-    merv_ssh_hostkey_probe "$_msp_slot" "$_msp_host" "${MERV_NODE_SSH_PORT:-22}" "$_msp_mac"
-    _msp_probe_rc=$?
-    if [ "$_msp_probe_rc" -ne 0 ]; then
-      case "$_msp_probe_rc:${MERV_SSH_TRUST_LAST_REASON:-}" in
-        10:*|11:*|*:unreachable|*:timeout|*:refused|*:no-route)
-          MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-unreachable}"
-          MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key probe could not reach the node"
-          return 4
-          ;;
+    _msp_canonical="$_msp_host"
+    if type merv_node_endpoint_candidates >/dev/null 2>&1; then
+      _msp_candidates=$(merv_node_endpoint_candidates "$_msp_slot" "$_msp_settings" 2>/dev/null) || return 2
+    else
+      _msp_candidates="$_msp_host"
+    fi
+    _msp_ok=0
+    while IFS= read -r _msp_endpoint || [ -n "$_msp_endpoint" ]; do
+      [ -n "$_msp_endpoint" ] || continue
+      merv_ssh_hostkey_probe "$_msp_slot" "$_msp_endpoint" "${MERV_NODE_SSH_PORT:-22}" "$_msp_mac" "$_msp_canonical"
+      _msp_probe_rc=$?
+      if [ "$_msp_probe_rc" -eq 0 ] && [ "${MERV_SSH_TRUST_LAST_STATUS:-}" = verified ]; then
+        _msp_ok=1
+        break
+      fi
+      # Only a proven pre-session transport failure may try the configured
+      # recovery endpoint. Trust, identity, and ambiguous probe failures stop.
+      case "${MERV_SSH_TRUST_LAST_REASON:-}" in
+        unreachable|timeout|refused|no-route|connect-timeout) continue ;;
       esac
       MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-probe-failed}"
       MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key preflight failed"
       return "$_msp_probe_rc"
+    done <<EOF
+$_msp_candidates
+EOF
+    if [ "$_msp_ok" -ne 1 ]; then
+      MERV_SSH_LAST_REASON=unreachable
+      MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} no configured management endpoint reached the verified host-key probe"
+      return 4
     fi
-    [ "$MERV_SSH_TRUST_LAST_STATUS" = verified ] || {
-      [ -n "${MERV_SSH_TRUST_LAST_REASON:-}" ] || MERV_SSH_TRUST_LAST_REASON=ssh-trust-required
-      case "${MERV_SSH_TRUST_LAST_REASON:-}" in
-        unreachable|timeout|refused|no-route)
-          MERV_SSH_LAST_REASON="$MERV_SSH_TRUST_LAST_REASON"
-          MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key probe could not reach the node"
-          return 4
-          ;;
-      esac
-      MERV_SSH_LAST_REASON="$MERV_SSH_TRUST_LAST_REASON"
-      MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key trust precondition failed"
-      return 6
-    }
   done < "$_msp_file"
 }
 
@@ -919,7 +931,7 @@ EOF
     merv_ssh_trust_cleanup_files "$_mspnl_tmp"
     return 2
   }
-  merv_ssh_preflight_node_set "$_mspnl_tmp"; _mspnl_rc=$?
+  merv_ssh_preflight_node_set "$_mspnl_tmp" "$_mspnl_settings"; _mspnl_rc=$?
   merv_ssh_trust_cleanup_files "$_mspnl_tmp" || _mspnl_rc=1
   return "$_mspnl_rc"
 }

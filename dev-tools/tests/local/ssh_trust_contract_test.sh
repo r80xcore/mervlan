@@ -144,6 +144,11 @@ merv_ssh_trust_publish_stage "$STAGE" >/dev/null 2>&1 || fail publish-record
 merv_ssh_hostkey_probe 1 192.168.1.2 22 "$MAC1"
 [ "$?" -eq 0 ] || fail verified-probe
 ok verified-probe
+merv_ssh_require_verified_node 1 192.168.1.99 22 "$MAC1" 192.168.1.2 || fail alternate-endpoint-canonical-trust
+ok alternate-endpoint-canonical-trust
+merv_ssh_hostkey_probe 1 192.168.1.99 22 "$MAC1" 192.168.1.2
+[ "$?" -eq 0 ] || fail alternate-endpoint-canonical-probe
+ok alternate-endpoint-canonical-probe
 merv_ssh_hostkey_probe 1 192.168.1.99 22 "$MAC1"
 [ "$?" -eq 8 ] || fail endpoint-change
 ok endpoint-change
@@ -286,5 +291,12 @@ for _q in "$MERV_SSH_TRUST_QUARANTINE_ROOT"/"$CHALLENGE".invalid.*; do
 done
 [ "$_quarantined" -eq 1 ] || fail malformed-challenge-quarantine
 ok malformed-challenge-quarantine
+
+# Legacy nodes can lack AUTO_NODE<n>_MAC. Their trust identity is therefore
+# the configured ASUS/recovery endpoint, not a temporary WAN Native address.
+LEGACY_STAGE=$(merv_ssh_trust_stage_record 9 none 192.168.1.9 22 ssh-ed25519 "$KEY1" "$FP1") || fail legacy-stage-record
+merv_ssh_trust_publish_stage "$LEGACY_STAGE" >/dev/null 2>&1 || fail legacy-publish-record
+merv_ssh_require_verified_node 9 192.168.1.99 22 none 192.168.1.9 || fail alternate-endpoint-legacy-canonical-trust
+ok alternate-endpoint-legacy-canonical-trust
 
 printf 'SSH_TRUST_CONTRACT_OK\n'

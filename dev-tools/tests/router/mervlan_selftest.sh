@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.5"                #
+#            - File: mervlan_selftest.sh || version="0.72.9"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -3583,6 +3583,907 @@ test_apply_observation_contract() {
   return "$_tao_ok"
 }
 
+test_wan_native_contract() {
+  _twn_ok=0
+  _twn_root="$SELFTEST_ROOT/wan-native"
+  _twn_base="$_twn_root/base"
+  _twn_bin="$_twn_root/bin"
+  _twn_net="$_twn_root/net"
+  _twn_proc="$_twn_root/proc"
+  _twn_dhcp_pidfile="$_twn_root/udhcpc_lan.pid"
+  _twn_dhcp_addr="$_twn_root/lan.addr"
+  _twn_dhcp_expected="192.0.2.20"
+  rm -rf "$_twn_root" 2>/dev/null || return 1
+  mkdir -p "$_twn_base" "$_twn_bin" "$_twn_net/br0/brif" "$_twn_net/eth0" "$_twn_proc" || return 1
+  cp -R "$MERV_BASE/settings" "$_twn_base/" || return 1
+  mkdir -p "$_twn_base/functions" || return 1
+  cp "$MERV_BASE/functions/mervlan_wan.sh" "$_twn_base/functions/" || return 1
+  printf '%s\n' '02:00:00:00:00:01' > "$_twn_net/br0/address"
+  : > "$_twn_net/eth0/address"
+  : > "$_twn_net/br0/brif/eth0"
+  printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+
+cat > "$_twn_bin/nvram" <<'MERV_WAN_NVRAM'
+#!/bin/sh
+[ "$1" = get ] || exit 1
+case "$2" in
+  lan_proto) printf '%s\n' "${WAN_TEST_LAN_PROTO:-dhcp}" ;;
+  lan_ipaddr) printf '%s\n' "${WAN_TEST_EXPECTED_ADDRESS:-192.0.2.20/24}" ;;
+  *) exit 1 ;;
+esac
+MERV_WAN_NVRAM
+
+cat > "$_twn_bin/brctl" <<'MERV_WAN_BRCTL'
+#!/bin/sh
+wan_test_signal() {
+  [ -n "${WAN_TEST_SIGNAL_PHASE:-}" ] || return 0
+  [ -n "${WAN_TEST_SIGNAL_PID:-}" ] || return 0
+  [ -n "${WAN_TEST_SIGNAL_ONCE:-}" ] || return 0
+  [ ! -e "$WAN_TEST_SIGNAL_ONCE" ] || return 0
+  : > "$WAN_TEST_SIGNAL_ONCE" || return 0
+  kill -TERM "$WAN_TEST_SIGNAL_PID" 2>/dev/null || :
+}
+case "$1" in
+  addif)
+    [ "${FAIL_ADD_IF:-}" != "$3" ] || exit 1
+    mkdir -p "$MERV_WAN_NET_ROOT/$2/brif" || exit 1
+    : > "$MERV_WAN_NET_ROOT/$2/brif/$3"
+    [ -n "${WAN_TEST_ORDER_LOG:-}" ] && printf 'add %s\n' "$3" >> "$WAN_TEST_ORDER_LOG"
+    [ "${FAIL_VERIFY_IF:-}" = "$3" ] && {
+      { printf '%s  VID: 4094\n' "$3"; printf 'Device: wrong-lower\n'; } > "$MERV_WAN_PROC_VLAN_ROOT/$3"
+    }
+    [ "${WAN_TEST_SIGNAL_PHASE:-}" = attach-before-verify ] && [ "$3" = "${WAN_TEST_SIGNAL_IF:-}" ] && wan_test_signal || :
+    ;;
+  delif)
+    [ "${FAIL_DEL_IF:-}" != "$3" ] || exit 1
+    rm -f "$MERV_WAN_NET_ROOT/$2/brif/$3"
+    [ -n "${WAN_TEST_ORDER_LOG:-}" ] && printf 'del %s\n' "$3" >> "$WAN_TEST_ORDER_LOG"
+    [ "${WAN_TEST_SIGNAL_PHASE:-}" = detach-before-attach ] && [ "$3" = "${WAN_TEST_SIGNAL_IF:-}" ] && wan_test_signal || :
+    ;;
+  show) : ;;
+  *) exit 1 ;;
+esac
+MERV_WAN_BRCTL
+  cat > "$_twn_bin/ip" <<'MERV_WAN_IP'
+#!/bin/sh
+[ "$1" = -4 ] && shift
+[ "$1" = addr ] && {
+  shift
+  case "$1" in
+    show)
+      [ "$2" = dev ] || exit 1
+      _wan_addr=$(sed -n '1p' "${WAN_TEST_ADDRESS_FILE:?}" 2>/dev/null)
+      [ -n "$_wan_addr" ] && printf '    inet %s scope global %s\n' "$_wan_addr" "$3"
+      exit 0
+      ;;
+    flush)
+      [ "$2" = dev ] || exit 1
+      : > "${WAN_TEST_ADDRESS_FILE:?}" || exit 1
+      exit 0
+      ;;
+    add)
+      _wan_addr="$2"
+      [ "$3" = dev ] || exit 1
+      printf '%s\n' "$_wan_addr" > "${WAN_TEST_ADDRESS_FILE:?}" || exit 1
+      exit 0
+      ;;
+    *) exit 1 ;;
+  esac
+}
+[ "$1" = link ] || exit 1
+shift
+case "$1" in
+  add)
+    shift
+    [ "$1" = link ] || exit 1; lower="$2"; shift 2
+    [ "$1" = name ] || exit 1; ifc="$2"; shift 2
+    [ "$1" = type ] && [ "$2" = vlan ] || exit 1; shift 2
+    [ "$1" = id ] || exit 1; vid="$2"
+    mkdir -p "$MERV_WAN_NET_ROOT/$ifc" || exit 1
+    { printf '%s  VID: %s\n' "$ifc" "$vid"; printf 'Device: %s\n' "$lower"; } > "$MERV_WAN_PROC_VLAN_ROOT/$ifc"
+    ;;
+  set)
+    if [ "${FAIL_MAC_DRIFT:-}" = 1 ] && [ "$2" != address ]; then
+      printf '%s\n' '02:00:00:00:00:ff' > "$MERV_WAN_NET_ROOT/br0/address"
+    fi
+    [ "${FAIL_MAC_RESTORE:-}" = 1 ] && [ "$2" = address ] && exit 1
+    :
+    ;;
+  del)
+    ifc="$2"
+    for x in "$MERV_WAN_NET_ROOT"/*/brif/"$ifc"; do [ -e "$x" ] && rm -f "$x" || :; done
+    rm -rf "$MERV_WAN_NET_ROOT/$ifc" "$MERV_WAN_PROC_VLAN_ROOT/$ifc"
+    ;;
+  *) exit 1 ;;
+esac
+MERV_WAN_IP
+  chmod 755 "$_twn_bin/brctl" "$_twn_bin/ip" "$_twn_bin/nvram" || return 1
+  _twn_settings="$_twn_base/settings/settings.json"
+  json_set_section2_value VLAN WAN_Native MAIN_WAN_NATIVE_IP "$_twn_dhcp_expected" "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native MAIN_ASUS_IP 192.0.2.10 "$_twn_settings" || return 1
+  _twn_dhcp_pid=4242
+  printf '%s\n' "$_twn_dhcp_pid" > "$_twn_dhcp_pidfile"
+  # The production helper validates PID/start identity against /proc.  This
+  # isolated fixture uses a private proc root and an authenticated fake
+  # udhcpc identity; the signal itself is published to a marker file, so no
+  # host process is ever signalled.
+  mkdir -p "$_twn_proc/$_twn_dhcp_pid" || return 1
+  {
+    printf '%s' '(udhcpc) S'
+    _twn_stat_i=1
+    while [ "$_twn_stat_i" -lt 19 ]; do printf '%s' ' 0'; _twn_stat_i=$((_twn_stat_i + 1)); done
+    printf '%s\n' ' 424242'
+  } > "$_twn_proc/$_twn_dhcp_pid/stat" || return 1
+  printf 'udhcpc\000-i\000br0\000-p\000%s\000-s\000/sbin/rc\000-H\000wan-test\000' "$_twn_dhcp_pidfile" > "$_twn_proc/$_twn_dhcp_pid/cmdline" || return 1
+  printf '%s\n' 424242 > "${_twn_dhcp_pidfile}.start"
+
+  _twn_run() {
+    PATH="$_twn_bin:$PATH" MERV_BASE="$_twn_base" DRY_RUN=no \
+      WAN_TEST_LAN_PROTO="${WAN_TEST_LAN_PROTO:-dhcp}" \
+      WAN_TEST_EXPECTED_ADDRESS="${WAN_TEST_EXPECTED_ADDRESS:-192.0.2.20}" \
+      WAN_TEST_PIDFILE="$_twn_dhcp_pidfile" WAN_TEST_ADDRESS_FILE="$_twn_dhcp_addr" \
+      WAN_TEST_SUPPRESS_FILE="$_twn_root/no-address" \
+      MERV_WAN_DHCP_PIDFILE="$_twn_dhcp_pidfile" \
+      MERV_WAN_DHCP_TEST_ADDRESS_FILE="$_twn_dhcp_addr" \
+      MERV_WAN_DHCP_TEST_LIFECYCLE_FILE="$_twn_root/dhcp.lifecycle" \
+      MERV_WAN_DHCP_TEST_SUPPRESS_FILE="$_twn_root/no-address" \
+      MERV_WAN_DHCP_TEST_ADDRESS_PREFIX="/24" \
+      MERV_WAN_DHCP_TEST_DELAY_POLLS="${WAN_TEST_DHCP_DELAY_POLLS:-0}" \
+      MERV_WAN_DHCP_TEST_TERM_AFTER_RELEASE="${WAN_TEST_DHCP_TERM_AFTER_RELEASE:-0}" \
+      MERV_WAN_DHCP_TEST_TERM_AFTER_TERMINATE="${WAN_TEST_DHCP_TERM_AFTER_TERMINATE:-0}" \
+      MERV_WAN_DHCP_TEST_RELEASE_STAYS_ALIVE="${WAN_TEST_DHCP_RELEASE_STAYS_ALIVE:-0}" \
+      MERV_WAN_DHCP_TEST_TERM_STICKS="${WAN_TEST_DHCP_TERM_STICKS:-0}" \
+      MERV_WAN_DHCP_TEST_STALE_PIDFILE="${WAN_TEST_DHCP_STALE_PIDFILE:-0}" \
+      MERV_WAN_DHCP_TEST_STALE_ADDRESS="${WAN_TEST_DHCP_STALE_ADDRESS:-0}" \
+      MERV_WAN_DHCP_TEST_REUSE_AFTER_RELEASE="${WAN_TEST_DHCP_REUSE_AFTER_RELEASE:-0}" \
+      MERV_WAN_DHCP_TEST_CMDLINE_CHANGE_AFTER_RELEASE="${WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE:-0}" \
+      MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_TERM="${WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM:-0}" \
+      MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_START="${WAN_TEST_DHCP_DUPLICATE_BEFORE_START:-0}" \
+      MERV_WAN_DHCP_WAIT_SEC="${WAN_TEST_DHCP_WAIT_SEC:-1}" \
+      MERV_WAN_DHCP_RELEASE_WAIT_SEC="${WAN_TEST_DHCP_RELEASE_WAIT_SEC:-1}" \
+      MERV_WAN_DHCP_TERM_WAIT_SEC="${WAN_TEST_DHCP_TERM_WAIT_SEC:-1}" \
+      MERV_WAN_NET_ROOT="$_twn_net" MERV_WAN_PROC_VLAN_ROOT="$_twn_proc" MERV_WAN_DHCP_PROC_ROOT="$_twn_proc" \
+      sh -c 'WAN_TEST_SIGNAL_PID=$$; export WAN_TEST_SIGNAL_PID; exec sh "$1" "$2"' \
+      sh "$_twn_base/functions/mervlan_wan.sh" "$1"
+  }
+  _twn_member() { [ -e "$_twn_net/br0/brif/$1" ]; }
+  _twn_dhcp_reset() {
+    _twn_reset_callback="${1:-/sbin/rc}"
+    _twn_reset_pid="${2:-4242}"
+    _twn_reset_hostname="${3:-wan-test}"
+    rm -rf "$_twn_proc"/[0-9]*
+    rm -f "$_twn_dhcp_pidfile" "${_twn_dhcp_pidfile}.start" "$_twn_root/dhcp.lifecycle" "$_twn_root/dhcp.lifecycle.launch-failed"
+    mkdir -p "$_twn_proc/$_twn_reset_pid" || return 1
+    {
+      printf '%s' '(udhcpc) S'; _twn_reset_i=1
+      while [ "$_twn_reset_i" -lt 19 ]; do printf '%s' ' 0'; _twn_reset_i=$((_twn_reset_i + 1)); done
+      printf '%s\n' ' 424242'
+    } > "$_twn_proc/$_twn_reset_pid/stat" || return 1
+    printf 'udhcpc\000-i\000br0\000-p\000%s\000-s\000%s\000-H\000%s\000' "$_twn_dhcp_pidfile" "$_twn_reset_callback" "$_twn_reset_hostname" > "$_twn_proc/$_twn_reset_pid/cmdline" || return 1
+    printf '%s\n' "$_twn_reset_pid" > "$_twn_dhcp_pidfile" || return 1
+    printf '%s\n' 424242 > "${_twn_dhcp_pidfile}.start" || return 1
+    printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+  }
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 10 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.10 && ! _twn_member eth0 && _twn_run verify >/dev/null 2>&1 && _twn_run health >/dev/null 2>&1; then
+    pass "WAN Native converges ASUS -> VLAN 10"
+  else fail "WAN Native converges ASUS -> VLAN 10"; _twn_ok=1; fi
+
+  # ASUSWRT's observed LAN-client hostname contains an underscore.  It is a
+  # bounded accepted firmware form, not an arbitrary argv escape hatch.
+  _twn_dhcp_reset /sbin/rc 4242 ZenWiFi_XT8-79F0 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 11 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.11 && ! _twn_member eth0.10; then
+    pass "WAN Native accepts observed ASUS DHCP hostname form"
+  else fail "WAN Native accepts observed ASUS DHCP hostname form"; _twn_ok=1; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 20 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.20 && ! _twn_member eth0.10 && [ ! -d "$_twn_net/eth0.10" ] && _twn_run verify >/dev/null 2>&1; then
+    pass "WAN Native migrates VLAN 10 -> VLAN 20 and removes stale native upper"
+  else fail "WAN Native migrates VLAN 10 -> VLAN 20 and removes stale native upper"; _twn_ok=1; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0 && ! _twn_member eth0.20 && [ ! -d "$_twn_net/eth0.20" ] && _twn_run verify >/dev/null 2>&1; then
+    if _twn_run health >/dev/null 2>&1 && [ "$(sed -n '1p' "$_twn_dhcp_addr")" = "192.0.2.10/24" ]; then
+      pass "WAN Native restores VLAN 20 -> ASUS with fresh MAIN DHCP"
+    else fail "WAN Native restores VLAN 20 -> ASUS with fresh MAIN DHCP"; _twn_ok=1; fi
+  else fail "WAN Native restores VLAN 20 -> ASUS"; _twn_ok=1; fi
+
+  # Reverse MAIN handoff is its own transaction: failure to acquire the ASUS
+  # endpoint must restore both the VLAN-20 bridge member and VLAN-20 DHCP
+  # state, rather than leaving mixed L2/L3 domains behind.
+  _twn_dhcp_reset /sbin/rc || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 20 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+  : > "$_twn_root/no-address"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  WAN_TEST_DHCP_WAIT_SEC=0 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  rm -f "$_twn_root/no-address"
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.20 && ! _twn_member eth0 &&
+     [ "$(sed -n '1p' "$_twn_dhcp_addr")" = "192.0.2.20/24" ]; then
+    pass "WAN Native ASUS reacquisition timeout rolls back to numeric L2 and L3"
+  else fail "WAN Native ASUS reacquisition timeout rolls back to numeric L2 and L3"; _twn_ok=1; fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+
+  rm -f "$_twn_net/br0/brif/eth0"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  if _twn_run health >/dev/null 2>&1 || _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native rejects unsupported ASUS topology without physical uplink"; _twn_ok=1
+  else
+    pass "WAN Native rejects unsupported ASUS topology without physical uplink"
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 50 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native validate rejects missing native replacement path"; _twn_ok=1
+  else
+    pass "WAN Native validate rejects missing native replacement path"
+  fi
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native refuses to invent a new br0 path on non-native WAN"; _twn_ok=1
+  elif [ ! -d "$_twn_net/eth0.50" ]; then
+    pass "WAN Native refuses to invent a new br0 path on non-native WAN"
+  else fail "WAN Native refuses to invent a new br0 path on non-native WAN"; _twn_ok=1; fi
+  : > "$_twn_net/br0/brif/eth0"
+
+  # Live preflight must fail closed when either required base interface is
+  # absent, without inventing or mutating a replacement path.
+  mv "$_twn_net/br0" "$_twn_root/br0-missing" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native validate rejects missing br0"; _twn_ok=1
+  else
+    pass "WAN Native validate rejects missing br0"
+  fi
+  mv "$_twn_root/br0-missing" "$_twn_net/br0" || return 1
+  mv "$_twn_net/eth0" "$_twn_root/eth0-missing" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native validate rejects missing uplink"; _twn_ok=1
+  else
+    pass "WAN Native validate rejects missing uplink"
+  fi
+  mv "$_twn_root/eth0-missing" "$_twn_net/eth0" || return 1
+
+  # An existing target owned by another bridge is not a valid replacement
+  # candidate, even when its VLAN metadata names the expected lower device.
+  mkdir -p "$_twn_net/br1/brif" "$_twn_net/eth0.101" || return 1
+  : > "$_twn_net/br1/brif/eth0.101"
+  {
+    printf 'eth0.101  VID: 101\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.101"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 101 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects target owned by another bridge"; _twn_ok=1
+  else
+    pass "WAN Native rejects target owned by another bridge"
+  fi
+  rm -f "$_twn_net/br1/brif/eth0.101"
+  rm -rf "$_twn_net/br1" "$_twn_net/eth0.101" "$_twn_proc/eth0.101"
+
+  # Both halves of target identity are independently required: wrong VID and
+  # wrong lower-device metadata must each reject an existing upper.
+  mkdir -p "$_twn_net/eth0.102" || return 1
+  : > "$_twn_net/br0/brif/eth0.102"
+  {
+    printf 'eth0.102  VID: 101\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.102"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 102 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects existing target with wrong VID metadata"; _twn_ok=1
+  else
+    pass "WAN Native rejects existing target with wrong VID metadata"
+  fi
+  {
+    printf 'eth0.102  VID: 102\n'; printf 'Device: other0\n'
+  } > "$_twn_proc/eth0.102"
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects existing target with wrong lower metadata"; _twn_ok=1
+  else
+    pass "WAN Native rejects existing target with wrong lower metadata"
+  fi
+  rm -f "$_twn_net/br0/brif/eth0.102"
+  rm -rf "$_twn_net/eth0.102" "$_twn_proc/eth0.102"
+
+  # A pre-existing upper with no deterministic procfs identity must be
+  # rejected before validation or mutation; the interface name alone is not
+  # proof of its VLAN ID or lower device.
+  mkdir -p "$_twn_net/eth0.60" || return 1
+  : > "$_twn_net/br0/brif/eth0.60"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 60 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects existing upper without VLAN/lower metadata"; _twn_ok=1
+  else
+    pass "WAN Native rejects existing upper without VLAN/lower metadata"
+  fi
+  rm -f "$_twn_net/br0/brif/eth0.60"
+  rm -rf "$_twn_net/eth0.60" "$_twn_proc/eth0.60"
+
+  # Multiple native members are all captured and removed, while an unrelated
+  # detached upper remains outside this helper's deletion ownership.
+  mkdir -p "$_twn_net/eth0.60" "$_twn_net/eth0.61" "$_twn_net/eth0.200" || return 1
+  {
+    printf 'eth0.60  VID: 60\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.60"
+  {
+    printf 'eth0.61  VID: 61\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.61"
+  {
+    printf 'eth0.200  VID: 200\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.200"
+  : > "$_twn_net/br0/brif/eth0.60"
+  : > "$_twn_net/br0/brif/eth0.61"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 70 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.70 && ! _twn_member eth0.60 && ! _twn_member eth0.61 &&
+     [ ! -d "$_twn_net/eth0.60" ] && [ ! -d "$_twn_net/eth0.61" ] && [ -d "$_twn_net/eth0.200" ] && ! _twn_member eth0.200; then
+    pass "WAN Native handles multiple native members and preserves detached unrelated upper"
+  else
+    fail "WAN Native handles multiple native members and preserves detached unrelated upper"; _twn_ok=1
+  fi
+
+  # Re-applying the selected, already-verified target is idempotent and does
+  # not disturb unrelated detached uppers.
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.70 && [ -d "$_twn_net/eth0.200" ] && _twn_run verify >/dev/null 2>&1; then
+    pass "WAN Native same selection is idempotent"
+  else
+    fail "WAN Native same selection is idempotent"; _twn_ok=1
+  fi
+
+  FAIL_DEL_IF=eth0.70; export FAIL_DEL_IF
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 80 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native detach failure is fail-closed"; _twn_ok=1
+  elif _twn_member eth0.70 && ! _twn_member eth0.80 && [ ! -d "$_twn_net/eth0.80" ]; then
+    pass "WAN Native detach failure restores captured native path"
+  else
+    fail "WAN Native detach failure restores captured native path"; _twn_ok=1
+  fi
+  unset FAIL_DEL_IF
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 1 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects VLAN 1"; _twn_ok=1; else pass "WAN Native rejects VLAN 1"; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 4095 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects VLAN 4095"; _twn_ok=1; else pass "WAN Native rejects VLAN 4095"; fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN not-a-vlan "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects nonnumeric VLAN"; _twn_ok=1; else pass "WAN Native rejects nonnumeric VLAN"; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 31 "$_twn_settings" || return 1
+  json_set_section2_value WiFi SSIDs SSID_01 guest "$_twn_settings" || return 1
+  json_set_section2_value VLAN Pool VLAN_01 31 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects SSID VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects SSID VLAN conflict"; fi
+  json_set_section2_value WiFi SSIDs SSID_01 unused-placeholder "$_twn_settings" || return 1
+  json_set_section2_value VLAN Pool VLAN_01 none "$_twn_settings" || return 1
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 32 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TRUNK1 1 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 32 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects tagged trunk VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects tagged trunk VLAN conflict"; fi
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 none "$_twn_settings" || return 1
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 33 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks UNTAGGED_TRUNK1 33 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects untagged trunk VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects untagged trunk VLAN conflict"; fi
+  json_set_section2_value VLAN Trunks UNTAGGED_TRUNK1 none "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TRUNK1 0 "$_twn_settings" || return 1
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 30 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Ethernet_ports ETH1_VLAN 30 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects same-device access VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects same-device access VLAN conflict"; fi
+  json_set_section2_value VLAN Ethernet_ports ETH1_VLAN none "$_twn_settings" || return 1
+
+  FAIL_ADD_IF=eth0.30; export FAIL_ADD_IF
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native replacement attach failure is fail-closed"; _twn_ok=1
+  elif _twn_member eth0.70 && ! _twn_member eth0.30 && [ ! -d "$_twn_net/eth0.30" ]; then
+    pass "WAN Native replacement attach failure rolls back prior path"
+  else
+    fail "WAN Native replacement attach failure rolls back prior path"; _twn_ok=1
+  fi
+  unset FAIL_ADD_IF
+
+  json_set_section_value General NODE_ID 1 "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 77 "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_NODE1 44 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.44 && ! _twn_member eth0 && _twn_run verify >/dev/null 2>&1; then
+    pass "WAN Native selects the per-node NODE1 setting"
+  else fail "WAN Native selects the per-node NODE1 setting"; _twn_ok=1; fi
+
+  # DHCP handoff is MAIN-only: a node with a static LAN remains untouched by
+  # the MAIN protocol guard and does not signal the MAIN udhcpc fixture.
+  _twn_node_address_before="$(cat "$_twn_dhcp_addr" 2>/dev/null)"
+  WAN_TEST_LAN_PROTO=static _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.44 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "$_twn_node_address_before" ]; then
+    pass "WAN Native leaves node LAN policy untouched"
+  else
+    fail "WAN Native leaves node LAN policy untouched"; _twn_ok=1
+  fi
+
+  # MAIN trunks do not exist on node runtime. Shared settings may therefore use
+  # a VLAN on a MAIN trunk and independently use that VID as NODE1 WAN Native.
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_NODE1 45 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TRUNK1 1 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 45 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    pass "WAN Native node validation ignores MAIN-only trunk VLANs"
+  else fail "WAN Native node validation ignores MAIN-only trunk VLANs"; _twn_ok=1; fi
+  json_set_section2_value VLAN Trunks TRUNK1 0 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 none "$_twn_settings" || return 1
+
+  # Signals delivered during the active membership transaction must restore
+  # the captured path and retain the conventional TERM status.  The fake
+  # brctl sends TERM from the exact detach/add transition once per run.
+  json_set_section_value General NODE_ID none "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 90 "$_twn_settings" || return 1
+  WAN_TEST_SIGNAL_PHASE=detach-before-attach WAN_TEST_SIGNAL_IF=eth0.44 \
+    WAN_TEST_SIGNAL_ONCE="$_twn_root/signal-detach.once"
+  export WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native TERM after detach is nonzero and fail-closed"; _twn_ok=1
+  elif [ "$_twn_rc" -ne 143 ]; then
+    fail "WAN Native TERM after detach preserves status 143"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.90 && [ ! -d "$_twn_net/eth0.90" ]; then
+    pass "WAN Native TERM after detach restores captured members"
+  else
+    fail "WAN Native TERM after detach restores captured members"; _twn_ok=1
+  fi
+  unset WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+
+  WAN_TEST_SIGNAL_PHASE=attach-before-verify WAN_TEST_SIGNAL_IF=eth0.91 \
+    WAN_TEST_SIGNAL_ONCE="$_twn_root/signal-attach.once"
+  export WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 91 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native TERM after attach is nonzero and fail-closed"; _twn_ok=1
+  elif [ "$_twn_rc" -ne 143 ]; then
+    fail "WAN Native TERM after attach preserves status 143"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.91 && [ ! -d "$_twn_net/eth0.91" ]; then
+    pass "WAN Native TERM after attach restores captured members"
+  else
+    fail "WAN Native TERM after attach restores captured members"; _twn_ok=1
+  fi
+  unset WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+
+  # Corrupting verified metadata after attach forces verify_live to fail; the
+  # same rollback path must restore the previous native upper.
+  FAIL_VERIFY_IF=eth0.92; export FAIL_VERIFY_IF
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 92 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native verification failure is fail-closed"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.92 && [ ! -d "$_twn_net/eth0.92" ]; then
+    pass "WAN Native verification failure restores captured members"
+  else
+    fail "WAN Native verification failure restores captured members"; _twn_ok=1
+  fi
+  unset FAIL_VERIFY_IF
+
+  # If convergence finds an extra captured native member after the target is
+  # already attached, removal failure must restore every original member and
+  # return nonzero.
+  rm -f "$_twn_net/br0/brif/eth0.44"
+  mkdir -p "$_twn_net/eth0.94" "$_twn_net/eth0.95" || return 1
+  {
+    printf 'eth0.94  VID: 94\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.94"
+  {
+    printf 'eth0.95  VID: 95\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.95"
+  : > "$_twn_net/br0/brif/eth0.94"
+  : > "$_twn_net/br0/brif/eth0.95"
+  FAIL_DEL_IF=eth0.95; export FAIL_DEL_IF
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 94 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native extra-member removal failure is nonzero"; _twn_ok=1
+  elif _twn_member eth0.94 && _twn_member eth0.95; then
+    pass "WAN Native extra-member removal failure restores all captured members"
+  else
+    fail "WAN Native extra-member removal failure restores all captured members"; _twn_ok=1
+  fi
+  unset FAIL_DEL_IF
+  rm -f "$_twn_net/br0/brif/eth0.94" "$_twn_net/br0/brif/eth0.95"
+  rm -rf "$_twn_net/eth0.94" "$_twn_net/eth0.95" "$_twn_proc/eth0.94" "$_twn_proc/eth0.95"
+  : > "$_twn_net/br0/brif/eth0.44"
+
+  # Force a bridge-MAC drift before restore and make the restore command fail;
+  # membership rollback remains mandatory and the operation must be nonzero.
+  FAIL_MAC_DRIFT=1 FAIL_MAC_RESTORE=1; export FAIL_MAC_DRIFT FAIL_MAC_RESTORE
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 93 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native MAC restore failure is nonzero"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.93 && [ ! -d "$_twn_net/eth0.93" ]; then
+    pass "WAN Native MAC restore failure rolls back native membership"
+  else
+    fail "WAN Native MAC restore failure rolls back native membership"; _twn_ok=1
+  fi
+  unset FAIL_MAC_DRIFT FAIL_MAC_RESTORE
+  printf '%s\n' '02:00:00:00:00:01' > "$_twn_net/br0/address"
+
+  # Record bridge operations to prove no replacement attach happens until all
+  # captured native members have been detached.
+  rm -f "$_twn_net/br0/brif/eth0.44"
+  mkdir -p "$_twn_net/eth0.96" "$_twn_net/eth0.97" || return 1
+  {
+    printf 'eth0.96  VID: 96\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.96"
+  {
+    printf 'eth0.97  VID: 97\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.97"
+  : > "$_twn_net/br0/brif/eth0.96"
+  : > "$_twn_net/br0/brif/eth0.97"
+  _twn_order_log="$_twn_root/order.log"
+  : > "$_twn_order_log"
+  WAN_TEST_ORDER_LOG="$_twn_order_log"; export WAN_TEST_ORDER_LOG
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 &&
+     [ "$(sed -n '1p' "$_twn_order_log")" = "del eth0.96" ] &&
+     [ "$(sed -n '2p' "$_twn_order_log")" = "del eth0.97" ] &&
+     [ "$(sed -n '3p' "$_twn_order_log")" = "add eth0.98" ] &&
+     [ "$(wc -l < "$_twn_order_log")" -eq 3 ]; then
+    pass "WAN Native detaches every captured member before target attach"
+  else
+    fail "WAN Native detaches every captured member before target attach"; _twn_ok=1
+  fi
+  unset WAN_TEST_ORDER_LOG
+
+  # MAIN static LAN is rejected before any bridge operation.  The target and
+  # captured native member must remain exactly as they were before preflight.
+  : > "$_twn_order_log"
+  json_set_section_value General NODE_ID none "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  if WAN_TEST_LAN_PROTO=static _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native manager preflight rejects numeric MAIN on static LAN"; _twn_ok=1
+  else
+    pass "WAN Native manager preflight rejects numeric MAIN on static LAN"
+  fi
+  WAN_TEST_LAN_PROTO=static _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native blocks numeric MAIN on static LAN before mutation"
+  else
+    fail "WAN Native blocks numeric MAIN on static LAN before mutation"; _twn_ok=1
+  fi
+
+  # The explicit MAIN endpoint is production state, not a test-only default.
+  # Its absence must fail before bridge mutation even when LAN DHCP is active.
+  json_set_section2_value VLAN WAN_Native MAIN_WAN_NATIVE_IP none "$_twn_settings" || return 1
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native requires persisted MAIN DHCP endpoint before mutation"
+  else
+    fail "WAN Native requires persisted MAIN DHCP endpoint before mutation"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native MAIN_WAN_NATIVE_IP "$_twn_dhcp_expected" "$_twn_settings" || return 1
+
+  # Reboots can remove the configured MerVLAN tmp root before any manager
+  # initialization. DHCP argv identity parsing must fall back to /tmp rather
+  # than turning this read-only preflight into a false safety failure.
+  MERV_WAN_DHCP_TMP_ROOT="$_twn_root/missing-tmpdir"; export MERV_WAN_DHCP_TMP_ROOT
+  if _twn_run validate >/dev/null 2>&1; then
+    pass "WAN Native DHCP identity preflight tolerates missing configured tmp root"
+  else
+    fail "WAN Native DHCP identity preflight tolerates missing configured tmp root"; _twn_ok=1
+  fi
+  unset MERV_WAN_DHCP_TMP_ROOT
+
+  # Delayed lease publication must be observed before commit.  The fake
+  # address is CIDR-shaped at rest, while persisted endpoint is host-only.
+  printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+  WAN_TEST_DHCP_DELAY_POLLS=1 WAN_TEST_DHCP_WAIT_SEC=2 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 && ! _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.20/24" ]; then
+    pass "WAN Native accepts delayed persisted MAIN DHCP endpoint acquisition"
+  else
+    fail "WAN Native accepts delayed persisted MAIN DHCP endpoint acquisition"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  WAN_TEST_DHCP_DELAY_POLLS=0 WAN_TEST_DHCP_WAIT_SEC=1 _twn_run apply >/dev/null 2>&1 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+
+  # A successful release/restart is not success by itself: without the expected
+  # lease, bounded acquisition times out and restores both L2 membership and
+  # the captured L3 address through a fresh original-domain lifecycle.
+  printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+  : > "$_twn_root/no-address"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  WAN_TEST_DHCP_WAIT_SEC=1 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  rm -f "$_twn_root/no-address"
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ]; then
+    pass "WAN Native DHCP restart timeout rolls back L2 and L3"
+  else
+    fail "WAN Native DHCP restart timeout rolls back L2 and L3"; _twn_ok=1
+  fi
+
+  # Lifecycle authentication rejects an unexpected callback before bridge
+  # mutation; no process control action may occur for a foreign argv.
+  _twn_dhcp_reset /not-asus/rc || return 1
+  : > "$_twn_order_log"
+  : > "$_twn_root/dhcp.lifecycle"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ ! -s "$_twn_root/dhcp.lifecycle" ] && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native rejects unexpected ASUS udhcpc callback before mutation"
+  else
+    fail "WAN Native rejects unexpected ASUS udhcpc callback before mutation"; _twn_ok=1
+  fi
+
+  # This is the exact live ASUS behavior: RELEASE deconfigures the old lease
+  # but leaves the authenticated process alive. It must then be explicitly
+  # terminated before exactly one fresh target-domain client is started.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_order_log"
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1; export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 && ! _twn_member eth0.98 &&
+     [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.20/24" ] &&
+     grep -q '^release 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^terminate 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^start 4243$' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native RELEASE-live client terminates before one replacement starts"
+  else
+    fail "WAN Native RELEASE-live client terminates before one replacement starts"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+
+  # A released but still-live client that ignores TERM must never compete with
+  # a new client. Rollback restores L2 before renewing the exact client.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_TERM_STICKS=1 WAN_TEST_DHCP_TERM_WAIT_SEC=0
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_STICKS WAN_TEST_DHCP_TERM_WAIT_SEC
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_STICKS WAN_TEST_DHCP_TERM_WAIT_SEC
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
+     grep -q '^terminate 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^renew 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native TERM timeout renews released client only after L2 rollback"
+  else
+    fail "WAN Native TERM timeout renews released client only after L2 rollback"; _twn_ok=1
+  fi
+
+  # A PID/start identity change after RELEASE must block TERM and any fresh
+  # client. L2 is still restored, but the unknown process is never signalled.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_REUSE_AFTER_RELEASE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_REUSE_AFTER_RELEASE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_REUSE_AFTER_RELEASE
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     grep -q '^release 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^terminate ' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native never TERM-signals a reused DHCP PID after RELEASE"
+  else
+    fail "WAN Native never TERM-signals a reused DHCP PID after RELEASE"; _twn_ok=1
+  fi
+
+  # A changed argv is likewise an unknown process: do not signal or replace it.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     ! grep -q '^terminate ' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native never replaces an altered DHCP client after RELEASE"
+  else
+    fail "WAN Native never replaces an altered DHCP client after RELEASE"; _twn_ok=1
+  fi
+
+  # A second valid client that appears during RELEASE is ambiguous and blocks
+  # both TERM and replacement launch.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     ! grep -q '^terminate ' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native rejects a second DHCP client before TERM"
+  else
+    fail "WAN Native rejects a second DHCP client before TERM"; _twn_ok=1
+  fi
+
+  # The exiting RELEASE branch must also reject another client before the
+  # replacement boundary; the helper may not collapse or overwrite it.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_DUPLICATE_BEFORE_START=1; export WAN_TEST_DHCP_DUPLICATE_BEFORE_START
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_DUPLICATE_BEFORE_START
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native rejects a DHCP client that appears before replacement"
+  else
+    fail "WAN Native rejects a DHCP client that appears before replacement"; _twn_ok=1
+  fi
+
+  # An interrupt after SIGTERM but before exit follows the same L2-first,
+  # exact-client renew recovery path and keeps status 143.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_TERM_AFTER_TERMINATE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_TERMINATE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_TERMINATE
+  if [ "$_twn_rc" -eq 143 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     grep -q '^terminate 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^renew 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native TERM after DHCP SIGTERM restores released client safely"
+  else
+    fail "WAN Native TERM after DHCP SIGTERM restores released client safely"; _twn_ok=1
+  fi
+
+  # RELEASE may legitimately exit the client. A pidfile left behind may be
+  # cleaned only after the old authenticated process is proved gone.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_STALE_PIDFILE=1; export WAN_TEST_DHCP_STALE_PIDFILE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_STALE_PIDFILE
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 &&
+     grep -q '^start 4243$' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native clears only proven stale DHCP pidfile after released exit"
+  else
+    fail "WAN Native clears only proven stale DHCP pidfile after released exit"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+
+  # A fresh release must remove the old lease; leaving it installed fails
+  # closed before any replacement client is started.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_STALE_ADDRESS=1 WAN_TEST_DHCP_RELEASE_WAIT_SEC=0
+  export WAN_TEST_DHCP_STALE_ADDRESS WAN_TEST_DHCP_RELEASE_WAIT_SEC
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_STALE_ADDRESS WAN_TEST_DHCP_RELEASE_WAIT_SEC
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
+     [ "$(grep -c '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null)" -ge 1 ]; then
+    pass "WAN Native rejects stale address after DHCP release"
+  else
+    fail "WAN Native rejects stale address after DHCP release"; _twn_ok=1
+  fi
+
+  # A replacement launch failure leaves no target client; rollback uses the
+  # captured authenticated argv contract to restore one original-domain client.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  MERV_WAN_DHCP_TEST_LAUNCH_FAIL=1 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
+     [ "$(grep -c '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null)" -ge 1 ]; then
+    pass "WAN Native replacement launch failure restores original DHCP client"
+  else
+    fail "WAN Native replacement launch failure restores original DHCP client"; _twn_ok=1
+  fi
+
+  # A second authenticated LAN client is never collapsed or signalled by this
+  # helper; the ambiguous state fails closed before transport mutation.
+  _twn_dhcp_reset /sbin/rc || return 1
+  cp -R "$_twn_proc/4242" "$_twn_proc/4243" || return 1
+  sed 's/424242/424243/' "$_twn_proc/4243/stat" > "$_twn_proc/4243/stat.tmp" && mv "$_twn_proc/4243/stat.tmp" "$_twn_proc/4243/stat"
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98; then
+    pass "WAN Native rejects duplicate authenticated LAN DHCP clients"
+  else
+    fail "WAN Native rejects duplicate authenticated LAN DHCP clients"; _twn_ok=1
+  fi
+  _twn_dhcp_reset /sbin/rc || return 1
+
+  # A TERM immediately after live-client RELEASE is an interruption point.
+  # The transaction trap must restore L2 before renewing that same exact
+  # released client, then retain the conventional signal status.
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  _twn_dhcp_reset /sbin/rc || return 1
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_TERM_AFTER_RELEASE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_RELEASE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_RELEASE
+  if [ "$_twn_rc" -eq 143 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ]; then
+    pass "WAN Native TERM after DHCP release restores original DHCP lifecycle"
+  else
+    fail "WAN Native TERM after DHCP release restores original DHCP lifecycle"; _twn_ok=1
+  fi
+  _twn_dhcp_reset /sbin/rc || return 1
+
+  # PID zero and a mismatched start-time sidecar are both rejected before any
+  # signal or bridge operation; this covers positive/non-reused PID safety.
+  printf '%s\n' 0 > "$_twn_dhcp_pidfile"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 100 "$_twn_settings" || return 1
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native rejects non-positive udhcpc PID"
+  else
+    fail "WAN Native rejects non-positive udhcpc PID"; _twn_ok=1
+  fi
+  printf '%s\n' "$_twn_dhcp_pid" > "$_twn_dhcp_pidfile"
+  printf '%s\n' 999999999 > "${_twn_dhcp_pidfile}.start"
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  rm -f "${_twn_dhcp_pidfile}.start"
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native rejects reused udhcpc PID identity"
+  else
+    fail "WAN Native rejects reused udhcpc PID identity"; _twn_ok=1
+  fi
+
+  if grep -Fq 'Preserving live WAN Native transport' "$MERV_BASE/functions/mervlan_manager.sh" &&
+     [ "$(grep -c 'run_wan_native apply' "$MERV_BASE/functions/mervlan_manager.sh" 2>/dev/null)" -ge 2 ] &&
+     grep -Fq 'run_wan_native verify' "$MERV_BASE/functions/mervlan_manager.sh"; then
+    pass "manager protects, reapplies, and finally verifies WAN Native"
+  else fail "manager protects, reapplies, and finally verifies WAN Native"; _twn_ok=1; fi
+
+  if grep -Fq 'functions/mervlan_wan.sh' "$MERV_BASE/functions/sync_nodes.sh" &&
+     grep -Fq 'functions/mervlan_wan.sh' "$MERV_BASE/functions/update_mervlan.sh" &&
+     grep -Fq 'functions/mervlan_wan.sh' "$MERV_BASE/functions/update_mervlan_repair.manifest"; then
+    pass "WAN Native helper is covered by node sync, update, and repair manifests"
+  else fail "WAN Native helper is covered by node sync, update, and repair manifests"; _twn_ok=1; fi
+
+  if grep -Fq 'wan_main_dhcp_restart()' "$MERV_BASE/functions/mervlan_wan.sh" &&
+     grep -Fq 'nvram get lan_proto' "$MERV_BASE/functions/mervlan_wan.sh" &&
+     grep -Fq 'kill -USR2' "$MERV_BASE/functions/mervlan_wan.sh"; then
+    pass "WAN Native restarts MAIN DHCP only after verified transport swap"
+  else fail "WAN Native DHCP restart contract is wired"; _twn_ok=1; fi
+
+  if grep -Fq 'class="no-vlanfield wan-native-value"' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'wan-native-input' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'validateAllWanNativeSettings' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'WAN_NATIVE_MAIN' "$MERV_BASE/settings/settings.json" &&
+     grep -Fq 'json_set_section2_value "VLAN" "WAN_Native"' "$MERV_BASE/functions/save_settings.sh"; then
+    pass "WAN Native UI, schema, and sectioned save path are wired"
+  else fail "WAN Native UI, schema, and sectioned save path are wired"; _twn_ok=1; fi
+
+  # Safety-popup contract: the table owns the one visible VLAN field, while the
+  # form-anchored dialog owns only DHCP reservation endpoints and stages them
+  # through the normal settings transaction.
+  if grep -Fq 'wanNativeConfigPopup' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'function saveWanNativeConfig' "$MERV_BASE/www/index.html" &&
+     grep -Fq "openHelpPopup('wan-native')" "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'WanNativeIpField' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'WAN Native VLAN ID' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wan-native-edit-btn' "$MERV_BASE/www/index.html" &&
+     grep -Fq '>Edit</button><span id="statusWAN_NATIVE"' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'wan-native-config-btn' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativePopupVlan' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'wanNativePopupEdit' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativePopupNodeIp' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativePopupNodeAsusIp' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'cachedWanNativeIp' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'WAN_NATIVE_POPUP_STATE && target !== CURRENT_LAN_TARGET' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'requires both DHCP reservations' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'requires a WAN Native DHCP reservation' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'nodeAsusRow.style.display = isMain ?' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'min-width:var(--wan-native-edit-width, 50px);' "$MERV_BASE/www/vlan_form_style.css" &&
+     grep -Fq 'value.textContent = (!raw || raw.toLowerCase() === "none") ? "ASUS" : raw' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'validateWanNativeField(wanInput' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'anchorModalToForm(popup)' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'top: 16%' "$MERV_BASE/www/vlan_form_style.css" &&
+     grep -Fq 'wan-native-popup.modal' "$MERV_BASE/www/vlan_form_style.css"; then
+    pass "WAN Native uses a compact form-anchored DHCP reservation editor"
+  else
+    fail "WAN Native uses a compact form-anchored DHCP reservation editor"
+    _twn_ok=1
+  fi
+
+  return "$_twn_ok"
+}
+
 test_shell_syntax() {
   _tss_bad=0
   if grep -q 'grep -c "\^-s ".*|| :' "$MERV_BASE/functions/mervlan_boot.sh"; then
@@ -3603,6 +4504,7 @@ test_shell_syntax() {
     "$MERV_BASE/functions/mac_refresh.sh" \
     "$MERV_BASE/functions/service-event-handler.sh" \
     "$MERV_BASE/functions/mervlan_manager.sh" \
+    "$MERV_BASE/functions/mervlan_wan.sh" \
     "$MERV_BASE/functions/heal_event.sh" \
     "$MERV_BASE/functions/mervlan_boot.sh" \
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
@@ -3824,6 +4726,7 @@ run_one() {
     ssh-trust) test_ssh_trust_contract ;;
     logging-polling) test_logging_polling_contract ;;
     apply-observation) test_apply_observation_contract ;;
+    wan-native-contract) test_wan_native_contract ;;
     shell-syntax) test_shell_syntax ;;
     signal-termination) test_signal_termination ;;
     live-audit) test_live_audit ;;
@@ -3870,7 +4773,7 @@ if [ "$SELFTEST_ACTION" = all ]; then
     settle-watchdog recovery failsafe-status post-apply observation-lock observation-concurrency \
     observation-timeouts observation-generations observation-resume-progress atomic-publication json-validation client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity update-download-retry payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax signal-termination live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity update-download-retry payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation wan-native-contract shell-syntax signal-termination live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

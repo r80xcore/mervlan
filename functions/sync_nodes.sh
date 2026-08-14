@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: sync_nodes.sh || version="0.72.4"                     #
+#             - File: sync_nodes.sh || version="0.72.5"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -351,6 +351,7 @@ functions/heal_event.sh
 functions/service-event-handler.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
+functions/mervlan_wan.sh
 functions/mac_refresh.sh
 templates/mervlan_templates.sh
 "
@@ -384,6 +385,7 @@ functions/heal_event.sh
 functions/service-event-handler.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
+functions/mervlan_wan.sh
 functions/mac_refresh.sh
 "
 FILES_TO_COPY_CHMOD="$FILES_TO_COPY_CHMOD $DEV_TOOLS_FILES_TO_COPY_CHMOD"

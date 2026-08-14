@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.62"                      #
+#                    - File: install.sh || version="0.63"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -183,6 +183,12 @@ install_maintenance_admit() {
     }
     if ! merv_maintenance_direct_admit; then
         echo "[install] ERROR: another MerVLAN maintenance operation is live or unverifiable; refusing install" >&2
+        return 1
+    fi
+    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
+       ! merv_maintenance_direct_export_install_context; then
+        merv_maintenance_direct_release >/dev/null 2>&1 || :
+        echo "[install] ERROR: could not export authenticated maintenance context to installer children" >&2
         return 1
     fi
     MERV_MAINTENANCE_ENTRY_ADMITTED=1
@@ -2061,7 +2067,7 @@ download_mervlan() {
         }
         echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
-            functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
+            functions/mervlan_boot.sh functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
             settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
@@ -2418,9 +2424,13 @@ case "$MODE" in
             www/vlan_index_style.css \
             www/vlan_form_style.css \
             settings/lib_action_ack.sh \
+            functions/mervlan_wan.sh \
             settings/settings.json
         do
-            [ -f "$MERV_BASE/$_req" ] || {
+            case "$_req" in
+                functions/mervlan_wan.sh) [ -x "$MERV_BASE/$_req" ] ;;
+                *) [ -f "$MERV_BASE/$_req" ] ;;
+            esac || {
                 echo "[install] ERROR: Missing required file: $MERV_BASE/$_req" >&2
                 echo "[install] The addon files are not installed yet." >&2
                 echo "[install] For a first install, run: sh install.sh full" >&2
@@ -2754,11 +2764,14 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do
-    [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; }
+    case "$_req" in
+        functions/mervlan_wan.sh) [ -x "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing or non-executable $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
+        *) [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
+    esac
 done
 settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings validation failed"; FINAL_STATUS=1; }
 [ -d "$MERV_STATE_ROOT/ssh_trust" ] || { RESULT_DETAIL="durable SSH trust state root missing"; FINAL_STATUS=1; }

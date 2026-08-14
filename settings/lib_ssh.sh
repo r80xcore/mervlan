@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: lib_ssh.sh || version="0.72.0"                       #
+#              - File: lib_ssh.sh || version="0.72.4"                       #
 # ============================================================================ #
 # - Purpose:    Define shared SSH related functions                            #
 # ============================================================================ #
@@ -503,6 +503,10 @@ ssh_keys_effectively_installed() {
 : "${MERV_SSH_TIMEOUT:=10}"         # seconds per attempt (dbclient hard timeout)
 : "${MERV_SSH_PING_TIMEOUT:=2}"     # seconds for ping -W
 : "${MERV_SSH_RETRY_DELAY:=2}"      # seconds between attempts
+# Command execution is once-only by default.  A caller may opt in only for a
+# command it has independently established as read-only/idempotent; even that
+# opt-in never replays a command/session timeout or an ambiguous remote exit.
+: "${MERV_SSH_EXEC_RETRY_SAFE:=0}"
 
 # Last failure reason/details (for callers to log consistently)
 MERV_SSH_LAST_REASON=""
@@ -516,6 +520,142 @@ _merv_log_err()  { merv_has error && error -c cli,vlan "$*" || echo "[ERROR] $*"
 _merv_is_ipv4() {
   # returns 0 if $1 looks like IPv4
   echo "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+# Node identity is the configured ASUS/recovery endpoint plus its pinned MAC,
+# never an address selected for an in-flight connection.  WAN Native can move a
+# node's management address temporarily, so keep selection in this one library
+# instead of teaching every SSH caller a special case.
+merv_node_valid_ipv4() {
+  printf '%s\n' "${1:-}" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+}
+
+merv_node_asus_endpoint() {
+  _mnae_slot="$1"; _mnae_file="${2:-${SETTINGS_FILE:-}}"
+  case "$_mnae_slot" in ''|*[!0-9]*) return 1 ;; esac
+  _mnae_ip=$(json_get_section_value "Nodes" "NODE${_mnae_slot}" "$_mnae_file" 2>/dev/null)
+  [ -n "$_mnae_ip" ] || _mnae_ip=$(json_get_flag "NODE${_mnae_slot}" "" "$_mnae_file" 2>/dev/null)
+  [ -n "$_mnae_ip" ] || _mnae_ip=$(json_get_flag "NODE${_mnae_slot}_IP" "" "$_mnae_file" 2>/dev/null)
+  merv_node_valid_ipv4 "$_mnae_ip" || return 1
+  printf '%s\n' "$_mnae_ip"
+}
+
+merv_node_wan_native_value() {
+  _mnwn_slot="$1"; _mnwn_file="${2:-${SETTINGS_FILE:-}}"
+  _mnwn_value=$(json_get_section2_value "VLAN" "WAN_Native" "WAN_NATIVE_NODE${_mnwn_slot}" "$_mnwn_file" 2>/dev/null)
+  [ -n "$_mnwn_value" ] || _mnwn_value=$(json_get_flag "WAN_NATIVE_NODE${_mnwn_slot}" "none" "$_mnwn_file" 2>/dev/null)
+  case "$_mnwn_value" in ''|none|NONE|asus|ASUS) printf '%s\n' none; return 0 ;; esac
+  case "$_mnwn_value" in *[!0-9]*) return 1 ;; esac
+  [ "$_mnwn_value" -ge 2 ] 2>/dev/null && [ "$_mnwn_value" -le 4094 ] 2>/dev/null || return 1
+  printf '%s\n' "$_mnwn_value"
+}
+
+merv_node_wan_native_endpoint() {
+  _mnwe_slot="$1"; _mnwe_file="${2:-${SETTINGS_FILE:-}}"
+  _mnwe_ip=$(json_get_section_value "Nodes" "NODE${_mnwe_slot}_WAN_NATIVE_IP" "$_mnwe_file" 2>/dev/null)
+  [ -n "$_mnwe_ip" ] || _mnwe_ip=$(json_get_flag "NODE${_mnwe_slot}_WAN_NATIVE_IP" "" "$_mnwe_file" 2>/dev/null)
+  case "$_mnwe_ip" in ''|none|NONE) return 1 ;; esac
+  merv_node_valid_ipv4 "$_mnwe_ip" || return 1
+  printf '%s\n' "$_mnwe_ip"
+}
+
+merv_node_endpoint_candidates() {
+  # merv_node_endpoint_candidates <slot> [settings-file]
+  # Emits expected-first endpoints.  The configured ASUS endpoint is retained
+  # for identity/recovery; WAN Native only changes connection preference.
+  _mnec_slot="$1"; _mnec_file="${2:-${SETTINGS_FILE:-}}"
+  _mnec_asus=$(merv_node_asus_endpoint "$_mnec_slot" "$_mnec_file") || return 1
+  _mnec_wan_mode=$(merv_node_wan_native_value "$_mnec_slot" "$_mnec_file") || return 2
+  _mnec_wan=$(merv_node_wan_native_endpoint "$_mnec_slot" "$_mnec_file" 2>/dev/null || printf '')
+  if [ "$_mnec_wan_mode" != none ] && [ -z "$_mnec_wan" ]; then
+    MERV_SSH_LAST_REASON=wan-native-endpoint-missing
+    MERV_SSH_LAST_DETAIL="NODE${_mnec_slot} WAN Native=$_mnec_wan_mode requires NODE${_mnec_slot}_WAN_NATIVE_IP"
+    return 2
+  fi
+  if [ "$_mnec_wan_mode" != none ] && [ -n "$_mnec_wan" ]; then
+    printf '%s\n' "$_mnec_wan"
+    [ "$_mnec_wan" = "$_mnec_asus" ] || printf '%s\n' "$_mnec_asus"
+  else
+    printf '%s\n' "$_mnec_asus"
+    [ -z "$_mnec_wan" ] || [ "$_mnec_wan" = "$_mnec_asus" ] || printf '%s\n' "$_mnec_wan"
+  fi
+}
+
+merv_node_endpoint_is_configured() {
+  _mneic_slot="$1"; _mneic_ip="$2"; _mneic_file="${3:-${SETTINGS_FILE:-}}"
+  merv_node_endpoint_candidates "$_mneic_slot" "$_mneic_file" 2>/dev/null | grep -Fx -- "$_mneic_ip" >/dev/null 2>&1
+}
+
+merv_node_validate_wan_native_management() {
+  _mnvwn_file="${1:-${SETTINGS_FILE:-}}"; _mnvwn_slot=1
+  while [ "$_mnvwn_slot" -le "${MERV_MAX_NODES:-10}" ]; do
+    _mnvwn_asus=$(merv_node_asus_endpoint "$_mnvwn_slot" "$_mnvwn_file" 2>/dev/null || printf '')
+    if [ -n "$_mnvwn_asus" ]; then
+      _mnvwn_mode=$(merv_node_wan_native_value "$_mnvwn_slot" "$_mnvwn_file" 2>/dev/null) || return 1
+      if [ "$_mnvwn_mode" != none ] && ! merv_node_wan_native_endpoint "$_mnvwn_slot" "$_mnvwn_file" >/dev/null 2>&1; then
+        MERV_SSH_LAST_REASON=wan-native-endpoint-missing
+        MERV_SSH_LAST_DETAIL="NODE${_mnvwn_slot} has WAN Native=$_mnvwn_mode but no valid NODE${_mnvwn_slot}_WAN_NATIVE_IP"
+        return 1
+      fi
+    fi
+    _mnvwn_slot=$((_mnvwn_slot + 1))
+  done
+  return 0
+}
+
+# Live global preflight uses the same expected-first resolver as every SSH
+# caller.  The immutable trust identity remains the ASUS/recovery endpoint;
+# only the host-key probe transport address may be the configured WAN Native
+# endpoint.  A reachability failure can try the configured recovery address;
+# any trust, key, or configuration error fails closed immediately.
+merv_ssh_preflight_configured_nodes() {
+  _mspcn_file="${1:-${SETTINGS_FILE:-}}"
+  [ -n "$_mspcn_file" ] && [ -f "$_mspcn_file" ] || return 2
+  type merv_node_list >/dev/null 2>&1 || return 2
+  _mspcn_lines=$(merv_node_list "$_mspcn_file" 2>/dev/null) || return 2
+  [ -n "$_mspcn_lines" ] || return 0
+  _mspcn_port=$(get_node_ssh_port 2>/dev/null || printf '22')
+  _mspcn_port=$(merv_ssh_trust_normalize_port "$_mspcn_port") || return 2
+  while IFS=' ' read -r _mspcn_slot _mspcn_canonical _mspcn_extra || [ -n "$_mspcn_slot" ]; do
+    [ -n "$_mspcn_slot" ] || continue
+    [ -z "$_mspcn_extra" ] || return 2
+    _mspcn_canonical=$(merv_node_asus_endpoint "$_mspcn_slot" "$_mspcn_file") || return 2
+    _mspcn_mac=$(json_get_flag "AUTO_NODE${_mspcn_slot}_MAC" "" "$_mspcn_file" 2>/dev/null)
+    _mspcn_mac=$(merv_ssh_trust_mac_or_none "$_mspcn_mac") || return 2
+    _mspcn_candidates=$(merv_node_endpoint_candidates "$_mspcn_slot" "$_mspcn_file" 2>/dev/null) || return 2
+    _mspcn_ok=0
+    while IFS= read -r _mspcn_endpoint || [ -n "$_mspcn_endpoint" ]; do
+      [ -n "$_mspcn_endpoint" ] || continue
+      merv_ssh_hostkey_probe "$_mspcn_slot" "$_mspcn_endpoint" "$_mspcn_port" "$_mspcn_mac" "$_mspcn_canonical"
+      _mspcn_rc=$?
+      if [ "$_mspcn_rc" -eq 0 ] && [ "${MERV_SSH_TRUST_LAST_STATUS:-}" = verified ]; then
+        _mspcn_ok=1
+        break
+      fi
+      case "$_mspcn_rc:${MERV_SSH_TRUST_LAST_REASON:-}" in
+        10:*|11:*|*:unreachable|*:timeout|*:refused|*:no-route) continue ;;
+        # Some Dropbear builds terminate before printing a transport error.
+        # Treat that otherwise-ambiguous probe result as fallback-eligible only
+        # when the same bounded ICMP check also proves this endpoint absent.
+        7:probe-failed)
+          _merv_ping_ok "$_mspcn_endpoint" || continue
+          ;;
+      esac
+      MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-probe-failed}"
+      MERV_SSH_LAST_DETAIL="NODE${_mspcn_slot:-?} host-key preflight failed"
+      return "$_mspcn_rc"
+    done <<EOF
+$_mspcn_candidates
+EOF
+    if [ "$_mspcn_ok" -ne 1 ]; then
+      MERV_SSH_LAST_REASON=unreachable
+      MERV_SSH_LAST_DETAIL="NODE${_mspcn_slot:-?} no configured management endpoint reached the verified host-key probe"
+      return 4
+    fi
+  done <<EOF
+$_mspcn_lines
+EOF
+  return 0
 }
 
 _merv_ping_ok() {
@@ -782,11 +922,19 @@ merv_ssh_precheck_cache_matches() {
   [ "${MERV_SSH_PRECHECK_SLOT:-}" = "$1" ] && [ "${MERV_SSH_PRECHECK_HOST:-}" = "$2" ]
 }
 
+merv_ssh_canonical_endpoint() {
+  _msce_slot="$1"; _msce_host="$2"
+  _msce_canonical=$(merv_node_asus_endpoint "$_msce_slot" 2>/dev/null || printf '')
+  [ -n "$_msce_canonical" ] || _msce_canonical="$_msce_host"
+  printf '%s\n' "$_msce_canonical"
+}
+
 merv_ssh_precheck_cache_store() {
   _mspcs_slot="$1"; _mspcs_host="$2"; _mspcs_port="$3"; _mspcs_mac="$4"; _mspcs_user="$5"
-  _mspcs_node=$(merv_ssh_trust_node_id "$_mspcs_slot" "$_mspcs_mac" "$_mspcs_host" "$_mspcs_port") || return 1
+  _mspcs_canonical=$(merv_ssh_canonical_endpoint "$_mspcs_slot" "$_mspcs_host") || return 1
+  _mspcs_node=$(merv_ssh_trust_node_id "$_mspcs_slot" "$_mspcs_mac" "$_mspcs_canonical" "$_mspcs_port") || return 1
   [ "${SSH_TRUST_NODE:-}" = "$_mspcs_node" ] || return 1
-  [ "${SSH_TRUST_HOST:-}" = "$_mspcs_host" ] && [ "${SSH_TRUST_PORT:-}" = "$_mspcs_port" ] || return 1
+  [ "${SSH_TRUST_HOST:-}" = "$_mspcs_canonical" ] && [ "${SSH_TRUST_PORT:-}" = "$_mspcs_port" ] || return 1
   [ -n "$_mspcs_user" ] || return 1
   MERV_SSH_PRECHECK_SLOT="$_mspcs_slot"; MERV_SSH_PRECHECK_HOST="$_mspcs_host"; MERV_SSH_PRECHECK_PORT="$_mspcs_port"; MERV_SSH_PRECHECK_MAC="$_mspcs_mac"; MERV_SSH_PRECHECK_USER="$_mspcs_user"
   MERV_SSH_PRECHECK_NODE="$_mspcs_node"; MERV_SSH_PRECHECK_TRUST_DIGEST="${MERV_SSH_TRUST_VALIDATION_DIGEST:-}"
@@ -798,10 +946,11 @@ merv_ssh_precheck_cache_store() {
 
 merv_ssh_precheck_trust_current() {
   _msptc_node="$1"; _msptc_host="$2"; _msptc_port="$3"; _msptc_mac="$4"
+  _msptc_canonical=$(merv_ssh_canonical_endpoint "${MERV_SSH_PRECHECK_SLOT:-}" "$_msptc_host") || return 1
   [ "${MERV_SSH_PRECHECK_HOST:-}" = "$_msptc_host" ] || return 1
   [ "${MERV_SSH_PRECHECK_PORT:-}" = "$_msptc_port" ] && [ "${MERV_SSH_PRECHECK_MAC:-}" = "$_msptc_mac" ] || return 1
   [ "${MERV_SSH_PRECHECK_NODE:-}" = "$_msptc_node" ] && [ "${MERV_SSH_PRECHECK_TRUST_NODE:-}" = "$_msptc_node" ] || return 1
-  [ "${MERV_SSH_PRECHECK_TRUST_HOST:-}" = "$_msptc_host" ] && [ "${MERV_SSH_PRECHECK_TRUST_PORT:-}" = "$_msptc_port" ] || return 1
+  [ "${MERV_SSH_PRECHECK_TRUST_HOST:-}" = "$_msptc_canonical" ] && [ "${MERV_SSH_PRECHECK_TRUST_PORT:-}" = "$_msptc_port" ] || return 1
   [ -n "${MERV_SSH_PRECHECK_TRUST_ALGORITHM:-}" ] && [ -n "${MERV_SSH_PRECHECK_TRUST_PUBLIC_KEY:-}" ] || return 1
   [ -n "${MERV_SSH_PRECHECK_TRUST_DIGEST:-}" ] || return 1
   _msptc_digest=$(merv_ssh_trust_file_digest "${MERV_SSH_TRUST_FILE:-}" 2>/dev/null || printf '')
@@ -852,7 +1001,8 @@ merv_ssh_release_known_host() {
 
 merv_ssh_prepare_known_host() {
   _mskh_node="$1"; _mskh_host="$2"; _mskh_port="$3"; _mskh_mac="$4"
-  _mskh_node_id=$(merv_ssh_trust_node_id "$_mskh_node" "$_mskh_mac" "$_mskh_host" "$_mskh_port") || return 1
+  _mskh_canonical=$(merv_ssh_canonical_endpoint "$_mskh_node" "$_mskh_host") || return 1
+  _mskh_node_id=$(merv_ssh_trust_node_id "$_mskh_node" "$_mskh_mac" "$_mskh_canonical" "$_mskh_port") || return 1
   if merv_ssh_precheck_trust_current "$_mskh_node_id" "$_mskh_host" "$_mskh_port" "$_mskh_mac"; then
     merv_ssh_precheck_trust_restore
   else
@@ -916,7 +1066,14 @@ merv_ssh_precheck() {
     return 6
   fi
   _node_port_for_trust="$(get_node_ssh_port 2>/dev/null || printf '22')"
-  merv_ssh_require_verified_node "$node_num" "$node_ip" "$_node_port_for_trust" "$node_mac"
+  _node_asus_endpoint=$(merv_node_asus_endpoint "$node_num" 2>/dev/null || printf '')
+  if [ -n "$_node_asus_endpoint" ] && [ "$node_ip" != "$_node_asus_endpoint" ] && \
+     ! merv_node_endpoint_is_configured "$node_num" "$node_ip"; then
+    MERV_SSH_LAST_REASON="unconfigured-endpoint"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} endpoint '$node_ip' is not configured"
+    return 3
+  fi
+  merv_ssh_require_verified_node "$node_num" "$node_ip" "$_node_port_for_trust" "$node_mac" "$_node_asus_endpoint"
   _trust_rc=$?
   if [ "$_trust_rc" -ne 0 ]; then
     MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-ssh-trust-required}"
@@ -962,13 +1119,16 @@ merv_ssh_precheck() {
   return 0
 }
 
-merv_ssh_exec() {
+merv_ssh_exec_endpoint() {
   # merv_ssh_exec <node_num> <node_ip> <remote_cmd>
   #
   # Behavior:
-  # - Precheck (ip + keys + ping)
-  # - 3 attempts total
-  # - hard timeout per attempt
+  # - Precheck (ip + keys + ping) may retry before command execution.
+  # - A remote command executes once by default.  Set
+  #   MERV_SSH_EXEC_RETRY_SAFE=1 only for an explicitly idempotent command;
+  #   that permits retry only after a proven pre-command transport failure.
+  # - A hard command/session timeout and every ambiguous command exit are
+  #   terminal: the command may already have run and must not be replayed.
   # - sets MERV_SSH_LAST_REASON / DETAIL on failure
   #
   # Return:
@@ -988,7 +1148,9 @@ merv_ssh_exec() {
     return 5
   fi
 
-  # Precheck once before retry loop; if unreachable, still retry (3 total) because LAN can be flaky
+  # Retry reachability prechecks before any remote command is started.  Once
+  # dbclient has been invoked, retrying is governed by the stricter execution
+  # contract below.
   _attempt=1
   while [ "$_attempt" -le "$MERV_SSH_RETRIES" ]; do
     merv_ssh_precheck "$_node_num" "$_node_ip"
@@ -1074,10 +1236,14 @@ merv_ssh_exec() {
       return 0
     fi
 
-    # Timeout(124) if BusyBox timeout was used
+    # A local timeout cannot prove dbclient failed before the remote shell
+    # started.  It is deliberately distinct from a connection timeout emitted
+    # by dbclient before session establishment, and must never fall back or
+    # replay the command.
     if [ "$_rc" -eq 124 ]; then
-      MERV_SSH_LAST_REASON="timeout"
-      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' timed out after ${MERV_SSH_TIMEOUT}s (attempt $_attempt/$MERV_SSH_RETRIES)"
+      MERV_SSH_LAST_REASON="session-timeout"
+      MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' command/session timed out after ${MERV_SSH_TIMEOUT}s"
+      return 5
     else
       # Best-effort classify common dbclient failures
       if echo "$_err" | grep -qi "Permission denied"; then
@@ -1091,18 +1257,30 @@ merv_ssh_exec() {
       elif echo "$_err" | grep -qi "No route to host"; then
         MERV_SSH_LAST_REASON="no-route"
         MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' no route to host"
+      elif echo "$_err" | grep -Eqi 'Connection timed out|Connect timeout|Operation timed out|Network is unreachable'; then
+        MERV_SSH_LAST_REASON="connect-timeout"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' connection timed out before SSH session establishment"
+      elif echo "$_err" | grep -Eqi 'host[[:space:]-]*key|fingerprint'; then
+        MERV_SSH_LAST_REASON="host-key-mismatch"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' rejected the pinned SSH host key"
+        return 6
       elif [ "$_rc" -eq 126 ] || [ "$_rc" -eq 127 ]; then
         MERV_SSH_LAST_REASON="remote-cmd-failed"
         MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' remote command exited rc=$_rc"
         # Missing remote files/binaries will not improve by retrying.
         return 5
       else
-        MERV_SSH_LAST_REASON="ssh-failed"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' dbclient failed rc=$_rc (attempt $_attempt/$MERV_SSH_RETRIES)"
+        MERV_SSH_LAST_REASON="command-or-session-failed"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' command/session failed rc=$_rc; not replayed"
+        return 5
       fi
     fi
 
-    if [ "$_attempt" -lt "$MERV_SSH_RETRIES" ]; then
+    # A same-endpoint execution retry is an explicit caller contract, and is
+    # available only when dbclient positively reported a pre-session transport
+    # failure.  The default remains exactly one command invocation.
+    case "${MERV_SSH_EXEC_RETRY_SAFE:-0}" in 1|yes|on|true) _retry_safe=1 ;; *) _retry_safe=0 ;; esac
+    if [ "$_retry_safe" -eq 1 ] && [ "$_attempt" -lt "$MERV_SSH_RETRIES" ]; then
       sleep "$MERV_SSH_RETRY_DELAY"
       _attempt=$((_attempt + 1))
       continue
@@ -1112,6 +1290,84 @@ merv_ssh_exec() {
   done
 
   return 5
+}
+
+# Endpoint fallback is safe only when the preferred transport is proven not to
+# have established a usable SSH session. Any generic SSH failure or remote exit
+# is ambiguous and must never replay a potentially mutating command elsewhere.
+merv_ssh_fallback_allowed() {
+  case "${1:-}" in
+    unreachable|timeout|refused|no-route|connect-timeout) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+merv_ssh_exec() {
+  # merv_ssh_exec <node_num> <configured-asus-ip> <remote_cmd>
+  # All existing connection callers retain their configured ASUS value, while
+  # this wrapper chooses the expected WAN Native endpoint first when enabled.
+  _msee_slot="$1"; _msee_configured="$2"; _msee_cmd="$3"
+  _msee_candidates=$(merv_node_endpoint_candidates "$_msee_slot" 2>/dev/null)
+  _msee_candidate_rc=$?
+  if [ "$_msee_candidate_rc" -ne 0 ]; then
+    # Preserve the historical direct-wrapper contract for legacy callers that
+    # supply a valid endpoint before a Nodes section exists.  A discovered WAN
+    # Native configuration error is never downgraded to that compatibility path.
+    if [ "$_msee_candidate_rc" -eq 1 ] && merv_node_valid_ipv4 "$_msee_configured"; then
+      _msee_candidates="$_msee_configured"
+    else
+      [ "$_msee_candidate_rc" -eq 2 ] || {
+      MERV_SSH_LAST_REASON=invalid-node-endpoint
+      MERV_SSH_LAST_DETAIL="NODE${_msee_slot:-?} configured ASUS endpoint is invalid"
+      }
+      return 3
+    fi
+  fi
+  [ -n "$_msee_candidates" ] || { MERV_SSH_LAST_REASON=invalid-node-endpoint; return 3; }
+  _msee_expected=$(printf '%s\n' "$_msee_candidates" | sed -n '1p')
+  _msee_last_rc=4
+  while IFS= read -r _msee_endpoint || [ -n "$_msee_endpoint" ]; do
+    [ -n "$_msee_endpoint" ] || continue
+    if merv_ssh_exec_endpoint "$_msee_slot" "$_msee_endpoint" "$_msee_cmd"; then
+      MERV_NODE_ENDPOINT_SELECTED="$_msee_endpoint"
+      MERV_NODE_ENDPOINT_EXPECTED="$_msee_expected"
+      if [ "$_msee_endpoint" = "$_msee_expected" ]; then MERV_NODE_ENDPOINT_FALLBACK=0; else MERV_NODE_ENDPOINT_FALLBACK=1; fi
+      return 0
+    else
+      _msee_last_rc=$?
+    fi
+    merv_ssh_fallback_allowed "${MERV_SSH_LAST_REASON:-}" || return "$_msee_last_rc"
+  done <<EOF
+$_msee_candidates
+EOF
+  return "$_msee_last_rc"
+}
+
+merv_node_resolve_endpoint() {
+  # merv_node_resolve_endpoint <slot> <configured-asus-ip>
+  _mnre_slot="$1"; _mnre_configured="$2"; _mnre_candidates=$(merv_node_endpoint_candidates "$_mnre_slot" 2>/dev/null)
+  _mnre_candidates_rc=$?
+  if [ "$_mnre_candidates_rc" -ne 0 ]; then
+    [ "$_mnre_candidates_rc" -eq 1 ] && merv_node_valid_ipv4 "$_mnre_configured" || return 3
+    _mnre_candidates="$_mnre_configured"
+  fi
+  _mnre_expected=$(printf '%s\n' "$_mnre_candidates" | sed -n '1p')
+  _mnre_last_rc=4
+  while IFS= read -r _mnre_endpoint || [ -n "$_mnre_endpoint" ]; do
+    [ -n "$_mnre_endpoint" ] || continue
+    if merv_ssh_precheck "$_mnre_slot" "$_mnre_endpoint"; then
+      MERV_NODE_ENDPOINT_SELECTED="$_mnre_endpoint"; MERV_NODE_ENDPOINT_EXPECTED="$_mnre_expected"
+      if [ "$_mnre_endpoint" = "$_mnre_expected" ]; then MERV_NODE_ENDPOINT_FALLBACK=0; else MERV_NODE_ENDPOINT_FALLBACK=1; fi
+      printf '%s\n' "$_mnre_endpoint"
+      return 0
+    else
+      _mnre_last_rc=$?
+    fi
+    merv_ssh_fallback_allowed "${MERV_SSH_LAST_REASON:-}" || return "$_mnre_last_rc"
+  done <<EOF
+$_mnre_candidates
+EOF
+  return "$_mnre_last_rc"
 }
 
 # merv_ssh_stream_file <node> <ip> <local-file> <remote-path>
@@ -1126,6 +1382,7 @@ merv_ssh_stream_file() {
     *) MERV_SSH_LAST_REASON="invalid-remote-path"; return 2 ;;
   esac
   case "$_mssf_remote" in *..*|*[!A-Za-z0-9_./-]*) MERV_SSH_LAST_REASON="invalid-remote-path"; return 2 ;; esac
+  _mssf_ip=$(merv_node_resolve_endpoint "$_mssf_node" "$_mssf_ip") || return $?
   merv_ssh_precheck "$_mssf_node" "$_mssf_ip" || return $?
   if merv_ssh_precheck_cache_matches "$_mssf_node" "$_mssf_ip"; then
     _mssf_mac="$MERV_SSH_PRECHECK_MAC"; _mssf_port="$MERV_SSH_PRECHECK_PORT"; _mssf_user="$MERV_SSH_PRECHECK_USER"
@@ -1152,6 +1409,7 @@ merv_ssh_stream_file() {
 
 merv_ssh_stream_stdin() {
   _msss_node="$1"; _msss_ip="$2"; _msss_cmd="$3"
+  _msss_ip=$(merv_node_resolve_endpoint "$_msss_node" "$_msss_ip") || return $?
   merv_ssh_precheck "$_msss_node" "$_msss_ip" || return $?
   if merv_ssh_precheck_cache_matches "$_msss_node" "$_msss_ip"; then
     _msss_mac="$MERV_SSH_PRECHECK_MAC"; _msss_port="$MERV_SSH_PRECHECK_PORT"; _msss_user="$MERV_SSH_PRECHECK_USER"

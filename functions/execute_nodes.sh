@@ -925,6 +925,7 @@ execute_vlan_manager_on_node() {
 # Bounded-worker handlers.  Parent aggregation remains in this script.
 execute_prepare_job() {
     _epj_id="$1" _epj_ip="$2"
+    _epj_ip=$(merv_node_resolve_endpoint "$_epj_id" "$_epj_ip") || return 1
     merv_ssh_precheck "$_epj_id" "$_epj_ip" || return 1
     test_ssh_connection "$_epj_id" "$_epj_ip" || return 1
     sync_settings_conf_for_node "$_epj_id" "$_epj_ip" || return 1

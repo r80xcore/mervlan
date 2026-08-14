@@ -5,7 +5,16 @@
 The addon normally lives below `/jffs/addons/mervlan/` on a device.
 
 - `settings/settings.json`: user configuration; preserve during deployment.
+  `VLAN.WAN_Native` stores the per-device native uplink request as
+  `WAN_NATIVE_MAIN`, `MAIN_WAN_NATIVE_IP`, `MAIN_ASUS_IP`, `PERSISTENT_DEBUG_LOGGING`, and
+  `WAN_NATIVE_NODE1..NODE10`;
+  the MAIN endpoints are the exact DHCP IPv4s required after numeric and
+  ASUS/default MAIN handoffs. ASUS/default is supported only when `br0` uses
+  the positively identified physical WAN uplink; unknown tagged-native topology
+  is not inferred.
 - `settings/`: shared libraries and runtime defaults.
+- `logs/debug/`: bounded persistent WAN Native diagnostic records, created only
+  when the explicitly opt-in setting is enabled.
 - `tmp/`: persistent databases and generated addon data where configured,
   including MAC Shield and metadata stores.
 - `www/`: main-router WebUI and static assets.
@@ -23,6 +32,11 @@ Runtime state is normally below `/tmp/mervlan_tmp/`:
 | `client_collection/` | Local/node observation artifacts and temporary files. |
 | `node_jobs/` | Isolated per-run node worker directories and terminal results. |
 | `selftest.<run-id>/` | Fake backend and state for deterministic tests. |
+
+`locks/dhcp_hold/` is a fail-closed protocol state, not disposable temporary
+data. A retained recovery marker and DHCP hold may be cleared only by the
+token-owned MerVLAN recovery API after its final topology verification; direct
+file or ebtables deletion is not a supported recovery action.
 
 ## Ownership and publication
 

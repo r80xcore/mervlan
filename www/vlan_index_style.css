@@ -133,6 +133,15 @@ body {
         --table-col-width-name: 270px;
         --table-col-width-id: 117px;
         --ssid-assign-extension:127px;
+        /* UI tuning: compact controls and Preset status spacing. */
+        --apmo-button-width:60px;
+        --wan-native-edit-width:50px;
+        --wan-native-edit-height:22px;
+        --wan-native-edit-status-gap:45px;
+        --preset-panel-bottom-padding:16px;
+        --preset-status-margin-top:6px;
+        --preset-status-min-height:1.4em;
+        --preset-status-line-height:1.4em;
 }
 
 body {
@@ -809,6 +818,52 @@ body {
         text-align:center;
         border-radius:0 0 6px 6px;
         padding:14px 16px 16px;
+}
+
+/* Keep this after the generic shorthand above so Preset owns its final pad. */
+.form-box.controls-panel.controls-panel--preset {
+        padding-bottom:var(--preset-panel-bottom-padding);
+}
+
+.settings-authority-status {
+        margin-top:var(--preset-status-margin-top);
+        min-height:var(--preset-status-min-height);
+        line-height:var(--preset-status-line-height);
+        font-size:12px;
+        color:#aaa;
+        transition:opacity 0.4s ease;
+}
+
+#advancedOverrideBtn {
+        width:var(--apmo-button-width);
+        min-width:var(--apmo-button-width);
+        box-sizing:border-box;
+        padding:0;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+}
+
+.form-box--main .wan-native-edit-btn {
+        width:var(--wan-native-edit-width);
+        min-width:var(--wan-native-edit-width);
+        height:var(--wan-native-edit-height);
+        min-height:var(--wan-native-edit-height);
+        box-sizing:border-box;
+        padding:0;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        line-height:1;
+        margin-left:0;
+        margin-right:var(--wan-native-edit-status-gap);
+}
+
+#saveSettingsBtn.is-dirty:not(:disabled) {
+        border-color:#f0ad4e;
+        background:#6d5736;
+        box-shadow:inset 0 0 0 1px rgba(255,214,132,.45);
+        font-weight:bold;
 }
 
 .controls-panel::after {

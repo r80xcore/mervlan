@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.64"                  #
+#          - File: service-event-handler.sh || version="0.65"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -523,19 +523,19 @@ dispatch_if_executable() {
       _se_worker_pid=""
       return 0
     fi
-    if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+    if merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
       kill -TERM "$_se_worker_pid" 2>/dev/null || :
       _se_n=0
-      while [ "$_se_n" -lt 5 ] && merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; do
+      while [ "$_se_n" -lt 5 ] && merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; do
         sleep 1
         _se_n=$((_se_n + 1))
       done
-      if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+      if merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
         kill -KILL "$_se_worker_pid" 2>/dev/null || :
         sleep 1
       fi
     fi
-    if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+    if merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
       return 1
     fi
     wait "$_se_worker_pid" 2>/dev/null || :
@@ -611,7 +611,10 @@ dispatch_if_executable() {
       # signal reconciliation without descendant-wide kills.
       sh "$SCRIPT_PATH" "$@" &
       _se_worker_pid=$!
-      _se_worker_start=$(merv_proc_start_time "$_se_worker_pid" 2>/dev/null || printf '')
+      # lib_action_lock loads lib_identity; use that lightweight, authoritative
+      # identity API directly.  merv_proc_start_time is a lib_mervqt wrapper
+      # and is intentionally not loaded by this DHCP-sensitive dispatcher.
+      _se_worker_start=$(merv_identity_proc_start "$_se_worker_pid" 2>/dev/null || printf '')
       case "$_se_worker_start" in
         ''|*[!0-9]*)
           # Never issue an unauthenticated PID kill.  The direct child is

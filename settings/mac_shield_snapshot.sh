@@ -509,6 +509,12 @@ merv_mac_push_db_to_nodes() {
     [ -n "$nip" ] || continue
     MERV_MAC_LAST_PUSH_TOTAL=$(( MERV_MAC_LAST_PUSH_TOTAL + 1 ))
 
+    nip=$(merv_node_resolve_endpoint "$nid" "$nip") || {
+      _merv_mac_log warn "MERV_MAC: node ${nid} endpoint resolution failed â€” db not pushed"
+      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
+      continue
+    }
+
     if ! merv_ssh_precheck "$nid" "$nip" >/dev/null 2>&1; then
       _merv_mac_log warn "MERV_MAC: node ${nip} precheck failed — db not pushed"
       MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))

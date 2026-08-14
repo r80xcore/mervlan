@@ -33,6 +33,23 @@ That optimization is always guarded by a fresh SHA-256 content stamp; before
 each connection the endpoint, record shape, and expiry are checked again, and
 an enroll, revoke, or changed trust file invalidates both caches.
 
+The configured `Nodes.NODE<n>` address remains the canonical ASUS/recovery
+identity. When `WAN_NATIVE_NODE<n>` is numeric, its configured
+`NODE<n>_WAN_NATIVE_IP` is the preferred connection endpoint; the canonical
+address is a transport fallback only for a proven pre-session failure
+(unreachable, timeout, refused, or no route). Remote command exits, trust/key
+errors, host-key mismatches, and any ambiguous SSH failure never retry a
+command on another endpoint. This contract applies to host-key preflight as
+well as Sync, Execute, collection, MAC Shield, update, and backup workflows.
+
+Endpoint discovery and reachability prechecks may retry before a remote command
+is started. `merv_ssh_exec_endpoint()` executes a command once by default; an
+explicit `MERV_SSH_EXEC_RETRY_SAFE=1` is reserved for callers that have already
+established the command as read-only/idempotent, and still cannot replay an
+ambiguous command/session timeout or remote exit. Client collection may connect
+through the preferred WAN Native address, but its published router identity and
+remote observation metadata remain the configured ASUS/recovery address.
+
 On development and test branches, the same staged pipeline also copies:
 
 ```text

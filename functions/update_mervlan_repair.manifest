@@ -37,6 +37,7 @@ format=1
 0755 functions/mervlan_node_runner.sh
 0755 functions/mervlan_recover.sh
 0755 functions/mervlan_trunk.sh
+0755 functions/mervlan_wan.sh
 0755 functions/post_apply_worker.sh
 0755 functions/save_settings.sh
 0755 functions/service-event-handler.sh

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.68"                   #
+#                - File: update_mervlan.sh || version="0.69"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -557,10 +557,12 @@ update_tree_valid() {
 	[ -d "$_update_tree" ] || return 1
 	for _update_required in install.sh uninstall.sh changelog.txt mervlan.asp \
 		functions/update_mervlan.sh functions/mervlan_boot.sh \
+		functions/mervlan_wan.sh \
 		settings/settings.json www/index.html
 	do
 		[ -f "$_update_tree/$_update_required" ] || return 1
 	done
+	[ -x "$_update_tree/functions/mervlan_wan.sh" ] || return 1
 	return 0
 }
 
@@ -787,6 +789,7 @@ functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
+functions/mervlan_wan.sh
 functions/save_settings.sh
 functions/update_mervlan.sh
 settings/settings.json

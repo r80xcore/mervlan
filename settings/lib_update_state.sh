@@ -215,6 +215,10 @@ merv_update_maintenance_sync_context_valid() {
 # children additionally require the durable journal/quiesce state that makes
 # it safe to mutate while the Update owner is live.  Backup and standalone
 # recovery children are bound to the same live owner record and explicit kind.
+# A standalone installer may likewise delegate only to a direct child after it
+# has acquired the exact maintenance owner record itself.  This is needed for
+# the installer's hardware-profile worker; it must not mistake its own parent
+# owner for an unrelated active Update.
 merv_maintenance_delegation_valid() {
   local _mmd_kind _mmd_lock
   _mmd_kind="${MERV_MAINTENANCE_DELEGATION_KIND:-}"
@@ -225,11 +229,12 @@ merv_maintenance_delegation_valid() {
       merv_update_quiesce_active || return 1
       merv_update_journal_requires_safe_boot || return 1
       ;;
-    backup|recovery)
+    backup|recovery|install)
       [ "${MERV_MAINTENANCE_DELEGATED:-0}" = "1" ] || return 1
       case "$_mmd_kind" in
         backup) [ "${MERV_BACKUP_DELEGATION:-0}" = "1" ] || return 1 ;;
         recovery) [ "${MERV_RECOVERY_DELEGATION:-0}" = "1" ] || return 1 ;;
+        install) [ "${MERV_INSTALL_DELEGATION:-0}" = "1" ] || return 1 ;;
         *) return 1 ;;
       esac
       type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
@@ -265,7 +270,30 @@ merv_maintenance_direct_admit() {
   type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
   merv_owner_lock_acquire "$_mda_lock" 1800 2 "mervlan_maintenance" || return 1
   MERV_MAINTENANCE_ENTRY_NONCE="${MERV_LOCK_NONCE:-}"
+  MERV_MAINTENANCE_ENTRY_START="${MERV_LOCK_START:-}"
   MERV_MAINTENANCE_ENTRY_OWNED=1
+  return 0
+}
+
+# Export a narrow, authenticated direct-installer context for its children.
+# The receiving process still verifies the live owner record; these environment
+# values are only a transport for that exact identity and cannot authorize an
+# unrelated process or stale maintenance state.
+merv_maintenance_direct_export_install_context() {
+  [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] || return 1
+  type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
+  type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
+  merv_owner_v2_positive_uint "${MERV_MAINTENANCE_ENTRY_START:-}" || return 1
+  merv_owner_v2_nonce_valid "${MERV_MAINTENANCE_ENTRY_NONCE:-}" || return 1
+  MERV_MAINTENANCE_DELEGATED=1
+  MERV_MAINTENANCE_DELEGATION_KIND=install
+  MERV_INSTALL_DELEGATION=1
+  MERV_MAINTENANCE_OWNER_PID="$$"
+  MERV_MAINTENANCE_OWNER_START="$MERV_MAINTENANCE_ENTRY_START"
+  MERV_MAINTENANCE_OWNER_NONCE="$MERV_MAINTENANCE_ENTRY_NONCE"
+  export MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
+    MERV_INSTALL_DELEGATION MERV_MAINTENANCE_OWNER_PID \
+    MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
   return 0
 }
 
@@ -276,6 +304,7 @@ merv_maintenance_direct_release() {
     "${MERV_MAINTENANCE_ENTRY_NONCE:-}" || return 1
   MERV_MAINTENANCE_ENTRY_OWNED=0
   MERV_MAINTENANCE_ENTRY_NONCE=""
+  MERV_MAINTENANCE_ENTRY_START=""
   return 0
 }
 
@@ -286,6 +315,10 @@ merv_maintenance_direct_release() {
 # active. An unreadable owner record is treated as blocked rather than safe.
 merv_update_mutation_blocked() {
   merv_update_owner_context_valid && return 1
+  # A direct installer may invoke a hardware-profile child while retaining
+  # the maintenance lock.  Permit only that child context after exact owner
+  # verification; ordinary processes still fail closed below.
+  merv_maintenance_delegation_valid && return 1
   merv_update_journal_requires_safe_boot && return 0
   _mumb_lock=$(merv_update_maintenance_lock_path) || return 0
   [ -e "$_mumb_lock" ] || return 1

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_clients.sh || version="0.53"                  #
+#                - File: collect_clients.sh || version="0.54"                  #
 # ============================================================================ #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -258,18 +258,26 @@ get_node_ips() {
 # ============================================================================ #
 collect_from_node() {
   node_id="$1"
-  node_ip="$2"
+  configured_ip="$2"
   output_file="$3"
   # This background worker must establish its own initial reachability proof.
   # It may then avoid exactly one duplicate ICMP probe in merv_ssh_exec.
   unset MERV_SSH_SKIP_PING
 
-  info -c vlan "→ Collecting from node $node_ip (NODE${node_id})"
+  # A configured ASUS/default address is the durable router identity.  WAN
+  # Native may select a different SSH transport endpoint, but that temporary
+  # route must never leak into client artifacts or source metadata.
+  transport_ip=$(merv_node_resolve_endpoint "$node_id" "$configured_ip") || {
+    merv_ssh_skip_log "$node_id" "$configured_ip" "collect"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "${MERV_SSH_LAST_REASON:-endpoint-unreachable}" > "$output_file"
+    return 1
+  }
+  info -c vlan "→ Collecting from NODE${node_id} identity $configured_ip via $transport_ip"
 
-  # Use wrapper precheck (validates IP, keys, and ping)
-  if ! merv_ssh_precheck "$node_id" "$node_ip"; then
-    merv_ssh_skip_log "$node_id" "$node_ip" "collect"
-    printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$MERV_SSH_LAST_REASON" > "$output_file"
+  # Use the selected transport only for connectivity/trust checks.
+  if ! merv_ssh_precheck "$node_id" "$transport_ip"; then
+    merv_ssh_skip_log "$node_id" "$configured_ip" "collect"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "$MERV_SSH_LAST_REASON" > "$output_file"
     return 1
   fi
   MERV_SSH_SKIP_PING=1
@@ -282,11 +290,11 @@ collect_from_node() {
   # Keep the remote artifact's router identity equal to the configured IP.
   # The environment is exported once for both request and run-wait because the
   # coordinator executes the local collector only during the latter command.
-  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 sh '$MERV_BASE/functions/post_apply_worker.sh' request collect >/dev/null 2>&1 && sh '$MERV_BASE/functions/post_apply_worker.sh' run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
+  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$configured_ip'; MERV_OBS_NO_AUTOSTART=1 sh '$MERV_BASE/functions/post_apply_worker.sh' request collect >/dev/null 2>&1 && sh '$MERV_BASE/functions/post_apply_worker.sh' run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
   
-  _result_tmp="$COLLECTDIR/node_${node_ip}.out.$$"
+  _result_tmp="$COLLECTDIR/node_${configured_ip}.out.$$"
   result=""
-  if merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" >"$_result_tmp" 2>/dev/null; then
+  if merv_ssh_exec "$node_id" "$configured_ip" "$remote_cmd" >"$_result_tmp" 2>/dev/null; then
     rc=0
     result="$(cat "$_result_tmp" 2>/dev/null)"
   else
@@ -301,17 +309,17 @@ collect_from_node() {
        ! mv -f "$_node_output_tmp" "$output_file" 2>/dev/null; then
       rm -f "$_node_output_tmp" 2>/dev/null || :
       _reason="invalid-json"
-      warn -c cli,vlan "Invalid JSON received from $node_ip; using an error artifact"
-      printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
+      warn -c cli,vlan "Invalid JSON received from NODE${node_id} via $transport_ip; using an error artifact"
+      printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "$_reason" > "$output_file"
       return 1
     fi
-    info -c vlan "✓ Successfully collected from $node_ip"
+    info -c vlan "✓ Successfully collected from NODE${node_id} identity $configured_ip via $transport_ip"
     return 0
   else
     _reason="${MERV_SSH_LAST_REASON:-fetch-failed}"
     [ "$rc" -eq 0 ] && [ -z "$result" ] && _reason="empty-output"
-    warn -c cli,vlan "Failed to fetch results from $node_ip (rc=$rc, reason=$_reason)"
-    printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
+    warn -c cli,vlan "Failed to fetch results from NODE${node_id} identity $configured_ip via $transport_ip (rc=$rc, reason=$_reason)"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "$_reason" > "$output_file"
     return 1
   fi
 }

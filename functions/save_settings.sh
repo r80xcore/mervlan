@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.54"                     #
+#               - File: save_settings.sh || version="0.56"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -322,13 +322,13 @@ sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
 # ============================================================================ #
 # STEP 1.5: Extract and remove SAVE_SCOPE                                      #
 # The UI sends vlanmgr_SAVE_SCOPE to indicate which subset of keys are present  #
-# in this payload (normal/override/clientmeta/full). It must not be written    #
+# in this payload (normal/wan_native/override/clientmeta/full). It must not be written #
 # into settings.json. Remove it here before any further processing.            #
 # ============================================================================ #
 
 SAVE_SCOPE="$(awk -F'\t' '$1=="SAVE_SCOPE"{print $2; exit}' "${TMP_KV}")"
 case "$SAVE_SCOPE" in
-    normal|override|clientmeta|full) :;;
+    normal|wan_native|override|clientmeta|full) :;;
     *) SAVE_SCOPE="full" ;; # backward-compatible: old UI sends no SAVE_SCOPE
 esac
 info -c vlan "save_settings.sh: SAVE_SCOPE=$SAVE_SCOPE"
@@ -367,6 +367,13 @@ case "$SAVE_SCOPE" in
             $1 != "MAC_SHIELD_OVERRIDES" &&
             $1 != "CLIENT_NAME_OVERRIDES" { print }
         ' "${TMP_KV}" > "${_tmp_kv_filtered}" && mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
+        ;;
+    wan_native)
+        # Narrow supported transport-endpoint save used by controlled WAN
+        # transitions. It cannot synthesize absent trunk/SSID keys or trigger
+        # node sync from a partial payload.
+        awk -F'\t' '$1 ~ /^WAN_NATIVE_(MAIN|NODE([1-9]|10))$/ || $1 == "MAIN_WAN_NATIVE_IP" || $1 == "MAIN_ASUS_IP" || $1 == "PERSISTENT_DEBUG_LOGGING" { print }' \
+          "${TMP_KV}" > "${_tmp_kv_filtered}" && mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
         ;;
     override)
         # Keep only OVERRIDE_* keys.
@@ -811,13 +818,174 @@ seed_general_setting_from_normal_kv() {
     [ "$_sg_observed" = "$_sg_value" ] || return 1
 }
 
-if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
+if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "wan_native" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
     if ! seed_general_setting_from_normal_kv "AUTO_SYNC_SETTINGS" || \
        ! seed_general_setting_from_normal_kv "HTML_CLIENT_REFRESH_MINUTES"; then
         error -c vlan "save_settings.sh: failed to seed General settings"
         rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
         exit 1
     fi
+fi
+
+# WAN Native values are normal-scope settings but live in VLAN.WAN_Native in
+# sectioned settings. Validate them before mutation and seed the subsection on
+# upgrades so the generic flat merger never appends these keys at document root.
+validate_wan_native_kv() {
+    _vwn_key="$1"
+    _vwn_value="$2"
+    case "$_vwn_key" in
+        PERSISTENT_DEBUG_LOGGING)
+            case "$_vwn_value" in
+                1|true|TRUE|yes|YES|on|ON|enabled|ENABLED) return 0 ;;
+                0|false|FALSE|no|NO|off|OFF|disabled|DISABLED|'') return 0 ;;
+                *) return 1 ;;
+            esac
+            ;;
+        WAN_NATIVE_MAIN|WAN_NATIVE_NODE[1-9]|WAN_NATIVE_NODE10) ;;
+        MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP)
+            case "$_vwn_value" in ''|none|NONE) return 0 ;; esac
+            printf '%s\n' "$_vwn_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+            return $?
+            ;;
+        WAN_NATIVE_*) return 1 ;;
+        *) return 0 ;;
+    esac
+    case "$_vwn_value" in
+        ''|none|NONE|asus|ASUS) return 0 ;;
+        *[!0-9]*) return 1 ;;
+    esac
+    [ "$_vwn_value" -ge 2 ] 2>/dev/null && [ "$_vwn_value" -le 4094 ] 2>/dev/null
+}
+
+while IFS="$(printf '\t')" read -r _vwn_key _vwn_value; do
+    case "$_vwn_key" in WAN_NATIVE_*|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|PERSISTENT_DEBUG_LOGGING)
+        if ! validate_wan_native_kv "$_vwn_key" "$_vwn_value"; then
+            error -c vlan "save_settings.sh: invalid WAN Native setting $_vwn_key=$_vwn_value (use none or VLAN 2-4094)"
+            rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+            exit 1
+        fi
+        ;;
+    esac
+done < "${TMP_SORTED}"
+
+seed_wan_native_section_if_missing() {
+    grep -q '"VLAN"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null || return 2
+    if grep -q '"WAN_Native"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null; then
+        # Schema upgrades previously had the subsection but not the explicit
+        # MAIN DHCP endpoint.  Seed a fail-closed default inside that existing
+        # subsection rather than letting the generic flat merger add a root key.
+        _vwn_main_ip="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_WAN_NATIVE_IP" "${_save_candidate}" 2>/dev/null)"
+        [ -n "$_vwn_main_ip" ] || json_set_section2_value "VLAN" "WAN_Native" "MAIN_WAN_NATIVE_IP" "none" "${_save_candidate}" || return 1
+        _vwn_main_asus_ip="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_ASUS_IP" "${_save_candidate}" 2>/dev/null)"
+        [ -n "$_vwn_main_asus_ip" ] || json_set_section2_value "VLAN" "WAN_Native" "MAIN_ASUS_IP" "none" "${_save_candidate}" || return 1
+        _vwn_persist="$(json_get_section2_value "VLAN" "WAN_Native" "PERSISTENT_DEBUG_LOGGING" "${_save_candidate}" 2>/dev/null)"
+        [ -n "$_vwn_persist" ] || json_set_section2_value "VLAN" "WAN_Native" "PERSISTENT_DEBUG_LOGGING" "0" "${_save_candidate}" || return 1
+        return 0
+    fi
+    _vwn_seed_tmp="${_save_candidate}.wanseed.${MERV_IDENTITY_NONCE}"
+    awk '
+        BEGIN { inserted=0 }
+        {
+            print
+            if (!inserted && $0 ~ /"VLAN"[[:space:]]*:[[:space:]]*{/) {
+                print "    \"WAN_Native\": {"
+                print "      \"_description\": \"Optional native VLAN tag for the WAN/uplink per device; none keeps ASUS untagged behavior\","
+                print "      \"WAN_NATIVE_MAIN\": \"none\","
+                print "      \"MAIN_WAN_NATIVE_IP\": \"none\","
+                print "      \"MAIN_ASUS_IP\": \"none\","
+                print "      \"PERSISTENT_DEBUG_LOGGING\": \"0\","
+                print "      \"WAN_NATIVE_NODE1\": \"none\","
+                print "      \"WAN_NATIVE_NODE2\": \"none\","
+                print "      \"WAN_NATIVE_NODE3\": \"none\","
+                print "      \"WAN_NATIVE_NODE4\": \"none\","
+                print "      \"WAN_NATIVE_NODE5\": \"none\","
+                print "      \"WAN_NATIVE_NODE6\": \"none\","
+                print "      \"WAN_NATIVE_NODE7\": \"none\","
+                print "      \"WAN_NATIVE_NODE8\": \"none\","
+                print "      \"WAN_NATIVE_NODE9\": \"none\","
+                print "      \"WAN_NATIVE_NODE10\": \"none\""
+                print "    },"
+                inserted=1
+            }
+        }
+        END { if (!inserted) exit 1 }
+    ' "${_save_candidate}" > "${_vwn_seed_tmp}" 2>/dev/null &&
+    json_validate_file "${_vwn_seed_tmp}" 2>/dev/null &&
+    mv "${_vwn_seed_tmp}" "${_save_candidate}" 2>/dev/null && return 0
+    rm -f "${_vwn_seed_tmp}" 2>/dev/null
+    return 1
+}
+
+if grep -q '"VLAN"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null; then
+    if ! seed_wan_native_section_if_missing; then
+        error -c vlan "save_settings.sh: failed to seed VLAN.WAN_Native settings section"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+    _vwn_filtered="${TMP_SORTED}.nowan.${MERV_IDENTITY_NONCE}"
+    : > "${_vwn_filtered}"
+    while IFS="$(printf '\t')" read -r _vwn_key _vwn_value; do
+        case "$_vwn_key" in
+            WAN_NATIVE_MAIN|WAN_NATIVE_NODE[1-9]|WAN_NATIVE_NODE10|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|PERSISTENT_DEBUG_LOGGING)
+                case "$_vwn_key" in
+                    PERSISTENT_DEBUG_LOGGING)
+                        case "$_vwn_value" in
+                            1|true|TRUE|yes|YES|on|ON|enabled|ENABLED) _vwn_value="1" ;;
+                            *) _vwn_value="0" ;;
+                        esac
+                        ;;
+                    *) case "$_vwn_value" in ''|NONE|asus|ASUS) _vwn_value="none" ;; esac ;;
+                esac
+                if ! json_set_section2_value "VLAN" "WAN_Native" "$_vwn_key" "$_vwn_value" "${_save_candidate}" ||
+                   [ "$(json_get_section2_value "VLAN" "WAN_Native" "$_vwn_key" "${_save_candidate}" 2>/dev/null)" != "$_vwn_value" ]; then
+                    rm -f "${_vwn_filtered}"
+                    error -c vlan "save_settings.sh: failed to stage $_vwn_key in VLAN.WAN_Native"
+                    exit 1
+                fi
+                ;;
+            *) printf '%s\t%s\n' "$_vwn_key" "$_vwn_value" >> "${_vwn_filtered}" ;;
+        esac
+    done < "${TMP_SORTED}"
+    mv "${_vwn_filtered}" "${TMP_SORTED}" || exit 1
+fi
+
+# The configured NODE<n> address remains the ASUS/recovery address.  Store the
+# optional WAN Native management address beside it in Nodes, not as a second
+# logical node.  Flat legacy files retain a flat key until their normal
+# structured migration; sectioned files never gain an accidental root key.
+validate_wan_native_endpoint_kv() {
+    _vwne_key="$1"; _vwne_value="$2"
+    case "$_vwne_key" in NODE[1-9]_WAN_NATIVE_IP|NODE10_WAN_NATIVE_IP|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP) ;; *) return 0 ;; esac
+    case "$_vwne_value" in ''|none|NONE) return 0 ;; esac
+    printf '%s\n' "$_vwne_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+}
+
+while IFS="$(printf '\t')" read -r _vwne_key _vwne_value; do
+    if ! validate_wan_native_endpoint_kv "$_vwne_key" "$_vwne_value"; then
+        error -c vlan "save_settings.sh: invalid WAN Native management endpoint $_vwne_key=$_vwne_value"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+if grep -q '"Nodes"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null; then
+    _vwne_filtered="${TMP_SORTED}.nowanendpoint.${MERV_IDENTITY_NONCE}"
+    : > "${_vwne_filtered}"
+    while IFS="$(printf '\t')" read -r _vwne_key _vwne_value; do
+        case "$_vwne_key" in
+            NODE[1-9]_WAN_NATIVE_IP|NODE10_WAN_NATIVE_IP)
+                case "$_vwne_value" in '') _vwne_value=none ;; esac
+                if ! json_set_section_value "Nodes" "$_vwne_key" "$_vwne_value" "${_save_candidate}" ||
+                   [ "$(json_get_section_value "Nodes" "$_vwne_key" "${_save_candidate}" 2>/dev/null)" != "$_vwne_value" ]; then
+                    rm -f "${_vwne_filtered}"
+                    error -c vlan "save_settings.sh: failed to stage $_vwne_key in Nodes"
+                    exit 1
+                fi
+                ;;
+            *) printf '%s\t%s\n' "$_vwne_key" "$_vwne_value" >> "${_vwne_filtered}" ;;
+        esac
+    done < "${TMP_SORTED}"
+    mv "${_vwne_filtered}" "${TMP_SORTED}" || exit 1
 fi
 
 # ============================================================================ #
@@ -827,6 +995,13 @@ fi
 
 if ! json_apply_kv_file "${TMP_SORTED}" "${_save_candidate}"; then
     error -c vlan "save_settings.sh: failed to stage settings update"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+    exit 1
+fi
+
+if type merv_node_validate_wan_native_management >/dev/null 2>&1 &&
+   ! merv_node_validate_wan_native_management "${_save_candidate}"; then
+    error -c vlan "save_settings.sh: ${MERV_SSH_LAST_DETAIL:-WAN Native node management endpoint validation failed}"
     rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
     exit 1
 fi
@@ -1168,7 +1343,7 @@ _save_node_sync_status="skipped"
 if [ "$_save_public_status" != "ok" ]; then
     _save_node_sync_status="skipped-public-failure"
 fi
-if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "clientmeta" ]; then
+if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "clientmeta" ] && [ "${SAVE_SCOPE:-full}" != "wan_native" ]; then
     _auto_sync_flag=$(json_get_flag "AUTO_SYNC_SETTINGS" "" "${SETTINGS_FILE}" 2>/dev/null)
     _nodes_configured=""
     for _n_idx in 1 2 3 4 5 6 7 8 9 10; do

@@ -1,3 +1,31 @@
+mervlan v0.53.28-dev
+
+New: Optional per-device WAN Native tagging
+- Added a target-aware WAN Native field above the LAN-port table for Main and
+  Node 1-10. Blank uses the dimmed ASUS default; VLAN IDs 2-4094 tag the
+  existing native br0 uplink transport without changing ASUS-facing bridge
+  semantics.
+- Added `mervlan_wan.sh` as the isolated owner of native WAN transport
+  validation, migration, rollback, stale-native cleanup, and verification.
+
+Safety: Fail-closed native uplink lifecycle
+- Generic manager cleanup preserves the actual live br0 uplink VLAN member, so
+  WAN Native can converge safely across ASUS -> tagged, tagged -> tagged, and
+  tagged -> ASUS transitions without deleting the active management path.
+- ASUS mode never forces the physical WAN into br0 when ASUS did not place it
+  there. Numeric WAN Native refuses to invent a new br0-over-WAN path when no
+  existing native uplink path is present.
+- WAN Native VLAN IDs are exclusive per device: conflicts with assigned SSIDs,
+  access ports, or trunks fail before bridge mutation. Final Apply verification
+  now includes the native WAN transport after ASUS rc and trunk work settle.
+
+Maintenance: Save, node, update, and regression coverage
+- Sectioned settings persist `WAN_NATIVE_MAIN` and `WAN_NATIVE_NODE1..NODE10`
+  under `VLAN.WAN_Native`, including migration of older sectioned settings.
+- Full Sync Nodes, Update, installer verification, and Emergency Repair include
+  the new runtime helper. Added isolated WAN Native transition/rollback/node
+  selftests and BusyBox-compatible shell coverage.
+
 mervlan v0.53.27-dev
 
 Fixed: Audit-remediation ownership and recovery contracts

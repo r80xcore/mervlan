@@ -743,8 +743,27 @@ $untagged"
 # mismatch to persist across 2 checks with delay to avoid false positives      #
 # during transient rc states.                                                  #
 # ============================================================================ #
+check_wan_native_health() {
+  # The WAN helper's health mode is strictly observational: it validates the
+  # expected br0 native transport (and configured MAIN DHCP state) without
+  # creating an upper, touching bridge membership, or signalling DHCP. Heal
+  # itself continues to hand all mutation to the normal manager owner.
+  _cwnh_helper="$MERV_BASE/functions/mervlan_wan.sh"
+  [ -x "$_cwnh_helper" ] || {
+    warn -c vlan "WAN Native health: helper is unavailable or not executable"
+    return 1
+  }
+  sh "$_cwnh_helper" health >/dev/null 2>&1 || {
+    warn -c vlan "WAN Native health mismatch detected"
+    return 1
+  }
+  return 0
+}
+
 check_vlan_config() {
   local exp cur exp_str cur_str missing extra mismatch_count
+
+  check_wan_native_health || return 1
 
   exp=$(expected_vlans_from_settings)
   if [ -z "$exp" ]; then
@@ -859,6 +878,8 @@ check_vlan_config() {
 
 check_vlan_config_fast() {
   local exp cur exp_str cur_str missing extra
+
+  check_wan_native_health || return 1
 
   exp=$(expected_vlans_from_settings)
   if [ -z "$exp" ]; then

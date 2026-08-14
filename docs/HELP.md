@@ -260,6 +260,63 @@ Trunk mode tags multiple VLANs on a single LAN port. Intended for connecting a m
 
 If your device's port labels don't match the physical ports, or if the WAN interface was incorrectly detected, use APMO to correct the hardware profile manually.
 
+<a id="wan-native"></a>
+
+### WAN Native VLAN
+
+WAN Native VLAN carries the normal ASUS/native `br0` management network over a
+tagged VLAN on the WAN/uplink. Leave it as **ASUS** (the default) unless the
+upstream switch and DHCP server have been prepared for the chosen VLAN.
+
+Before enabling WAN Native on MAIN, set the ASUS LAN addressing mode to DHCP:
+
+1. **LAN** → **LAN IP**.
+2. Set **Get LAN IP Automatically?** to **Yes**.
+
+MerVLAN does not assign management addresses or configure a static interface.
+Before enabling numeric MAIN WAN Native, configure fixed DHCP reservations on
+the upstream router, firewall, or DHCP server so the devices have predictable
+addresses in both management domains. Example only — these are not MerVLAN
+defaults:
+
+| Domain | MAIN | NODE1 |
+| --- | --- | --- |
+| ASUS/default network | `192.168.186.200` | `192.168.186.201` |
+| WAN Native VLAN 190 | `192.168.190.200` | `192.168.190.201` |
+
+The **WAN Native VLAN ID** row has a compact **Edit** button. The LAN table
+edits only the VLAN ID; the target-aware dialog edits the fixed DHCP
+reservations. For MAIN, enter both the **ASUS/default DHCP reservation** and
+the **WAN Native DHCP reservation**. For a node, the ASUS/default reservation
+continues to be the canonical **Node Configuration** address; enter only that
+node's WAN Native DHCP reservation in the dialog. MerVLAN uses these configured
+addresses to reconnect and verify the device; it does not assign them. Dialog
+**Save** stages changes through the normal settings-save path; **Cancel** does
+not persist popup edits.
+
+When the VLAN ID is numeric, both MAIN reservations are mandatory. A numeric
+node also requires its configured ASUS/default node IP and its WAN Native DHCP
+reservation. When the VLAN ID is **ASUS**, an unset WAN Native reservation is
+valid. Keep both DHCP reservations configured while WAN Native is in use, and
+**do not remove the ASUS/default DHCP reservation after enabling WAN Native**:
+it is the deterministic recovery/default endpoint.
+
+The selected WAN Native VLAN must already be tagged and carried on the ASUS
+uplink. Under the current bridge model, do not use the same VLAN ID as WAN
+Native and as another managed SSID, LAN, or trunk VLAN on the same device.
+Reusing a VLAN ID on a different device is allowed.
+
+Live qualification observed that MAIN on the ASUS/default domain while NODE1
+was on VLAN 190 made the ASUS GUI show NODE1 disconnected. When both MAIN and
+NODE1 were on VLAN 190, the ASUS GUI showed NODE1 healthy again. Treat this as
+the qualified operating requirement: AiMesh MAIN and nodes should remain in the
+same native/L2 management domain. It is not a claim that ASUS officially
+guarantees arbitrary tagged-native deployments.
+
+Keep the ASUS/default endpoint as the recovery/default management path.
+MerVLAN verifies transitions fail-closed; if validation cannot prove the
+expected path, it restores the proven original path instead of guessing.
+
 Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) for instructions and the full list of pre-mapped devices.
 
 ### Status Icons
