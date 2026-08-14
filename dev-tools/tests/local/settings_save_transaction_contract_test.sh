@@ -42,13 +42,19 @@ grep -Fq 'elif [ -L "${PUBLIC_SETTINGS_FILE}" ]; then' "$SAVE_FILE" || fail 'pub
 grep -Fq '_save_public_status="failed"' "$SAVE_FILE" || fail 'public publication failure is not represented'
 grep -Fq 'public-settings-publication-failed' "$SAVE_FILE" || fail 'public publication failure acknowledgement missing'
 
-# Normal Save draft clearing follows persistence, acknowledgement, and reload.
+# Normal Save retains the draft until acknowledgement, then clears it before
+# reloading the authoritative settings so the final visible form is populated.
 save_line=$(grep -n "Clearing form fields" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 ack_line=$(grep -n "waitForVerifiedActionResult" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 reload_line=$(grep -n "const reloaded = await loadSettings()" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 [ "$save_line" -gt "$ack_line" ] || fail 'normal Save clears draft before acknowledgement'
-[ "$save_line" -gt "$reload_line" ] || fail 'normal Save clears draft before verified reload'
-grep -Fq "Save reload failed" "$UI_FILE" || fail 'reload failure does not retain draft'
+[ "$save_line" -lt "$reload_line" ] || fail 'normal Save does not clear draft before authoritative reload'
+grep -Fq "if (saveAck.status === 'partial')" "$UI_FILE" || fail 'partial acknowledgement branch missing'
+grep -Fq "} else if (!saveAck.ok)" "$UI_FILE" || fail 'failed acknowledgement branch missing'
+grep -Fq "return { ok: false, changed: true" "$UI_FILE" || fail 'failed or partial acknowledgement does not retain draft'
+partial_line=$(grep -n "if (saveAck.status === 'partial')" "$UI_FILE" | tail -n 1 | cut -d: -f1)
+failed_line=$(grep -n "} else if (!saveAck.ok)" "$UI_FILE" | tail -n 1 | cut -d: -f1)
+[ "$partial_line" -lt "$save_line" ] && [ "$failed_line" -lt "$save_line" ] || fail 'failed or partial Save can reach draft clearing'
 grep -Fq "Client metadata apply did not reach a terminal refresh; keeping the editor draft." "$UI_FILE" || fail 'ClientMeta timeout does not retain draft'
 
 printf 'SETTINGS_SAVE_TRANSACTION_CONTRACT_OK\n'

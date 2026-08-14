@@ -12706,9 +12706,9 @@ async function uploadSettingsAndSave(btn, options = {}) {
       }
       appendCliText(`Saving settings via Merlin (${payloadStr.length} bytes)...\n`, { scroll: 'force' });
       const saveOptions = loadingTask
-        ? { loading: false, skipRefresh: true, waitSec: 0 }
+        ? { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 }
         : (loadingOverride === false
-            ? { loading: false, skipRefresh: true, waitSec: 0 }
+            ? { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 }
             : { skipRefresh: true, waitSec: 0 });
       saveOptions.progressToken = saveRequestToken;
       const saveSubmission = submitCorrelatedSettingsSave(parentWin, merlinPayload, saveRequestToken, saveOptions);
@@ -12769,6 +12769,13 @@ async function uploadSettingsAndSave(btn, options = {}) {
         await settleCorrelatedTransport(saveSubmission, 'Settings save');
       }
 
+      // Clear only after durable acknowledgement. The following authoritative
+      // reload repopulates the visible form; never clear after that reload.
+      if (shouldClearForm) {
+        appendCliText('Clearing form fields...\n', { scroll: 'force' });
+        clearFields();
+      }
+
       if (reloadAfterSave) {
         if (loadingTask) loadingTask.phase('Loading saved settings...', 90);
         appendCliText('Reloading settings from disk...\n', { scroll: 'force' });
@@ -12781,19 +12788,16 @@ async function uploadSettingsAndSave(btn, options = {}) {
         }
       }
 
-      // Clear only after durable acknowledgement and verified reload.  Any
-      // rejection, timeout, partial result, or reload failure leaves the
-      // user's draft available for correction/retry.
-      if (shouldClearForm) {
-        appendCliText('Clearing form fields...\n', { scroll: 'force' });
-        clearFields();
-      }
-
       if (nodeSyncStatus === 'pending') {
         saveCompletionMessage = 'Settings saved locally; node synchronization queued';
       }
-      if (loadingTask) loadingTask.complete(saveCompletionMessage);
-      if (loadingTask && loadingTask.completion) await loadingTask.completion;
+      if (loadingTask) {
+        loadingTask.complete(saveCompletionMessage);
+        if (loadingTask.completion) await loadingTask.completion;
+        // completion resolves before the terminal panel's delayed close. The
+        // settings-only sync must own a fresh loader, so release Save first.
+        if (typeof MerVLANLoading !== 'undefined') MerVLANLoading.close();
+      }
       appendCliText('Save verification complete.\n', { scroll: 'force' });
 
       // Local persistence is terminal before node mutation begins.  Queue a

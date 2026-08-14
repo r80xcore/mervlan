@@ -50,11 +50,28 @@ grep -q 'Node settings auto-sync queued after local save' "$SAVE_FILE" || fail '
 grep -q 'node_sync":"pending"' "$SAVE_FILE" || fail 'deferred node-sync acknowledgement missing'
 grep -q 'queueAutomaticNodeSettingsSync' "$UI_FILE" || fail 'Save/APMO shared node-sync queue helper missing'
 grep -q 'loadingTask.completion' "$UI_FILE" || fail 'automatic node sync does not wait for explicit loading completion'
+grep -q 'MerVLANLoading.close();' "$UI_FILE" || fail 'Save loader is not released before automatic node sync'
 ! grep -q 'waitForMerVLANLoadingIdle' "$UI_FILE" || fail 'automatic node sync still relies on mutable loading active state'
 grep -q 'syncsettings_vlanmgr: {' "$UI_FILE" || fail 'settings-only loading fallback missing'
 grep -q 'Syncing settings to node(s)...' "$UI_FILE" || fail 'settings-only UI transition label missing'
 grep -q 'Syncing settings to node(s)...' "$MERV_BASE/www/settings/loading_actions.json" || fail 'settings-only loading action label missing'
 grep -q 'checkNodes: false' "$UI_FILE" || fail 'Save follow-up can be suppressed by stale node cache'
 ! grep -q 'window.setTimeout(() => { scheduleSshTrustProbe().catch(() => {}); }, 650);' "$UI_FILE" || fail 'unconditional post-save SSH probe still present'
+
+# Save must release its terminal loading task before starting the distinct
+# settings-only node-sync action. The parent must never show ASUS loading while
+# MerVLAN owns Save loading.
+SAVE_BLOCK=$(sed -n '/async function uploadSettingsAndSave/,/^[[:space:]]*return result;[[:space:]]*$/p' "$UI_FILE")
+line_of() { printf '%s\n' "$SAVE_BLOCK" | grep -n -F -- "$1" | head -n 1 | cut -d: -f1; }
+line_of_last() { printf '%s\n' "$SAVE_BLOCK" | grep -n -F -- "$1" | tail -n 1 | cut -d: -f1; }
+complete_line=$(line_of 'loadingTask.complete(saveCompletionMessage);')
+await_line=$(line_of 'if (loadingTask.completion) await loadingTask.completion;')
+close_line=$(line_of "if (typeof MerVLANLoading !== 'undefined') MerVLANLoading.close();")
+pending_guard_line=$(line_of_last "if (nodeSyncStatus === 'pending') {")
+sync_line=$(line_of 'const queued = await queueAutomaticNodeSettingsSync({ announce: false, checkNodes: false });')
+[ -n "$complete_line" ] && [ -n "$await_line" ] && [ -n "$close_line" ] && [ -n "$pending_guard_line" ] && [ -n "$sync_line" ] || fail 'Save-to-node-sync lifecycle markers missing'
+[ "$complete_line" -lt "$await_line" ] && [ "$await_line" -lt "$close_line" ] && [ "$close_line" -lt "$pending_guard_line" ] && [ "$pending_guard_line" -lt "$sync_line" ] || fail 'Save loader is not released before pending node sync'
+grep -Fq '? { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 }' "$UI_FILE" || fail 'MerVLAN-owned Save omits minLoadingMs zero'
+grep -Fq ': { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 }' "$UI_FILE" || fail 'loading:false Save path omits minLoadingMs zero'
 
 printf 'SERVICE_SETTINGS_CONTRACT_OK\n'
