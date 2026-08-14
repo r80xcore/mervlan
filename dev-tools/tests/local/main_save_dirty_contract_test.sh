@@ -25,6 +25,8 @@ reject 'settingsAuthorityStatus" class="settings-authority-status" role="status"
 require 'function extractMainPageSaveKeys(flat)' "$UI_FILE" 'main-page key extractor missing'
 require 'function mainPageSaveIsDirty()' "$UI_FILE" 'main-page dirty comparator missing'
 require 'function refreshMainSaveNeededState()' "$UI_FILE" 'central dirty refresh missing'
+require 'effectiveMaxSsids();' "$UI_FILE" 'main-page dirty filter must use the defined SSID-cap helper'
+reject 'getEffectiveMaxSsids' "$UI_FILE" 'main-page dirty filter calls an undefined SSID-cap helper'
 require 'Service modal, APMO, client metadata, and update state have separate' "$UI_FILE" 'main-page ownership boundary is undocumented'
 require 'saveBtn.classList.toggle(' "$UI_FILE" 'Save dirty class update missing'
 require 'Unsaved changes. Click Save to persist.' "$UI_FILE" 'dirty status message missing'

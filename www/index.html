@@ -3549,7 +3549,7 @@ function showTooltip() {
     function isMainPageSaveKey(key) {
       key = String(key || '');
       let match;
-      if ((match = key.match(/^(?:SSID|VLAN|APISO|SSIDassign)_(\d\d)$/))) return +match[1] >= 1 && +match[1] <= getEffectiveMaxSsids();
+      if ((match = key.match(/^(?:SSID|VLAN|APISO|SSIDassign)_(\d\d)$/))) return +match[1] >= 1 && +match[1] <= effectiveMaxSsids();
       if (/^(?:WAN_NATIVE_MAIN|MAIN_(?:ASUS_IP|WAN_NATIVE_IP))$/.test(key)) return true;
       if ((match = key.match(/^WAN_NATIVE_NODE(\d+)$/))) return +match[1] >= 1 && +match[1] <= MAX_NODES;
       if ((match = key.match(/^(?:ETH(\d+)_VLAN|TRUNK(\d+)|TAGGED_TRUNK(\d+)|UNTAGGED_TRUNK(\d+))$/))) {
