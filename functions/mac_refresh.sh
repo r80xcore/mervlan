@@ -15,6 +15,7 @@ fi
 if ! type merv_action_progress_init >/dev/null 2>&1; then
   merv_action_progress_init() { :; }
   merv_action_progress_phase() { :; }
+  merv_action_progress_update() { :; }
   merv_action_progress_complete() { :; }
   merv_action_progress_fail() { :; }
 fi
@@ -25,6 +26,16 @@ if merv_update_mutation_blocked; then
   merv_action_progress_fail "MAC shield refresh refused while Update maintenance is active"
   exit 75
 fi
+
+# Allow the synchronous observation worker and MAC snapshot code to publish
+# detailed milestones into this same backend-owned progress record.
+MERV_MAC_REFRESH_PROGRESS=1
+export MERV_MAC_REFRESH_PROGRESS MERV_PROGRESS_TOKEN
+export MERV_ACTION_PROGRESS_STARTED_AT MERV_ACTION_PROGRESS_PID
+export MERV_ACTION_PROGRESS_OWNER_START MERV_ACTION_PROGRESS_NONCE
+
+merv_action_progress_update prepare 0 0 5 \
+  "Preparing MAC Shield rebuild..."
 
 mac_refresh_progress_exit() {
   _mr_rc=$?
@@ -48,16 +59,20 @@ fi
 # generation request: the worker owns both the observation lock and the inner
 # snapshot/collection locks, preserving the global lock order.
 info -c cli,vlan "MAC Refresh: requesting reset snapshot and client collection"
-merv_action_progress_phase "Requesting snapshot reset and client collection..."
+merv_action_progress_update prepare 0 0 10 \
+  "Queuing MAC Shield rebuild and client collection..."
 if ! MERV_OBS_NO_AUTOSTART=1 sh "$WORKER" request snapshot-reset collect >/dev/null 2>&1; then
   error -c cli,vlan "MAC Refresh: failed to publish observation generations"
   exit 1
 fi
 
-merv_action_progress_phase "Rebuilding MAC shield and collecting clients..."
+merv_action_progress_update preflight 0 0 15 \
+  "Starting MAC Shield observation worker..."
 if sh "$WORKER" run; then
   _status=$(sh "$WORKER" status 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
   info -c cli,vlan "MAC Refresh: complete - ${_status:-observation generations complete}"
+  merv_action_progress_update finish 1 1 98 \
+    "Finalizing MAC Shield refresh..."
   exit 0
 else
   _rc=$?

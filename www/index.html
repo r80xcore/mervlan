@@ -3316,8 +3316,13 @@ function showTooltip() {
     let SETTINGS_AUTHORITY_CACHE_GENERATION = 0;
     let SETTINGS_NODE_STATE = 'unknown'; // configured | none | unknown
     let SETTINGS_AUTHORITY_ERROR = '';
+    const SETTINGS_STATUS_FADE_IN_MS = 150;
+    const SETTINGS_STATUS_FADE_OUT_MS = 400;
+    const SETTINGS_STATUS_LOADING_MIN_MS = 500;
+    const SETTINGS_STATUS_SUCCESS_HOLD_MS = 4000;
     let SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
     let SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+    let SETTINGS_AUTHORITY_STATUS_SWAP_TIMER = null;
     let SETTINGS_AUTHORITY_STATUS_GENERATION = 0;
     // Rendering the authority state must be side-effect free.  The dirty
     // snapshot is refreshed after a completed load or an explicit form edit;
@@ -3342,6 +3347,10 @@ function showTooltip() {
       if (SETTINGS_AUTHORITY_STATUS_FADE_TIMER) {
         clearTimeout(SETTINGS_AUTHORITY_STATUS_FADE_TIMER);
         SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
+      }
+      if (SETTINGS_AUTHORITY_STATUS_SWAP_TIMER) {
+        clearTimeout(SETTINGS_AUTHORITY_STATUS_SWAP_TIMER);
+        SETTINGS_AUTHORITY_STATUS_SWAP_TIMER = null;
       }
     }
 
@@ -3371,31 +3380,63 @@ function showTooltip() {
         message = 'Settings are not loaded. Click Load before Save or Apply.';
       }
       if (status) {
-        status.classList.remove('is-fading');
-        status.textContent = message;
-        status.dataset.state = mainPageDirty ? 'dirty' : state;
-        status.style.color = state === 'failed' ? '#f28b82'
+        const visualState = mainPageDirty ? 'dirty' : state;
+        const color = state === 'failed' ? '#f28b82'
           : (mainPageDirty ? '#f0ad4e' : (state === 'ready' && SETTINGS_NODE_STATE !== 'unknown' ? '#8bc34a' : '#f0ad4e'));
+        const currentMessage = status.textContent;
+        const messageChanged = currentMessage !== message || status.dataset.state !== visualState;
+        const showMessage = () => {
+          if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION) return;
+          status.style.transitionDuration = '0ms';
+          status.classList.add('is-fading');
+          status.textContent = message;
+          status.dataset.state = visualState;
+          status.style.color = color;
+          void status.offsetWidth;
+          status.style.transitionDuration = SETTINGS_STATUS_FADE_IN_MS + 'ms';
+          status.classList.remove('is-fading');
+        };
 
-        // A successful node classification is informational only. Keep it
-        // visible long enough to be read, then fade it without removing the
-        // status row from the layout. Every timer checks both the render
-        // generation and current state so a later load/error cannot be hidden
-        // by an older success timer.
+        if (messageChanged && currentMessage) {
+          status.style.transitionDuration = SETTINGS_STATUS_FADE_OUT_MS + 'ms';
+          status.classList.add('is-fading');
+          SETTINGS_AUTHORITY_STATUS_SWAP_TIMER = setTimeout(() => {
+            SETTINGS_AUTHORITY_STATUS_SWAP_TIMER = null;
+            showMessage();
+          }, SETTINGS_STATUS_FADE_OUT_MS);
+        } else if (messageChanged) {
+          showMessage();
+        } else {
+          status.style.color = color;
+          if (status.classList.contains('is-fading')) {
+            status.style.transitionDuration = SETTINGS_STATUS_FADE_IN_MS + 'ms';
+            status.classList.remove('is-fading');
+          }
+        }
+
+        // Successful informational messages hide themselves after their fade-in
+        // and hold period. Persistent loading/error/dirty messages only leave
+        // when a new authority state replaces them.
         const hideSuccess = state === 'ready' && !mainPageDirty && SETTINGS_NODE_STATE !== 'unknown';
         if (hideSuccess) {
+          const successDelay = SETTINGS_STATUS_SUCCESS_HOLD_MS + SETTINGS_STATUS_FADE_IN_MS +
+            (messageChanged && currentMessage ? SETTINGS_STATUS_FADE_OUT_MS : 0);
           SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = setTimeout(() => {
             SETTINGS_AUTHORITY_STATUS_HIDE_TIMER = null;
             if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION ||
-                SETTINGS_AUTHORITY_STATE !== 'ready' || SETTINGS_NODE_STATE === 'unknown') return;
+                SETTINGS_AUTHORITY_STATE !== 'ready' || MAIN_PAGE_SAVE_DIRTY ||
+                SETTINGS_NODE_STATE === 'unknown') return;
+            status.style.transitionDuration = SETTINGS_STATUS_FADE_OUT_MS + 'ms';
             status.classList.add('is-fading');
             SETTINGS_AUTHORITY_STATUS_FADE_TIMER = setTimeout(() => {
               SETTINGS_AUTHORITY_STATUS_FADE_TIMER = null;
               if (renderGeneration !== SETTINGS_AUTHORITY_STATUS_GENERATION ||
-                  SETTINGS_AUTHORITY_STATE !== 'ready' || SETTINGS_NODE_STATE === 'unknown') return;
+                  SETTINGS_AUTHORITY_STATE !== 'ready' || MAIN_PAGE_SAVE_DIRTY ||
+                  SETTINGS_NODE_STATE === 'unknown') return;
               status.textContent = '';
-            }, 400);
-          }, 4000);
+              status.dataset.state = '';
+            }, SETTINGS_STATUS_FADE_OUT_MS);
+          }, successDelay);
         }
       }
       if (saveBtn) {
@@ -8364,32 +8405,27 @@ async function runVlanManagerOnlyNodes(button) {
 
 async function runMacRefresh() {
   closeVlanManagerModal();
-  const macRefreshStarted = Date.now();
-  const previousRunId = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
-  const previousGenerated = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
+
   return queueServiceAction('macrefresh_vlanmgr', {
     description: 'MAC Shield Refresh',
     cooldownMs: 3000,
     loadingOptions: { progressBacked: true },
     passProgressToken: true,
+
+    // The backend owns progress and terminal success/failure.
+    // Once it has completed, reload the already-generated client JSON so
+    // badges and client metadata immediately reflect the new observation.
     afterSubmit: (loadingTask) => {
-      // mac_refresh.sh rebuilds the shield DB and kicks off a fresh client
-      // collection; poll until the new JSON lands so badges/locks update.
-      if (loadingTask) loadingTask.phase('Rebuilding MAC shield database...', 30);
-      pollForFreshClientData(macRefreshStarted, {
-        previousRunId,
-        previousGenerated,
-        isCancelled: () => loadingTask && !loadingTask.isRunning(),
-        doneMsg: 'MAC shield refreshed.',
-        timeoutMsg: 'MAC shield refresh is taking longer than expected; showing latest available.',
-        onFresh: () => {
-          if (loadingTask) loadingTask.complete('MAC shield rebuilt.');
-        },
-        onTimeout: () => {
-          if (loadingTask) loadingTask.fail('MAC shield refresh did not complete in time. Check the log for details.');
-        }
+      if (!loadingTask || !loadingTask.completion) return;
+
+      loadingTask.completion.then(async result => {
+        if (!result || (result.state !== 'complete' && result.state !== 'partial')) return;
+
+        const data = await fetchClientsJSON();
+        if (data) renderClientsOverview(data);
+      }).catch(err => {
+        console.error('MAC Shield post-refresh client reload failed:', err);
       });
-      if (loadingTask) loadingTask.phase('Refreshing client inventory...', 68);
     }
   });
 }
@@ -8664,6 +8700,11 @@ async function runMacRefresh() {
 
     async function loadSettings(opts = {}){
     const { deferFill = false, shouldCommit = null } = opts;
+    const authorityStatus = document.getElementById('settingsAuthorityStatus');
+    const loadingPresentationMs = SETTINGS_STATUS_FADE_IN_MS + SETTINGS_STATUS_LOADING_MIN_MS +
+      (authorityStatus && authorityStatus.textContent && authorityStatus.dataset.state !== 'loading'
+        ? SETTINGS_STATUS_FADE_OUT_MS : 0);
+    const loadingPresentationStartedAt = Date.now();
     const loadGeneration = beginSettingsAuthorityLoad();
     const failCurrentLoad = message => {
       if (loadGeneration !== SETTINGS_AUTHORITY_GENERATION) return false;
@@ -8708,6 +8749,11 @@ async function runMacRefresh() {
         return failCurrentLoad('settings.json did not contain a settings object.');
       }
       if (!mayCommit()) return false;
+      const loadingRemain = loadingPresentationMs - (Date.now() - loadingPresentationStartedAt);
+      if (loadingRemain > 0) {
+        await new Promise(resolve => setTimeout(resolve, loadingRemain));
+      }
+      if (loadGeneration !== SETTINGS_AUTHORITY_GENERATION) return false;
       if (isStructuredSettingsPayload(data)) {
         const flat = flattenStructuredSettingsPayload(data);
         if (!commitSettingsAuthority(loadGeneration, flat, data, 'sectioned')) return false;

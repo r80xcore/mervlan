@@ -77,6 +77,33 @@ obs_resume_progress_phase() {
     "Resuming MerVLAN action" "$_orpp_phase" "$_orpp_message" >/dev/null 2>&1 || :
 }
 
+obs_mac_refresh_progress() {
+  _omrp_phase="$1"
+  _omrp_percent="$2"
+  _omrp_message="$3"
+
+  [ "${MERV_MAC_REFRESH_PROGRESS:-0}" = "1" ] || return 0
+
+  case "${MERV_PROGRESS_TOKEN:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+
+  type merv_progress_update >/dev/null 2>&1 || return 0
+
+  merv_progress_update \
+    "$MERV_PROGRESS_TOKEN" \
+    macrefresh_vlanmgr \
+    "Rebuild MAC Shield" \
+    running \
+    determinate \
+    "$_omrp_phase" \
+    0 \
+    0 \
+    "$_omrp_percent" \
+    "$_omrp_message" \
+    "" >/dev/null 2>&1 || :
+}
+
 # The collection loader is frontend-owned.  Give its nested SSH trust probe a
 # distinct, terminal progress record so a verified check cannot overwrite the
 # client-refresh stages or leave the browser token falsely running.
@@ -423,10 +450,14 @@ obs_run() {
       continue
     fi
     if [ "$OBS_CC" -lt "$OBS_CR" ]; then
-      obs_resume_progress_phase collect "Refreshing client inventory..."
-      _ow_generation="$OBS_CR"
+    obs_resume_progress_phase collect "Refreshing client inventory..."
+    obs_mac_refresh_progress refresh 92 \
+      "Refreshing client inventory..."
+    _ow_generation="$OBS_CR"
       if obs_collection_run; then
-        obs_complete_generation collection "$_ow_generation" || return 2
+    obs_complete_generation collection "$_ow_generation" || return 2
+    obs_mac_refresh_progress finish 97 \
+      "Client inventory refreshed; finishing..."
       else
         obs_record_fault collection "$_ow_generation"
         return 1

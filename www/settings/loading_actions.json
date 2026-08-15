@@ -89,18 +89,24 @@
         { "id": "refresh", "label": "Refreshing client inventory", "start": 82, "end": 100 }
       ]
     },
-    "macrefresh_vlanmgr": {
-      "label": "Rebuild MAC Shield",
-      "display": "panel",
-      "mode": "phase",
-      "poll_ms": 1000,
-      "frontend_owned": true,
-      "phases": [
-        { "id": "prepare", "label": "Preparing MAC shield rebuild", "start": 0, "end": 20 },
-        { "id": "rebuild", "label": "Rebuilding MAC shield database", "start": 20, "end": 65 },
-        { "id": "refresh", "label": "Refreshing client inventory", "start": 65, "end": 100 }
-      ]
-    },
+	"macrefresh_vlanmgr": {
+	  "label": "Rebuild MAC Shield",
+	  "display": "panel",
+	  "mode": "phase",
+	  "poll_ms": 1000,
+	  "backend_owned": true,
+	  "phases": [
+		{ "id": "prepare", "label": "Preparing MAC Shield rebuild", "start": 0, "end": 10 },
+		{ "id": "preflight", "label": "Verifying interfaces and SSH trust", "start": 10, "end": 20 },
+		{ "id": "local_collect", "label": "Collecting clients from MAIN", "start": 20, "end": 35 },
+		{ "id": "node_collect", "label": "Collecting clients from nodes", "start": 35, "end": 55 },
+		{ "id": "merge", "label": "Rebuilding MAC Shield database", "start": 55, "end": 70 },
+		{ "id": "apply", "label": "Applying MAC Shield on MAIN", "start": 70, "end": 82 },
+		{ "id": "push", "label": "Pushing MAC Shield to nodes", "start": 82, "end": 90 },
+		{ "id": "refresh", "label": "Refreshing client inventory", "start": 90, "end": 98 },
+		{ "id": "finish", "label": "Finishing MAC Shield refresh", "start": 98, "end": 100 }
+	  ]
+	},
     "genkey_vlanmgr": {
       "label": "Generate SSH Keys",
       "display": "panel",

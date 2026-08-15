@@ -107,6 +107,38 @@ _merv_mac_logv() {
 }
 
 # ============================================================================
+# _merv_mac_refresh_progress <phase> <percent> <message>
+# Publish detailed progress only for an explicitly requested manual
+# macrefresh_vlanmgr action. Periodic/background snapshots remain silent.
+# ============================================================================
+_merv_mac_refresh_progress() {
+  local _mmrp_phase="$1"
+  local _mmrp_percent="$2"
+  local _mmrp_message="$3"
+
+  [ "${MERV_MAC_REFRESH_PROGRESS:-0}" = "1" ] || return 0
+
+  case "${MERV_PROGRESS_TOKEN:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+
+  type merv_progress_update >/dev/null 2>&1 || return 0
+
+  merv_progress_update \
+    "$MERV_PROGRESS_TOKEN" \
+    macrefresh_vlanmgr \
+    "Rebuild MAC Shield" \
+    running \
+    determinate \
+    "$_mmrp_phase" \
+    0 \
+    0 \
+    "$_mmrp_percent" \
+    "$_mmrp_message" \
+    "" >/dev/null 2>&1 || :
+}
+
+# ============================================================================
 # merv_mac_boot_init
 # Called once in boot mode before first manager apply.
 #   - If /tmp db is missing and JFFS checkpoint exists: copy to /tmp
@@ -328,7 +360,7 @@ _PAIRS_
 # ============================================================================
 merv_mac_build_snapshot() {
   local tmpfile="$1"
-  local br_path br_name vid iface_path iface mac now rep_iface
+  local br_path br_name vid iface_path iface mac now rep_iface _fdb_path _fdb_pno _fdb_iface
 
   now=$(date +%s)
   : > "$tmpfile" || return 1
@@ -356,16 +388,10 @@ merv_mac_build_snapshot() {
       done
     done
 
-    # Supplement assoclist with the bridge forwarding database. `brctl showmacs`
-    # reports every MAC the bridge has forwarded, so it captures clients that
-    # have momentarily aged out of `wl assoclist` (power-save / sleeping
-    # devices) or very recently disassociated — closing the protection gap for
-    # those MACs. Only non-local entries (is local? = no) are clients; local
-    # entries are the router's own port MACs and are excluded. Records are
-    # attributed to the bridge's representative wireless subinterface (metadata
-    # only — the ebtables rule keys on MAC + --logical-in br0, never on iface)
-    # and only when the bridge has at least one wireless member, keeping
-    # wired-only VLANs out of this version's wireless snapshot scope.
+    # Supplement assoclist with the bridge forwarding database, but only for
+    # MACs actually learned on a wireless VAP port. A VLAN bridge also learns
+    # upstream/trunk MACs on eth*.VID; treating every non-local FDB entry as a
+    # wireless client can shield the upstream gateway itself on native br0.
     if [ -n "$rep_iface" ] && merv_has brctl; then
       brctl showmacs "$br_name" 2>/dev/null | while read -r _pno mac _islocal _rest; do
         case "$mac" in
@@ -373,9 +399,25 @@ merv_mac_build_snapshot() {
           *) continue ;;
         esac
         [ "$_islocal" = "no" ] || continue
+
+        _fdb_iface=""
+        for _fdb_path in "/sys/class/net/$br_name/brif/"*; do
+          [ -e "$_fdb_path/port_no" ] || continue
+          _fdb_pno=$(cat "$_fdb_path/port_no" 2>/dev/null) || continue
+          _fdb_pno=$((_fdb_pno))
+          [ "$_fdb_pno" -eq "$_pno" ] 2>/dev/null || continue
+          _fdb_iface="${_fdb_path##*/}"
+          break
+        done
+
+        [ -n "$_fdb_iface" ] || continue
+
+        # Only FDB entries actually learned on a wireless VAP belong in MERV_MAC.
+        mervqt_valid_wl_subif "$_fdb_iface" || continue
+
         mac=$(mervqt_mac_lower "$mac")
         mervqt_valid_mac "$mac" || continue
-        printf '%s %s %s %s\n' "$now" "$mac" "$rep_iface" "$vid"
+        printf '%s %s %s %s\n' "$now" "$mac" "$_fdb_iface" "$vid"
       done
     fi
   done >> "$tmpfile"
@@ -443,11 +485,28 @@ for b in /sys/class/net/br[1-9]*/brif; do
     done
   done
   [ -n "$rep" ] || continue
-  merv_has brctl || continue
+  type brctl >/dev/null 2>&1 || continue
   brctl showmacs "$n" 2>/dev/null | while read -r po m loc rest; do
     case "$m" in [0-9a-fA-F][0-9a-fA-F]:*) ;; *) continue ;; esac
     [ "$loc" = no ] || continue
-    echo "$m $rep $v"
+
+    src=""
+    for pd in "$b"/*; do
+      [ -e "$pd/port_no" ] || continue
+      pn=$(cat "$pd/port_no" 2>/dev/null) || continue
+      pn=$((pn))
+      [ "$pn" -eq "$po" ] 2>/dev/null || continue
+      src=${pd##*/}
+      break
+    done
+
+    # Ignore uplink/trunk FDB entries. Only wireless VAP-learned MACs are clients.
+    case "$src" in
+      wl*.*|ra*.*|ath*.*) ;;
+      *) continue ;;
+    esac
+
+    echo "$m $src $v"
   done
 done
 REMOTE
@@ -506,8 +565,11 @@ merv_mac_push_db_to_nodes() {
   fi
 
   while read -r nid nip; do
-    [ -n "$nip" ] || continue
-    MERV_MAC_LAST_PUSH_TOTAL=$(( MERV_MAC_LAST_PUSH_TOTAL + 1 ))
+  [ -n "$nip" ] || continue
+  MERV_MAC_LAST_PUSH_TOTAL=$(( MERV_MAC_LAST_PUSH_TOTAL + 1 ))
+
+  _merv_mac_refresh_progress push 86 \
+    "Pushing MAC Shield to NODE${nid}..."
 
     nip=$(merv_node_resolve_endpoint "$nid" "$nip") || {
       _merv_mac_log warn "MERV_MAC: node ${nid} endpoint resolution failed â€” db not pushed"
@@ -545,7 +607,9 @@ merv_mac_push_db_to_nodes() {
            "MERV_BASE='$MERV_BASE'; MERV_NODE_CONTEXT=1; "'. "$MERV_BASE/settings/var_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null; ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"' \
            >/dev/null 2>&1; then
         _merv_mac_logv info "MERV_MAC: ✓ db pushed + shield reloaded on node ${nip}"
-        MERV_MAC_LAST_PUSH_OK=$(( MERV_MAC_LAST_PUSH_OK + 1 ))
+    MERV_MAC_LAST_PUSH_OK=$(( MERV_MAC_LAST_PUSH_OK + 1 ))
+    _merv_mac_refresh_progress push 86 \
+  "NODE${nid} MAC Shield updated."
       else
         _merv_mac_log warn "MERV_MAC: db pushed but shield reload failed on node ${nip}"
         MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
@@ -800,6 +864,9 @@ _merv_mac_set_counts() {
 merv_mac_snapshot() {
   [ "${DRY_RUN:-no}" = "yes" ] && return 0
 
+  _merv_mac_refresh_progress preflight 15 \
+    "Verifying MAC Shield interfaces and node access..."
+
   # --- Snapshot mutual-exclusion (unified lock primitives) -----------------
   # A single mac_snapshot.lock serializes every MAC snapshot path: the cron
   # tick (heal_event.sh), the post-apply async snapshot (mervlan_manager.sh)
@@ -889,8 +956,15 @@ merv_mac_snapshot() {
 
   local snap_tmp="${MERV_MAC_DB_ACTIVE}.snap.$$"
   local client_count
+
+  _merv_mac_refresh_progress local_collect 25 \
+    "Collecting MAC clients from MAIN..."
+
   client_count=$(merv_mac_build_snapshot "$snap_tmp")
-  _merv_mac_logv info "MERV_MAC: local snapshot captured ${client_count:-0} record(s)"
+
+  _merv_mac_refresh_progress local_collect 35 \
+    "MAIN collection complete — ${client_count:-0} record(s)."
+    _merv_mac_logv info "MERV_MAC: local snapshot captured ${client_count:-0} record(s)"
 
   # --- Cluster collection --------------------------------------------------
   # When running on the main with node sync enabled, gather client MACs from
@@ -907,19 +981,27 @@ merv_mac_snapshot() {
         _merv_mac_log warn "MERV_MAC: node sync on with configured node(s) but SSH keys unavailable — cluster observation incomplete"
       else
         local _nid _nip _node_recs _rc
-        while read -r _nid _nip; do
-          [ -n "$_nip" ] || continue
-          _nodes_total=$(( _nodes_total + 1 ))
-          if _node_recs=$(merv_mac_collect_from_node "$_nid" "$_nip"); then
+    while read -r _nid _nip; do
+      [ -n "$_nip" ] || continue
+      _nodes_total=$(( _nodes_total + 1 ))
+
+      _merv_mac_refresh_progress node_collect 45 \
+      "Collecting MAC clients from NODE${_nid}..."
+
+      if _node_recs=$(merv_mac_collect_from_node "$_nid" "$_nip"); then
             _nodes_ok=$(( _nodes_ok + 1 ))
-            if [ -n "$_node_recs" ]; then
-              printf '%s\n' "$_node_recs" >> "$snap_tmp"
-              _rc=$(printf '%s\n' "$_node_recs" | wc -l | tr -d ' ')
-              _node_total=$(( _node_total + _rc ))
-              _merv_mac_logv info "MERV_MAC: node ${_nip} — ${_rc} record(s)"
-            else
-              _merv_mac_logv info "MERV_MAC: node ${_nip} — 0 records"
-            fi
+      if [ -n "$_node_recs" ]; then
+        printf '%s\n' "$_node_recs" >> "$snap_tmp"
+        _rc=$(printf '%s\n' "$_node_recs" | wc -l | tr -d ' ')
+        _node_total=$(( _node_total + _rc ))
+        _merv_mac_logv info "MERV_MAC: node ${_nip} — ${_rc} record(s)"
+        _merv_mac_refresh_progress node_collect 45 \
+        "NODE${_nid} collection complete — ${_rc} record(s)."
+      else
+        _merv_mac_logv info "MERV_MAC: node ${_nip} — 0 records"
+        _merv_mac_refresh_progress node_collect 45 \
+        "NODE${_nid} collection complete — 0 records."
+      fi
           else
             _nodes_failed=$(( _nodes_failed + 1 ))
             _merv_mac_logv warn "MERV_MAC: node ${_nip} — SSH/collector failed"
@@ -950,6 +1032,8 @@ _NODES_
 
   local total_count
   total_count=$(wc -l < "$snap_tmp" 2>/dev/null | tr -d ' ')
+  _merv_mac_refresh_progress merge 55 \
+    "Combining ${total_count:-0} observed MAC record(s)..."
 
   # --- Empty snapshot handling ---------------------------------------------
   if [ "${total_count:-0}" -eq 0 ]; then
@@ -1022,6 +1106,8 @@ _NODES_
   # Compare structural fingerprint (mac+iface+vid only, timestamps excluded).
   # Raw md5 would always differ because timestamps refresh on every snapshot.
   local _pre_fp _post_fp
+  _merv_mac_refresh_progress merge 65 \
+  "Rebuilding MAC Shield database..."
   _pre_fp=$(awk '{print $2, $3, $4}' "$MERV_MAC_DB_ACTIVE" 2>/dev/null | sort | md5sum 2>/dev/null | cut -d' ' -f1)
   merv_mac_merge_db "$snap_tmp" "$_effective_reset" || {
     MERV_MAC_LAST_STATUS="merge_failed"
@@ -1051,7 +1137,10 @@ _NODES_
   # Reload fires for a real change OR an explicit force-reload. Push to nodes
   # whenever we reload, so every unit's shield is reapplied/repaired.
   if [ "$MERV_MAC_LAST_CHANGED" = "1" ] || [ "$_snap_force_reload" = "1" ]; then
-    if ! ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"; then
+  _merv_mac_refresh_progress apply 75 \
+    "Replacing MAC Shield rules on MAIN..."
+
+  if ! ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"; then
       MERV_MAC_LAST_STATUS="apply_failed"
       MERV_MAC_LAST_REASON="local_enforcement_failed"
       _merv_mac_set_counts
@@ -1063,7 +1152,10 @@ _NODES_
       return 1
     fi
     if [ -n "$_nodes" ]; then
-  MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
+    _merv_mac_refresh_progress push 82 \
+    "Pushing MAC Shield database and rules to nodes..."
+
+    MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
       merv_mac_push_db_to_nodes "$_nodes"
     fi
   else

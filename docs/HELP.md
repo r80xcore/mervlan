@@ -1,4 +1,8 @@
-# MerVLAN Help & Usage Guide
+<p align="center">
+  <img src="docs/images/mervlan_help.svg" alt="MerVLAN Welcome" />
+</p>
+
+#
 
 MerVLAN is a VLAN management addon for Asuswrt-Merlin. This guide covers setup, multi-node behavior, logs, CLI recovery, device support, and troubleshooting.
 
@@ -260,65 +264,155 @@ Trunk mode tags multiple VLANs on a single LAN port. Intended for connecting a m
 
 If your device's port labels don't match the physical ports, or if the WAN interface was incorrectly detected, use APMO to correct the hardware profile manually.
 
+Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) for instructions and the full list of pre-mapped devices.
+<br>
+<br>
 <a id="wan-native"></a>
 
 ### WAN Native VLAN
 
-WAN Native VLAN carries the normal ASUS/native `br0` management network over a
-tagged VLAN on the WAN/uplink. Leave it as **ASUS** (the default) unless the
-upstream switch and DHCP server have been prepared for the chosen VLAN.
+> [!WARNING]
+> It is **highly recommended** to disable **Apply on boot** while testing the *WAN Native VLAN* configuration.\
+> **Reason**: *Should the unit become unresponsive or misconfigured, a simple power cycle will safely **restore it**.*
 
-Before enabling WAN Native on MAIN, set the ASUS LAN addressing mode to DHCP:
+WAN Native VLAN moves the normal ASUS/native `br0` management network from the default untagged uplink path onto a **tagged VLAN**.
 
-1. **LAN** → **LAN IP**.
+MerVLAN does not inject or hijack traffic; it wraps the existing ASUS native `br0` uplink with a tagged VLAN layer. ASUS continues to use its normal `br0` management bridge, while MerVLAN changes the transport underneath it:
+
+| Mode | `br0` path | Uplink traffic on wire |
+| --- | --- | --- |
+| ASUS/default | `br0 → WAN/uplink` | Untagged/native |
+| WAN Native VLAN 190 | `br0 → WAN/uplink.190 → WAN/uplink` | Tagged VLAN 190 |
+
+Leave WAN Native as **ASUS** (the default) unless the upstream switch and DHCP server are prepared for the selected VLAN. MerVLAN does **NOT** assign static IP addresses; it uses the configured addresses to reconnect and verify devices during transitions.
+
+---
+
+#### Preparation
+
+Before enabling numeric WAN Native on MAIN:
+
+> [!WARNING]
+> **Automatic LAN IP is strictly mandatory!**\
+> *WAN Native VLAN will not work unless the unit is set to receive its IP automatically.*
+
+1. Go to **LAN** → **LAN IP** in the ASUS GUI.
 2. Set **Get LAN IP Automatically?** to **Yes**.
+3. Configure fixed DHCP reservations on the upstream router/DHCP server for **both** management domains.
 
-MerVLAN does not assign management addresses or configure a static interface.
-Before enabling numeric MAIN WAN Native, configure fixed DHCP reservations on
-the upstream router, firewall, or DHCP server so the devices have predictable
-addresses in both management domains. Example only — these are not MerVLAN
-defaults:
+<br>
+
+*The configuration presets below are **only examples!**:*
+
+**In OPNsense** *on setups using Dnsmasq DHCP, your static mappings might look like this:*
+
+| Purpose | Host | IP address | Hardware address | Description |
+| --- | --- | --- | --- | --- |
+| ASUS/default mgmt | `xt8-main-br0` | `192.168.186.200` | `02:11:22:33:44:55` | `XT8-Main ASUS/default` |
+| ASUS/default mgmt | `xt8-node1-br0` | `192.168.186.201` | `03:22:33:44:55:66` | `XT8-Node-1 ASUS/default` |
+| WAN Native VLAN 190 | `xt8-main-vlan190` | `192.168.190.200` | `02:11:22:33:44:55` | `XT8-Main WAN 190` |
+| WAN Native VLAN 190 | `xt8-node1-vlan190` | `192.168.190.201` | `02:11:22:33:44:55` | `XT8-Node-1 WAN 190` |
+
+<br>
+
+**If using MikroTik (RouterOS/SwOS)** *the switch port connected to your ASUS unit must match your chosen uplink mode:*
+
+| Uplink Mode | Tagged (T) | Untagged (U) / Native PVID | Frame Type / Ingress Policy |
+| --- | --- | --- | --- |
+| **SAFER** | `190`+`optional` | `1` *(default)* | Admit All |
+| **FULLY TAGGED** | `190`+`optional` | *(None / Blocked)* | 🔴Admit only VLAN-tagged |
+
+🔴 *Disable non-VLAN **after** MerVLAN config*
+
+> [!TIP]
+> **SAFER** Mode:
+> This is essentially a standard mixed/hybrid trunk, but it comes with **Hardware Advantages**. During normal operation, this untagged network sits **completely silent**. All management traffic flows over the tagged VLAN while enabling a fallback. This is beneficial for budget switches that struggle with continuous mixed traffic on the same port.
+>
+> **FULLY TAGGED** Mode:
+> Once your setup is tested and stable, this mode locks down the switch port to accept *only* tagged frames. It offers the cleanest and most secure trunk by eliminating untagged traffic entirely. The trade-off is the loss of the automatic safety net: if the router experiences an error and falls back to untagged `br0`, the switch will drop the connection until you manually re-enable untagged traffic on that port.
+>
+> **Alternative: Switch-Side Hybrid Trunk**:
+> You can skip MerVLAN's WAN Native feature entirely (leaving it set to **ASUS**). Instead, handle the routing directly on your switch by configuring a standard mixed/hybrid trunk: set your management network as the **Untagged (U) / PVID** and pass all other MerVLAN networks as **Tagged (T)**.
+> *(Keep in mind: Unlike the SAFER mode above, this forces your switch to constantly handle active mixed traffic, which may cause instability on cheaper hardware).*
+
+<br>
+
+#### WAN Native VLAN Configuration
+
+1. *Enter your reserved IP addresses into the MerVLAN interface:*
+2. Click **Edit** next to the VLAN ID to open the IP settings.
+3. Click **Save** to store your changes, or **Cancel** to discard.
+
+*(Note: If your mode is set to **ASUS**, you can leave these fields empty).*
 
 | Domain | MAIN | NODE1 |
 | --- | --- | --- |
 | ASUS/default network | `192.168.186.200` | `192.168.186.201` |
 | WAN Native VLAN 190 | `192.168.190.200` | `192.168.190.201` |
 
-The **WAN Native VLAN ID** row has a compact **Edit** button. The LAN table
-edits only the VLAN ID; the target-aware dialog edits the fixed DHCP
-reservations. For MAIN, enter both the **ASUS/default DHCP reservation** and
-the **WAN Native DHCP reservation**. For a node, the ASUS/default reservation
-continues to be the canonical **Node Configuration** address; enter only that
-node's WAN Native DHCP reservation in the dialog. MerVLAN uses these configured
-addresses to reconnect and verify the device; it does not assign them. Dialog
-**Save** stages changes through the normal settings-save path; **Cancel** does
-not persist popup edits.
+* **MAIN:** Requires both the ASUS/default and WAN Native DHCP reservations during the setup.
+* **Nodes:** The "Node Configuration" address is default. Enter the node's WAN Native DHCP reservation.
 
-When the VLAN ID is numeric, both MAIN reservations are mandatory. A numeric
-node also requires its configured ASUS/default node IP and its WAN Native DHCP
-reservation. When the VLAN ID is **ASUS**, an unset WAN Native reservation is
-valid. Keep both DHCP reservations configured while WAN Native is in use, and
-**do not remove the ASUS/default DHCP reservation after enabling WAN Native**:
-it is the deterministic recovery/default endpoint.
+> While not **strictly required**, it's **highly recommended** keeping your original ASUS/default DHCP reservation active for recovery. For fully tagged systems, see **Uplink Modes & Recovery** below for exactly how this works.
 
-The selected WAN Native VLAN must already be tagged and carried on the ASUS
-uplink. Under the current bridge model, do not use the same VLAN ID as WAN
-Native and as another managed SSID, LAN, or trunk VLAN on the same device.
-Reusing a VLAN ID on a different device is allowed.
+---
 
-Live qualification observed that MAIN on the ASUS/default domain while NODE1
-was on VLAN 190 made the ASUS GUI show NODE1 disconnected. When both MAIN and
-NODE1 were on VLAN 190, the ASUS GUI showed NODE1 healthy again. Treat this as
-the qualified operating requirement: AiMesh MAIN and nodes should remain in the
-same native/L2 management domain. It is not a claim that ASUS officially
-guarantees arbitrary tagged-native deployments.
+#### Uplink Modes & Recovery
 
-Keep the ASUS/default endpoint as the recovery/default management path.
-MerVLAN verifies transitions fail-closed; if validation cannot prove the
-expected path, it restores the proven original path instead of guessing.
+There are two practical ways to configure your upstream switch:
 
-Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) for instructions and the full list of pre-mapped devices.
+| Switch traffic | SAFER / recommended | FULLY TAGGED |
+| --- | --- | --- |
+| Untagged/native | Allowed | Blocked by switch |
+| WAN Native VLAN 190 | Tagged — active `br0` management | Tagged — active `br0` management |
+| Other MerVLAN VLANs | Tagged as required | Tagged as required |
+| Recovery | Switch-side fallback available | Manual recovery required |
 
+**1. SAFER / Recommended**
+The switch carries the original untagged/native network alongside the new tagged WAN Native VLAN. If WAN Native validation fails, MerVLAN restores the ASUS/default `br0` path. Because the switch still accepts untagged traffic, your fallback path remains instantly available.
+
+**2. FULLY TAGGED**
+Once WAN Native is stable, you can configure the ASUS uplink as **tagged-only** (e.g., "Admit only VLAN-tagged frames"). While running normally, the old untagged path isn't needed.
+
+**The Catch (Recovery):** If the tagged path fails, ASUS might restore the ASUS/default untagged `br0` path—but your upstream switch will now block it. To recover, you must manually do one of the following:
+
+* Temporarily re-enable the untagged/native management network on the upstream switch port.
+* Connect a PC directly to an ASUS LAN port and assign it a static IP in the ASUS/default management subnet.
+
+*Recovery PC Example:*
+
+| Device | Recovery address |
+| --- | --- |
+| ASUS/default router | `192.168.186.200/24` |
+| Temporary PC address | `192.168.186.10/24` |
+
+---
+
+#### AiMesh MAIN and Nodes
+
+Live qualification shows that mixing ASUS/default and WAN Native management domains breaks AiMesh visibility.
+
+| MAIN | NODE1 | Observed result |
+| --- | --- | --- |
+| ASUS/default | WAN Native VLAN 190 | NODE1 shown disconnected |
+| WAN Native VLAN 190 | WAN Native VLAN 190 | NODE1 shown healthy |
+
+**Requirement:** AiMesh MAIN and nodes must remain in the same native/L2 management domain.
+
+---
+
+#### VLAN Requirements
+
+* The selected WAN Native VLAN must already be **tagged and carried on the ASUS uplink** before enabling it.
+* **Do not** use the same VLAN ID for WAN Native and another managed SSID, LAN, or trunk VLAN on the *same device*.
+* Reusing the same VLAN ID on a *different device* is allowed.
+* Keep the ASUS/default management endpoint configured while WAN Native is in use.
+* Fully tagged operation is optional and should only be used after WAN Native is proven stable.
+
+---
+
+<br>
+<br>
 ### Status Icons
 
 - <kbd>OK</kbd> - valid VLAN configured

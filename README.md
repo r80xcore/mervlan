@@ -1,4 +1,8 @@
-# MerVLAN
+<p align="center">
+  <img src="docs/images/mervlan_manager.svg" alt="MerVLAN Welcome" />
+</p>
+
+#
 
 MerVLAN is an addon for Asuswrt‑Merlin that adds a **graphical VLAN manager directly inside the stock Asus/Merlin web UI**.
 
