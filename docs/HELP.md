@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/mervlan_help.svg" alt="MerVLAN Welcome" />
+  <img src="images/mervlan_help.svg" alt="MerVLAN Welcome" />
 </p>
 
 #

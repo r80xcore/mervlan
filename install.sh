@@ -2157,6 +2157,7 @@ create_dirs() {
         "$PUBLIC_DIR/settings" \
         "$PUBLIC_DIR/docs" \
         "$PUBLIC_DIR/diagrams" \
+		"$PUBLIC_DIR/images" \
         "$PUBLIC_DIR/vendor" \
         "$PUBLIC_DIR/.ssh" \
         "$PUBLIC_DIR/tmp/results" \
@@ -2259,6 +2260,7 @@ verify_reinstall_projection() {
         "$PUBLIC_DIR/diagrams/topology-2_aimesh.svg" \
         "$PUBLIC_DIR/diagrams/topology-3_standalone-ap.svg" \
         "$PUBLIC_DIR/diagrams/topology-4_node-to-main.svg" \
+		"$PUBLIC_DIR/images/mervlan_help.svg" \
         "$TMP_DIR/logs/cli_output.log" \
         "$TMP_DIR/logs/vlan_manager.log" \
         "$TMP_DIR/logs/boot_wrap.log"
@@ -2448,7 +2450,8 @@ case "$MODE" in
             docs/diagrams/topology-1_local.svg \
             docs/diagrams/topology-2_aimesh.svg \
             docs/diagrams/topology-3_standalone-ap.svg \
-            docs/diagrams/topology-4_node-to-main.svg
+            docs/diagrams/topology-4_node-to-main.svg \
+			docs/images/mervlan_help.svg
         do
             [ -f "$MERV_BASE/$_optional" ] || \
                 echo "[install] WARNING: Optional file missing: $MERV_BASE/$_optional" >&2
@@ -2546,6 +2549,7 @@ cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-1_local.svg" "$PUBLIC_DIR/diagra
 cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-2_aimesh.svg" "$PUBLIC_DIR/diagrams/topology-2_aimesh.svg" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-3_standalone-ap.svg" "$PUBLIC_DIR/diagrams/topology-3_standalone-ap.svg" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-4_node-to-main.svg" "$PUBLIC_DIR/diagrams/topology-4_node-to-main.svg" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/images/mervlan_help.svg" "$PUBLIC_DIR/images/mervlan_help.svg" 2>/dev/null
 if [ "$TEST_RUN" = "1" ]; then
     cp -p "$ADDON_DIR/$ADDON/www/installer-test.html" "$PUBLIC_DIR/installer-test.html" 2>/dev/null || {
         RESULT_WEBUI="FAIL - diagnostic asset publication"
