@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/mervlan_manager.svg" alt="MerVLAN Welcome" />
+  <img src="docs/images/mervlan_manager.png" alt="MerVLAN Welcome" />
 </p>
 
 #
@@ -48,7 +48,7 @@ The addon installs under the normal Merlin web interface (LAN section) and handl
 
 <h2 id="status-beta-notes">Status / Beta Notes <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-- **[View the complete list of supported devices](docs/HELP.md#8-device-support)**
+- **[View the complete list of supported devices](docs/HELP.md#10-device-support)**
 - **Status:** Public beta – expect bugs and breaking changes.
 - **Mode:** **AP‑mode only** (main and nodes must be running as APs, not routers).
 - For setup questions and general discussion, use [Discord](https://discord.com/invite/8c3C8q54hn) or [snbforums.com](https://www.snbforums.com/threads/mervlan-v0-52-1-dev-0-52-7-simple-and-powerful-vlan-management-beta.95936/).
@@ -58,27 +58,35 @@ The addon installs under the normal Merlin web interface (LAN section) and handl
 
 <h2 id="what-mervlan-actually-does">What MerVLAN Actually Does <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-MerVLAN turns supported Asuswrt-Merlin APs into VLAN-aware access points without requiring a hand-written VLAN script. From the web UI, it can:
+Out of the box, Asuswrt-Merlin in AP mode treats all physical LAN ports and wireless radios as one flat broadcast domain, placing everything into a single shared Linux bridge (`br0`). MerVLAN transforms supported Asus routers into VLAN-aware access points by managing Linux kernel bridges, 802.1Q tagged interfaces, and Layer 2 isolation directly from the web UI, without requiring manual configuration of shell scripts.
 
-- Assign VLANs to wireless networks and physical LAN ports.
-- Apply different wired-port assignments to the main AP and individual nodes.
-- Synchronize and apply the configuration across supported nodes over SSH.
-- When Apply on Boot is enabled, reapply a confirmed configuration after reboot and repair it when a firmware event disrupts it.
+### How It Works
 
-Routing, DHCP, firewall policy, and inter-VLAN access remain the responsibility of your upstream network.
+* **Kernel-Level Bridge Isolation**  
+  When you assign a VLAN ID to a Guest SSID or physical LAN port, MerVLAN creates a dedicated Linux bridge for that VLAN (e.g. `br20`), moves the corresponding wireless virtual interfaces (`wl0.1`, `wl1.1`) and Ethernet ports out of `br0`, and binds them to the new bridge. Strict `ebtables` filtering and MAC Shield protection prevent VLAN devices from escaping across bridges or acquiring an unauthorized DHCP lease on the default LAN, while metadata override rules allow trusted management/admin devices to traverse freely.
+
+* **802.1Q Uplink Trunking & WAN Native**  
+  MerVLAN attaches each VLAN bridge to an 802.1Q tagged sub-interface on the uplink port (such as `eth0.20`), seamlessly trunking client traffic over your Ethernet backhaul to your upstream managed switch or router/firewall (like OPNsense, pfSense, UniFi, or MikroTik). You can also wrap the AP's own `br0` management interface onto a tagged **WAN Native VLAN** to isolate router administration onto its own network.
+
+* **Multi-Node Sync & Event-Driven Auto-Healing**  
+  In multi-AP setups (AiMesh or standalone APs), the main router acts as a coordinator, pushing device-specific configurations across all nodes over SSH. Because Asus firmware routinely restarts interfaces during Wi-Fi events or DHCP renewals, MerVLAN hooks into Merlin's service-event system and runs a background health monitor to automatically repair bridges, re-bind interfaces, and ensure settings persist across reboots.
+
+> [!NOTE]
+> MerVLAN operates strictly at **Layer 2 (bridging and tagging)** on the access point. IP routing, DHCP server assignments, and inter-VLAN firewall rules remain entirely the responsibility of your upstream gateway.
 
 ---
 
 <h2 id="key-features">Key Features <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-- Per-SSID and per-device LAN-port VLAN assignments.
-- Optional AP isolation and native-SSID support.
-- Experimental trunk support from the main unit to directly connected nodes.
-- Main-router, node-only, and combined apply modes.
-- Active VLAN client information and MAC Shield controls.
-- Dry Run enabled by default for safer configuration checks.
-- Optional boot persistence and automatic health recovery.
-- Built-in update, backup, restore, and temporary undo tools.
+- **[SSID Configuration](docs/HELP.md#2-ssid-configuration)** – Map wireless guest networks to dedicated VLAN IDs with optional AP isolation.
+- **[LAN Port Configuration](docs/HELP.md#3-lan-port-configuration)** – Assign individual physical ports to VLANs or configure trunk ports for connected devices.
+- **[WAN Native VLAN](docs/HELP.md#4-wan-native-vlan)** – Encapsulate router and node management (`br0`) onto a tagged uplink VLAN.
+- **[Apply Modes & Multi-Node](docs/HELP.md#5-applying-your-configuration)** – Apply to local router only, nodes only, or synchronized router + nodes over SSH.
+- **[SSH Key Management](docs/HELP.md#6-ssh-key-install)** – Automated ED25519 key generation and guided setup for AiMesh and standalone APs.
+- **[Active Clients & MAC Shield](docs/HELP.md#7-logs--monitoring)** – Real-time VLAN client inventory, MAC Shield isolation controls, and live command/runtime logs.
+- **[Settings & Dry Run](docs/HELP.md#settings-modal)** – Safe configuration simulation with Dry Run mode, STP, Pause Event Reactions, and Native SSID (ENS) controls.
+- **[Boot Persistence & Auto-Heal](docs/HELP.md#5-applying-your-configuration)** – Automatic configuration re-apply on boot with continuous 5-minute health monitoring.
+- **[Update, Backup & Restore](docs/HELP.md#8-updating-or-restoring-mervlan)** – One-click updates across release channels, automatic pre-update backups, point-in-time restore, and undo tools.
 
 ---
 
@@ -95,7 +103,7 @@ Multi‑AP notes:
 
 - Each node must either connect to a VLAN-aware switch or directly to a trunk-enabled LAN port on the main unit using the experimental MAIN → NODE topology.
 - LAN-port VLAN assignments can be configured separately for the main AP and each node.
-- AiMesh and standalone APs use different SSH-key setup steps. See [SSH Key Install](docs/HELP.md#5-ssh-key-install).
+- AiMesh and standalone APs use different SSH-key setup steps. See [SSH Key Install](docs/HELP.md#6-ssh-key-install).
 
 See [Getting Started](docs/HELP.md#1-getting-started-with-mervlan) for supported topology details.
 
@@ -179,7 +187,7 @@ A restore returns the complete MerVLAN installation—including its version, set
 
 After a successful update or restore, a temporary **Undo Update** or **Undo Restore** option may be available until the next reboot.
 
-For step-by-step instructions, see [Updating or Restoring MerVLAN](docs/HELP.md#updating-mervlan). For manual commands, see [Update, Backup, and Restore Commands](docs/HELP.md#update-backup-and-restore-commands). The same Help Guide is available from <kbd>INFO</kbd> &rarr; <kbd>Help</kbd> in the MerVLAN UI.
+For step-by-step instructions, see [Updating or Restoring MerVLAN](docs/HELP.md#8-updating-or-restoring-mervlan). For manual commands, see [Update, Backup, and Restore Commands](docs/HELP.md#update-backup-and-restore-commands). The same Help Guide is available from <kbd>INFO</kbd> &rarr; <kbd>Help</kbd> in the MerVLAN UI.
 
 ---
 
@@ -187,7 +195,7 @@ For step-by-step instructions, see [Updating or Restoring MerVLAN](docs/HELP.md#
 
 Open <kbd>INFO</kbd> for live command output, then select <kbd>View Logs</kbd> for the VLAN Manager, CLI Output, and Boot & Startup logs. Runtime logs are stored under `/tmp/mervlan_tmp/logs` and are cleared on reboot.
 
-See [Logs & Monitoring](docs/HELP.md#6-logs--monitoring) for common problems and the [CLI log commands](docs/HELP.md#logs-and-quick-debugging) when working manually over SSH.
+See [Logs & Monitoring](docs/HELP.md#7-logs--monitoring) for common problems and the [CLI log commands](docs/HELP.md#logs-and-quick-debugging) when working manually over SSH.
 
 ---
 
@@ -195,7 +203,7 @@ See [Logs & Monitoring](docs/HELP.md#6-logs--monitoring) for common problems and
 
 MerVLAN is beta software developed primarily on ASUS AP-mode systems. Hardware and firmware behavior varies, so development builds and experimental trunk features need broader testing.
 
-See [Branches, Releases and Contributions](#branches-releases-and-contributions) for development channels and [Get Help & Support](docs/HELP.md#9-get-help--support) for testing and discussion links. Developers working from `dev` should start with `dev-tools/README.md`.
+See [Branches, Releases and Contributions](#branches-releases-and-contributions) for development channels and [Get Help & Support](docs/HELP.md#11-get-help--support) for testing and discussion links. Developers working from `dev` should start with `dev-tools/README.md`.
 
 ---
 
@@ -209,7 +217,7 @@ See the **[`changelog.txt`](changelog.txt)** in this repository for detailed ver
 
 Accurate LAN-to-interface mappings are needed to add official support for more routers. The interactive mapper guides the test, creates a report, and prepares a GitHub issue for submission.
 
-See [Device Support and the mapper instructions](docs/HELP.md#8-device-support) for the supported-device list and step-by-step procedure.
+See [Device Support and the mapper instructions](docs/HELP.md#10-device-support) for the supported-device list and step-by-step procedure.
 
 ### Models requiring testing
 
@@ -255,7 +263,7 @@ MerVLAN uses two primary branches:
 
 Temporary test branches may also be created from `dev`, normally using names such as `dev-test1` or `dev-test2`. They are used for targeted development and testing and may change without notice.
 
-Use **Custom branch (dev only)** when working with the maintainer on a specific change. See [Updating MerVLAN](docs/HELP.md#updating-mervlan) or the [CLI Usage](docs/HELP.md#7-cli-usage) reference for instructions.
+Use **Custom branch (dev only)** when working with the maintainer on a specific change. See [Updating MerVLAN](docs/HELP.md#8-updating-or-restoring-mervlan) or the [CLI Usage](docs/HELP.md#9-cli-usage) reference for instructions.
 
 ### Contributing
 
@@ -273,6 +281,14 @@ That is the portable entry point for project rules, developer guidance,
 testing, and deployment constraints.
 
 When a development version is ready for public beta, `dev` is merged into `main` and published as a tagged GitHub pre-release.
+
+### Hardware Donations for Development
+
+Expanding MerVLAN's device compatibility requires hands-on hardware to analyze kernel drivers and switch mappings. If you have upgraded away from ASUS and have retired routers that would otherwise gather dust in a closet or head for electronics recycling, donating them gives them a second life and directly supports ongoing development:
+
+- **Especially useful:** Models with shared internal switch architectures (where multiple physical LAN ports are multiplexed behind a single kernel interface, such as the RT-AX88U or RT-BE92U), multi-gigabit units, or newer Wi-Fi 6/7 hardware.
+- **Location & shipping:** As development is based in Sweden (EU), donations from within Europe are preferred to keep shipping practical and avoid prohibitive international freight costs and customs fees.
+- **Get in touch:** If you have surplus gear you'd be happy to pass along to the test lab, feel free to connect via [Discord](https://discord.com/invite/8c3C8q54hn) or send a PM on [SNB Forums](https://www.snbforums.com/threads/mervlan-v0-52-1-dev-0-52-7-simple-and-powerful-vlan-management-beta.95936/).
 
 ---
 

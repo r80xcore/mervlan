@@ -834,13 +834,15 @@ docs/HELP.md
 docs/diagrams/topology-1_local.svg
 docs/diagrams/topology-2_aimesh.svg
 docs/diagrams/topology-3_standalone-ap.svg
-docs/diagrams/topology-4_node-to-main.svg"
+docs/diagrams/topology-4_node-to-main.svg
+docs/images/mervlan_help.svg
+docs/images/mervlan_manager.svg"
 
 # required directories in a valid package
 CORE_STAGE_DIRS="functions settings templates www"
 
 # optional directories are allowed to differ between branches
-OPTIONAL_STAGE_DIRS="www/vendor docs docs/diagrams"
+OPTIONAL_STAGE_DIRS="www/vendor docs docs/diagrams docs/images"
 
 # ========================================================================== #
 # SETTINGS.JSON MERGE HELPERS                                                #

@@ -9,6 +9,8 @@ format=1
 0644 docs/diagrams/topology-3_standalone-ap.svg
 0644 docs/diagrams/topology-4_node-to-main.svg
 0644 docs/HELP.md
+0644 docs/images/mervlan_help.svg
+0644 docs/images/mervlan_manager.svg
 0644 LICENSE
 0644 mervlan.asp
 0644 README.md

@@ -13,14 +13,15 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. This guide covers setup, 
 1. [Getting Started With MerVLAN](#1-getting-started-with-mervlan)
 2. [SSID Configuration](#2-ssid-configuration)
 3. [LAN Port Configuration](#3-lan-port-configuration)
-4. [Applying Your Configuration](#4-applying-your-configuration)
-5. [SSH Key Install](#5-ssh-key-install)
-6. [Logs & Monitoring](#6-logs--monitoring)
-7. [Updating or Restoring MerVLAN](#updating-mervlan)
-8. [CLI Usage](#7-cli-usage)
-9. [Device Support](#8-device-support)
-10. [Get Help & Support](#9-get-help--support)
-11. [Wiki - Reference & Glossary](#10-wiki---reference--glossary)
+4. [WAN Native VLAN](#4-wan-native-vlan)
+5. [Applying Your Configuration](#5-applying-your-configuration)
+6. [SSH Key Install](#6-ssh-key-install)
+7. [Logs & Monitoring](#7-logs--monitoring)
+8. [Updating or Restoring MerVLAN](#8-updating-or-restoring-mervlan)
+9. [CLI Usage](#9-cli-usage)
+10. [Device Support](#10-device-support)
+11. [Get Help & Support](#11-get-help--support)
+12. [Wiki - Reference & Glossary](#12-wiki---reference--glossary)
 
 <h2 id="1-getting-started-with-mervlan">1. Getting Started With MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
@@ -123,7 +124,7 @@ Click <kbd>Apply</kbd> to save changes made in this window. While the save is ru
 
 ### Setup Checklist - Multi-Node (AiMesh or Standalone AP)
 
-1. **Install SSH Keys** - follow [SSH Key Install](#5-ssh-key-install).
+1. **Install SSH Keys** - follow [SSH Key Install](#6-ssh-key-install).
 2. **Add Your Nodes**
     - Enter each node's IP in the Nodes panel and rename it if desired.
     - Click <kbd>Save</kbd> before syncing.
@@ -134,7 +135,7 @@ Click <kbd>Apply</kbd> to save changes made in this window. While the save is ru
 7. **Apply** - click <kbd>Apply VLAN</kbd>, choose <kbd>Router + Nodes</kbd>, and watch the command output.
 
 > [!IMPORTANT]
-> After either setup works correctly with Dry Run off, open <kbd>Settings</kbd>, enable **Apply on Boot**, and click <kbd>Apply</kbd>. This makes the configuration survive a reboot and enables automatic health checks. See [Logs & Monitoring](#6-logs--monitoring) to verify the result.
+> After either setup works correctly with Dry Run off, open <kbd>Settings</kbd>, enable **Apply on Boot**, and click <kbd>Apply</kbd>. This makes the configuration survive a reboot and enables automatic health checks. See [Logs & Monitoring](#7-logs--monitoring) to verify the result.
 
 ### Important Tips
 
@@ -264,12 +265,45 @@ Trunk mode tags multiple VLANs on a single LAN port. Intended for connecting a m
 
 If your device's port labels don't match the physical ports, or if the WAN interface was incorrectly detected, use APMO to correct the hardware profile manually.
 
-Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) for instructions and the full list of pre-mapped devices.
-<br>
-<br>
-<a id="wan-native"></a>
+Open <kbd>APMO</kbd> from the main UI. See [Device Support](#10-device-support) for instructions and the full list of pre-mapped devices.
 
-### WAN Native VLAN
+### Status Icons
+
+- <kbd>OK</kbd> - valid VLAN configured
+- <kbd>Unconfigured</kbd> - no VLAN assigned (default network)
+- <kbd>Pending</kbd> - edited but not saved
+- <kbd>Duplicate</kbd> - duplicate VLAN (check if intentional)
+- <kbd>X</kbd> - invalid VLAN ID
+
+### Common Scenarios
+
+> **Scenario 1 - IoT wired + wireless on the same segment**
+>
+> - SSID `IoT_2G` → VLAN 30
+> - LAN4 → VLAN 30
+> - A wired device on LAN4 joins the same isolated IoT network as wireless clients.
+
+> **Scenario 2 - Full per-port isolation**
+>
+> - LAN1 → VLAN 10
+> - LAN2 → VLAN 20
+> - LAN3 → VLAN 30
+> - LAN4 → VLAN 40
+> - Every port is its own isolated segment.
+
+> **Scenario 3 - One isolated port, rest default**
+>
+> - LAN1-LAN3 → blank/default
+> - LAN4 → VLAN 30
+> - Only LAN4 is isolated; the rest of the LAN is unaffected.
+
+> [!TIP]
+> Next, configure [WAN Native VLAN](#4-wan-native-vlan) if needed, or continue to [Applying Your Configuration](#5-applying-your-configuration).
+
+---
+
+<h2 id="4-wan-native-vlan">4. WAN Native VLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="wan-native"></a>
 
 > [!WARNING]
 > It is **highly recommended** to disable **Apply on boot** while testing the *WAN Native VLAN* configuration.\
@@ -288,7 +322,7 @@ Leave WAN Native as **ASUS** (the default) unless the upstream switch and DHCP s
 
 ---
 
-#### Preparation
+### Preparation
 
 Before enabling numeric WAN Native on MAIN:
 
@@ -337,7 +371,7 @@ Before enabling numeric WAN Native on MAIN:
 
 <br>
 
-#### WAN Native VLAN Configuration
+### WAN Native VLAN Configuration
 
 1. *Enter your reserved IP addresses into the MerVLAN interface:*
 2. Click **Edit** next to the VLAN ID to open the IP settings.
@@ -357,7 +391,7 @@ Before enabling numeric WAN Native on MAIN:
 
 ---
 
-#### Uplink Modes & Recovery
+### Uplink Modes & Recovery
 
 There are two practical ways to configure your upstream switch:
 
@@ -388,7 +422,7 @@ Once WAN Native is stable, you can configure the ASUS uplink as **tagged-only** 
 
 ---
 
-#### AiMesh MAIN and Nodes
+### AiMesh MAIN and Nodes
 
 Live qualification shows that mixing ASUS/default and WAN Native management domains breaks AiMesh visibility.
 
@@ -401,7 +435,7 @@ Live qualification shows that mixing ASUS/default and WAN Native management doma
 
 ---
 
-#### VLAN Requirements
+### VLAN Requirements
 
 * The selected WAN Native VLAN must already be **tagged and carried on the ASUS uplink** before enabling it.
 * **Do not** use the same VLAN ID for WAN Native and another managed SSID, LAN, or trunk VLAN on the *same device*.
@@ -409,46 +443,12 @@ Live qualification shows that mixing ASUS/default and WAN Native management doma
 * Keep the ASUS/default management endpoint configured while WAN Native is in use.
 * Fully tagged operation is optional and should only be used after WAN Native is proven stable.
 
----
-
-<br>
-<br>
-### Status Icons
-
-- <kbd>OK</kbd> - valid VLAN configured
-- <kbd>Unconfigured</kbd> - no VLAN assigned (default network)
-- <kbd>Pending</kbd> - edited but not saved
-- <kbd>Duplicate</kbd> - duplicate VLAN (check if intentional)
-- <kbd>X</kbd> - invalid VLAN ID
-
-### Common Scenarios
-
-> **Scenario 1 - IoT wired + wireless on the same segment**
->
-> - SSID `IoT_2G` → VLAN 30
-> - LAN4 → VLAN 30
-> - A wired device on LAN4 joins the same isolated IoT network as wireless clients.
-
-> **Scenario 2 - Full per-port isolation**
->
-> - LAN1 → VLAN 10
-> - LAN2 → VLAN 20
-> - LAN3 → VLAN 30
-> - LAN4 → VLAN 40
-> - Every port is its own isolated segment.
-
-> **Scenario 3 - One isolated port, rest default**
->
-> - LAN1-LAN3 → blank/default
-> - LAN4 → VLAN 30
-> - Only LAN4 is isolated; the rest of the LAN is unaffected.
-
 > [!TIP]
-> Ready to apply? Continue to [Applying Your Configuration](#4-applying-your-configuration).
+> Ready to apply? Continue to [Applying Your Configuration](#5-applying-your-configuration).
 
 ---
 
-<h2 id="4-applying-your-configuration">4. Applying Your Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="5-applying-your-configuration">5. Applying Your Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
 Once configured, it's time to push your VLANs live.
 
@@ -480,7 +480,7 @@ Single router: no mode selection - applies immediately.
 3. Click <kbd>Apply VLAN</kbd> - choose an apply mode if nodes are configured, then watch the command output.
 
 > [!TIP]
-> If you are configuring nodes, complete [SSH Key Install](#5-ssh-key-install) before applying.
+> If you are configuring nodes, complete [SSH Key Install](#6-ssh-key-install) before applying.
 
 ### What Happens During Apply
 
@@ -515,11 +515,12 @@ By default, VLANs do **not** survive a router reboot. After confirming that a re
 | VLANs lost after reboot        | Open Settings, enable **Apply on Boot**, and click <kbd>Apply</kbd>.                                      |
 
 > [!TIP]
-> Want to monitor results? Continue to [Logs & Monitoring](#6-logs--monitoring).
+> Want to monitor results? Continue to [Logs & Monitoring](#7-logs--monitoring).
 
 ---
 
-<h2 id="5-ssh-key-install">5. SSH Key Install <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="6-ssh-key-install">6. SSH Key Install <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="5-ssh-key-install"></a>
 
 SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node. AiMesh nodes receive authorized keys from the main router during boot, while standalone APs require the key to be installed on each device.
 
@@ -580,11 +581,12 @@ After keys are installed and any required node reboots are done:
 | Key already exists message | This is normal. MerVLAN reuses its existing key pair. |
 
 > [!TIP]
-> Keys installed? Return to [Applying Your Configuration](#4-applying-your-configuration).
+> Keys installed? Return to [Applying Your Configuration](#5-applying-your-configuration).
 
 ---
 
-<h2 id="6-logs--monitoring">6. Logs & Monitoring <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="7-logs--monitoring">7. Logs & Monitoring <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="6-logs--monitoring"></a>
 
 MerVLAN provides real-time command output and runtime logs for its operations.
 
@@ -638,11 +640,12 @@ The panel below the command output groups detected VLAN clients by device and VL
 | Recovery runs repeatedly | Check the VLAN Manager log for missing bridges, interfaces returning to `br0`, or wireless-event warnings. |
 
 > [!TIP]
-> Need more help? See [Get Help & Support](#9-get-help--support).
+> Need more help? See [Get Help & Support](#11-get-help--support).
 
 ---
 
-<h2 id="updating-mervlan">7. Updating or Restoring MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="8-updating-or-restoring-mervlan">8. Updating or Restoring MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="updating-mervlan"></a>
 
 > [!NOTE]
 > By default, updates preserve your settings, SSH keys, MAC Shield data, local backups, and existing logs. You can optionally clear old logs before an update; the new update is still logged from beginning to end.
@@ -723,7 +726,8 @@ For manual update, backup, restore, and undo commands, see [Update, Backup, and 
 
 ---
 
-<h2 id="7-cli-usage">8. CLI Usage <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="9-cli-usage">9. CLI Usage <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="7-cli-usage"></a>
 
 These commands are useful when working over SSH on the main router. Most users should use the web UI first; CLI commands are mainly for recovery, manual updates, testing, and advanced troubleshooting.
 
@@ -914,7 +918,8 @@ These commands are useful after editing local web or public files. They do not d
 
 ---
 
-<h2 id="8-device-support">9. Device Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="10-device-support">10. Device Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="8-device-support"></a>
 
 MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merlin routers. Each profile maps physical LAN ports to the correct kernel interfaces (ethX) and identifies the WAN port.
 
@@ -997,11 +1002,12 @@ The interactive mapper identifies the physical LAN-port order and prepares a Git
 3. Follow the prompts for each physical LAN port.
 4. Submit the pre-filled GitHub issue link produced at the end.
 
-The report is stored under `/tmp/mervlan_tmp/results` and is lost on reboot. See [Get Help & Support](#9-get-help--support) if you need assistance.
+The report is stored under `/tmp/mervlan_tmp/results` and is lost on reboot. See [Get Help & Support](#11-get-help--support) if you need assistance.
 
 ---
 
-<h2 id="9-get-help--support">10. Get Help & Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="11-get-help--support">11. Get Help & Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="9-get-help--support"></a>
 
 Need help? Found a bug? Have a feature idea? The MerVLAN community is active and happy to assist.
 
@@ -1049,9 +1055,10 @@ testing, and deployment constraints.
 
 ---
 
-<h2 id="10-wiki---reference--glossary">11. Wiki - Reference & Glossary <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="12-wiki---reference--glossary">12. Wiki - Reference & Glossary <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="10-wiki---reference--glossary"></a>
 
-This section explains technical terms used throughout the guide. Manual and recovery commands are collected in [CLI Usage](#7-cli-usage).
+This section explains technical terms used throughout the guide. Manual and recovery commands are collected in [CLI Usage](#9-cli-usage).
 
 ### Glossary
 
