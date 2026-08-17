@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_wan.sh || version="0.8"                       #
+#               - File: mervlan_wan.sh || version="0.9"                       #
 # ============================================================================ #
 # - Purpose:    Own the optional native VLAN transport on the WAN/uplink.      #
 #               ASUS/native traffic remains on br0; this script changes only   #
@@ -118,11 +118,11 @@ WAN_DHCP_WAN_NATIVE_IP_CONFIG="$(json_get_section2_value "VLAN" "WAN_Native" "MA
 WAN_DHCP_ASUS_IP_CONFIG="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_ASUS_IP" "$SETTINGS_FILE" 2>/dev/null)"
 # Pre-structured settings saved these endpoint keys at document root. Preserve
 # that migration read while all current saves write VLAN.WAN_Native.
-case "$WAN_DHCP_WAN_NATIVE_IP_CONFIG" in ''|none|NONE)
+case "$WAN_DHCP_WAN_NATIVE_IP_CONFIG" in '')
   WAN_DHCP_WAN_NATIVE_IP_CONFIG="$(json_get_flag "MAIN_WAN_NATIVE_IP" "none" "$SETTINGS_FILE" 2>/dev/null)"
   ;;
 esac
-case "$WAN_DHCP_ASUS_IP_CONFIG" in ''|none|NONE)
+case "$WAN_DHCP_ASUS_IP_CONFIG" in '')
   WAN_DHCP_ASUS_IP_CONFIG="$(json_get_flag "MAIN_ASUS_IP" "none" "$SETTINGS_FILE" 2>/dev/null)"
   ;;
 esac
@@ -719,7 +719,11 @@ wan_main_dhcp_preflight() {
 
   WAN_DHCP_EXPECTED="$(wan_main_dhcp_expected_address 2>/dev/null || printf '')"
   [ -n "$WAN_DHCP_EXPECTED" ] || {
-    error -c cli,vlan "WAN Native: MAIN DHCP has no expected address for bounded handoff"
+    if [ "$WAN_NATIVE" = "none" ]; then
+      error -c cli,vlan "WAN Native: ASUS/default DHCP reservation is not configured; refusing return to ASUS before mutation"
+    else
+      error -c cli,vlan "WAN Native: WAN Native DHCP reservation is not configured; refusing tagged transition before mutation"
+    fi
     return 1
   }
   WAN_DHCP_L3_ORIGINAL="$(wan_main_dhcp_address_read 2>/dev/null || printf '')"

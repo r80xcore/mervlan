@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: uninstall.sh || version: 0.47                      #
+#                   - File: uninstall.sh || version: 0.48                      #
 # ============================================================================ #
 # - Purpose:    Disable the MerVLAN addon and clean up necessary files.        #
 #                                                                              #
@@ -95,6 +95,12 @@ uninstall_maintenance_admit() {
     }
     if ! merv_maintenance_direct_admit; then
         echo "[uninstall] ERROR: another MerVLAN maintenance operation is live or unverifiable; refusing uninstall" >&2
+        return 1
+    fi
+    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
+       ! merv_maintenance_direct_export_uninstall_context; then
+        merv_maintenance_direct_release >/dev/null 2>&1 || :
+        echo "[uninstall] ERROR: could not export authenticated maintenance context to uninstall children" >&2
         return 1
     fi
     MERV_MAINTENANCE_ENTRY_ADMITTED=1
@@ -918,7 +924,13 @@ am_page="$(am_settings_get mervlan_page)"
 
 # Discover the ASP slot by title when the stored page reference is empty
 if [ -z "$am_page" ]; then
-    am_page="$(ls /www/user/user*.asp 2>/dev/null | xargs -r grep -l 'VLAN Manager' 2>/dev/null | xargs -r -n1 basename | head -n1)"
+    for _asp_candidate in /www/user/user*.asp; do
+        [ -f "$_asp_candidate" ] || continue
+        if grep -q 'VLAN Manager' "$_asp_candidate" 2>/dev/null; then
+            am_page="${_asp_candidate##*/}"
+            break
+        fi
+    done
 fi
 
 logger -t "$LOGTAG" "Uninstalling $ADDON page '$am_page'"
@@ -970,15 +982,25 @@ rm -rf /www/user/merlin_vlan_manager 2>/dev/null
 
 # Remove service-event and addon hooks via setupdisable for real uninstalls.
 # Reinstall only rebuilds public/runtime publication; its caller owns hooks.
+UNINSTALL_HOOKS_OK=1
 if [ "$ACTION" != "reinstall" ]; then
     if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
         echo "[uninstall] Removing service-event hooks"
-        # Log outcome of setupdisable while skipping node sync for performance
-        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
-            echo "[uninstall] Service-event hooks removed"
+        _uninstall_hook_log="${TMPDIR:-/tmp}/mervlan-uninstall-hooks.$$"
+        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >"$_uninstall_hook_log" 2>&1; then
+            if grep -q '/jffs/addons/mervlan/functions/service-event-handler.sh' /jffs/scripts/service-event 2>/dev/null ||
+               grep -q '/jffs/addons/mervlan/functions/mervlan_boot_wrap.sh install' /jffs/scripts/services-start 2>/dev/null; then
+                echo "[uninstall] ERROR: MerVLAN hook content remains after setupdisable" >&2
+                UNINSTALL_HOOKS_OK=0
+            else
+                echo "[uninstall] Service-event hooks removed"
+            fi
         else
-            echo "[uninstall] WARNING: setupdisable failed" >&2
+            echo "[uninstall] ERROR: setupdisable failed" >&2
+            [ ! -s "$_uninstall_hook_log" ] || sed -n '1,80p' "$_uninstall_hook_log" >&2
+            UNINSTALL_HOOKS_OK=0
         fi
+        rm -f "$_uninstall_hook_log" 2>/dev/null || :
 
         # Handle node cleanup if nodes are configured
         if has_configured_nodes; then
@@ -993,7 +1015,12 @@ if [ "$ACTION" != "reinstall" ]; then
             fi
         fi
     else
-        echo "[uninstall] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
+        echo "[uninstall] ERROR: mervlan_boot.sh not executable or missing; cannot remove service hooks safely" >&2
+        UNINSTALL_HOOKS_OK=0
+    fi
+    if [ "$UNINSTALL_HOOKS_OK" != "1" ]; then
+        echo "[uninstall] Uninstall stopped: addon files were retained because local service hooks could not be verified removed" >&2
+        exit 1
     fi
 else
     echo "[uninstall] Reinstall cleanup complete; service hooks retained for caller reconciliation"

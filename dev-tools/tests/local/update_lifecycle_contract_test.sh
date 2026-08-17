@@ -72,6 +72,24 @@ unset MERV_MAINTENANCE_ENTRY_OWNED MERV_MAINTENANCE_ENTRY_START MERV_MAINTENANCE
   MERV_MAINTENANCE_OWNER_PID MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
 pass direct-installer-child-lifecycle
 
+# Standalone uninstall owns the same maintenance lock but gets a distinct,
+# authenticated delegation kind for its boot-hook teardown children.
+merv_owner_lock_acquire "$MERV_UPDATE_MAINTENANCE_LOCK" 60 1 direct-uninstall || fail direct-uninstall-owner-acquire
+MERV_MAINTENANCE_ENTRY_OWNED=1
+MERV_MAINTENANCE_ENTRY_START="$MERV_LOCK_START"
+MERV_MAINTENANCE_ENTRY_NONCE="$MERV_LOCK_NONCE"
+merv_maintenance_direct_export_uninstall_context || fail direct-uninstall-context-export
+merv_maintenance_delegation_valid || fail direct-uninstall-context-valid
+! merv_update_mutation_blocked || fail direct-uninstall-child-bypass
+MERV_MAINTENANCE_OWNER_NONCE=forged
+merv_update_mutation_blocked || fail forged-direct-uninstall-context-blocked
+MERV_MAINTENANCE_OWNER_NONCE="$MERV_MAINTENANCE_ENTRY_NONCE"
+merv_owner_lock_release "$MERV_UPDATE_MAINTENANCE_LOCK" "$MERV_MAINTENANCE_ENTRY_NONCE" || fail direct-uninstall-owner-release
+unset MERV_MAINTENANCE_ENTRY_OWNED MERV_MAINTENANCE_ENTRY_START MERV_MAINTENANCE_ENTRY_NONCE \
+  MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND MERV_UNINSTALL_DELEGATION \
+  MERV_MAINTENANCE_OWNER_PID MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
+pass direct-uninstaller-child-lifecycle
+
 merv_node_reconcile_write nodeenable unreachable node-unavailable 0 1234 digest:abc || fail node-marker-write
 merv_node_reconcile_active || fail node-marker-active
 [ "$(merv_node_reconcile_get action '')" = nodeenable ] || fail node-marker-action

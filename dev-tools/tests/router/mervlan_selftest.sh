@@ -571,6 +571,28 @@ test_owner_lock_contract() {
   rm -rf "$MERV_DHCP_HOLD_PROC_ROOT/9001"
   assert_rc 1 "owner v2 distinguishes a dead identity" \
     merv_owner_v2_matches "$_tol_lock" 9001 123456 second-owner "$MERV_DHCP_HOLD_PROC_ROOT"
+
+  # A pre-owner-aware lock may be a regular file.  It is an obstruction, not
+  # an absent directory: acquire must fail immediately instead of retrying the
+  # impossible mkdir forever.
+  rm -rf "$_tol_lock" 2>/dev/null || return 1
+  : > "$_tol_lock" || return 1
+  [ "$(merv_owner_lock_state "$_tol_lock")" = unknown ] &&
+    pass "regular-file lock obstruction is fail-closed, not absent" ||
+    fail "regular-file lock obstruction is fail-closed, not absent"
+  assert_rc 1 "regular-file lock obstruction fails bounded acquisition" \
+    merv_owner_lock_acquire "$_tol_lock" 0 0 owner-obstruction
+
+  # A lock-root symlink is equally ambiguous, even when it points at a real
+  # directory. Never follow it as an owner directory.
+  rm -f "$_tol_lock" 2>/dev/null || return 1
+  mkdir -p "$_tol_root/symlink-target" || return 1
+  ln -s "$_tol_root/symlink-target" "$_tol_lock" || return 1
+  [ "$(merv_owner_lock_state "$_tol_lock")" = unknown ] &&
+    pass "symlink lock obstruction is fail-closed" ||
+    fail "symlink lock obstruction is fail-closed"
+  assert_rc 1 "symlink lock obstruction fails bounded acquisition" \
+    merv_owner_lock_acquire "$_tol_lock" 0 0 owner-symlink-obstruction
 }
 
 test_maintenance_lock_interop() {
@@ -3419,11 +3441,13 @@ test_ssh_trust_contract() {
      grep -Fq 'STAGED_NODE_FAIL' "$_tst_sync" &&
      grep -Fq 'node-activation-failed' "$_tst_sync" &&
      grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh' "$_tst_boot" &&
-     grep -Fq 'reconcile_legacy_boot_file_locks' "$_tst_boot" &&
+     [ "$(grep -Fc 'reconcile_legacy_boot_file_locks' "$_tst_boot")" -ge 4 ] &&
+     grep -Fq 'Refusing setupenable while legacy boot-file lock state is ambiguous' "$_tst_boot" &&
+     grep -Fq 'Refusing setupdisable while legacy boot-file lock state is ambiguous' "$_tst_boot" &&
      grep -Fq 'merv_lock_quarantine_legacy_file' "$_tst_lib"; then
-    pass "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+    pass "boot hook activation/removal uses shell-safe invocation, diagnostics, and legacy-lock migration"
   else
-    fail "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+    fail "boot hook activation/removal uses shell-safe invocation, diagnostics, and legacy-lock migration"
     _tst_ok=0
   fi
 
@@ -4128,6 +4152,29 @@ MERV_WAN_IP
   fi
   unset WAN_TEST_ORDER_LOG
 
+  # A numeric MAIN target needs only its target-domain reservation.  The ASUS
+  # recovery reservation is optional until a later return to ASUS/default.
+  json_set_section2_value VLAN WAN_Native MAIN_ASUS_IP none "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.99 && ! _twn_member eth0.98; then
+    pass "WAN Native numeric MAIN works without ASUS/default recovery IP"
+  else
+    fail "WAN Native numeric MAIN works without ASUS/default recovery IP"; _twn_ok=1
+  fi
+  : > "$_twn_order_log"
+  WAN_TEST_ORDER_LOG="$_twn_order_log"; export WAN_TEST_ORDER_LOG
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.99 && ! _twn_member eth0 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native refuses return to ASUS without recovery IP before mutation"
+  else
+    fail "WAN Native refuses return to ASUS without recovery IP before mutation"; _twn_ok=1
+  fi
+  unset WAN_TEST_ORDER_LOG
+  json_set_section2_value VLAN WAN_Native MAIN_ASUS_IP 192.0.2.10 "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+
   # MAIN static LAN is rejected before any bridge operation.  The target and
   # captured native member must remain exactly as they were before preflight.
   : > "$_twn_order_log"
@@ -4437,6 +4484,7 @@ MERV_WAN_IP
 
   if grep -Fq 'wan_main_dhcp_restart()' "$MERV_BASE/functions/mervlan_wan.sh" &&
      grep -Fq 'nvram get lan_proto' "$MERV_BASE/functions/mervlan_wan.sh" &&
+     grep -Fq 'case "$WAN_DHCP_ASUS_IP_CONFIG" in '"'"''"'"')' "$MERV_BASE/functions/mervlan_wan.sh" &&
      grep -Fq 'kill -USR2' "$MERV_BASE/functions/mervlan_wan.sh"; then
     pass "WAN Native restarts MAIN DHCP only after verified transport swap"
   else fail "WAN Native DHCP restart contract is wired"; _twn_ok=1; fi
@@ -4466,7 +4514,9 @@ MERV_WAN_IP
      grep -Fq 'wanNativePopupNodeAsusIp' "$MERV_BASE/www/index.html" &&
      grep -Fq 'cachedWanNativeIp' "$MERV_BASE/www/index.html" &&
      grep -Fq 'WAN_NATIVE_POPUP_STATE && target !== CURRENT_LAN_TARGET' "$MERV_BASE/www/index.html" &&
-     grep -Fq 'requires both DHCP reservations' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativeOptionalIpIsValid' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'The ASUS/default reservation is optional until you switch back to ASUS.' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'requires both DHCP reservations' "$MERV_BASE/www/index.html" &&
      grep -Fq 'requires a WAN Native DHCP reservation' "$MERV_BASE/www/index.html" &&
      grep -Fq 'nodeAsusRow.style.display = isMain ?' "$MERV_BASE/www/index.html" &&
      grep -Fq 'min-width:var(--wan-native-edit-width, 50px);' "$MERV_BASE/www/vlan_form_style.css" &&

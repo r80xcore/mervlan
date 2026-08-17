@@ -229,12 +229,13 @@ merv_maintenance_delegation_valid() {
       merv_update_quiesce_active || return 1
       merv_update_journal_requires_safe_boot || return 1
       ;;
-    backup|recovery|install)
+    backup|recovery|install|uninstall)
       [ "${MERV_MAINTENANCE_DELEGATED:-0}" = "1" ] || return 1
       case "$_mmd_kind" in
         backup) [ "${MERV_BACKUP_DELEGATION:-0}" = "1" ] || return 1 ;;
         recovery) [ "${MERV_RECOVERY_DELEGATION:-0}" = "1" ] || return 1 ;;
         install) [ "${MERV_INSTALL_DELEGATION:-0}" = "1" ] || return 1 ;;
+        uninstall) [ "${MERV_UNINSTALL_DELEGATION:-0}" = "1" ] || return 1 ;;
         *) return 1 ;;
       esac
       type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
@@ -293,6 +294,27 @@ merv_maintenance_direct_export_install_context() {
   MERV_MAINTENANCE_OWNER_NONCE="$MERV_MAINTENANCE_ENTRY_NONCE"
   export MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
     MERV_INSTALL_DELEGATION MERV_MAINTENANCE_OWNER_PID \
+    MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
+  return 0
+}
+
+# Export the same exact-owner contract for standalone uninstall children.
+# Keeping uninstall distinct from install avoids turning one lifecycle's grant
+# into a generic maintenance bypass.
+merv_maintenance_direct_export_uninstall_context() {
+  [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] || return 1
+  type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
+  type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
+  merv_owner_v2_positive_uint "${MERV_MAINTENANCE_ENTRY_START:-}" || return 1
+  merv_owner_v2_nonce_valid "${MERV_MAINTENANCE_ENTRY_NONCE:-}" || return 1
+  MERV_MAINTENANCE_DELEGATED=1
+  MERV_MAINTENANCE_DELEGATION_KIND=uninstall
+  MERV_UNINSTALL_DELEGATION=1
+  MERV_MAINTENANCE_OWNER_PID="$$"
+  MERV_MAINTENANCE_OWNER_START="$MERV_MAINTENANCE_ENTRY_START"
+  MERV_MAINTENANCE_OWNER_NONCE="$MERV_MAINTENANCE_ENTRY_NONCE"
+  export MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
+    MERV_UNINSTALL_DELEGATION MERV_MAINTENANCE_OWNER_PID \
     MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
   return 0
 }

@@ -303,6 +303,7 @@ Open <kbd>APMO</kbd> from the main UI. See [Device Support](#10-device-support) 
 ---
 
 <h2 id="4-wan-native-vlan">4. WAN Native VLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+
 <a id="wan-native"></a>
 
 > [!WARNING]
@@ -384,10 +385,10 @@ Before enabling numeric WAN Native on MAIN:
 | ASUS/default network | `192.168.186.200` | `192.168.186.201` |
 | WAN Native VLAN 190 | `192.168.190.200` | `192.168.190.201` |
 
-* **MAIN:** Requires both the ASUS/default and WAN Native DHCP reservations during the setup.
+* **MAIN:** A numeric WAN Native VLAN requires the WAN Native DHCP reservation. The ASUS/default recovery reservation is optional while tagged, but must be configured before MerVLAN can switch MAIN back to ASUS/default.
 * **Nodes:** The "Node Configuration" address is default. Enter the node's WAN Native DHCP reservation.
 
-> While not **strictly required**, it's **highly recommended** keeping your original ASUS/default DHCP reservation active for recovery. For fully tagged systems, see **Uplink Modes & Recovery** below for exactly how this works.
+> Keeping the original ASUS/default DHCP reservation is **highly recommended** for recovery, but fully tagged systems that intentionally have no untagged/default network may leave it unconfigured. MerVLAN will then refuse a return to ASUS/default before making any bridge change. See **Uplink Modes & Recovery** below for the switch-side implications.
 
 ---
 
@@ -849,6 +850,29 @@ These commands are useful after editing local web or public files. They do not d
 | --- | --- |
 | `TMP_DIR=/tmp/mervlan_staging sh install.sh download` | Download and retain the MerVLAN archive without installing it. |
 | `TMP_DIR=/tmp/mervlan_staging sh install.sh tarball` | Install from the archive retained in the selected staging directory. |
+
+For an **offline router**, download the archive on another computer and copy it
+to `/tmp/mervlan_staging`. Modern OpenSSH `scp` uses SFTP by default, which is
+not available on every ASUSWRT-Merlin build, so use capital `-O` to select the
+legacy SCP transport:
+
+```sh
+ssh admin@<ROUTER_IP> "mkdir -p /tmp/mervlan_staging"
+scp -O mervlan-<branch>-<version>.tar.gz admin@<ROUTER_IP>:/tmp/mervlan_staging/
+```
+
+On the router, extract the archive normally instead of using wildcard
+member-to-stdout extraction, then run the extracted installer in `tarball`
+mode while keeping the archive in the staging directory:
+
+```sh
+cd /tmp/mervlan_staging
+tar -xzf mervlan-<branch>-<version>.tar.gz
+TMP_DIR=/tmp/mervlan_staging sh /tmp/mervlan_staging/<extracted-directory>/install.sh tarball
+```
+
+`full` is the online installer and downloads its selected source from GitHub.
+Use `tarball` when the source archive has already been staged locally.
 
 #### Uninstall
 

@@ -719,7 +719,7 @@
           <label>WAN Native VLAN ID
             <input id="wanNativePopupVlan" type="text" inputmode="numeric" maxlength="4" placeholder="ASUS" oninput="updateWanNativePopupRequirement()">
           </label>
-          <label id="wanNativePopupAsusIpRow">ASUS/default DHCP reservation
+          <label id="wanNativePopupAsusIpRow">ASUS/default DHCP reservation (optional)
             <input id="wanNativePopupAsusIp" type="text" inputmode="decimal" maxlength="15" placeholder="Not configured">
           </label>
           <div id="wanNativePopupNodeAsusRow" class="wan-native-popup__readonly" hidden>
@@ -733,7 +733,7 @@
           <label id="wanNativePopupNodeIpRow">WAN Native DHCP reservation
             <input id="wanNativePopupNodeIp" type="text" inputmode="decimal" maxlength="15" placeholder="Not configured">
           </label>
-          <p class="wan-native-popup__hint">Keep both DHCP reservations configured while WAN Native is in use. The ASUS/default reservation is the recovery endpoint.</p>
+          <p class="wan-native-popup__hint">The WAN Native reservation is required for tagged MAIN. The ASUS/default recovery reservation is optional, but must be configured before switching MAIN back to ASUS/default.</p>
           <p class="wan-native-popup__hint">Before enabling WAN Native: ASUS <strong>LAN → LAN IP</strong> → <strong>Get LAN IP Automatically? Yes</strong>. MerVLAN does not assign these addresses.</p>
         </div>
         <div id="wanNativePopupError" class="wan-native-popup__error" role="alert" aria-live="polite"></div>
@@ -3891,12 +3891,11 @@ function showTooltip() {
       const mainNative = String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE.WAN_NATIVE_MAIN) || "").trim();
       const mainEndpoint = String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE.MAIN_WAN_NATIVE_IP) || "").trim();
       const mainAsusEndpoint = String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE.MAIN_ASUS_IP) || "").trim();
-      if(mainNative && mainNative.toLowerCase() !== "none" &&
-         (!statusNodeIpIsValid(mainEndpoint) || !statusNodeIpIsValid(mainAsusEndpoint))){
-        return { ok:false, target:"main", error:"WAN Native VLAN " + mainNative + " requires both DHCP reservations. Click Edit next to WAN Native VLAN ID to complete the setup." };
+      if(mainNative && mainNative.toLowerCase() !== "none" && !statusNodeIpIsValid(mainEndpoint)){
+        return { ok:false, target:"main", error:"WAN Native VLAN " + mainNative + " requires a WAN Native DHCP reservation. Click Edit next to WAN Native VLAN ID to complete the setup." };
       }
-      if(mainAsusEndpoint && !statusNodeIpIsValid(mainAsusEndpoint)){
-        return { ok:false, target:"main", error:"MAIN ASUS/default IP must be a valid IPv4 address." };
+      if(!wanNativeOptionalIpIsValid(mainAsusEndpoint)){
+        return { ok:false, target:"main", error:"MAIN ASUS/default IP must be a valid IPv4 address or left unconfigured." };
       }
       return { ok:true };
     }
@@ -3936,15 +3935,20 @@ function showTooltip() {
       return valid;
     }
 
+    function wanNativeOptionalIpIsValid(value){
+      const raw = String(value || "").trim();
+      return !raw || raw.toLowerCase() === "none" || statusNodeIpIsValid(raw);
+    }
+
     function validateMainAsusEndpointField(input, refresh = true){
       if(!input) return true;
       input.value = input.value.replace(/\s+/g, "");
       input.classList.remove("valid", "invalid");
       const raw = input.value.trim();
-      const valid = !raw || statusNodeIpIsValid(raw);
+      const valid = wanNativeOptionalIpIsValid(raw);
       if(raw) input.classList.add(valid ? "valid" : "invalid");
       input.title = valid
-        ? "Expected MAIN DHCP management IPv4 after returning to ASUS/default."
+        ? "Optional recovery IPv4 used only when returning MAIN WAN Native to ASUS/default."
         : "Use a valid IPv4 address or leave this optional endpoint blank.";
       if(refresh) refreshFormStatuses();
       return valid;
@@ -4266,7 +4270,13 @@ function showTooltip() {
       });
       refreshFormStatuses();
     }
-    function validateVlanField(el){ if(el && el.value) el.value=el.value.replace(/\s+/g,""); validateAllVlans(); updateAPIsolationAvailability(); updateSSIDAssignCheckboxes(); }
+    function validateVlanField(el){
+      if(el && el.value) el.value=el.value.replace(/\s+/g,"");
+      rebuildTrunkVlanOptionsFromSettings(CURRENT_SETTINGS_CACHE || {});
+      validateAllVlans();
+      updateAPIsolationAvailability();
+      updateSSIDAssignCheckboxes();
+    }
 
     function updateAPIsolationAvailability(){
       // Enable AP Isolation select only when both SSID and VLAN are valid
@@ -4544,6 +4554,25 @@ function showTooltip() {
       }
     }
 
+    function trunkVlanDraftSettings(flat){
+      const merged = Object.assign({}, flat || {}, CURRENT_SETTINGS_CACHE || {});
+      const maxSsids = effectiveMaxSsids();
+      for(let i = 1; i <= maxSsids; i++){
+        const idx = String(i).padStart(2, "0");
+        const input = document.querySelector(`input[name="VLAN_${idx}"]`);
+        if(input) merged[`VLAN_${idx}`] = input.value.trim() || "none";
+      }
+      const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
+      for(let i = 1; i <= maxEth; i++){
+        const key = `ETH${i}_VLAN`;
+        if(CURRENT_LAN_TARGET === "main"){
+          const input = document.querySelector(`.lan-vlan-input[data-lan-port="${i}"]`);
+          if(input) merged[key] = input.value.trim() || "none";
+        }
+      }
+      return merged;
+    }
+
     function extractVlansFromFlatSettings(flat){
       if(!flat) return [];
       const collected = new Set();
@@ -4568,7 +4597,7 @@ function showTooltip() {
     }
 
     function rebuildTrunkVlanOptionsFromSettings(flat){
-      const vlans = extractVlansFromFlatSettings(flat);
+      const vlans = extractVlansFromFlatSettings(trunkVlanDraftSettings(flat));
       const maxEth = HW_SETTINGS.MAX_ETH_PORTS;
       for(let i = 1; i <= maxEth; i++){
         const taggedSel = document.querySelector(`select[name="TAGGED_TRUNK${i}"]`);
@@ -5650,9 +5679,11 @@ function toggleCliFullsize() {
           const raw = wanNativePopupInput('wanNativePopupVlan').value.trim();
           const numeric = managedVlanNumber(raw) !== null;
           const requirement = document.getElementById('wanNativePopupRequirement');
-          if (!raw) requirement.textContent = 'ASUS/default mode: a WAN Native DHCP reservation is optional.';
+          const returningMainToAsus = isMain && !raw && managedVlanNumber(String(WAN_NATIVE_POPUP_STATE.vlan || '')) !== null;
+          if (returningMainToAsus) requirement.textContent = 'Returning MAIN to ASUS/default requires a valid ASUS/default recovery reservation below.';
+          else if (!raw) requirement.textContent = isMain ? 'ASUS/default mode: the ASUS/default recovery reservation is optional.' : 'ASUS/default mode: a WAN Native DHCP reservation is optional.';
           else if (!numeric) requirement.textContent = 'Use a VLAN ID from 2 to 4094, or leave this field blank for ASUS/default mode.';
-          else requirement.textContent = isMain ? `WAN Native VLAN ${raw} requires both DHCP reservation addresses below.` : `WAN Native VLAN ${raw} requires a WAN Native DHCP reservation.`;
+          else requirement.textContent = isMain ? `WAN Native VLAN ${raw} requires the WAN Native DHCP reservation. The ASUS/default reservation is optional until you switch back to ASUS.` : `WAN Native VLAN ${raw} requires a WAN Native DHCP reservation.`;
         }
         function openWanNativeConfigPopup() {
           syncLanFieldsToCache(CURRENT_LAN_TARGET);
@@ -5666,7 +5697,7 @@ function toggleCliFullsize() {
           if (!popup) return;
           popup.style.display = 'block';
           document.getElementById('wanNativePopupTitle').textContent = `WAN Native VLAN — ${label}`;
-          document.getElementById('wanNativePopupTarget').textContent = isMain ? 'Configure the two MAIN DHCP reservations used for WAN Native and recovery.' : `Configure ${label}'s WAN Native DHCP reservation.`;
+          document.getElementById('wanNativePopupTarget').textContent = isMain ? 'Configure the MAIN WAN Native reservation and, if available, the ASUS/default recovery reservation.' : `Configure ${label}'s WAN Native DHCP reservation.`;
           wanNativePopupInput('wanNativePopupVlan').value = String(vlan).toLowerCase() === 'none' ? '' : vlan;
           wanNativePopupInput('wanNativePopupNativeIp').value = isMain && String(cache.MAIN_WAN_NATIVE_IP || '').toLowerCase() !== 'none' ? String(cache.MAIN_WAN_NATIVE_IP) : '';
           wanNativePopupInput('wanNativePopupAsusIp').value = isMain && String(cache.MAIN_ASUS_IP || '').toLowerCase() !== 'none' ? String(cache.MAIN_ASUS_IP) : '';
@@ -5692,8 +5723,10 @@ function toggleCliFullsize() {
           const vlan = wanNativePopupInput('wanNativePopupVlan').value.trim() || 'none';
           const numeric = managedVlanNumber(vlan) !== null;
           if (vlan !== 'none' && (!numeric || wanNativeConflictsWithTarget(target, vlan))) { document.getElementById('wanNativePopupError').textContent = 'Use a VLAN ID from 2 to 4094 that is not already used by another MerVLAN network on this router/node.'; return; }
-          if (target === 'main' && numeric && (!statusNodeIpIsValid(nativeIp) || !statusNodeIpIsValid(asusIp))) { document.getElementById('wanNativePopupError').textContent = 'Both the ASUS/default and WAN Native DHCP reservations are required while this VLAN is numeric.'; return; }
-          if (target === 'main' && asusIp !== 'none' && !statusNodeIpIsValid(asusIp)) { document.getElementById('wanNativePopupError').textContent = 'MAIN ASUS/default DHCP reservation must be a valid IPv4 address.'; return; }
+          if (target === 'main' && numeric && !statusNodeIpIsValid(nativeIp)) { document.getElementById('wanNativePopupError').textContent = 'A valid WAN Native DHCP reservation is required while this VLAN is numeric.'; return; }
+          if (target === 'main' && !wanNativeOptionalIpIsValid(asusIp)) { document.getElementById('wanNativePopupError').textContent = 'MAIN ASUS/default DHCP reservation must be a valid IPv4 address or left unconfigured.'; return; }
+          const returningMainToAsus = target === 'main' && vlan === 'none' && managedVlanNumber(String(WAN_NATIVE_POPUP_STATE.vlan || '')) !== null;
+          if (returningMainToAsus && !statusNodeIpIsValid(asusIp)) { document.getElementById('wanNativePopupError').textContent = 'Configure a valid ASUS/default DHCP reservation before switching MAIN back to ASUS/default.'; return; }
           if (target !== 'main' && numeric && !statusNodeIpIsValid(wanNativeNodeAsusIp(target))) { document.getElementById('wanNativePopupError').textContent = 'Configure the ASUS/default IP under Node Configuration first.'; return; }
           if (target !== 'main' && numeric && !statusNodeIpIsValid(nodeIp)) { document.getElementById('wanNativePopupError').textContent = 'A valid WAN Native DHCP reservation is required while this VLAN is numeric.'; return; }
           if (target !== 'main' && nodeIp !== 'none' && !statusNodeIpIsValid(nodeIp)) { document.getElementById('wanNativePopupError').textContent = 'Node WAN Native DHCP reservation must be a valid IPv4 address.'; return; }

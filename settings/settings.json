@@ -154,7 +154,7 @@
     },
 
     "WAN_Native": {
-      "_description": "Optional native VLAN tag for the WAN/uplink per device; MAIN DHCP transitions use explicit ASUS and WAN Native management IPv4 endpoints. Persistent debug logging is troubleshooting-only, bounded, and disabled by default",
+      "_description": "Optional native VLAN tag for the WAN/uplink per device; numeric MAIN requires a WAN Native DHCP reservation, while the ASUS/default recovery reservation is optional until returning to ASUS. Persistent debug logging is troubleshooting-only, bounded, and disabled by default",
       "WAN_NATIVE_MAIN": "none",
       "MAIN_WAN_NATIVE_IP": "none",
       "MAIN_ASUS_IP": "none",

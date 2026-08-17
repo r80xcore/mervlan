@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.63"                      #
+#                    - File: install.sh || version="0.64"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1722,7 +1722,7 @@ run_install_hardware_probe() {
 # Explanation: Lists available tarballs, allows selection and deletion
 select_and_validate_tarball() {
   local staging_dir="$1"
-  local tarballs idx sel chosen action
+  local tarballs idx sel chosen action base size branch version topname
   
   while :; do
     # Find all mervlan-*.tar.gz files
@@ -1734,7 +1734,10 @@ select_and_validate_tarball() {
       return 1
     fi
     
-    # Display menu
+    # Display menu. Preserve the known main/dev channel encoded by archives
+    # retained by this installer; otherwise derive custom metadata from the
+    # archive's codeload top-level directory. Store metadata beside each menu
+    # entry so the selected item cannot inherit the final loop iteration.
     echo ""
     echo "Available MerVLAN tarballs:"
     idx=0
@@ -1742,11 +1745,35 @@ select_and_validate_tarball() {
       idx=$((idx + 1))
       base="$(basename "$tarball")"
       size="$(wc -c < "$tarball" 2>/dev/null)"
-      # Extract branch and version from filename: mervlan-main-v0.48.tar.gz
-      branch=$(echo "$base" | sed 's/mervlan-\([^-]*\)-.*/\1/')
-      version=$(echo "$base" | sed 's/.*-\(v[^.]*\.[^.]*\)\.tar\.gz/\1/')
+      topname="$(tar -tzf "$tarball" 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
+      if [ -z "$topname" ]; then
+        topname="$(gzip -dc "$tarball" 2>/dev/null | tar -t 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
+      fi
+      # Installer-retained archives encode the selected public channel in the
+      # filename. A stable tag's codeload top directory is the tag (not
+      # "main"), so preserve known main/dev channel names there. For manually
+      # staged/custom codeload archives, fall back to the real top directory.
+      case "$base" in
+        mervlan-main-*.tar.gz) branch="main" ;;
+        mervlan-dev-*.tar.gz) branch="dev" ;;
+        *)
+          case "$topname" in
+            mervlan-*) branch="${topname#mervlan-}" ;;
+            *) branch="unknown" ;;
+          esac
+          ;;
+      esac
+      version="unknown"
+      case "$base" in
+        "mervlan-${branch}-"*.tar.gz)
+          version="${base#"mervlan-${branch}-"}"
+          version="${version%.tar.gz}"
+          ;;
+      esac
       printf '  %d) %s  [%s | %s | %d bytes]\n' "$idx" "$base" "$branch" "$version" "$size"
       eval "TARBALL_$idx=\"$tarball\""
+      eval "TARBALL_BRANCH_$idx=\"$branch\""
+      eval "TARBALL_VERSION_$idx=\"$version\""
     done
     
     echo ""
@@ -1767,7 +1794,8 @@ select_and_validate_tarball() {
             read action
             case "$action" in
               y|Y|yes|YES)
-                BRANCH="$branch"
+                eval "BRANCH=\${TARBALL_BRANCH_$sel}"
+                eval "SELECTED_TARBALL_VERSION=\${TARBALL_VERSION_$sel}"
                 SELECTED_TARBALL="$chosen"
                 return 0
                 ;;
@@ -1966,15 +1994,31 @@ download_mervlan() {
       return 1
     fi
 
-    # Extract version from changelog.txt inside the tarball
-    local version=""
-    if tar -tzf "$archive_dir/mervlan_temp.tar.gz" >/dev/null 2>&1; then
-      version=$(tar -xzf "$archive_dir/mervlan_temp.tar.gz" -O "*/changelog.txt" 2>/dev/null | head -1 | sed 's/^mervlan[[:space:]]*//')
-    else
-      version=$(gzip -dc "$archive_dir/mervlan_temp.tar.gz" | tar -x -O "*/changelog.txt" 2>/dev/null | head -1 | sed 's/^mervlan[[:space:]]*//')
+    # Extract the version without wildcard member-to-stdout tar syntax. Older
+    # ASUSWRT BusyBox tar builds can list/extract the archive normally but do
+    # not reliably support `-O "*/member"`. Extract the exact changelog member
+    # into a private probe directory instead.
+    local version="" version_top="" version_probe=""
+    version_top="$(tar -tzf "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
+    if [ -z "$version_top" ]; then
+      version_top="$(gzip -dc "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | tar -t 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
     fi
+    case "$version_top" in
+      mervlan-*)
+        version_probe="$work_dir/.version-probe"
+        rm -rf "$version_probe" 2>/dev/null || return 1
+        mkdir -p "$version_probe" 2>/dev/null || return 1
+        if tar -xzf "$archive_dir/mervlan_temp.tar.gz" -C "$version_probe" "$version_top/changelog.txt" 2>/dev/null ||
+           gzip -dc "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | tar -x -C "$version_probe" "$version_top/changelog.txt" 2>/dev/null; then
+          if [ -f "$version_probe/$version_top/changelog.txt" ]; then
+            version=$(sed -n '1p' "$version_probe/$version_top/changelog.txt" 2>/dev/null | sed 's/^mervlan[[:space:]]*//')
+          fi
+        fi
+        rm -rf "$version_probe" 2>/dev/null || return 1
+        ;;
+    esac
     version=$(printf '%s' "$version" | tr -d '\r\n')
-    
+
     if [ -z "$version" ]; then
       version="unknown"
     fi
@@ -2706,21 +2750,24 @@ elif [ "$MODE" = "reinstall" ]; then
     fi
     logger -t "$ADDON" "Reinstall mode: public/runtime provisioning complete; hook reconciliation deferred to caller"
     echo "[install] Reinstall provisioning complete; hooks preserved for caller reconciliation"
-    RESULT_HOOKS="SKIPPED - deferred to update/restore caller"
-    RESULT_NODES="SKIPPED - deferred to update/restore caller"
+    RESULT_HOOKS="PRESERVED - reinstall does not modify hooks"
+    RESULT_NODES="PRESERVED - reinstall does not modify node state"
 else
     # Ensure boot/service-event hooks are present even on non-full installs
     echo "[install] Installing service-event hooks"
     if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1; then
+        _install_hook_log="${TMP_DIR:-/tmp}/install-hooks.$$"
+        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >"$_install_hook_log" 2>&1; then
             logger -t "$ADDON" "addon setupenable completed (post-install)"
             echo "[install] Service-event hooks installed"
             RESULT_HOOKS="PASS"
         else
             logger -t "$ADDON" "WARNING: setupenable failed during post-install"
             echo "[install] WARNING: Service-event hook installation failed" >&2
+            [ ! -s "$_install_hook_log" ] || sed -n '1,80p' "$_install_hook_log" >&2
             RESULT_HOOKS="FAIL"
         fi
+        rm -f "$_install_hook_log" 2>/dev/null || :
     else
         logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping post-install setupenable"
         echo "[install] WARNING: mervlan_boot.sh not executable" >&2

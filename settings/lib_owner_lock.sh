@@ -297,11 +297,17 @@ merv_owner_lock_cleanup_claim() {
 # Prints one of: absent, live, dead, reused, incomplete-grace,
 # incomplete-expired, incomplete-unknown, malformed, or unknown.  The caller
 # may use the distinctions for diagnostics, but generic acquisition reclaims
-# only complete owners proven dead or PID-reused.
+# only complete owners proven dead or PID-reused.  A non-directory object at
+# the lock path is never equivalent to absence.
 merv_owner_lock_state() {
   _mols_lock="${1:-}"; _mols_proc="${2:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}"
   [ -n "$_mols_lock" ] || { printf 'unknown'; return 1; }
-  [ -d "$_mols_lock" ] || { printf 'absent'; return 0; }
+  if [ ! -e "$_mols_lock" ] && [ ! -L "$_mols_lock" ]; then
+    printf 'absent'
+    return 0
+  fi
+  [ ! -L "$_mols_lock" ] || { printf 'unknown'; return 0; }
+  [ -d "$_mols_lock" ] || { printf 'unknown'; return 0; }
   if [ -e "$_mols_lock/owner" ] || [ -L "$_mols_lock/owner" ]; then
     [ -r "$_mols_lock/owner" ] || { printf 'unknown'; return 0; }
     merv_owner_v2_read "$_mols_lock" 2>/dev/null || { printf 'malformed'; return 0; }

@@ -1,5 +1,27 @@
 mervlan v0.53.28-dev
 
+Fixed: Installer, hook ownership, and upgrade-lock recovery
+- Owner-aware locks now distinguish an actually absent path from a legacy or
+  malformed non-directory obstruction, preventing the service-hook lock path
+  from spinning indefinitely on pre-owner-aware regular lock files.
+- setupenable/setupdisable reconcile known stale boot-file locks before use,
+  verify hook changes, and return failure when hook removal is incomplete.
+- Standalone uninstall now delegates its authenticated maintenance owner to
+  boot-hook children, reports hook diagnostics, refuses false success when
+  hooks remain, and avoids the BusyBox xargs/basename SIGPIPE discovery path.
+- Tarball selection binds branch/version metadata to the selected archive and
+  derives hyphenated/custom branch names from the archive top-level directory.
+- Installer archive probing no longer relies on wildcard `tar -O` extraction,
+  and the offline guide documents legacy `scp -O` for routers without SFTP.
+
+Fixed: WAN Native clean-state and trunk configuration
+- MAIN ASUS/default recovery IP is optional while using a numeric WAN Native
+  VLAN. The WAN Native reservation remains required, and a return to ASUS is
+  refused before mutation when no ASUS/default recovery reservation exists.
+- Fresh settings with MAIN_ASUS_IP=none no longer block unrelated Save actions.
+- Trunk VLAN selectors now include valid VLAN IDs from the current unsaved form
+  draft so first-time configuration does not require a save/reload cycle.
+
 New: Optional per-device WAN Native tagging
 - Added a target-aware WAN Native field above the LAN-port table for Main and
   Node 1-10. Blank uses the dimmed ASUS default; VLAN IDs 2-4094 tag the
