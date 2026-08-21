@@ -960,9 +960,27 @@ validate_wan_native_endpoint_kv() {
     printf '%s\n' "$_vwne_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
 }
 
+# Roles live with the durable node identity and are accepted by both normal
+# and WAN-Native save scopes.  Missing legacy keys are interpreted by the
+# shared reader as standalone; an explicitly supplied invalid value fails
+# before the candidate settings file can be published.
+validate_node_role_kv() {
+    _vnrole_key="$1"; _vnrole_value="$2"
+    case "$_vnrole_key" in NODE[1-9]_ROLE|NODE10_ROLE) ;; *) return 0 ;; esac
+    case "$_vnrole_value" in aimesh|standalone) return 0 ;; *) return 1 ;; esac
+}
+
 while IFS="$(printf '\t')" read -r _vwne_key _vwne_value; do
     if ! validate_wan_native_endpoint_kv "$_vwne_key" "$_vwne_value"; then
         error -c vlan "save_settings.sh: invalid WAN Native management endpoint $_vwne_key=$_vwne_value"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+while IFS="$(printf '\t')" read -r _vnrole_key _vnrole_value; do
+    if ! validate_node_role_kv "$_vnrole_key" "$_vnrole_value"; then
+        error -c vlan "save_settings.sh: invalid node role $_vnrole_key=$_vnrole_value (use aimesh or standalone)"
         rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
         exit 1
     fi
@@ -975,6 +993,14 @@ if grep -q '"Nodes"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null;
         case "$_vwne_key" in
             NODE[1-9]_WAN_NATIVE_IP|NODE10_WAN_NATIVE_IP)
                 case "$_vwne_value" in '') _vwne_value=none ;; esac
+                if ! json_set_section_value "Nodes" "$_vwne_key" "$_vwne_value" "${_save_candidate}" ||
+                   [ "$(json_get_section_value "Nodes" "$_vwne_key" "${_save_candidate}" 2>/dev/null)" != "$_vwne_value" ]; then
+                    rm -f "${_vwne_filtered}"
+                    error -c vlan "save_settings.sh: failed to stage $_vwne_key in Nodes"
+                    exit 1
+                fi
+                ;;
+            NODE[1-9]_ROLE|NODE10_ROLE)
                 if ! json_set_section_value "Nodes" "$_vwne_key" "$_vwne_value" "${_save_candidate}" ||
                    [ "$(json_get_section_value "Nodes" "$_vwne_key" "${_save_candidate}" 2>/dev/null)" != "$_vwne_value" ]; then
                     rm -f "${_vwne_filtered}"

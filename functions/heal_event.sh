@@ -484,7 +484,10 @@ check_wl_iface_placements() {
   local pairs iface vid ok
 
   ok=1
-  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null) || return 0
+  pairs=$(merv_iface_vid_list 2>/dev/null) || {
+    error -c vlan "Placement: expected managed VAP state is unknown"
+    return 1
+  }
   [ -n "$pairs" ] || return 0
 
   while IFS=' ' read -r iface vid; do
@@ -511,6 +514,33 @@ _PAIRS_
   [ "$ok" -eq 1 ]
 }
 
+# A live VLAN bridge alone is not evidence that its configured physical
+# access port is on that bridge. Resolve node-aware Ethernet policy and prove
+# exclusive bridge membership for every numeric managed port.
+check_managed_eth_placements() {
+  local pairs iface vid bad
+
+  pairs=$(merv_managed_eth_iface_vid_list "$SETTINGS_FILE" "${MERV_NODE_ID:-none}" 2>/dev/null) || {
+    error -c vlan "Placement: expected managed Ethernet state is unknown"
+    return 1
+  }
+  [ -n "$pairs" ] || return 0
+  bad=0
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+    if [ ! -d "/sys/class/net/$iface" ]; then
+      warn -c vlan "Placement: managed Ethernet $iface is absent"
+      bad=1
+    elif ! merv_exact_bridge_membership "$iface" "$vid"; then
+      warn -c vlan "Placement: managed Ethernet $iface is not exclusively in br${vid}"
+      bad=1
+    fi
+  done <<_ETH_PAIRS_
+$pairs
+_ETH_PAIRS_
+  [ "$bad" -eq 0 ]
+}
+
 # ============================================================================ #
 # evict_wl_from_br0                                                            #
 # Pre-eviction guard: immediately removes wl subinterfaces from br0 before    #
@@ -530,7 +560,8 @@ evict_wl_from_br0() {
   # Only these can leak to br0; firmware-owned AiMesh SSIDs must be left alone.
   managed_ifaces=""
   if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
-    managed_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+    pairs=$(merv_iface_vid_list 2>/dev/null) || return 1
+    managed_ifaces=$(printf '%s\n' "$pairs" | awk '{print $1}')
   fi
   # Nothing to evict if no MERVLAN-managed wl interfaces are configured.
   [ -n "$managed_ifaces" ] || return 0
@@ -661,11 +692,10 @@ $vlan"
   idx=1
   for eth in $ETH_PORTS; do
     # Use json_get_section2_value for VLAN->Ethernet_ports->ETHx_VLAN nested structure
-    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
-    # Fallback to old flat structure for backwards compatibility
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
-    fi
+    vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
+      error -c vlan "expected_vlans_from_settings: Ethernet policy is unknown for port $idx"
+      return 1
+    }
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
       vids="$vids
@@ -784,6 +814,10 @@ check_vlan_config() {
       return 1
     fi
   fi
+  if ! check_managed_eth_placements; then
+    warn -c vlan "managed Ethernet already misplaced at check entry — skipping monitoring window"
+    return 1
+  fi
 
   # Multi-check validation with full monitoring window
   # - Always performs all max_checks to ensure VLANs remain stable
@@ -873,6 +907,11 @@ check_vlan_config() {
     fi
   fi
 
+  if ! check_managed_eth_placements; then
+    warn -c vlan "VLAN bridges present but managed Ethernet access port is misplaced"
+    return 1
+  fi
+
   return 0
 }
 
@@ -891,7 +930,8 @@ check_vlan_config_fast() {
   cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
 
   if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
-    return 0
+    check_managed_eth_placements
+    return $?
   fi
 
   missing=""

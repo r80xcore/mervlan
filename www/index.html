@@ -687,9 +687,15 @@
     <div class="node-row node-row--primary">
       <label for="node1Field"><span class="node-label" data-node-index="1" title="Double-click to rename this node">Node 1</span></label>
       <div class="node-input-wrap">
-        <input id="node1Field" class="input_15_table vlan-input" name="NODE1" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE1')" title="Enter ASUS/default node IP (format: 192.168.x.x); this remains the recovery address.">
+        <input id="node1Field" class="input_15_table vlan-input" name="NODE1" size="12" maxlength="15" type="text" oninput="handleNodeIpInput(1, this)" title="Enter ASUS/default node IP (format: 192.168.x.x); this remains the recovery address.">
         <span id="statusNODE1" class="status node-status" title="❌ Missing/invalid value">❌</span>
       </div>
+      <label class="node-role-control" title="AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting.">Role
+        <select name="NODE1_ROLE" data-node-role="1" onchange="setNodeRoleDraft(1, this.value)">
+          <option value="aimesh">AiMesh</option>
+          <option value="standalone">Standalone</option>
+        </select>
+      </label>
       <button type="button" class="node-row__toggle" id="nodeToggle" aria-expanded="false" aria-controls="nodeAdditional">
         <span class="node-row__toggle-icon">+</span>
         <span class="sr-only">Show additional nodes</span>
@@ -732,6 +738,12 @@
           </label>
           <label id="wanNativePopupNodeIpRow">WAN Native DHCP reservation
             <input id="wanNativePopupNodeIp" type="text" inputmode="decimal" maxlength="15" placeholder="Not configured">
+          </label>
+          <label id="wanNativePopupRoleRow">Node role
+            <select id="wanNativePopupRole" onchange="updateWanNativePopupRequirement()">
+              <option value="aimesh">AiMesh — inherit MAIN</option>
+              <option value="standalone">Standalone — own WAN Native</option>
+            </select>
           </label>
           <p class="wan-native-popup__hint">The WAN Native reservation is required for tagged MAIN. The ASUS/default recovery reservation is optional, but must be configured before switching MAIN back to ASUS/default.</p>
           <p class="wan-native-popup__hint">Before enabling WAN Native: ASUS <strong>LAN → LAN IP</strong> → <strong>Get LAN IP Automatically? Yes</strong>. MerVLAN does not assign these addresses.</p>
@@ -1807,12 +1819,41 @@
             <div class="node-row">
               <label for="node${n}Field"><span class="node-label" data-node-index="${n}" title="Double-click to rename this node">Node ${n}</span></label>
               <div class="node-input-wrap">
-                <input id="node${n}Field" class="input_15_table vlan-input" name="NODE${n}" size="12" maxlength="15" type="text" oninput="validateNodeField(this); markEdited('NODE${n}')" title="Enter ASUS/default node IP (format: 192.168.x.x); this remains the recovery address.">
+                <input id="node${n}Field" class="input_15_table vlan-input" name="NODE${n}" size="12" maxlength="15" type="text" oninput="handleNodeIpInput(${n}, this)" title="Enter ASUS/default node IP (format: 192.168.x.x); this remains the recovery address.">
                 <span id="statusNODE${n}" class="status node-status" title="❌ Missing/invalid value">❌</span>
               </div>
-              <div class="node-input-wrap">
-              </div>
+              <label class="node-role-control" title="AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting.">Role
+                <select name="NODE${n}_ROLE" data-node-role="${n}" onchange="setNodeRoleDraft(${n}, this.value)">
+                  <option value="aimesh">AiMesh</option>
+                  <option value="standalone">Standalone</option>
+                </select>
+              </label>
             </div>`).join("");
+        }
+
+        function normalizeNodeRole(value, fallback = "standalone") {
+          const role = String(value || "").trim().toLowerCase();
+          return role === "aimesh" || role === "standalone" ? role : fallback;
+        }
+        function nodeRoleDraft(node) {
+          const cache = CURRENT_SETTINGS_CACHE || {};
+          const configured = statusNodeIpIsValid(String(cache[`NODE${node}`] || ""));
+          const persisted = normalizeNodeRole(cache[`NODE${node}_ROLE`], "standalone");
+          return configured ? persisted : "aimesh";
+        }
+        function setNodeRoleDraft(node, value) {
+          const role = normalizeNodeRole(value, "aimesh");
+          if (CURRENT_SETTINGS_CACHE) CURRENT_SETTINGS_CACHE[`NODE${node}_ROLE`] = role;
+          document.querySelectorAll(`[data-node-role="${node}"]`).forEach(el => { el.value = role; });
+          markEdited(`NODE${node}_ROLE`);
+          refreshFormStatuses();
+        }
+        function handleNodeIpInput(node, input) {
+          const cache = CURRENT_SETTINGS_CACHE || {};
+          const wasConfigured = statusNodeIpIsValid(String(cache[`NODE${node}`] || ""));
+          validateNodeField(input);
+          if (!wasConfigured && statusNodeIpIsValid(input.value)) setNodeRoleDraft(node, "aimesh");
+          markEdited(`NODE${node}`);
         }
 
         // Render hidden alias inputs for NODE1..NODE_MAX into #nodeAliasContainer.
@@ -1881,6 +1922,7 @@
             const aliasKey = `NODE${i}_ALIAS`;
             flat[aliasKey] = stringOrDefault(nodes[aliasKey], getDefaultNodeAlias(i));
             flat[`NODE${i}_WAN_NATIVE_IP`] = stringOrDefault(nodes[`NODE${i}_WAN_NATIVE_IP`], "none");
+            flat[`NODE${i}_ROLE`] = stringOrDefault(nodes[`NODE${i}_ROLE`], "");
           }
 
           const wifi = ensurePlainObject(data.WiFi);
@@ -2022,6 +2064,7 @@
           nodeNums().forEach(n => {
             nodesSection[`NODE${n}_ALIAS`] = `Node ${n}`;
             nodesSection[`NODE${n}_WAN_NATIVE_IP`] = "none";
+            nodesSection[`NODE${n}_ROLE`] = "standalone";
           });
 
           // Per-node Ethernet port VLAN overrides
@@ -2134,6 +2177,8 @@
             nodes[aliasKey] = stringOrDefault(flat[aliasKey], nodes[aliasKey] ?? getDefaultNodeAlias(i));
             const wanNativeIpKey = `NODE${i}_WAN_NATIVE_IP`;
             nodes[wanNativeIpKey] = stringOrDefault(flat[wanNativeIpKey], nodes[wanNativeIpKey] ?? "none");
+            const roleKey = `NODE${i}_ROLE`;
+            nodes[roleKey] = stringOrDefault(flat[roleKey], nodes[roleKey] ?? "standalone");
           }
 
           const wifi = target.WiFi = ensurePlainObject(target.WiFi);
@@ -2909,7 +2954,11 @@ function showTooltip() {
     function updateWanNativeSummary(target){
       const value = document.querySelector('.wan-native-value');
       if(!value) return;
-      const raw = String((CURRENT_SETTINGS_CACHE || {})[getWanNativeFlatKey(target || CURRENT_LAN_TARGET)] || "none");
+      const effectiveTarget = target || CURRENT_LAN_TARGET;
+      const cache = CURRENT_SETTINGS_CACHE || {};
+      const raw = effectiveTarget !== "main" && wanNativeNodeRole(effectiveTarget) === "aimesh"
+        ? String(cache.WAN_NATIVE_MAIN || "none")
+        : String(cache[getWanNativeFlatKey(effectiveTarget)] || "none");
       value.textContent = (!raw || raw.toLowerCase() === "none") ? "ASUS" : raw;
     }
 
@@ -3604,7 +3653,7 @@ function showTooltip() {
         const port = +(match[1] || match[2] || match[3] || match[4]);
         return port >= 1 && port <= HW_SETTINGS.MAX_ETH_PORTS;
       }
-      if ((match = key.match(/^NODE(\d+)(?:_ALIAS|_WAN_NATIVE_IP)?$/))) return +match[1] >= 1 && +match[1] <= MAX_NODES;
+      if ((match = key.match(/^NODE(\d+)(?:_ALIAS|_WAN_NATIVE_IP|_ROLE)?$/))) return +match[1] >= 1 && +match[1] <= MAX_NODES;
       if ((match = key.match(/^NODE(\d+)_ETH(\d+)_VLAN$/))) return +match[1] >= 1 && +match[1] <= MAX_NODES && +match[2] >= 1 && +match[2] <= HW_SETTINGS.MAX_ETH_PORTS;
       return false;
     }
@@ -3870,7 +3919,12 @@ function showTooltip() {
       const targets = ["main"].concat(nodeNums().map(n => `NODE${n}`));
       for(const target of targets){
         const key = getWanNativeFlatKey(target);
-        const raw = String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[key]) || "").trim();
+        const role = target === "main" ? "" : wanNativeNodeRole(target);
+        const configured = target === "main" || statusNodeIpIsValid(wanNativeNodeAsusIp(target));
+        const raw = target !== "main" && role === "aimesh"
+          ? String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE.WAN_NATIVE_MAIN) || "").trim()
+          : String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[key]) || "").trim();
+        if(target !== "main" && !configured) continue;
         if(!raw || raw.toLowerCase() === "none") continue;
         if(managedVlanNumber(raw) === null){
           return { ok:false, target, error:`WAN Native for ${target === "main" ? "Main" : target} must be VLAN 2-4094 or left blank for ASUS.` };
@@ -3884,7 +3938,7 @@ function showTooltip() {
             return { ok:false, target, error:`${alias} WAN Native VLAN ${raw} requires an ASUS/default DHCP reservation under Node Configuration. Click Edit after configuring it.` };
           }
           if(!statusNodeIpIsValid(String((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[`${target}_WAN_NATIVE_IP`]) || "").trim())){
-            return { ok:false, target, error:`${alias} WAN Native VLAN ${raw} requires a WAN Native DHCP reservation. Click Edit to complete the setup.` };
+            return { ok:false, target, error:`${alias} ${role === "aimesh" ? "AiMesh inherited" : "WAN Native"} VLAN ${raw} requires a WAN Native DHCP reservation. Click Edit to complete the setup.` };
           }
         }
       }
@@ -5168,6 +5222,8 @@ function showTooltip() {
           SETTINGS: "settings/settings.json",
           // clients overview JSON
           CLIENTS_JSON: "tmp/results/vlan_clients.json",
+          // bounded diagnostic for a failed all-or-nothing client generation
+          CLIENT_COLLECTION_FAULT: "tmp/results/client_collection_fault",
           // service status JSON written by mervlan_boot.sh status (tmpfs, not persistent)
           SERVICE_STATUS: "tmp/results/service_status.json",
           // correlated completion result for verified backend actions
@@ -5672,10 +5728,15 @@ function toggleCliFullsize() {
           const input = document.querySelector(`input[name="${target}"]`);
           return String(input ? input.value : ((CURRENT_SETTINGS_CACHE || {})[target] || '')).trim();
         }
+        function wanNativeNodeRole(target) {
+          const slot = Number(String(target || '').replace(/^NODE/, ''));
+          return normalizeNodeRole((CURRENT_SETTINGS_CACHE || {})[`NODE${slot}_ROLE`], "standalone");
+        }
         function updateWanNativePopupRequirement() {
           if (!WAN_NATIVE_POPUP_STATE) return;
           const target = WAN_NATIVE_POPUP_STATE.target;
           const isMain = target === 'main';
+          const role = isMain ? '' : normalizeNodeRole(wanNativePopupInput('wanNativePopupRole').value, "aimesh");
           const raw = wanNativePopupInput('wanNativePopupVlan').value.trim();
           const numeric = managedVlanNumber(raw) !== null;
           const requirement = document.getElementById('wanNativePopupRequirement');
@@ -5683,6 +5744,7 @@ function toggleCliFullsize() {
           if (returningMainToAsus) requirement.textContent = 'Returning MAIN to ASUS/default requires a valid ASUS/default recovery reservation below.';
           else if (!raw) requirement.textContent = isMain ? 'ASUS/default mode: the ASUS/default recovery reservation is optional.' : 'ASUS/default mode: a WAN Native DHCP reservation is optional.';
           else if (!numeric) requirement.textContent = 'Use a VLAN ID from 2 to 4094, or leave this field blank for ASUS/default mode.';
+          else if (!isMain && role === 'aimesh') requirement.textContent = `AiMesh inherits MAIN WAN Native VLAN ${raw}; this node reservation remains required for the inherited transport.`;
           else requirement.textContent = isMain ? `WAN Native VLAN ${raw} requires the WAN Native DHCP reservation. The ASUS/default reservation is optional until you switch back to ASUS.` : `WAN Native VLAN ${raw} requires a WAN Native DHCP reservation.`;
         }
         function openWanNativeConfigPopup() {
@@ -5691,20 +5753,26 @@ function toggleCliFullsize() {
           const cache = CURRENT_SETTINGS_CACHE || {};
           const vlan = String(cache[getWanNativeFlatKey(target)] || 'none');
           const isMain = target === 'main';
+          const role = isMain ? '' : wanNativeNodeRole(target);
+          const effectiveVlan = !isMain && role === 'aimesh'
+            ? String(cache.WAN_NATIVE_MAIN || 'none') : vlan;
           const label = wanNativeTargetLabel(target);
-          WAN_NATIVE_POPUP_STATE = { target, vlan };
+          WAN_NATIVE_POPUP_STATE = { target, vlan, role };
           const popup = document.getElementById('wanNativeConfigPopup');
           if (!popup) return;
           popup.style.display = 'block';
           document.getElementById('wanNativePopupTitle').textContent = `WAN Native VLAN — ${label}`;
-          document.getElementById('wanNativePopupTarget').textContent = isMain ? 'Configure the MAIN WAN Native reservation and, if available, the ASUS/default recovery reservation.' : `Configure ${label}'s WAN Native DHCP reservation.`;
-          wanNativePopupInput('wanNativePopupVlan').value = String(vlan).toLowerCase() === 'none' ? '' : vlan;
+          document.getElementById('wanNativePopupTarget').textContent = isMain ? 'Configure the MAIN WAN Native reservation and, if available, the ASUS/default recovery reservation.' : (role === 'aimesh' ? `${label} follows MAIN WAN Native; its independent value is retained for Standalone use.` : `Configure ${label}'s WAN Native DHCP reservation.`);
+          wanNativePopupInput('wanNativePopupVlan').value = String(effectiveVlan).toLowerCase() === 'none' ? '' : effectiveVlan;
+          wanNativePopupInput('wanNativePopupVlan').disabled = !isMain && role === 'aimesh';
           wanNativePopupInput('wanNativePopupNativeIp').value = isMain && String(cache.MAIN_WAN_NATIVE_IP || '').toLowerCase() !== 'none' ? String(cache.MAIN_WAN_NATIVE_IP) : '';
           wanNativePopupInput('wanNativePopupAsusIp').value = isMain && String(cache.MAIN_ASUS_IP || '').toLowerCase() !== 'none' ? String(cache.MAIN_ASUS_IP) : '';
           wanNativePopupInput('wanNativePopupNodeIp').value = !isMain && String(cache[target + '_WAN_NATIVE_IP'] || '').toLowerCase() !== 'none' ? String(cache[target + '_WAN_NATIVE_IP']) : '';
           document.getElementById('wanNativePopupNativeIpRow').style.display = isMain ? '' : 'none';
           document.getElementById('wanNativePopupAsusIpRow').style.display = isMain ? '' : 'none';
           document.getElementById('wanNativePopupNodeIpRow').style.display = isMain ? 'none' : '';
+          document.getElementById('wanNativePopupRoleRow').style.display = isMain ? 'none' : '';
+          wanNativePopupInput('wanNativePopupRole').value = role || 'aimesh';
           const nodeAsusRow = document.getElementById('wanNativePopupNodeAsusRow');
           nodeAsusRow.hidden = isMain;
           nodeAsusRow.style.display = isMain ? 'none' : '';
@@ -5720,9 +5788,12 @@ function toggleCliFullsize() {
           const nativeIp = wanNativePopupInput('wanNativePopupNativeIp').value.trim() || 'none';
           const asusIp = wanNativePopupInput('wanNativePopupAsusIp').value.trim() || 'none';
           const nodeIp = wanNativePopupInput('wanNativePopupNodeIp').value.trim() || 'none';
+          const role = target === 'main' ? '' : normalizeNodeRole(wanNativePopupInput('wanNativePopupRole').value, 'aimesh');
           const vlan = wanNativePopupInput('wanNativePopupVlan').value.trim() || 'none';
-          const numeric = managedVlanNumber(vlan) !== null;
-          if (vlan !== 'none' && (!numeric || wanNativeConflictsWithTarget(target, vlan))) { document.getElementById('wanNativePopupError').textContent = 'Use a VLAN ID from 2 to 4094 that is not already used by another MerVLAN network on this router/node.'; return; }
+          const effectiveVlan = target !== 'main' && role === 'aimesh'
+            ? String((CURRENT_SETTINGS_CACHE || {}).WAN_NATIVE_MAIN || 'none') : vlan;
+          const numeric = managedVlanNumber(effectiveVlan) !== null;
+          if (effectiveVlan !== 'none' && (!numeric || wanNativeConflictsWithTarget(target, effectiveVlan))) { document.getElementById('wanNativePopupError').textContent = 'Use a VLAN ID from 2 to 4094 that is not already used by another MerVLAN network on this router/node.'; return; }
           if (target === 'main' && numeric && !statusNodeIpIsValid(nativeIp)) { document.getElementById('wanNativePopupError').textContent = 'A valid WAN Native DHCP reservation is required while this VLAN is numeric.'; return; }
           if (target === 'main' && !wanNativeOptionalIpIsValid(asusIp)) { document.getElementById('wanNativePopupError').textContent = 'MAIN ASUS/default DHCP reservation must be a valid IPv4 address or left unconfigured.'; return; }
           const returningMainToAsus = target === 'main' && vlan === 'none' && managedVlanNumber(String(WAN_NATIVE_POPUP_STATE.vlan || '')) !== null;
@@ -5730,9 +5801,13 @@ function toggleCliFullsize() {
           if (target !== 'main' && numeric && !statusNodeIpIsValid(wanNativeNodeAsusIp(target))) { document.getElementById('wanNativePopupError').textContent = 'Configure the ASUS/default IP under Node Configuration first.'; return; }
           if (target !== 'main' && numeric && !statusNodeIpIsValid(nodeIp)) { document.getElementById('wanNativePopupError').textContent = 'A valid WAN Native DHCP reservation is required while this VLAN is numeric.'; return; }
           if (target !== 'main' && nodeIp !== 'none' && !statusNodeIpIsValid(nodeIp)) { document.getElementById('wanNativePopupError').textContent = 'Node WAN Native DHCP reservation must be a valid IPv4 address.'; return; }
-          CURRENT_SETTINGS_CACHE[getWanNativeFlatKey(target)] = vlan;
+          if (target === 'main' || role === 'standalone') CURRENT_SETTINGS_CACHE[getWanNativeFlatKey(target)] = vlan;
           if (target === 'main') { CURRENT_SETTINGS_CACHE.MAIN_WAN_NATIVE_IP = nativeIp; CURRENT_SETTINGS_CACHE.MAIN_ASUS_IP = asusIp; }
-          else CURRENT_SETTINGS_CACHE[target + '_WAN_NATIVE_IP'] = nodeIp;
+          else {
+            CURRENT_SETTINGS_CACHE[target + '_WAN_NATIVE_IP'] = nodeIp;
+            CURRENT_SETTINGS_CACHE[`${target}_ROLE`] = role;
+            document.querySelectorAll(`[data-node-role="${Number(target.replace(/^NODE/, ''))}"]`).forEach(el => { el.value = role; });
+          }
           const mainEndpoint = document.querySelector('.main-wan-native-ip-input');
           const mainAsusEndpoint = document.querySelector('.main-asus-ip-input');
           if (mainEndpoint && target === 'main') mainEndpoint.value = nativeIp === 'none' ? '' : nativeIp;
@@ -5851,6 +5926,24 @@ async function fetchClientsJSON(){
     if (clientFetchErrors === 3) {
       appendCliText('Client inventory polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
     }
+    return null;
+  }
+}
+
+async function fetchClientCollectionFailure(sinceMs){
+  try{
+    const r = await fetch(PATHS.CLIENT_COLLECTION_FAULT + "?_=" + Date.now(), { cache:"no-store" });
+    if(!r.ok) return null;
+    const text = await r.text();
+    const epochMatch = text.match(/^epoch=(\d+)$/m);
+    if(!epochMatch) return null;
+    const epochMs = Number(epochMatch[1]) * 1000;
+    // A bounded fault remains on disk until the next good generation.  Ignore
+    // one that predates this browser request so an earlier error cannot fail a
+    // later retry before it has actually run.
+    if(!Number.isFinite(epochMs) || epochMs < Number(sinceMs) - 2000) return null;
+    return { epochMs };
+  }catch(_){
     return null;
   }
 }
@@ -6236,6 +6329,21 @@ function pollForFreshClientData(sinceMs, opts){
       clearInterval(CLIENTS_REFRESH_TIMER);
       CLIENTS_REFRESH_TIMER = null;
       stopProgress();
+      return;
+    }
+    const collectionFailure = await fetchClientCollectionFailure(sinceMs);
+    if (seq !== CLIENTS_REFRESH_SEQ) return;
+    if (collectionFailure) {
+      clearInterval(CLIENTS_REFRESH_TIMER);
+      CLIENTS_REFRESH_TIMER = null;
+      stopProgress();
+      if (data) renderClientsOverview(data);
+      appendCliText((opts.failureMsg || 'Client refresh failed; showing the last known client data.') + '\n', {scroll:'force'});
+      if (typeof opts.onFailure === 'function') {
+        try { opts.onFailure(data); } catch (err) { console.error(err); }
+      } else if (opts.loadingTask) {
+        opts.loadingTask.fail('Client refresh failed; showing the last known client data.');
+      }
       return;
     }
     if (data) {
@@ -6697,8 +6805,10 @@ async function startClientsOnPageLoad(){
         previousRunId: cached && cached.run_id,
         previousGenerated: cached && cached.generated,
         doneMsg: 'Client list auto-refreshed.',
+        failureMsg: 'Client auto-refresh failed; showing the last known client data.',
         timeoutMsg: 'Client auto-refresh is taking longer than expected; showing latest available.',
         onFresh: () => { if (loadingTask) loadingTask.complete('Client list auto-refreshed.'); },
+        onFailure: () => { if (loadingTask) loadingTask.fail('Client auto-refresh failed; showing the last known client data.'); },
         onTimeout: () => { if (loadingTask) loadingTask.fail('Client auto-refresh did not complete in time.'); }
       });
     }
@@ -6738,8 +6848,10 @@ async function refreshClients(btn){
         previousRunId,
         previousGenerated,
         doneMsg: 'Client list refreshed.',
+        failureMsg: 'Client refresh failed; showing the last known client data.',
         timeoutMsg: 'Client refresh is taking longer than expected; showing latest available.',
         onFresh: () => { if (loadingTask) loadingTask.complete('Client list refreshed.'); },
+        onFailure: () => { if (loadingTask) loadingTask.fail('Client refresh failed; showing the last known client data.'); },
         onTimeout: () => { if (loadingTask) loadingTask.fail('Client refresh did not complete in time.'); }
       });
     }
@@ -8508,6 +8620,8 @@ async function runMacRefresh() {
         if (f[wanNativeIpKey]) {
           f[wanNativeIpKey].value = String(wanNativeIpRaw).toLowerCase() === "none" ? "" : String(wanNativeIpRaw);
         }
+        const roleInput = f[`NODE${i}_ROLE`];
+        if (roleInput) roleInput.value = v ? normalizeNodeRole(flat[`NODE${i}_ROLE`], "standalone") : "aimesh";
       }
 
       // Update input names to match the current LAN target (main or configured node)
@@ -8645,6 +8759,8 @@ async function runMacRefresh() {
         const wanNativeIpInput = f[`NODE${i}_WAN_NATIVE_IP`];
         const cachedWanNativeIp = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[`NODE${i}_WAN_NATIVE_IP`];
         out[`vlanmgr_NODE${i}_WAN_NATIVE_IP`] = toNone(cachedWanNativeIp || (wanNativeIpInput ? wanNativeIpInput.value.trim() : ""));
+        const roleInput = f[`NODE${i}_ROLE`];
+        out[`vlanmgr_NODE${i}_ROLE`] = normalizeNodeRole(roleInput ? roleInput.value : "", raw ? "standalone" : "aimesh");
         if (aliasInput) {
           aliasInput.value = aliasValue;
         }
@@ -8857,6 +8973,7 @@ async function runMacRefresh() {
         );
         flat[`NODE${i}_ALIAS`] = aliasValue;
         flat[`NODE${i}_WAN_NATIVE_IP`] = toNone((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[`NODE${i}_WAN_NATIVE_IP`]) || f[`NODE${i}_WAN_NATIVE_IP`]?.value || "");
+        flat[`NODE${i}_ROLE`] = normalizeNodeRole(f[`NODE${i}_ROLE`]?.value || "", flat[`NODE${i}`] === "none" ? "aimesh" : "standalone");
         if(aliasInput){
           aliasInput.value = aliasValue;
         }
@@ -12526,7 +12643,7 @@ function normalizeToFlatSettings(obj) {
 // Only compare keys MerVLAN actually manages (ignore Hardware, timestamps, etc)
 function isManagedNodeKey(k) {
   let m;
-  if ((m = k.match(/^NODE([0-9]+)(?:_ALIAS|_WAN_NATIVE_IP)?$/))) {
+  if ((m = k.match(/^NODE([0-9]+)(?:_ALIAS|_WAN_NATIVE_IP|_ROLE)?$/))) {
     const n = +m[1]; return n >= 1 && n <= MAX_NODES;
   }
   if ((m = k.match(/^NODE([0-9]+)_ETH\d+_VLAN$/))) {
@@ -12584,7 +12701,7 @@ function extractManagedKeysForScope(flat, scope) {
   Object.keys(all).forEach(k => {
     if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
     let m;
-    if ((m = k.match(/^NODE([0-9]+)(?:_ALIAS|_WAN_NATIVE_IP)?$/))) {
+  if ((m = k.match(/^NODE([0-9]+)(?:_ALIAS|_WAN_NATIVE_IP|_ROLE)?$/))) {
       const n = +m[1]; if (n >= 1 && n <= MAX_NODES) out[k] = String(all[k] ?? "");
     } else if ((m = k.match(/^NODE([0-9]+)_ETH\d+_VLAN$/))) {
       const n = +m[1]; if (n >= 1 && n <= MAX_NODES) out[k] = String(all[k] ?? "");

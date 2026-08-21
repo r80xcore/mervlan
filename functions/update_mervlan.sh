@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.69"                   #
+#                - File: update_mervlan.sh || version="0.70"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -79,6 +79,10 @@ update_changelog_version() {
 }
 
 update_channel_label() {
+	if [ "${UPDATE_SOURCE:-remote}" = "local" ]; then
+		printf '%s\n' 'local archive'
+		return 0
+	fi
 	case "${CHANNEL:-main}" in
 		main|main_direct|refs/tags/*) printf '%s\n' 'stable branch' ;;
 		dev|refs/heads/dev) printf '%s\n' 'development branch' ;;
@@ -523,7 +527,8 @@ update_filter_source_tree() {
 	_update_payload_keep="$TMP_BASE/.dev-tools-keep.$$"
 	[ -d "$_update_payload_root" ] || return 1
 	UPDATE_PAYLOAD_DEV_TOOLS="0"
-	if [ "${GITHUB_REF:-}" != "refs/heads/main" ] &&
+	if [ "${UPDATE_SOURCE:-remote}" = "remote" ] &&
+	   [ "${GITHUB_REF:-}" != "refs/heads/main" ] &&
 	   [ "${GITHUB_REF#refs/tags/}" = "${GITHUB_REF}" ]; then
 		mkdir -p "$_update_payload_keep/dev-tools/tests/router" \
 			"$_update_payload_keep/dev-tools/safety" 2>/dev/null || return 1
@@ -565,6 +570,29 @@ update_tree_valid() {
 	[ -x "$_update_tree/functions/mervlan_wan.sh" ] || return 1
 	return 0
 }
+
+# CORE STAGE VALIDATOR BEGIN
+# Core payload validation is deliberately shared by the normal activation path
+# and local-archive regression harnesses. Optional files remain informational.
+update_stage_core_valid() {
+	_update_stage_root="$1"
+	_update_stage_missing=0
+	[ -d "$_update_stage_root" ] || return 1
+	for _update_stage_required in $CORE_STAGE_FILES; do
+		if [ ! -f "$_update_stage_root/$_update_stage_required" ]; then
+			warn -c cli,vlan "Missing core file in stage: $_update_stage_required"
+			_update_stage_missing=1
+		fi
+	done
+	for _update_stage_dir in $CORE_STAGE_DIRS; do
+		if [ ! -d "$_update_stage_root/$_update_stage_dir" ]; then
+			warn -c cli,vlan "Missing core directory in stage: $_update_stage_dir/"
+			_update_stage_missing=1
+		fi
+	done
+	[ "$_update_stage_missing" -eq 0 ]
+}
+# CORE STAGE VALIDATOR END
 
 update_reconcile_stale_stages() {
 	if ! update_tree_valid "$MERV_BASE"; then
@@ -1177,6 +1205,8 @@ esac
 
 MODE="update"
 CHANNEL="main"
+UPDATE_SOURCE="remote"
+UPDATE_LOCAL_ARCHIVE=""
 UPDATE_LOG_POLICY="keep"
 UPDATE_LEGACY_FALLBACK="0"
 
@@ -1211,8 +1241,19 @@ case "$1" in
 			set_update_log_policy "${3:-}"
 		fi
 		;;
+	local)
+		UPDATE_SOURCE="local"
+		UPDATE_LOCAL_ARCHIVE="${2:-}"
+		[ -n "$UPDATE_LOCAL_ARCHIVE" ] || fail_update cli "Local update requires an absolute archive path"
+		case "$UPDATE_LOCAL_ARCHIVE" in /*) ;; *) fail_update cli "Local update archive path must be absolute" ;; esac
+		[ -L "$UPDATE_LOCAL_ARCHIVE" ] && fail_update cli "Local update archive must not be a symbolic link"
+		[ -f "$UPDATE_LOCAL_ARCHIVE" ] && [ -s "$UPDATE_LOCAL_ARCHIVE" ] || \
+			fail_update cli "Local update archive must be a nonempty regular file"
+		[ "$#" -le 3 ] || fail_update cli "Local update accepts only an archive path and optional --logs policy"
+		set_update_log_policy "${3:-}"
+		;;
 	*)
-		echo "Usage: $0 [update [branch] [--logs=keep|--logs=clear]|backup|restore|main|dev|refs/<ref>]" >&2
+		echo "Usage: $0 [local /absolute/path/archive.tar.gz [--logs=keep|--logs=clear]|update [branch] [--logs=keep|--logs=clear]|backup|restore|main|dev|refs/<ref>]" >&2
 		fail_update cli "Unknown mode/channel: $1"
 		;;
 esac
@@ -1410,28 +1451,92 @@ download_update_archive() {
 	return 1
 }
 
-# resolve curl once, fail with a helpful error if missing
-CURL_BIN="$(find_curl)" || \
-	fail_update curl "curl not found (tried PATH and /usr/sbin/curl); cannot update MerVLAN."
+# LOCAL ARCHIVE HELPERS BEGIN
+acquire_local_update_archive() {
+	_update_local_source="$1"
+	_update_local_dest="$2"
+	_update_local_part="${_update_local_dest}.part"
+	case "$_update_local_source" in /*) ;; *) return 1 ;; esac
+	[ -L "$_update_local_source" ] && return 1
+	[ -f "$_update_local_source" ] && [ -s "$_update_local_source" ] || return 1
+	rm -f "$_update_local_dest" "$_update_local_part" 2>/dev/null || return 1
+	cp -p "$_update_local_source" "$_update_local_part" 2>/dev/null || {
+		rm -f "$_update_local_part" 2>/dev/null || :
+		return 1
+	}
+	[ -s "$_update_local_part" ] && mv -f "$_update_local_part" "$_update_local_dest" 2>/dev/null || {
+		rm -f "$_update_local_part" 2>/dev/null || :
+		return 1
+	}
+	return 0
+}
 
-# channel/ref selection
-case "$CHANNEL" in
-	""|main)
-		GITHUB_REF="refs/heads/main"
-		;;
-	dev)
-		GITHUB_REF="refs/heads/dev"
-		;;
-	refs/*)
-		GITHUB_REF="$CHANNEL"
-		;;
-	*)
-		GITHUB_REF="refs/heads/$CHANNEL"
-		;;
-esac
+# Validate the archive member list before extraction. BusyBox tar renders a
+# hardlink as a normal-file listing with " -> target", while symlinks start
+# with `l`; reject both formats rather than resolving link targets.
+validate_update_archive_members() {
+	_update_archive="$1"
+	_update_members="$TMP_BASE/archive.members.$$"
+	_update_verbose="$TMP_BASE/archive.verbose.$$"
+	UPDATE_ARCHIVE_TOPDIR=""
+	UPDATE_ARCHIVE_RAW_READY="0"
+	rm -f "$_update_members" "$_update_verbose" "$RAW_ARCHIVE" 2>/dev/null || return 1
 
-readonly GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$GITHUB_REF"
-info -c cli,vlan "Using Git ref: $GITHUB_REF"
+	if tar -tzf "$_update_archive" >"$_update_members" 2>/dev/null &&
+	   tar -tvzf "$_update_archive" >"$_update_verbose" 2>/dev/null; then
+		:
+	else
+		gzip -dc "$_update_archive" >"$RAW_ARCHIVE" 2>/dev/null || return 1
+		tar -tf "$RAW_ARCHIVE" >"$_update_members" 2>/dev/null &&
+			tar -tvf "$RAW_ARCHIVE" >"$_update_verbose" 2>/dev/null || return 1
+		UPDATE_ARCHIVE_RAW_READY="1"
+	fi
+
+	[ -s "$_update_members" ] || return 1
+	while IFS= read -r _update_member || [ -n "$_update_member" ]; do
+		case "$_update_member" in
+			''|/*|*'\\'*|*//*|.|./*|*/.|*/./*|..|../*|*/..|*/../*) return 1 ;;
+		esac
+		_update_member_root="${_update_member%%/*}"
+		case "$_update_member_root" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+		if [ -z "$UPDATE_ARCHIVE_TOPDIR" ]; then
+			UPDATE_ARCHIVE_TOPDIR="$_update_member_root"
+		elif [ "$UPDATE_ARCHIVE_TOPDIR" != "$_update_member_root" ]; then
+			return 1
+		fi
+		case "$_update_member" in
+			"$UPDATE_ARCHIVE_TOPDIR"|"$UPDATE_ARCHIVE_TOPDIR"/*) : ;;
+			*) return 1 ;;
+		esac
+	done <"$_update_members"
+	[ -n "$UPDATE_ARCHIVE_TOPDIR" ] || return 1
+
+	while IFS= read -r _update_verbose_line || [ -n "$_update_verbose_line" ]; do
+		case "$_update_verbose_line" in l*|h*|*' -> '*|*' link to '*) return 1 ;; esac
+	done <"$_update_verbose"
+	return 0
+}
+# LOCAL ARCHIVE HELPERS END
+
+if [ "$UPDATE_SOURCE" = "remote" ]; then
+	# Resolve curl only for remote source acquisition. Local archive mode must
+	# remain usable on router images with no curl binary at all.
+	CURL_BIN="$(find_curl)" || \
+		fail_update curl "curl not found (tried PATH and /usr/sbin/curl); cannot update MerVLAN."
+
+	case "$CHANNEL" in
+		""|main) GITHUB_REF="refs/heads/main" ;;
+		dev) GITHUB_REF="refs/heads/dev" ;;
+		refs/*) GITHUB_REF="$CHANNEL" ;;
+		*) GITHUB_REF="refs/heads/$CHANNEL" ;;
+	esac
+	GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$GITHUB_REF"
+	info -c cli,vlan "Using Git ref: $GITHUB_REF"
+else
+	GITHUB_REF="local"
+	GITHUB_URL=""
+	info -c cli,vlan "Using local update archive source"
+fi
 
 # ========================================================================== #
 # BASIC VALIDATION (update mode)                                             #
@@ -1671,10 +1776,22 @@ done
 
 # ========================================================================== #
 
-info -c cli,vlan "Downloading latest MerVLAN snapshot using: $CURL_BIN"
 update_record_phase downloading || fail_update journal "Could not persist the downloading Update journal"
-download_update_archive "$GITHUB_URL" "$ARCHIVE" || \
-	fail_update downloading "Download failed after 5 attempts"
+if [ "$UPDATE_SOURCE" = "local" ]; then
+	info -c cli,vlan "Acquiring MerVLAN archive from local file"
+	acquire_local_update_archive "$UPDATE_LOCAL_ARCHIVE" "$ARCHIVE" || \
+		fail_update downloading "Could not safely acquire the local update archive"
+else
+	info -c cli,vlan "Downloading latest MerVLAN snapshot using: $CURL_BIN"
+	download_update_archive "$GITHUB_URL" "$ARCHIVE" || \
+		fail_update downloading "Download failed after 5 attempts"
+fi
+
+# Never extract a locally supplied (or remotely acquired) archive until its
+# complete member list, single root, and BusyBox link representation are safe.
+if ! validate_update_archive_members "$ARCHIVE"; then
+	fail_update extracting "Archive failed pre-extraction path or link validation"
+fi
 
 # The archive is the first large RAM allocation. The original check above is
 # only a conservative baseline; refresh it with the actual compressed size and
@@ -1686,35 +1803,19 @@ update_require_space_kb "$TMP_DIR" "$((UPDATE_CURRENT_KB * 2))" "archive and ext
 
 info -c cli,vlan "Extracting archive into staging area"
 update_record_phase extracting || fail_update journal "Could not persist the extracting Update journal"
-if tar -tzf "$ARCHIVE" >/dev/null 2>&1; then
-	tar -xzf "$ARCHIVE" -C "$TMP_BASE" || \
-		fail_update extracting "Failed to extract archive"
-else
+if [ "${UPDATE_ARCHIVE_RAW_READY:-0}" = "1" ]; then
 	info -c cli,vlan "tar gzip support unavailable; using checked gzip-to-RAM fallback"
-	if ! gzip -dc "$ARCHIVE" > "$RAW_ARCHIVE" 2>/dev/null; then
-		fail_update extracting "Failed to decompress archive via gzip fallback"
-	fi
 	UPDATE_RAW_ARCHIVE_KB=$(update_path_size_kb "$RAW_ARCHIVE")
 	case "$UPDATE_RAW_ARCHIVE_KB" in ''|0) fail_update extracting "Decompressed archive size could not be measured" ;; esac
 	update_require_space_kb "$TMP_DIR" "$((UPDATE_CURRENT_KB * 2))" "checked gzip extraction workspace"
 	tar -xf "$RAW_ARCHIVE" -C "$TMP_BASE" || fail_update extracting "Failed to extract decompressed archive"
 	update_cleanup_files "$RAW_ARCHIVE" || fail_update extracting "Could not remove the checked gzip fallback archive"
-fi
-
-# Detect top directory from archive
-topdir=""
-topname="$(tar -tzf "$ARCHIVE" 2>/dev/null | head -1 | cut -d/ -f1)"
-if [ -n "$topname" ] && [ -d "$TMP_BASE/$topname" ]; then
-	topdir="$TMP_BASE/$topname"
 else
-	for d in "$TMP_BASE"/mervlan-*; do
-		[ -d "$d" ] && { topdir="$d"; break; }
-	done
+	tar -xzf "$ARCHIVE" -C "$TMP_BASE" || fail_update extracting "Failed to extract archive"
 fi
 
-if [ -z "$topdir" ]; then
-	fail_update extracting "Unable to determine extracted directory"
-fi
+topdir="$TMP_BASE/$UPDATE_ARCHIVE_TOPDIR"
+[ -d "$topdir" ] || fail_update extracting "Archive root did not extract as one directory"
 
 
 # Publish the human-readable update banner once both versions are known. The
@@ -1748,21 +1849,8 @@ update_require_space_kb "$TMP_DIR" "$UPDATE_CURRENT_KB" "validated stage and rol
 # ========================================================================== #
 
 info -c cli,vlan "Validating staged files"
-missing=0
-for required in $CORE_STAGE_FILES; do
-	if [ ! -f "$STAGE_DIR/$required" ]; then
-		warn -c cli,vlan "Missing core file in stage: $required"
-		missing=1
-	fi
-done
-
-# ensure required top-level directories are present too (clearer messages)
-for d in $CORE_STAGE_DIRS; do
-	if [ ! -d "$STAGE_DIR/$d" ]; then
-		warn -c cli,vlan "Missing core directory in stage: $d/"
-		missing=1
-	fi
-done
+update_stage_core_valid "$STAGE_DIR" || \
+	fail_update validating "Validation failed; downloaded archive is missing core MerVLAN files. Include validation and file warnings when reporting this issue."
 
 for optional in $OPTIONAL_STAGE_FILES; do
 	if [ ! -f "$STAGE_DIR/$optional" ]; then
@@ -1776,9 +1864,6 @@ for d in $OPTIONAL_STAGE_DIRS; do
 	fi
 done
 
-if [ "$missing" -ne 0 ]; then
-	fail_update validating "Validation failed; downloaded archive is missing core MerVLAN files. Include validation and file warnings when reporting this issue."
-fi
 info -c cli,vlan "Staged content validated successfully"
 update_record_phase staged || fail_update journal "Could not persist the staged Update journal"
 

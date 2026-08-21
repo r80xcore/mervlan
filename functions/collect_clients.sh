@@ -58,8 +58,13 @@ fi
 # directories and clear any stale results from previous runs.                  #
 # ============================================================================ #
 
-# Timeout (seconds) for remote SSH commands; prevents hanging on slow nodes
-TIMEOUT=10
+# The ordinary SSH execution timeout is intentionally short (10 seconds), but
+# this one read-only command waits for a node-owned collection generation and
+# then reads its artifact.  Give that bounded request enough time to finish
+# without changing the timeout policy for any other caller.  The parent worker
+# timeout remains 90 seconds, so a lost node can never hold collection open
+# indefinitely.
+NODE_RESULT_SSH_TIMEOUT=45
 # Retry controls for transient node boot/SSH delays
 RETRY_MAX="${COLLECT_RETRY_MAX:-2}"
 RETRY_DELAY="${COLLECT_RETRY_DELAY:-3}"
@@ -233,6 +238,37 @@ mkdir -p "$COLLECTDIR" "$RESULTDIR"
 # Writing to a work file and renaming at the end prevents the browser from
 # seeing a missing, partial, or unannotated file during collection.
 OUT_WORK="${OUT_FINAL}.new.$$"
+# A collection generation is all-or-nothing.  Private per-router error
+# artifacts are useful diagnostics, but are never eligible for the public
+# aggregate.  Keep the first attributable failure so the observation worker
+# can retain the requested generation and operators have a bounded fault file.
+COLLECT_FAILED=0
+COLLECT_FAILURE_PHASE=""
+COLLECT_FAILURE_TARGET=""
+COLLECT_FAILURE_REASON=""
+COLLECT_FAULT_FILE="${RESULTDIR}/client_collection_fault"
+REQUIRED_RESULTS=""
+
+collect_note_failure() {
+  [ "$COLLECT_FAILED" -eq 0 ] || return 0
+  COLLECT_FAILED=1
+  COLLECT_FAILURE_PHASE="$1"
+  COLLECT_FAILURE_TARGET="$2"
+  COLLECT_FAILURE_REASON="$3"
+}
+
+collect_write_fault() {
+  [ "$COLLECT_FAILED" -eq 1 ] || return 0
+  _collect_fault_tmp="${COLLECT_FAULT_FILE}.new.$$"
+  {
+    printf 'phase=%s\n' "$COLLECT_FAILURE_PHASE"
+    printf 'target=%s\n' "$COLLECT_FAILURE_TARGET"
+    printf 'reason=%s\n' "$COLLECT_FAILURE_REASON"
+    printf 'epoch=%s\n' "$(date +%s 2>/dev/null || printf 0)"
+  } > "$_collect_fault_tmp" 2>/dev/null &&
+    mv -f "$_collect_fault_tmp" "$COLLECT_FAULT_FILE" 2>/dev/null ||
+    rm -f "$_collect_fault_tmp" 2>/dev/null || :
+}
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -294,12 +330,17 @@ collect_from_node() {
   
   _result_tmp="$COLLECTDIR/node_${configured_ip}.out.$$"
   result=""
+  _collect_saved_ssh_timeout="${MERV_SSH_TIMEOUT:-10}"
+  MERV_SSH_TIMEOUT="$NODE_RESULT_SSH_TIMEOUT"
+  export MERV_SSH_TIMEOUT
   if merv_ssh_exec "$node_id" "$configured_ip" "$remote_cmd" >"$_result_tmp" 2>/dev/null; then
     rc=0
     result="$(cat "$_result_tmp" 2>/dev/null)"
   else
     rc=$?
   fi
+  MERV_SSH_TIMEOUT="$_collect_saved_ssh_timeout"
+  export MERV_SSH_TIMEOUT
   rm -f "$_result_tmp" 2>/dev/null || :
 
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
@@ -338,6 +379,7 @@ collect_from_main() {
   if sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1 &&
      json_validate_file "$MAIN_JSON" 2>/dev/null; then
     info -c vlan "✓ Main router collection completed"
+    return 0
   else
     rc=$?
     error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
@@ -347,6 +389,7 @@ collect_from_main() {
     fi
     rm -f "$MAIN_JSON" 2>/dev/null || :
     printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+    return 1
   fi
 }
 
@@ -432,6 +475,7 @@ EOF
 fi
 
 # Start main collection only after the complete node trust preflight passes.
+REQUIRED_RESULTS="$MAIN_JSON:main"
 ( trap - EXIT INT TERM; collect_from_main ) &
 MAIN_PID="$!"
 collect_track_pid "$MAIN_PID" || :
@@ -447,6 +491,7 @@ if [ "$NODES_ENABLED" = "true" ]; then
   # Read from file (not pipe) so background PIDs stay in this shell
   while read -r node_id node_ip; do
     [ -n "$node_id" ] || continue
+    REQUIRED_RESULTS="$REQUIRED_RESULTS $COLLECTDIR/node_${node_ip}.json:node-${node_id}"
     ( trap - EXIT INT TERM; collect_from_node "$node_id" "$node_ip" "$COLLECTDIR/node_${node_ip}.json" ) &
     # Track PID for cleanup handler
     collect_track_pid "$!" || :
@@ -488,6 +533,7 @@ if [ -n "$BG_PIDS" ]; then
 
   if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
     warn -c cli,vlan "Client collection timeout after ${WAIT_TIMEOUT}s; some results may be incomplete"
+    collect_note_failure wait collection timeout
     for _collect_track in ${BG_TRACKED:-}; do
       _collect_pid=${_collect_track%%:*}
       _collect_start=${_collect_track#*:}
@@ -506,10 +552,34 @@ if [ -n "$BG_PIDS" ]; then
       case "$_collect_pid:$_collect_start" in
         ''|*[!0-9:]*|:*|*::*) continue ;;
       esac
-      wait "$_collect_pid" 2>/dev/null
+      if ! wait "$_collect_pid" 2>/dev/null; then
+        collect_note_failure worker collection worker-nonzero
+      fi
     done
   BG_PIDS=""
   BG_TRACKED=""
+fi
+
+# Reap status alone is insufficient: a worker can intentionally leave a valid
+# JSON error artifact.  Require one valid, non-error result for every requested
+# main/node target before a new public aggregate is even constructed.
+for _collect_expected in $REQUIRED_RESULTS; do
+  _collect_expected_file=${_collect_expected%%:*}
+  _collect_expected_target=${_collect_expected#*:}
+  if [ ! -s "$_collect_expected_file" ]; then
+    collect_note_failure result "$_collect_expected_target" missing-result
+  elif ! json_validate_file "$_collect_expected_file" 2>/dev/null; then
+    collect_note_failure result "$_collect_expected_target" invalid-json
+  elif grep -q '"error"[[:space:]]*:' "$_collect_expected_file" 2>/dev/null; then
+    collect_note_failure result "$_collect_expected_target" error-artifact
+  fi
+done
+
+if [ "$COLLECT_FAILED" -ne 0 ]; then
+  collect_write_fault
+  error -c cli,vlan "Client collection failed: phase=$COLLECT_FAILURE_PHASE target=$COLLECT_FAILURE_TARGET reason=$COLLECT_FAILURE_REASON; preserving previous inventory"
+  rm -f "$OUT_WORK" 2>/dev/null || :
+  exit 1
 fi
 
 # ============================================================================ #
@@ -874,4 +944,5 @@ rm -rf "$COLLECTDIR"
 
 info -c vlan "✓ Client collection completed - JSON saved to $OUT_FINAL"
 info -c cli,vlan "Refreshing client list complete"
+rm -f "$COLLECT_FAULT_FILE" 2>/dev/null || :
 exit 0

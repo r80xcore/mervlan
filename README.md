@@ -67,6 +67,7 @@ Out of the box, Asuswrt-Merlin in AP mode treats all physical LAN ports and wire
 
 * **802.1Q Uplink Trunking & WAN Native**  
   MerVLAN attaches each VLAN bridge to an 802.1Q tagged sub-interface on the uplink port (such as `eth0.20`), seamlessly trunking client traffic over your Ethernet backhaul to your upstream managed switch or router/firewall (like OPNsense, pfSense, UniFi, or MikroTik). You can also wrap the AP's own `br0` management interface onto a tagged **WAN Native VLAN** to isolate router administration onto its own network.
+  A WAN Native VID is reserved on that device: do not reuse it for a managed SSID, LAN access port, or trunk. AiMesh nodes follow MAIN's effective native mode and each need their own DHCP reservation when it is tagged; standalone APs retain an independent mode.
 
 * **Multi-Node Sync & Event-Driven Auto-Healing**  
   In multi-AP setups (AiMesh or standalone APs), the main router acts as a coordinator, pushing device-specific configurations across all nodes over SSH. Because Asus firmware routinely restarts interfaces during Wi-Fi events or DHCP renewals, MerVLAN hooks into Merlin's service-event system and runs a background health monitor to automatically repair bridges, re-bind interfaces, and ensure settings persist across reboots.
@@ -178,6 +179,12 @@ MerVLAN includes built-in update, backup, restore, and temporary undo tools. Ope
 The **Update** tab can install a tagged release, the current `main` or `dev` version, or a custom test branch. It compares the selected version with your current installation, warns before a downgrade, and shows the changelog when one is available.
 
 By default, an update keeps your settings, SSH keys, MAC Shield data, backups, and existing logs. You can choose to clear older logs before starting. An automatic backup is created before the installed version is replaced, and reachable configured nodes are updated with the main unit.
+
+For an offline recovery or test package, the same transaction also accepts
+`sh functions/update_mervlan.sh local /absolute/path/archive.tar.gz`. The
+archive must be a non-symlink regular file and is checked for unsafe paths,
+multiple roots, and links before MerVLAN extracts it. The original file is not
+changed. See the Help Guide for the full safety requirements.
 
 ### Backup and Restore
 

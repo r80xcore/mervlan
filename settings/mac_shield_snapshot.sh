@@ -274,28 +274,43 @@ _NVRAM_
 # ============================================================================
 _MERV_IFACE_VID_CACHE=""
 _MERV_IFACE_VID_CACHE_ON=0
+_MERV_IFACE_VID_CACHE_STATUS="unset"
 
 merv_iface_vid_cache_enable() {
   _MERV_IFACE_VID_CACHE_ON=1
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="unset"
 }
 
 merv_iface_vid_cache_invalidate() {
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="unset"
 }
 
 merv_iface_vid_cache_disable() {
   _MERV_IFACE_VID_CACHE_ON=0
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="unset"
 }
 
 merv_iface_vid_list() {
   if [ "${_MERV_IFACE_VID_CACHE_ON:-0}" = "1" ]; then
-    if [ -z "$_MERV_IFACE_VID_CACHE" ]; then
-      _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null)
+    case "${_MERV_IFACE_VID_CACHE_STATUS:-unset}" in
+      valid)
+        [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+        return 0
+        ;;
+      error) return 1 ;;
+    esac
+    if _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null); then
+      _MERV_IFACE_VID_CACHE_STATUS="valid"
+      [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+      return 0
+    else
+      _MERV_IFACE_VID_CACHE=""
+      _MERV_IFACE_VID_CACHE_STATUS="error"
+      return 1
     fi
-    [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
-    return 0
   fi
   merv_mac_build_expected_iface_vid 2>/dev/null
 }
@@ -315,7 +330,11 @@ merv_iface_vid_list() {
 merv_mac_snapshot_preconditions_ok() {
   local pairs iface vid ok=1 checked=0
 
-  pairs=$(merv_mac_build_expected_iface_vid)
+  pairs=$(merv_iface_vid_list)
+  if [ $? -ne 0 ]; then
+    warn -c vlan "MAC precondition: expected managed VAP state is unknown"
+    return 1
+  fi
   [ -n "$pairs" ] || return 0
 
   while IFS=' ' read -r iface vid; do

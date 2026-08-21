@@ -33,6 +33,9 @@ TRUST_ACTION_FILE="$MERV_BASE/functions/ssh_trust_action.sh"
 grep -q 'MERV_SSH_TRUST_ORIGINAL_ACTION="$SYNC_PROGRESS_ACTION"' "$SYNC_FILE" || fail settings-only-trust-action
 grep -q 'syncsettings_vlanmgr) sh "\$MERV_BASE/functions/sync_nodes.sh" --settings-only' "$TRUST_ACTION_FILE" || fail settings-only-trust-resume
 grep -q 'sync_vlanmgr|syncsettings_vlanmgr|' "$TRUST_ACTION_FILE" || fail settings-only-trust-allowlist
+grep -q '^functions/ssh_hostkey_probe.sh$' "$SYNC_FILE" || fail sync-hostkey-probe-payload
+grep -A20 '^FILES_TO_COPY_CHMOD="' "$SYNC_FILE" | grep -q '^functions/ssh_hostkey_probe.sh$' || fail sync-hostkey-probe-mode
+ok sync-hostkey-probe-payload
 
 # The action worker sources var_settings.sh, where CUSTOM_SETTINGS_FILE is
 # readonly.  Its startup path must not try to assign that canonical value a
@@ -84,6 +87,22 @@ fi
 [ "$_probe_rc" -eq 5 ] || fail probe-timeout-result
 [ "$_probe_elapsed" -lt 8 ] || fail probe-timeout-bound
 ok probe-timeout-cleans-up-client
+
+# ASUS Dropbear emits "Connect failed" for an unreachable route.  With no
+# captured known_hosts entry that is strictly a pre-session transport failure,
+# so the probe must return the recovery-fallback classification rather than
+# the ambiguous generic probe result.
+PROBE_CONNECT_FAIL="$TEST_ROOT/probe-connect-fail"
+printf '%s\n' '#!/bin/sh' \
+  'printf "%s\\n" "dbclient: Connection to test@198.51.100.10:22 exited: Connect failed: No route to host" >&2' \
+  'exit 1' > "$PROBE_CONNECT_FAIL" || fail probe-connect-fail-write
+chmod 700 "$PROBE_CONNECT_FAIL" || fail probe-connect-fail-mode
+MERV_BASE="$PROBE_BASE" MERV_SSH_CLIENT="$PROBE_CONNECT_FAIL" \
+  MERV_SSH_CONNECT_TIMEOUT=1 \
+  sh "$PROBE_BASE/functions/ssh_hostkey_probe.sh" \
+    'NODE1@198.51.100.10:22' 198.51.100.10 22 >/dev/null 2>&1
+[ "$?" -eq 10 ] || fail probe-connect-failed-transport-result
+ok probe-connect-failed-transport-result
 
 # Keep the browser-facing acknowledgement contract covered as well: a trust
 # required result must be valid JSON and must be published to both paths.

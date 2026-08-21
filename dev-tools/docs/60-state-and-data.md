@@ -11,7 +11,9 @@ The addon normally lives below `/jffs/addons/mervlan/` on a device.
   the MAIN endpoints are the exact DHCP IPv4s required after numeric and
   ASUS/default MAIN handoffs. ASUS/default is supported only when `br0` uses
   the positively identified physical WAN uplink; unknown tagged-native topology
-  is not inferred.
+  is not inferred. `Nodes.NODE<n>_ROLE` is `aimesh` or `standalone`; AiMesh
+  derives effective WAN Native from MAIN while Standalone uses its own value.
+  Legacy role-less nodes read as Standalone for compatibility.
 - `settings/`: shared libraries and runtime defaults.
 - `logs/debug/`: bounded persistent WAN Native diagnostic records, created only
   when the explicitly opt-in setting is enabled.
@@ -54,7 +56,8 @@ file or ebtables deletion is not a supported recovery action.
   missing PID or lock.
 - Shared files are written to a same-directory temporary file and published by
   atomic rename.
-- Client JSON must remain readable if a new generation fails.
+- Client JSON must remain readable if a new generation fails; a required
+  collector failure must not publish a partial replacement generation.
 - Progress and result files are parsed as data, never executed as shell.
 - Update maintenance has a journal-bound owner/quiesce marker under the
   maintenance state root; ordinary mutation and observation requests remain

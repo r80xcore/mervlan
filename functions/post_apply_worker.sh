@@ -249,6 +249,29 @@ obs_record_fault() {
   } > "$_orf_file" 2>/dev/null || :
 }
 
+# Collection has an all-or-nothing public-generation contract.  A failed
+# request deliberately leaves the last known-good client file in place, so a
+# progress-backed browser action also needs an explicit terminal failure rather
+# than inferring success from the still-readable old file.
+obs_collection_failure_notice() {
+  _ocfn_generation="$1"
+  case "${MERV_PROGRESS_TOKEN:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  if type merv_progress_fail >/dev/null 2>&1; then
+    merv_progress_fail "$MERV_PROGRESS_TOKEN" collectclients_vlanmgr \
+      "Collect VLAN clients" phase \
+      "Client refresh failed; showing the last known client data." \
+      client-collection-failed >/dev/null 2>&1 || :
+  fi
+  if type action_ack_error >/dev/null 2>&1; then
+    action_ack_error "$MERV_PROGRESS_TOKEN" collectclients_vlanmgr \
+      "{\"reason\":\"client-collection-failed\",\"generation\":$_ocfn_generation}" \
+      "Client refresh failed; showing the last known client data." '[]' \
+      client-collection-failed >/dev/null 2>&1 || :
+  fi
+}
+
 obs_snapshot_run() {
   if [ -n "${MERV_OBS_SNAPSHOT_CMD:-}" ]; then
     "$MERV_OBS_SNAPSHOT_CMD"
@@ -460,6 +483,7 @@ obs_run() {
       "Client inventory refreshed; finishing..."
       else
         obs_record_fault collection "$_ow_generation"
+        obs_collection_failure_notice "$_ow_generation"
         return 1
       fi
     fi

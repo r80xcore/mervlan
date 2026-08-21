@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: sync_nodes.sh || version="0.72.5"                     #
+#             - File: sync_nodes.sh || version="0.72.6"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -229,6 +229,13 @@ sync_handle_signal() {
 _cleanup_sync_tmp() {
     _sync_cleanup_rc=$?
     _sync_cleanup_failed=0
+    if [ -n "${_sync_endpoint_map:-}" ] && [ -e "$_sync_endpoint_map" ]; then
+        if ! rm -f "$_sync_endpoint_map" 2>/dev/null; then
+            _sync_cleanup_failed=1
+            warn -c cli,vlan "Sync cleanup could not remove its verified endpoint map"
+        fi
+    fi
+    unset MERV_SSH_PREFLIGHT_ENDPOINT_MAP MERV_SSH_SYNC_ENDPOINT_MAP
     for _sync_expected_file in "$TMPDIR"/merv_sync_expected_*; do
         [ -e "$_sync_expected_file" ] || continue
         if ! rm -f "$_sync_expected_file" 2>/dev/null; then
@@ -353,6 +360,7 @@ functions/hw_probe.sh
 functions/mervlan_trunk.sh
 functions/mervlan_wan.sh
 functions/mac_refresh.sh
+functions/ssh_hostkey_probe.sh
 templates/mervlan_templates.sh
 "
 
@@ -387,6 +395,7 @@ functions/hw_probe.sh
 functions/mervlan_trunk.sh
 functions/mervlan_wan.sh
 functions/mac_refresh.sh
+functions/ssh_hostkey_probe.sh
 "
 FILES_TO_COPY_CHMOD="$FILES_TO_COPY_CHMOD $DEV_TOOLS_FILES_TO_COPY_CHMOD"
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
@@ -542,6 +551,8 @@ fi
 # stream, or remote settings mutation.  A single untrusted/unknown node aborts
 # the whole synchronization; no partial node update is allowed.
 _sync_trust_file="$TMPDIR/sync_trust.$$"
+_sync_endpoint_map="$TMPDIR/sync_endpoint_map.$$"
+rm -f "$_sync_endpoint_map" 2>/dev/null || exit 75
 while IFS=' ' read -r _sync_slot _sync_ip _sync_extra || [ -n "$_sync_slot" ]; do
     [ -z "$_sync_extra" ] || { rm -f "$_sync_trust_file"; exit 1; }
     _sync_mac=$(json_get_flag "AUTO_NODE${_sync_slot}_MAC" "" "$SETTINGS_FILE" 2>/dev/null)
@@ -550,7 +561,12 @@ done <<EOF
 $NODE_IPS
 EOF
 if [ "$DRY_RUN" != yes ]; then
-    merv_ssh_preflight_node_set "$_sync_trust_file"
+    # Preflight writes the map through a separate variable so the normal
+    # endpoint resolver cannot consume a partially populated map mid-loop.
+    MERV_SSH_PREFLIGHT_ENDPOINT_MAP="$_sync_endpoint_map"
+    unset MERV_SSH_SYNC_ENDPOINT_MAP
+    export MERV_SSH_PREFLIGHT_ENDPOINT_MAP
+    merv_ssh_preflight_node_set "$_sync_trust_file" "$SETTINGS_FILE"
     _sync_trust_rc=$?
     if [ "$_sync_trust_rc" -ne 0 ]; then
         warn -c cli,vlan "Sync refused before mutation: SSH host-key trust/capability preflight failed (${MERV_SSH_TRUST_LAST_REASON:-unknown})"
@@ -574,6 +590,33 @@ if [ "$DRY_RUN" != yes ]; then
         }
         exit "$_sync_trust_rc"
     fi
+    [ -s "$_sync_endpoint_map" ] || {
+        error -c cli,vlan "Sync: SSH preflight did not publish a verified endpoint map"
+        exit 75
+    }
+    # Promote only the completed preflight map. Every resolver call made by
+    # Sync now pins one verified endpoint for the node's canonical identity.
+    unset MERV_SSH_PREFLIGHT_ENDPOINT_MAP
+    MERV_SSH_SYNC_ENDPOINT_MAP="$_sync_endpoint_map"
+    export MERV_SSH_SYNC_ENDPOINT_MAP
+    while IFS=' ' read -r _sync_slot _sync_ip _sync_extra || [ -n "$_sync_slot" ]; do
+        [ -z "$_sync_extra" ] || exit 75
+        _sync_selected=$(merv_node_endpoint_candidates "$_sync_slot" "$SETTINGS_FILE" 2>/dev/null | sed -n '1p') || {
+            error -c cli,vlan "Sync: verified endpoint map failed current candidate validation for NODE${_sync_slot}"
+            exit 75
+        }
+        [ -n "$_sync_selected" ] || exit 75
+    done <<EOF
+$NODE_IPS
+EOF
+    _sync_map_rows=$(wc -l < "$_sync_endpoint_map" 2>/dev/null | tr -d ' ')
+    _sync_node_rows=$(printf '%s\n' "$NODE_IPS" | wc -l 2>/dev/null | tr -d ' ')
+    [ "$_sync_map_rows" = "$_sync_node_rows" ] || {
+        error -c cli,vlan "Sync: verified endpoint map does not cover exactly the configured node set"
+        exit 75
+    }
+else
+    unset MERV_SSH_PREFLIGHT_ENDPOINT_MAP MERV_SSH_SYNC_ENDPOINT_MAP
 fi
 rm -f "$_sync_trust_file" 2>/dev/null || {
     error -c cli,vlan "Sync: trust preflight temporary cleanup failed"
@@ -1793,14 +1836,29 @@ activate_staged_node_settings_only() {
 
 sync_node_worker() {
     node_id="$1"
-    node_ip="$2"
+    node_canonical_ip="$2"
+    node_ip="$node_canonical_ip"
+    if [ -n "${MERV_SSH_SYNC_ENDPOINT_MAP:-}" ]; then
+        node_ip=$(merv_node_endpoint_candidates "$node_id" "${SETTINGS_FILE:-}" 2>/dev/null | sed -n '1p') || {
+            error -c cli,vlan "Sync NODE${node_id}: verified endpoint map could not be consumed"
+            return 1
+        }
+        [ -n "$node_ip" ] || {
+            error -c cli,vlan "Sync NODE${node_id}: verified endpoint map selected no endpoint"
+            return 1
+        }
+    fi
+    MERV_NODE_ENDPOINT_SELECTED="$node_ip"
+    MERV_NODE_ENDPOINT_EXPECTED="$node_ip"
+    MERV_NODE_ENDPOINT_FALLBACK=0
+    export MERV_NODE_ENDPOINT_SELECTED MERV_NODE_ENDPOINT_EXPECTED MERV_NODE_ENDPOINT_FALLBACK
     # A pool normally forks one process per node, but reset these worker-local
     # shortcuts so an alternate caller cannot inherit an earlier node's state.
     unset MERV_SSH_SKIP_PING
     SYNC_STAGE_DIRS_PREPARED=0
     SYNC_NODE_ACTIVATION_OUTPUT=""
     export SYNC_STAGE_DIRS_PREPARED SYNC_NODE_ACTIVATION_OUTPUT
-    info -c cli,vlan "Processing node: NODE${node_id} ($node_ip)"
+    info -c cli,vlan "Processing node: NODE${node_id} (canonical=$node_canonical_ip endpoint=$node_ip)"
     dbg_log "Beginning node synchronization"
     dbg_var node_ip DRY_RUN
     

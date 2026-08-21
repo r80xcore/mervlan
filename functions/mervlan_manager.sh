@@ -378,10 +378,13 @@ read_json() {
           ETH[1-8]_VLAN)
             idx="${key#ETH}"      # "1_VLAN"
             idx="${idx%_VLAN}"    # "1"
+            if type merv_effective_eth_vlan >/dev/null 2>&1; then
+              merv_effective_eth_vlan "$idx" "$file" "$NODE_ID"
+              return $?
+            fi
             okey="NODE${NODE_ID}_ETH${idx}_VLAN"
-
             val="$(read_json_raw "$okey" "$file")"
-            [ -z "$val" ] && val="none"   # strict modular: no fallback to main
+            [ -z "$val" ] && val="none"
             printf '%s' "$val"
             return 0
             ;;
@@ -585,7 +588,7 @@ wait_for_interface() {
     # waiting for a slow interface. One unified guard tick restores QT + MAC +
     # DHCP hold from a single ebtables read, each path fast-pathing to a no-op
     # when its chain and jumps are intact (no expensive rebuild per attempt).
-    merv_guard_tick
+    merv_guard_tick || return 1
 
     # Exponential backoff: 1<<attempt seconds (BusyBox-safe)
     sleep $((1 << attempt))
@@ -860,7 +863,8 @@ verify_interface_binding() {
   case "$vid" in
     none|trunk) return 0 ;;
   esac
-  member_of_bridge "br${vid}" "$iface"
+  type merv_exact_bridge_membership >/dev/null 2>&1 || return 1
+  merv_exact_bridge_membership "$iface" "$vid"
 }
 
 # attach_to_bridge — Attach interface to appropriate bridge based on VLAN config
@@ -873,12 +877,12 @@ attach_to_bridge() {
   LABEL="$3"
 
   # Validate VLAN ID before attempting attachment
-  validate_vlan_id "$VID" || { warn -c cli,vlan "Invalid VLAN $VID for $LABEL, skipping"; return; }
+  validate_vlan_id "$VID" || { warn -c cli,vlan "Invalid VLAN $VID for $LABEL, skipping"; return 1; }
 
   # Skip VAPs flagged as internal (those without a configured SSID)
-  is_internal_vap "$IF" && { warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"; return; }
+  is_internal_vap "$IF" && { warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"; return 1; }
   # Verify interface exists in kernel before attachment
-  iface_exists "$IF" || { warn -c cli,vlan "$LABEL ($IF) - not present, skipping"; return; }
+  iface_exists "$IF" || { warn -c cli,vlan "$LABEL ($IF) - not present, skipping"; return 1; }
 
   # Idempotency guard for br0 attachments: if the interface is already in
   # br0 and the target is also br0 (VID=none), skip remove+reattach.
@@ -954,8 +958,14 @@ attach_to_bridge() {
         track_change "Attached $IF to br${VID} (VLAN $VID)"
         if ! verify_interface_binding "$IF" "$VID"; then
           sleep 2
-          brctl addif "br${VID}" "$IF" 2>/dev/null || true
-          verify_interface_binding "$IF" "$VID" >/dev/null 2>&1 || :
+          brctl addif "br${VID}" "$IF" 2>/dev/null || {
+            error -c cli,vlan "Failed to reattach $IF to br${VID} after exact-placement verification"
+            return 1
+          }
+          if ! verify_interface_binding "$IF" "$VID"; then
+            error -c cli,vlan "Failed exact placement verification for $IF in br${VID}"
+            return 1
+          fi
         fi
         note_bound_iface "$IF"
         queue_watch "$IF,$VID"
@@ -1619,28 +1629,9 @@ ebt_quarantine_add() {
 }
 
 ebt_quarantine_ensure_expected_rules() {
-  local _if _vid _pairs
-
-  type ebtables >/dev/null 2>&1 || return 0
-  [ "$DRY_RUN" = "yes" ] && return 0
-
-  ebt_quarantine_init
-  if type merv_iface_vid_list >/dev/null 2>&1; then
-    _pairs=$(merv_iface_vid_list)
-  else
-    _pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null)
-  fi
-  printf '%s\n' "$_pairs" | while IFS=' ' read -r _if _vid; do
-    [ -n "$_if" ] && [ -n "$_vid" ] || continue
-    # Only quarantine VLAN-bound interfaces (real VID >= 2, purely numeric).
-    # Intentionally-native/br0 interfaces (none, trunk, 0, 1) are excluded.
-    # *[!0-9]* catches malformed resolver output (e.g. "187,188", "vlan187").
-    case "$_vid" in
-      ''|none|trunk|0|1|*[!0-9]*) continue ;;
-    esac
-    [ "$_vid" -ge 2 ] 2>/dev/null || continue
-    ebt_quarantine_add "$_if"
-  done
+  # Compatibility name for callers already deployed with manager-local QT.
+  # The sole policy is now the strict shared reconciler in lib_mervqt.
+  merv_qt_ensure_expected_rules
 }
 
 # ebt_quarantine_release — Remove the quarantine rule for a specific interface.
@@ -1688,7 +1679,10 @@ cleanup_existing_config() {
   # cleanup needed. Only MERVLAN-managed interfaces are quarantined; firmware-
   # owned subinterfaces (e.g. AiMesh management SSIDs like wl0.1 on nodes)
   # are excluded so they can continue handling AiMesh provisioning traffic.
-  ebt_quarantine_ensure_expected_rules
+  if ! ebt_quarantine_ensure_expected_rules; then
+    error -c cli,vlan "MERV_QT: exact guard arming failed; aborting before VLAN cleanup"
+    return 1
+  fi
   _qt_count=0
   if type merv_iface_vid_list >/dev/null 2>&1; then
     _qt_ifaces=$(merv_iface_vid_list | awk '{print $1}')
@@ -1708,6 +1702,10 @@ cleanup_existing_config() {
     error -c cli,vlan "MERV_MAC: shield initialization failed; aborting before VLAN cleanup"
     return 1
   fi
+  merv_l2_guard_verify_exact || {
+    error -c cli,vlan "L2 guards are not exact after arming; aborting before VLAN cleanup"
+    return 1
+  }
 
   # --- ebtables: remove all MerVLAN trunk filter rules FIRST ---
   # Must run before bridge/VLAN teardown to prevent stale rules that reference
@@ -1813,10 +1811,9 @@ merv_native_auth_audit() {
 }
 
 merv_manager_final_security_check() {
-  local bad iface vid pairs i ssid vlan have_vlan_ssid
+  local bad iface vid pairs eth_pairs
 
   bad=0
-  have_vlan_ssid=0
 
   if ! merv_dhcp_hold_rules_present; then
     error -c cli,vlan "SECURITY FAIL: token owner exists but exact DHCP-hold rules are incomplete"
@@ -1837,48 +1834,38 @@ merv_manager_final_security_check() {
     bad=1
   fi
 
-  i=1
-  while [ "$i" -le "$MAX_SSIDS" ]; do
-    ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
-    vlan=$(get_vlan_slot_value "$i" "$SETTINGS_FILE")
-    case "$vlan" in
-      ''|none|trunk) ;;
-      *[!0-9]*) ;;
-      *)
-        if [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ] && [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ]; then
-          have_vlan_ssid=1
-          break
-        fi
-        ;;
-    esac
-    i=$((i + 1))
-  done
-
-  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null)
-  if [ -z "$pairs" ]; then
-    if [ "$have_vlan_ssid" -eq 1 ]; then
-      error -c cli,vlan "SECURITY FAIL: no expected managed VAP list available"
-      return 1
-    fi
-    [ "$bad" -eq 0 ]
-    return $?
-  fi
+  pairs=$(merv_iface_vid_list 2>/dev/null) || {
+    error -c cli,vlan "SECURITY FAIL: expected managed VAP state is unknown"
+    return 1
+  }
 
   while IFS=' ' read -r iface vid; do
     [ -n "$iface" ] && [ -n "$vid" ] || continue
 
-    if [ -e "/sys/class/net/br0/brif/$iface" ]; then
-      error -c cli,vlan "SECURITY FAIL: managed VAP $iface is still in br0 after manager"
-      bad=1
-    fi
-
-    if [ ! -e "/sys/class/net/br${vid}/brif/$iface" ]; then
-      error -c cli,vlan "SECURITY FAIL: managed VAP $iface is not in expected br${vid}"
+    if ! merv_exact_bridge_membership "$iface" "$vid"; then
+      error -c cli,vlan "SECURITY FAIL: managed VAP $iface is not exclusively in br${vid}"
       bad=1
     fi
   done <<_PAIRS_
 $pairs
 _PAIRS_
+
+  eth_pairs=$(merv_managed_eth_iface_vid_list "$SETTINGS_FILE" "$NODE_ID" 2>/dev/null) || {
+    error -c cli,vlan "SECURITY FAIL: expected managed Ethernet state is unknown"
+    return 1
+  }
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+    if ! iface_exists "$iface"; then
+      error -c cli,vlan "SECURITY FAIL: managed Ethernet $iface is absent"
+      bad=1
+    elif ! merv_exact_bridge_membership "$iface" "$vid"; then
+      error -c cli,vlan "SECURITY FAIL: managed Ethernet $iface is not exclusively in br${vid}"
+      bad=1
+    fi
+  done <<_ETH_PAIRS_
+$eth_pairs
+_ETH_PAIRS_
 
   [ "$bad" -eq 0 ]
 }
@@ -1907,7 +1894,7 @@ run_service_with_timeout() {
     # leave MERV_QT and MERV_MAC missing for the whole restart (30-90s) — an
     # open L2 escape window for ARP/static-IP traffic, not just DHCP. Restore
     # every guard layer each second (all fast-path to no-ops when intact).
-    merv_guard_tick
+    merv_guard_tick || return 1
 
     if [ "$elapsed" -ge "$tmax" ]; then
       warn -c cli,vlan "service $cmd_string exceeded ${tmax}s; continuing without waiting"
@@ -1951,7 +1938,7 @@ wait_for_rc_quiet() {
   # Enforce expected MERV_QT rules once before the tick loop — ebt_quarantine_ensure_expected_rules
   # calls merv_mac_build_expected_iface_vid (expensive). Per-tick calls multiply that cost
   # across every sleep interval. The per-tick guard tick below handles cheap chain repair.
-  ebt_quarantine_ensure_expected_rules
+  ebt_quarantine_ensure_expected_rules || return 1
   while :; do
     # Re-arm ALL L2 shields on every tick — rc's restart_wireless wipes ebtables,
     # so MERV_QT, MERV_MAC and the DHCP hold all need active re-arming while wl
@@ -1961,7 +1948,7 @@ wait_for_rc_quiet() {
     #
     # During rc/wlconf we restore shields only. Do NOT brctl-delif VAPs here;
     # that fights Broadcom restart handling and lengthens restart_wireless.
-    merv_guard_tick
+    merv_guard_tick || return 1
 
     if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
        rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
@@ -2066,25 +2053,31 @@ merv_manager_settle_observe() {
   fi
 }
 
+merv_manager_arm_l2_before_mutation() {
+  # Expected state, DHCP ownership and exact L2 protection are prerequisites
+  # for cleanup/restart/WAN mutation. Unknown resolver state is terminal.
+  merv_qt_expected_iface_vid_list >/dev/null || return 1
+  merv_dhcp_hold_rules_present || return 1
+  merv_qt_ensure_expected_rules || return 1
+  ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || true)" || return 1
+  merv_l2_guard_verify_exact
+}
+
 merv_manager_corrective_pass() {
   if [ "$DRY_RUN" = "yes" ]; then
     info -c cli,vlan "watchdog: dry-run mode; skipping verification"
     return 0
   fi
-  case "$WATCH_IFACES" in
-    "" )
-      info -c cli,vlan "watchdog: no interfaces queued; skipping"
-      return 0
-      ;;
-  esac
-
   merv_dhcp_hold_enforce || {
     error -c cli,vlan "watchdog: DHCP hold enforcement failed"
     return 1
   }
-  ebt_quarantine_ensure_expected_rules
+  ebt_quarantine_ensure_expected_rules || {
+    error -c cli,vlan "watchdog: exact L2 guard re-arm failed"
+    return 1
+  }
 
-  info -c cli,vlan "watchdog: starting verification for: $WATCH_IFACES"
+  info -c cli,vlan "watchdog: starting verification for: ${WATCH_IFACES:-canonical expected state}"
   for pair in $WATCH_IFACES; do
     iface="${pair%,*}"
     vid="${pair#*,}"
@@ -2095,7 +2088,7 @@ merv_manager_corrective_pass() {
       info -c cli,vlan "watchdog: ${iface} no longer exists, skipping"
       continue
     fi
-    if member_of_bridge "br${vid}" "$iface"; then
+    if verify_interface_binding "$iface" "$vid"; then
       info -c cli,vlan "watchdog: ${iface} already on br${vid}, no action"
     elif member_of_bridge "br0" "$iface"; then
       info -c cli,vlan "watchdog: ${iface} on br0, hard-gating and moving to br${vid}"
@@ -2123,6 +2116,27 @@ merv_manager_corrective_pass() {
       info -c cli,vlan "watchdog: ${iface} not found on br0 or br${vid}"
     fi
   done
+
+  eth_pairs=$(merv_managed_eth_iface_vid_list "$SETTINGS_FILE" "$NODE_ID" 2>/dev/null) || {
+    error -c cli,vlan "watchdog: expected managed Ethernet state is unknown"
+    return 1
+  }
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+    if verify_interface_binding "$iface" "$vid"; then
+      info -c cli,vlan "watchdog: canonical Ethernet ${iface} already exactly on br${vid}"
+      continue
+    fi
+    if ! iface_exists "$iface"; then
+      error -c cli,vlan "watchdog: canonical Ethernet ${iface} is absent"
+      continue
+    fi
+    warn -c cli,vlan "watchdog: correcting canonical Ethernet ${iface} -> br${vid}"
+    attach_to_bridge "$iface" "$vid" "Ethernet ${iface} watchdog" ||
+      warn -c cli,vlan "watchdog: unable to correct canonical Ethernet ${iface}"
+  done <<_ETH_PAIRS_
+$eth_pairs
+_ETH_PAIRS_
 
   if merv_manager_final_security_check; then
     info -c cli,vlan "watchdog: placement verification passed; manager lease remains active"
@@ -2287,6 +2301,10 @@ main() {
   # wl*.*_ifname NVRAM mappings, and disabled before the final security check
   # and snapshot so they always see fresh state.
   type merv_iface_vid_cache_enable >/dev/null 2>&1 && merv_iface_vid_cache_enable
+  if [ "$DRY_RUN" != "yes" ] && ! merv_manager_arm_l2_before_mutation; then
+    error -c cli,vlan "Cannot prove exact L2 protection; aborting before mutation"
+    return 1
+  fi
   if [ "$DRY_RUN" != "yes" ]; then
     if ! merv_dhcp_hold_mark_mutating "$MANAGER_DHCP_TOKEN" bridge-cleanup; then
       error -c cli,vlan "Cannot publish manager mutation phase; aborting before bridge cleanup"
@@ -2388,7 +2406,10 @@ main() {
     # moment the manager confirms rc is done with restart_wireless.
     if type ebtables >/dev/null 2>&1; then
       info -c cli,vlan "Re-arming L2 shields post-restart_wireless..."
-      ebt_quarantine_ensure_expected_rules
+      ebt_quarantine_ensure_expected_rules || {
+        error -c cli,vlan "MERV_QT: post-restart exact re-arm failed"
+        return 1
+      }
       _post_qt_count=0
       if type merv_iface_vid_list >/dev/null 2>&1; then
         _post_qt_ifaces=$(merv_iface_vid_list | awk '{print $1}')

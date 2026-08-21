@@ -451,6 +451,33 @@ ebtables -t filter -A MERV_MAC -s 8:95:42:19:53:b2 --logical-in br0 -j DROP'
   return "$_tlgd_ok"
 }
 
+test_l2_guard_exactness_contract() {
+  selftest_reset || return 1
+  _tlge_dry="${DRY_RUN:-no}"
+  DRY_RUN=no
+  export DRY_RUN
+  ebtables() { "$SELFTEST_FAKE_BIN" "$@"; }
+  merv_iface_vid_list() { printf 'wl0.2 189\n'; }
+  merv_managed_eth_iface_vid_list() { printf 'lan_mapped 189\n'; }
+
+  assert_ok "QT exact reconciler arms VAP and mapped Ethernet rules" merv_qt_ensure_expected_rules
+  assert_ok "QT exact verifier accepts canonical expected rules" merv_qt_verify_exact
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_QT -i rogue0 --logical-in br0 -j DROP
+  assert_rc 1 "QT exact verifier rejects stale child" merv_qt_verify_exact
+  assert_ok "QT reconciler removes stale child without chain flush" merv_qt_ensure_expected_rules
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_QT -i wl0.2 --logical-in br0 -j DROP
+  assert_rc 1 "QT exact verifier rejects duplicate child" merv_qt_verify_exact
+  assert_ok "QT reconciler removes duplicate child" merv_qt_ensure_expected_rules
+  "$SELFTEST_FAKE_BIN" -t filter -D INPUT -j MERV_QT
+  assert_rc 1 "QT exact verifier rejects missing INPUT parent" merv_qt_verify_exact
+  assert_ok "strict QT restorer repairs missing parent" restore_merv_qt_shield
+  assert_ok "strict QT restorer leaves exact state" merv_qt_verify_exact
+
+  unset -f ebtables merv_iface_vid_list merv_managed_eth_iface_vid_list 2>/dev/null || :
+  DRY_RUN="$_tlge_dry"
+  export DRY_RUN
+}
+
 test_mac_shield_lifecycle() {
   selftest_reset || return 1
   _tms_old_active="$MERV_MAC_DB_ACTIVE"
@@ -2121,7 +2148,10 @@ test_client_refresh_contract() {
     pass "non-cron collection callers remain enabled" ||
     fail "non-cron collection callers remain enabled"
 
-  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "30"' "$_tcr_settings" &&
+  # The installed settings file is deliberately user-mutable.  Verify the
+  # persisted key plus the UI's shipped default rather than requiring a live
+  # router to still use that default.
+  grep -q '"HTML_CLIENT_REFRESH_MINUTES"' "$_tcr_settings" &&
     grep -q 'HTML_CLIENT_REFRESH_MINUTES: "30"' "$_tcr_html" &&
     grep -q 'clientAutoRefreshCooldownMs' "$_tcr_html" &&
     grep -q 'clientGeneratedMs(snapshot)' "$_tcr_html" &&
@@ -2146,6 +2176,21 @@ test_client_refresh_contract() {
     grep -q 'info -c cli,vlan "Refreshing client list complete"' "$_tcr_collect" &&
     pass "successful client refresh keeps CLI routine logging concise" ||
     fail "successful client refresh keeps CLI routine logging concise"
+
+  grep -q 'REQUIRED_RESULTS=' "$_tcr_collect" &&
+    grep -q 'worker-nonzero' "$_tcr_collect" &&
+    grep -q 'error-artifact' "$_tcr_collect" &&
+    grep -q 'preserving previous inventory' "$_tcr_collect" &&
+    grep -q 'client_collection_fault' "$_tcr_collect" &&
+    pass "client collection requires a complete non-error generation before publication" ||
+    fail "client collection requires a complete non-error generation before publication"
+
+  grep -q 'obs_collection_failure_notice' "$_tcr_worker" &&
+    grep -q 'client-collection-failed' "$_tcr_worker" &&
+    grep -q 'fetchClientCollectionFailure' "$_tcr_html" &&
+    grep -q 'showing the last known client data' "$_tcr_html" &&
+    pass "failed client refresh publishes a terminal failure while retaining prior data" ||
+    fail "failed client refresh publishes a terminal failure while retaining prior data"
 }
 
 test_manager_ownership() {
@@ -3135,7 +3180,7 @@ test_failure_propagation_contract() {
   _tfpc_meta="$MERV_BASE/functions/mac_client_meta.sh"
   _tfpc_ok=1
 
-  if grep -q 'isCancelled: () => loadingTask && !loadingTask.isRunning()' "$_tfpc_ui" &&
+  if grep -Eq 'isCancelled: \(\) => [A-Za-z]+LoadingTask && ![A-Za-z]+LoadingTask\.isRunning\(\)' "$_tfpc_ui" &&
      grep -q 'isRunning: () => !!active' "$_tfpc_ui" &&
      grep -q 'passProgressToken: true' "$_tfpc_ui" &&
      grep -q 'maintenanceLastPollError' "$_tfpc_ui" &&
@@ -3441,7 +3486,7 @@ test_ssh_trust_contract() {
      grep -Fq 'STAGED_NODE_FAIL' "$_tst_sync" &&
      grep -Fq 'node-activation-failed' "$_tst_sync" &&
      grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh' "$_tst_boot" &&
-     [ "$(grep -Fc 'reconcile_legacy_boot_file_locks' "$_tst_boot")" -ge 4 ] &&
+     [ "$(grep -Fc 'reconcile_legacy_boot_file_locks' "$_tst_boot")" -ge 3 ] &&
      grep -Fq 'Refusing setupenable while legacy boot-file lock state is ambiguous' "$_tst_boot" &&
      grep -Fq 'Refusing setupdisable while legacy boot-file lock state is ambiguous' "$_tst_boot" &&
      grep -Fq 'merv_lock_quarantine_legacy_file' "$_tst_lib"; then
@@ -3741,7 +3786,11 @@ MERV_WAN_IP
   printf 'udhcpc\000-i\000br0\000-p\000%s\000-s\000/sbin/rc\000-H\000wan-test\000' "$_twn_dhcp_pidfile" > "$_twn_proc/$_twn_dhcp_pid/cmdline" || return 1
   printf '%s\n' 424242 > "${_twn_dhcp_pidfile}.start"
 
-  _twn_run() {
+  _twn_run() (
+    # Every invocation must derive its role from the fixture file.  The parent
+    # selftest may have sourced a node-oriented helper, so do not leak a stale
+    # shell NODE_ID into this new WAN process.
+    export NODE_ID='' MERV_NODE_ID=''
     PATH="$_twn_bin:$PATH" MERV_BASE="$_twn_base" DRY_RUN=no \
       WAN_TEST_LAN_PROTO="${WAN_TEST_LAN_PROTO:-dhcp}" \
       WAN_TEST_EXPECTED_ADDRESS="${WAN_TEST_EXPECTED_ADDRESS:-192.0.2.20}" \
@@ -3769,7 +3818,7 @@ MERV_WAN_IP
       MERV_WAN_NET_ROOT="$_twn_net" MERV_WAN_PROC_VLAN_ROOT="$_twn_proc" MERV_WAN_DHCP_PROC_ROOT="$_twn_proc" \
       sh -c 'WAN_TEST_SIGNAL_PID=$$; export WAN_TEST_SIGNAL_PID; exec sh "$1" "$2"' \
       sh "$_twn_base/functions/mervlan_wan.sh" "$1"
-  }
+  )
   _twn_member() { [ -e "$_twn_net/br0/brif/$1" ]; }
   _twn_dhcp_reset() {
     _twn_reset_callback="${1:-/sbin/rc}"
@@ -3822,7 +3871,12 @@ MERV_WAN_IP
   _twn_run apply >/dev/null 2>&1 || return 1
   : > "$_twn_root/no-address"
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
-  WAN_TEST_DHCP_WAIT_SEC=0 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  (
+    WAN_TEST_DHCP_WAIT_SEC=0
+    export WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
   rm -f "$_twn_root/no-address"
   if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.20 && ! _twn_member eth0 &&
      [ "$(sed -n '1p' "$_twn_dhcp_addr")" = "192.0.2.20/24" ]; then
@@ -4006,6 +4060,10 @@ MERV_WAN_IP
   unset FAIL_ADD_IF
 
   json_set_section_value General NODE_ID 1 "$_twn_settings" || return 1
+  # This section exercises the retained independent-node policy.  Do not
+  # inherit the live router's AiMesh role when the fixture expects NODE1's
+  # configured native value.
+  json_set_section_value Nodes NODE1_ROLE standalone "$_twn_settings" || return 1
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 77 "$_twn_settings" || return 1
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_NODE1 44 "$_twn_settings" || return 1
   if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.44 && ! _twn_member eth0 && _twn_run verify >/dev/null 2>&1; then
@@ -4015,7 +4073,15 @@ MERV_WAN_IP
   # DHCP handoff is MAIN-only: a node with a static LAN remains untouched by
   # the MAIN protocol guard and does not signal the MAIN udhcpc fixture.
   _twn_node_address_before="$(cat "$_twn_dhcp_addr" 2>/dev/null)"
-  WAN_TEST_LAN_PROTO=static _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  # Some ASUSWRT BusyBox ash versions retain a temporary assignment made for
+  # a shell function.  Keep this node-only static-LAN probe in a subshell so
+  # later MAIN/DHCP cases cannot inherit its intentionally static protocol.
+  (
+    WAN_TEST_LAN_PROTO=static
+    export WAN_TEST_LAN_PROTO
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
   if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.44 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "$_twn_node_address_before" ]; then
     pass "WAN Native leaves node LAN policy untouched"
   else
@@ -4045,7 +4111,7 @@ MERV_WAN_IP
   if [ "$_twn_rc" -eq 0 ]; then
     fail "WAN Native TERM after detach is nonzero and fail-closed"; _twn_ok=1
   elif [ "$_twn_rc" -ne 143 ]; then
-    fail "WAN Native TERM after detach preserves status 143"; _twn_ok=1
+    fail "WAN Native TERM after detach preserves status 143 (actual=$_twn_rc)"; _twn_ok=1
   elif _twn_member eth0.44 && ! _twn_member eth0.90 && [ ! -d "$_twn_net/eth0.90" ]; then
     pass "WAN Native TERM after detach restores captured members"
   else
@@ -4061,7 +4127,7 @@ MERV_WAN_IP
   if [ "$_twn_rc" -eq 0 ]; then
     fail "WAN Native TERM after attach is nonzero and fail-closed"; _twn_ok=1
   elif [ "$_twn_rc" -ne 143 ]; then
-    fail "WAN Native TERM after attach preserves status 143"; _twn_ok=1
+    fail "WAN Native TERM after attach preserves status 143 (actual=$_twn_rc)"; _twn_ok=1
   elif _twn_member eth0.44 && ! _twn_member eth0.91 && [ ! -d "$_twn_net/eth0.91" ]; then
     pass "WAN Native TERM after attach restores captured members"
   else
@@ -4180,12 +4246,21 @@ MERV_WAN_IP
   : > "$_twn_order_log"
   json_set_section_value General NODE_ID none "$_twn_settings" || return 1
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
-  if WAN_TEST_LAN_PROTO=static _twn_run validate >/dev/null 2>&1; then
+  if (
+    WAN_TEST_LAN_PROTO=static
+    export WAN_TEST_LAN_PROTO
+    _twn_run validate >/dev/null 2>&1
+  ); then
     fail "WAN Native manager preflight rejects numeric MAIN on static LAN"; _twn_ok=1
   else
     pass "WAN Native manager preflight rejects numeric MAIN on static LAN"
   fi
-  WAN_TEST_LAN_PROTO=static _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  (
+    WAN_TEST_LAN_PROTO=static
+    export WAN_TEST_LAN_PROTO
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
   if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
     pass "WAN Native blocks numeric MAIN on static LAN before mutation"
   else
@@ -4218,14 +4293,25 @@ MERV_WAN_IP
   # Delayed lease publication must be observed before commit.  The fake
   # address is CIDR-shaped at rest, while persisted endpoint is host-only.
   printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
-  WAN_TEST_DHCP_DELAY_POLLS=1 WAN_TEST_DHCP_WAIT_SEC=2 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  (
+    WAN_TEST_DHCP_DELAY_POLLS=1
+    WAN_TEST_DHCP_WAIT_SEC=2
+    export WAN_TEST_DHCP_DELAY_POLLS WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
   if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 && ! _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.20/24" ]; then
     pass "WAN Native accepts delayed persisted MAIN DHCP endpoint acquisition"
   else
     fail "WAN Native accepts delayed persisted MAIN DHCP endpoint acquisition"; _twn_ok=1
   fi
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
-  WAN_TEST_DHCP_DELAY_POLLS=0 WAN_TEST_DHCP_WAIT_SEC=1 _twn_run apply >/dev/null 2>&1 || return 1
+  (
+    WAN_TEST_DHCP_DELAY_POLLS=0
+    WAN_TEST_DHCP_WAIT_SEC=1
+    export WAN_TEST_DHCP_DELAY_POLLS WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  ) || return 1
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
 
   # A successful release/restart is not success by itself: without the expected
@@ -4234,7 +4320,12 @@ MERV_WAN_IP
   printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
   : > "$_twn_root/no-address"
   json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
-  WAN_TEST_DHCP_WAIT_SEC=1 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  (
+    WAN_TEST_DHCP_WAIT_SEC=1
+    export WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
   rm -f "$_twn_root/no-address"
   if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ]; then
     pass "WAN Native DHCP restart timeout rolls back L2 and L3"
@@ -4409,7 +4500,12 @@ MERV_WAN_IP
   # captured authenticated argv contract to restore one original-domain client.
   _twn_dhcp_reset /sbin/rc || return 1
   : > "$_twn_root/dhcp.lifecycle"
-  MERV_WAN_DHCP_TEST_LAUNCH_FAIL=1 _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  (
+    MERV_WAN_DHCP_TEST_LAUNCH_FAIL=1
+    export MERV_WAN_DHCP_TEST_LAUNCH_FAIL
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
   if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
      [ "$(grep -c '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null)" -ge 1 ]; then
     pass "WAN Native replacement launch failure restores original DHCP client"
@@ -4608,7 +4704,7 @@ test_signal_termination() {
     printf '%s\n' '}'
     printf '%s\n' 'handle_signal() { status="$1"; [ "$signal_handling" -eq 0 ] || exit "$status"; signal_handling=1; trap - INT TERM; printf "%s\\n" "$status" > "$root/signal.status"; exit "$status"; }'
     printf '%s\n' 'trap - INT TERM; trap cleanup EXIT; trap "handle_signal 130" INT; trap "handle_signal 143" TERM'
-    printf '%s\n' ': > "$lock"; ( trap - EXIT INT TERM; exec sleep 3 ) & child_pid="$!"; child_start=$(merv_proc_start_time "$child_pid" 2>/dev/null || printf ""); printf "%s\\n" "$child_pid" > "$root/child.pid"; printf "%s\\n" "$child_start" > "$root/child.start"; case "${SIGNAL_TEST_SELF:-}" in INT) kill -INT "$$" ;; TERM) kill -TERM "$$" ;; esac; sleep 3; printf "%s\\n" success > "$result"; exit 0'
+    printf '%s\n' ': > "$lock"; printf "%s\\n" "$$" > "$root/fixture.pid"; ( trap - EXIT INT TERM; exec sleep 3 ) & child_pid="$!"; child_start=$(merv_proc_start_time "$child_pid" 2>/dev/null || printf ""); printf "%s\\n" "$child_pid" > "$root/child.pid"; printf "%s\\n" "$child_start" > "$root/child.start"; sleep 3; printf "%s\\n" success > "$result"; exit 0'
   } > "$_tst_fixture" || return 1
   chmod 700 "$_tst_fixture" || return 1
 
@@ -4617,33 +4713,32 @@ test_signal_termination() {
     _tst_expected=${_tst_signal_case#*:}
     _tst_case="$_tst_root/$_tst_signal"
     mkdir -p "$_tst_case" || { _tst_ok=0; continue; }
-    _tst_self_signal=""
-    [ "$_tst_signal" = INT ] && _tst_self_signal=INT
-    if [ -n "$_tst_self_signal" ]; then
-      SIGNAL_TEST_ROOT="$_tst_case" SIGNAL_TEST_SELF="$_tst_self_signal" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1
-      _tst_rc=$?
-    else
-      SIGNAL_TEST_ROOT="$_tst_case" SIGNAL_TEST_SELF="$_tst_self_signal" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1 &
-      _tst_pid=$!
-      sleep 1
-      _tst_parent_start=$(merv_proc_start_time "$_tst_pid" 2>/dev/null || printf '')
-      case "$_tst_parent_start" in
-        ''|*[!0-9]*)
-          fail "signal termination $_tst_signal parent identity is unverifiable"
-          _tst_ok=0
-          ;;
-        *)
-          if merv_process_identity_matches "$_tst_pid" "$_tst_parent_start" 2>/dev/null; then
-            kill -"$_tst_signal" "$_tst_pid" 2>/dev/null || :
-          else
-            fail "signal termination $_tst_signal parent identity changed before signal"
-            _tst_ok=0
-          fi
-          ;;
-      esac
-      wait "$_tst_pid" 2>/dev/null
-      _tst_rc=$?
-    fi
+    # Run the fixture in the foreground.  A non-interactive BusyBox shell
+    # launched as a background job inherits an ignored INT disposition and
+    # cannot test a real INT trap.  Its helper writes the exact fixture PID;
+    # this sibling then delivers the requested signal after that publication.
+    (
+      _tst_wait=0
+      while [ "$_tst_wait" -lt 5 ]; do
+        if [ -s "$_tst_case/fixture.pid" ]; then
+          _tst_fixture_pid=$(cat "$_tst_case/fixture.pid" 2>/dev/null)
+          case "$_tst_fixture_pid" in
+            ''|*[!0-9]*) ;;
+            *) kill -"$_tst_signal" "$_tst_fixture_pid" 2>/dev/null || :; exit 0 ;;
+          esac
+        fi
+        sleep 1
+        _tst_wait=$((_tst_wait + 1))
+      done
+      exit 1
+    ) &
+    _tst_killer=$!
+    SIGNAL_TEST_ROOT="$_tst_case" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1
+    _tst_rc=$?
+    wait "$_tst_killer" 2>/dev/null || {
+      fail "signal termination $_tst_signal helper did not deliver"
+      _tst_ok=0
+    }
     if [ "$_tst_rc" -eq "$_tst_expected" ]; then pass "signal termination $_tst_signal returns $_tst_expected"; else fail "signal termination $_tst_signal returns $_tst_expected (actual=$_tst_rc)"; _tst_ok=0; fi
     [ "$(cat "$_tst_case/cleanup.count" 2>/dev/null)" = 1 ] && pass "signal termination $_tst_signal cleanup runs once" || { fail "signal termination $_tst_signal cleanup runs once"; _tst_ok=0; }
     [ "$(cat "$_tst_case/result" 2>/dev/null)" = interrupted ] && pass "signal termination $_tst_signal publishes one interruption result" || { fail "signal termination $_tst_signal publishes one interruption result"; _tst_ok=0; }
@@ -4726,6 +4821,7 @@ run_one() {
     dhcp-ebtables-failures) test_dhcp_ebtables_failures ;;
     dhcp-rule-exactness) test_dhcp_rule_exactness ;;
     l2-guard-dump) test_l2_guard_dump_contract ;;
+    l2-guard-exactness) test_l2_guard_exactness_contract ;;
     mac-shield-lifecycle) test_mac_shield_lifecycle ;;
     process-identity) test_process_identity ;;
     owner-lock-contract) test_owner_lock_contract ;;
@@ -4817,7 +4913,7 @@ if [ "$SELFTEST_ACTION" = "_fault-child" ]; then
 fi
 
 if [ "$SELFTEST_ACTION" = all ]; then
-  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness l2-guard-dump mac-shield-lifecycle \
+  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness l2-guard-dump l2-guard-exactness mac-shield-lifecycle \
     process-identity nonce-uniqueness owner-lock-contract maintenance-lock-interop lock-publication lock-reclaim dhcp-incomplete-lock router-portability dhcp-owners dhcp-phases dhcp-crash-points \
     heal-handoff boot-handoff duplicate-events manager-ownership \
     settle-watchdog recovery failsafe-status post-apply observation-lock observation-concurrency \

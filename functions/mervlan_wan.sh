@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mervlan_wan.sh || version="0.9"                       #
+#               - File: mervlan_wan.sh || version="0.10"                      #
 # ============================================================================ #
 # - Purpose:    Own the optional native VLAN transport on the WAN/uplink.      #
 #               ASUS/native traffic remains on br0; this script changes only   #
@@ -109,11 +109,13 @@ else
   WAN_NATIVE_TARGET="NODE${NODE_ID}"
 fi
 
-WAN_NATIVE="$(json_get_section2_value "VLAN" "WAN_Native" "$WAN_NATIVE_KEY" "$SETTINGS_FILE" 2>/dev/null)"
-[ -n "$WAN_NATIVE" ] || WAN_NATIVE="$(json_get_flag "$WAN_NATIVE_KEY" "none" "$SETTINGS_FILE" 2>/dev/null)"
-case "$WAN_NATIVE" in
-  ''|none|NONE|asus|ASUS) WAN_NATIVE="none" ;;
-esac
+# Node WAN Native policy is role-aware.  AiMesh derives MAIN's mode/VID at
+# execution time; Standalone retains the node's own configured value.  A bad
+# role or mode is a pre-mutation validation failure, never a silent fallback.
+if ! WAN_NATIVE="$(merv_effective_wan_native_value "$NODE_ID" "$SETTINGS_FILE" 2>/dev/null)"; then
+  error -c cli,vlan "WAN Native: invalid effective policy for $WAN_NATIVE_TARGET"
+  exit 2
+fi
 WAN_DHCP_WAN_NATIVE_IP_CONFIG="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_WAN_NATIVE_IP" "$SETTINGS_FILE" 2>/dev/null)"
 WAN_DHCP_ASUS_IP_CONFIG="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_ASUS_IP" "$SETTINGS_FILE" 2>/dev/null)"
 # Pre-structured settings saved these endpoint keys at document root. Preserve
@@ -226,12 +228,10 @@ wan_setting_conflict() {
 
   _wsc_i=1
   while [ "$_wsc_i" -le 8 ]; do
-    if [ "$NODE_ID" = "none" ]; then
-      _wsc_key="ETH${_wsc_i}_VLAN"
-    else
-      _wsc_key="NODE${NODE_ID}_ETH${_wsc_i}_VLAN"
-    fi
-    _wsc_vlan="$(json_get_scalar "$_wsc_key" "$SETTINGS_FILE" 2>/dev/null)"
+    _wsc_vlan="$(merv_effective_eth_vlan "$_wsc_i" "$SETTINGS_FILE" "$NODE_ID" 2>/dev/null)" || {
+      error -c cli,vlan "WAN Native: Ethernet policy is unknown for LAN port $_wsc_i on $WAN_NATIVE_TARGET"
+      return 0
+    }
     if [ "$_wsc_vlan" = "$_wsc_vid" ]; then
       error -c cli,vlan "WAN Native: VLAN $_wsc_vid conflicts with LAN port $_wsc_i on $WAN_NATIVE_TARGET"
       return 0
@@ -490,8 +490,10 @@ wan_txn_on_signal() {
   _wts_status="$1"
   # Stop a second signal from interrupting restoration and making the outcome
   # ambiguous.  The original signal's conventional nonzero status is kept
-  # unless restoration itself fails (which is still nonzero).
-  trap - INT TERM
+  # unless restoration itself fails (which is still nonzero).  EXIT must be
+  # disarmed here too: the signal handler already owns rollback, and a second
+  # EXIT-trap pass can override the conventional 130/143 result on BusyBox.
+  trap - INT TERM EXIT
   wan_txn_restore || _wts_status=1
   exit "$_wts_status"
 }

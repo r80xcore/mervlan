@@ -47,6 +47,68 @@ _merv_guard_log() {
   fi
 }
 
+# Return the configured physical Ethernet mapping as "iface vid" pairs for
+# numeric managed access ports. ETH_PORTS is runtime hardware truth; never
+# infer Linux interface names from a logical port number.
+merv_managed_eth_iface_vid_list() {
+  _mep_file="${1:-${SETTINGS_FILE:-}}"
+  _mep_node="${2:-${NODE_ID:-none}}"
+  _mep_ports="${ETH_PORTS:-}"
+  _mep_hw="${HW_SETTINGS_FILE:-$_mep_file}"
+  _mep_index=1
+
+  if [ -z "$_mep_ports" ] && type json_get_section_array >/dev/null 2>&1; then
+    _mep_ports="$(json_get_section_array "Hardware" "ETH_PORTS" "$_mep_hw" 2>/dev/null)"
+    [ -n "$_mep_ports" ] || _mep_ports="$(json_get_array "ETH_PORTS" "$_mep_hw" 2>/dev/null)"
+  fi
+  [ -n "$_mep_ports" ] || return 1
+  type merv_effective_eth_vlan >/dev/null 2>&1 || return 1
+
+  for _mep_iface in $_mep_ports; do
+    _mep_vid="$(merv_effective_eth_vlan "$_mep_index" "$_mep_file" "$_mep_node")" || return 1
+    case "$_mep_vid" in
+      none|trunk) ;;
+      *) printf '%s %s\n' "$_mep_iface" "$_mep_vid" ;;
+    esac
+    _mep_index=$((_mep_index + 1))
+  done
+}
+
+# Exact bridge proof for a managed access interface. Sysfs is authoritative
+# when present; the brctl parser is a portable fallback for older firmware.
+merv_exact_bridge_membership() {
+  _mebm_iface="$1"
+  _mebm_vid="$2"
+  _mebm_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}"
+  _mebm_expected="br${_mebm_vid}"
+  _mebm_count=0
+  _mebm_seen=""
+
+  [ -n "$_mebm_iface" ] || return 1
+  case "$_mebm_vid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$_mebm_root/$_mebm_iface" ] || return 1
+
+  for _mebm_path in "$_mebm_root"/br*/brif; do
+    [ -d "$_mebm_path" ] || continue
+    [ -e "$_mebm_path/$_mebm_iface" ] || continue
+    _mebm_bridge="${_mebm_path%/brif}"
+    _mebm_bridge="${_mebm_bridge##*/}"
+    _mebm_count=$((_mebm_count + 1))
+    _mebm_seen="$_mebm_bridge"
+  done
+  if [ "$_mebm_count" -gt 0 ]; then
+    [ "$_mebm_count" -eq 1 ] && [ "$_mebm_seen" = "$_mebm_expected" ]
+    return $?
+  fi
+
+  type brctl >/dev/null 2>&1 || return 1
+  _mebm_seen="$(brctl show 2>/dev/null | awk -v IF="$_mebm_iface" '
+    NR == 1 { next }
+    { if ($1 != "") bridge=$1; for (i = 1; i <= NF; i++) if ($i == IF) print bridge }
+  ' | sort -u)"
+  [ "$(printf '%s\n' "$_mebm_seen" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] && [ "$_mebm_seen" = "$_mebm_expected" ]
+}
+
 # ---------------------------------------------------------------------------- #
 # merv_managed_wl_ifaces — list MerVLAN-managed wireless VAP interfaces        #
 # Outputs one interface name per line.                                          #
@@ -55,9 +117,10 @@ _merv_guard_log() {
 # ---------------------------------------------------------------------------- #
 merv_managed_wl_ifaces() {
   if type merv_iface_vid_list >/dev/null 2>&1; then
-    merv_iface_vid_list \
-      | awk '{print $1}' \
-      | grep -E '^(wl|ra|ath)[0-9].*\.[0-9]+$'
+    _mgw_pairs="$(merv_iface_vid_list)" || return 1
+    [ -n "$_mgw_pairs" ] || return 0
+    printf '%s\n' "$_mgw_pairs" | awk '{print $1}' | grep -E '^(wl|ra|ath)[0-9].*\.[0-9]+$' || return 1
+    return 0
   elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
     merv_mac_build_expected_iface_vid 2>/dev/null \
       | awk '{print $1}' \
@@ -86,7 +149,7 @@ merv_soft_evict_wl_from_br0() {
   _sg_tag="${1:-guard}"
   _sg_evicted=0
 
-  _sg_managed="$(merv_managed_wl_ifaces | tr '\n' ' ')"
+  _sg_managed="$(merv_managed_wl_ifaces | tr '\n' ' ')" || return 1
   [ -n "$_sg_managed" ] || return 0
   _sg_managed_set=" $_sg_managed "
 
@@ -130,7 +193,7 @@ merv_hard_evict_wl_from_br0() {
   _hg_tag="${1:-heal}"
   _hg_evicted=0
 
-  _hg_managed="$(merv_managed_wl_ifaces | tr '\n' ' ')"
+  _hg_managed="$(merv_managed_wl_ifaces | tr '\n' ' ')" || return 1
   [ -n "$_hg_managed" ] || return 0
   _hg_managed_set=" $_hg_managed "
 
@@ -201,7 +264,7 @@ merv_scrub_br0_nvram_ifnames() {
 
   type nvram >/dev/null 2>&1 || return 0
 
-  _ns_managed="$(merv_managed_wl_ifaces | tr '\n' ' ')"
+  _ns_managed="$(merv_managed_wl_ifaces | tr '\n' ' ')" || return 1
   [ -n "$_ns_managed" ] || return 0
 
   # Default to the narrower key only; lan_ifnames scrub is opt-in.

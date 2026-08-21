@@ -841,6 +841,17 @@ merv_ssh_require_verified_node() {
 
 merv_ssh_preflight_node_set() {
   _msp_file="$1"; _msp_settings="${2:-${SETTINGS_FILE:-}}"; [ -f "$_msp_file" ] || return 2
+  _msp_endpoint_map="${MERV_SSH_PREFLIGHT_ENDPOINT_MAP:-}"
+  if [ -n "$_msp_endpoint_map" ]; then
+    case "$_msp_endpoint_map" in
+      /*) ;;
+      *) return 2 ;;
+    esac
+    case "$_msp_endpoint_map" in
+      *..*|*[!A-Za-z0-9_./-]*) return 2 ;;
+    esac
+    ( umask 077; : > "$_msp_endpoint_map" ) 2>/dev/null || return 2
+  fi
   _msp_nodes=' '; _msp_eps=' '; _msp_lines=''
   while IFS=' ' read -r _msp_slot _msp_host _msp_mac _msp_extra || [ -n "$_msp_slot" ]; do
     [ -z "$_msp_extra" ] || return 2
@@ -886,6 +897,16 @@ merv_ssh_preflight_node_set() {
       case "${MERV_SSH_TRUST_LAST_REASON:-}" in
         unreachable|timeout|refused|no-route|connect-timeout) continue ;;
       esac
+      # Some Dropbear builds close before emitting a transport diagnostic and
+      # therefore surface the generic rc=7/probe-failed result.  Permit the
+      # recovery candidate only when the same bounded ICMP check proves the
+      # attempted endpoint absent; a reachable endpoint remains terminal.
+      if [ "$_msp_probe_rc" -eq 7 ] && \
+         [ "${MERV_SSH_TRUST_LAST_REASON:-}" = probe-failed ] && \
+         type _merv_ping_ok >/dev/null 2>&1 && \
+         ! _merv_ping_ok "$_msp_endpoint"; then
+        continue
+      fi
       MERV_SSH_LAST_REASON="${MERV_SSH_TRUST_LAST_REASON:-probe-failed}"
       MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} host-key preflight failed"
       return "$_msp_probe_rc"
@@ -896,6 +917,14 @@ EOF
       MERV_SSH_LAST_REASON=unreachable
       MERV_SSH_LAST_DETAIL="NODE${_msp_slot:-?} no configured management endpoint reached the verified host-key probe"
       return 4
+    fi
+    if [ -n "$_msp_endpoint_map" ]; then
+      _msp_map_canonical="$_msp_canonical"
+      if type merv_node_asus_endpoint >/dev/null 2>&1; then
+        _msp_map_canonical=$(merv_node_asus_endpoint "$_msp_slot" "$_msp_settings" 2>/dev/null) || return 2
+      fi
+      [ "$_msp_map_canonical" = "$_msp_canonical" ] || return 2
+      printf '%s %s %s\n' "$_msp_slot" "$_msp_map_canonical" "$_msp_endpoint" >> "$_msp_endpoint_map" 2>/dev/null || return 1
     fi
   done < "$_msp_file"
 }

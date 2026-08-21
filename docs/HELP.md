@@ -434,6 +434,19 @@ Live qualification shows that mixing ASUS/default and WAN Native management doma
 
 **Requirement:** AiMesh MAIN and nodes must remain in the same native/L2 management domain.
 
+Choose a node role in the WAN Native dialog before changing management VLANs:
+
+- **AiMesh:** the node inherits MAIN's effective WAN Native value. When MAIN is
+  numeric, the node still needs its own reservation for that tagged management
+  network; when MAIN is ASUS/default, the node returns to ASUS/default too.
+- **Standalone:** the node keeps and uses its own WAN Native value. Use this
+  only for an independently managed AP with prepared upstream addressing.
+
+Existing nodes without an explicit role keep the conservative **Standalone**
+behavior until you choose AiMesh. A live test with different MAIN and
+Standalone-node native VLANs requires separate standalone hardware and remains
+an advanced hardware-qualification scenario, not a general AiMesh recipe.
+
 ---
 
 ### VLAN Requirements
@@ -630,6 +643,11 @@ When Apply on Boot is enabled, MerVLAN checks VLAN health every five minutes and
 
 The panel below the command output groups detected VLAN clients by device and VLAN. Use its refresh button to update the visible list. You can also edit friendly names, show inactive or relayed observations, and rebuild MAC Shield after moving a device back to `br0`.
 
+Refresh publishes a new list only after MAIN and every required node collector
+finish successfully. If a collector fails or times out, MerVLAN reports that
+failure and preserves the last confirmed client list instead of replacing it
+with a partial result.
+
 ### Quick Troubleshooting
 
 | Symptom | What to check |
@@ -764,8 +782,17 @@ after verification succeeds. See the development branch's
 | `sh functions/update_mervlan.sh dev` | Install the current `dev` branch version. |
 | `sh functions/update_mervlan.sh update dev --logs=keep` | Update from `dev` and retain existing logs. This is the default log policy. |
 | `sh functions/update_mervlan.sh update dev --logs=clear` | Update from `dev` and clear older logs after the update lock is acquired. The new update is still logged. |
+| `sh functions/update_mervlan.sh local /absolute/path/archive.tar.gz --logs=keep` | Install a local recovery/test archive through the normal Update transaction without downloading from GitHub. |
 | `sh functions/update_mervlan.sh refs/heads/BRANCH` | Install a named custom branch. Replace `BRANCH` with the required branch name. |
 | `sh functions/update_mervlan.sh refs/tags/v0.53.15` | Install a tagged release. Replace the example with the required tag. |
+
+Local archives are an advanced recovery path. The path must be absolute, a
+nonempty regular file, and not a symlink. MerVLAN copies it into an
+updater-owned temporary archive, then rejects corrupt archives, absolute or
+traversal members, multiple roots, and every symlink/hardlink before
+extraction. The original archive is never modified. A safe archive still has
+to contain a complete MerVLAN package; it follows the same backup, activation,
+rollback, node, and log-policy lifecycle as a remote update.
 
 #### Emergency Update Repair
 

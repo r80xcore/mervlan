@@ -542,12 +542,10 @@ merv_node_asus_endpoint() {
 
 merv_node_wan_native_value() {
   _mnwn_slot="$1"; _mnwn_file="${2:-${SETTINGS_FILE:-}}"
-  _mnwn_value=$(json_get_section2_value "VLAN" "WAN_Native" "WAN_NATIVE_NODE${_mnwn_slot}" "$_mnwn_file" 2>/dev/null)
-  [ -n "$_mnwn_value" ] || _mnwn_value=$(json_get_flag "WAN_NATIVE_NODE${_mnwn_slot}" "none" "$_mnwn_file" 2>/dev/null)
-  case "$_mnwn_value" in ''|none|NONE|asus|ASUS) printf '%s\n' none; return 0 ;; esac
-  case "$_mnwn_value" in *[!0-9]*) return 1 ;; esac
-  [ "$_mnwn_value" -ge 2 ] 2>/dev/null && [ "$_mnwn_value" -le 4094 ] 2>/dev/null || return 1
-  printf '%s\n' "$_mnwn_value"
+  # The shared resolver preserves a role-less legacy node as Standalone and
+  # makes AiMesh inherit MAIN without overwriting its dormant node value.
+  type merv_effective_wan_native_value >/dev/null 2>&1 || return 1
+  merv_effective_wan_native_value "$_mnwn_slot" "$_mnwn_file"
 }
 
 merv_node_wan_native_endpoint() {
@@ -557,6 +555,51 @@ merv_node_wan_native_endpoint() {
   case "$_mnwe_ip" in ''|none|NONE) return 1 ;; esac
   merv_node_valid_ipv4 "$_mnwe_ip" || return 1
   printf '%s\n' "$_mnwe_ip"
+}
+
+# Read the completed endpoint map emitted by a Sync preflight.  The map is
+# deliberately opt-in: ordinary SSH callers continue to resolve the normal
+# expected-first candidate list.  Every row is shape-checked, each slot may
+# occur only once, and the requested slot/canonical identity must resolve to
+# exactly one endpoint that is still a current candidate.
+merv_ssh_sync_endpoint_pin() {
+  _msep_slot="$1"; _msep_canonical="$2"; _msep_wan="${3:-}"; _msep_file="${4:-${SETTINGS_FILE:-}}"
+  _msep_map="${MERV_SSH_SYNC_ENDPOINT_MAP:-}"
+  [ -n "$_msep_map" ] || return 1
+  case "$_msep_map" in
+    /*) ;;
+    *) return 2 ;;
+  esac
+  case "$_msep_map" in
+    *..*|*[!A-Za-z0-9_./-]*) return 2 ;;
+  esac
+  [ -f "$_msep_map" ] || return 2
+  _msep_seen_slots=' '; _msep_matches=0; _msep_endpoint=''
+  while IFS=' ' read -r _msep_row_slot _msep_row_canonical _msep_row_endpoint _msep_extra || [ -n "$_msep_row_slot" ]; do
+    [ -n "$_msep_row_slot" ] || return 2
+    [ -z "$_msep_extra" ] || return 2
+    case "$_msep_row_slot" in ''|*[!0-9]*) return 2 ;; esac
+    [ "$_msep_row_slot" -ge 1 ] 2>/dev/null || return 2
+    case "$_msep_seen_slots" in *" $_msep_row_slot "*) return 2 ;; esac
+    _msep_seen_slots="$_msep_seen_slots$_msep_row_slot "
+    merv_node_valid_ipv4 "$_msep_row_canonical" || return 2
+    merv_node_valid_ipv4 "$_msep_row_endpoint" || return 2
+    _msep_expected_canonical=$(merv_node_asus_endpoint "$_msep_row_slot" "$_msep_file" 2>/dev/null) || return 2
+    [ "$_msep_row_canonical" = "$_msep_expected_canonical" ] || return 2
+    if [ "$_msep_row_slot" = "$_msep_slot" ] && [ "$_msep_row_canonical" = "$_msep_canonical" ]; then
+      _msep_matches=$((_msep_matches + 1))
+      _msep_endpoint="$_msep_row_endpoint"
+    fi
+  done < "$_msep_map"
+  [ "$_msep_matches" -eq 1 ] || return 2
+  if [ "$_msep_endpoint" = "$_msep_canonical" ]; then
+    :
+  elif [ -n "$_msep_wan" ] && [ "$_msep_endpoint" = "$_msep_wan" ]; then
+    :
+  else
+    return 2
+  fi
+  printf '%s\n' "$_msep_endpoint"
 }
 
 merv_node_endpoint_candidates() {
@@ -571,6 +614,15 @@ merv_node_endpoint_candidates() {
     MERV_SSH_LAST_REASON=wan-native-endpoint-missing
     MERV_SSH_LAST_DETAIL="NODE${_mnec_slot} WAN Native=$_mnec_wan_mode requires NODE${_mnec_slot}_WAN_NATIVE_IP"
     return 2
+  fi
+  if [ -n "${MERV_SSH_SYNC_ENDPOINT_MAP:-}" ]; then
+    _mnec_pinned=$(merv_ssh_sync_endpoint_pin "$_mnec_slot" "$_mnec_asus" "$_mnec_wan" "$_mnec_file" 2>/dev/null) || {
+      MERV_SSH_LAST_REASON=sync-endpoint-map-invalid
+      MERV_SSH_LAST_DETAIL="NODE${_mnec_slot} preflight endpoint map is missing, stale, or not a current candidate"
+      return 2
+    }
+    printf '%s\n' "$_mnec_pinned"
+    return 0
   fi
   if [ "$_mnec_wan_mode" != none ] && [ -n "$_mnec_wan" ]; then
     printf '%s\n' "$_mnec_wan"
@@ -591,10 +643,19 @@ merv_node_validate_wan_native_management() {
   while [ "$_mnvwn_slot" -le "${MERV_MAX_NODES:-10}" ]; do
     _mnvwn_asus=$(merv_node_asus_endpoint "$_mnvwn_slot" "$_mnvwn_file" 2>/dev/null || printf '')
     if [ -n "$_mnvwn_asus" ]; then
-      _mnvwn_mode=$(merv_node_wan_native_value "$_mnvwn_slot" "$_mnvwn_file" 2>/dev/null) || return 1
+      _mnvwn_role=$(merv_node_role "$_mnvwn_slot" "$_mnvwn_file" 2>/dev/null) || {
+        MERV_SSH_LAST_REASON=invalid-node-role
+        MERV_SSH_LAST_DETAIL="NODE${_mnvwn_slot} role must be aimesh or standalone"
+        return 1
+      }
+      _mnvwn_mode=$(merv_node_wan_native_value "$_mnvwn_slot" "$_mnvwn_file" 2>/dev/null) || {
+        MERV_SSH_LAST_REASON=invalid-wan-native
+        MERV_SSH_LAST_DETAIL="NODE${_mnvwn_slot} effective WAN Native value is invalid"
+        return 1
+      }
       if [ "$_mnvwn_mode" != none ] && ! merv_node_wan_native_endpoint "$_mnvwn_slot" "$_mnvwn_file" >/dev/null 2>&1; then
         MERV_SSH_LAST_REASON=wan-native-endpoint-missing
-        MERV_SSH_LAST_DETAIL="NODE${_mnvwn_slot} has WAN Native=$_mnvwn_mode but no valid NODE${_mnvwn_slot}_WAN_NATIVE_IP"
+        MERV_SSH_LAST_DETAIL="NODE${_mnvwn_slot} (${_mnvwn_role}) has effective WAN Native=$_mnvwn_mode but no valid NODE${_mnvwn_slot}_WAN_NATIVE_IP"
         return 1
       fi
     fi

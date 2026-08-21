@@ -2394,7 +2394,7 @@ merv_guarded_sleep() {
   local _n="${1:-1}"
   case "$_n" in ''|*[!0-9]*) _n=1 ;; esac
   while [ "$_n" -gt 0 ]; do
-    merv_guard_tick
+    merv_guard_tick || return $?
     sleep 1
     _n=$((_n - 1))
   done
@@ -2603,7 +2603,8 @@ merv_ebtables_verify_parent_jumps() {
 
 merv_mac_shield_verify_exact() {
   [ "${DRY_RUN:-no}" = yes ] && return 0
-  _mev_dump=$(_merv_ebtables_get_dump) || return 1
+  _mev_dump="${1:-}"
+  [ -n "$_mev_dump" ] || _mev_dump=$(_merv_ebtables_get_dump) || return 1
   merv_ebtables_verify_parent_jumps "$_mev_dump" "$MERV_MAC_CHAIN" || return 1
   _mev_db=$(merv_mac_best_db 2>/dev/null || printf '')
   _mev_expected=0
@@ -2624,18 +2625,47 @@ merv_mac_shield_verify_exact() {
   return 0
 }
 
+mervqt_valid_managed_iface() {
+  case "${1:-}" in
+    ''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+  esac
+  if mervqt_valid_wl_subif "$1"; then
+    return 0
+  fi
+  # Hardware-mapped managed Ethernet names are intentionally not constrained
+  # to a vendor prefix (for example, they need not be ethN).
+  return 0
+}
+
+merv_qt_expected_iface_vid_list() {
+  _mqeil_vaps=""
+  if type merv_iface_vid_list >/dev/null 2>&1; then
+    _mqeil_vaps=$(merv_iface_vid_list 2>/dev/null) || return 1
+  elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
+    _mqeil_vaps=$(merv_mac_build_expected_iface_vid 2>/dev/null) || return 1
+  else
+    return 1
+  fi
+  [ -n "$_mqeil_vaps" ] && printf '%s\n' "$_mqeil_vaps"
+  if type merv_managed_eth_iface_vid_list >/dev/null 2>&1; then
+    _mqeil_eth=$(merv_managed_eth_iface_vid_list "${SETTINGS_FILE:-}" "${NODE_ID:-${MERV_NODE_ID:-none}}" 2>/dev/null) || return 1
+    [ -n "$_mqeil_eth" ] && printf '%s\n' "$_mqeil_eth"
+  fi
+  return 0
+}
+
 merv_qt_verify_exact() {
   [ "${DRY_RUN:-no}" = yes ] && return 0
-  _qtev_dump=$(_merv_ebtables_get_dump) || return 1
+  _qtev_dump="${1:-}"
+  [ -n "$_qtev_dump" ] || _qtev_dump=$(_merv_ebtables_get_dump) || return 1
   merv_ebtables_verify_parent_jumps "$_qtev_dump" "$MERV_QT_CHAIN" || return 1
-  _qtev_pairs=""
-  if type merv_iface_vid_list >/dev/null 2>&1; then _qtev_pairs=$(merv_iface_vid_list 2>/dev/null); elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then _qtev_pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null); fi
+  _qtev_pairs=$(merv_qt_expected_iface_vid_list) || return 1
   _qtev_expected=0
   while IFS=' ' read -r _qtev_iface _qtev_vid; do
     [ -n "$_qtev_iface" ] && [ -n "$_qtev_vid" ] || continue
     case "$_qtev_vid" in ''|*[!0-9]*) continue ;; esac
     [ "$_qtev_vid" -ge 2 ] 2>/dev/null || continue
-    mervqt_valid_wl_subif "$_qtev_iface" || return 1
+    mervqt_valid_managed_iface "$_qtev_iface" || return 1
     _qtev_expected=$((_qtev_expected + 1))
     _qtev_rule="-i $_qtev_iface --logical-in br0 -j DROP"
     [ "$(merv_ebtables_rule_count_exact "$_qtev_dump" "$MERV_QT_CHAIN" "$_qtev_rule")" = 1 ] || return 1
@@ -2647,8 +2677,9 @@ EOF
 }
 
 merv_l2_guard_verify_exact() {
-  merv_mac_shield_verify_exact || return 1
-  merv_qt_verify_exact || return 1
+  _mlgve_dump="${1:-}"
+  merv_mac_shield_verify_exact "$_mlgve_dump" || return 1
+  merv_qt_verify_exact "$_mlgve_dump" || return 1
   return 0
 }
 
@@ -2754,13 +2785,12 @@ merv_qt_ensure_expected_rules() {
     _meq_dump=$(_merv_ebtables_get_dump) || return 1
     [ "$(merv_ebtables_jump_count_exact "$_meq_dump" "$_meq_parent" "$MERV_QT_CHAIN")" = 1 ] || return 1
   done
-  type merv_mac_build_expected_iface_vid >/dev/null 2>&1 || return 1
-  if type merv_iface_vid_list >/dev/null 2>&1; then _meq_pairs=$(merv_iface_vid_list); else _meq_pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null); fi
+  _meq_pairs=$(merv_qt_expected_iface_vid_list) || return 1
   while IFS=' ' read -r _meq_iface _meq_vid; do
     [ -n "$_meq_iface" ] && [ -n "$_meq_vid" ] || continue
     case "$_meq_vid" in ''|*[!0-9]*) continue ;; esac
     [ "$_meq_vid" -ge 2 ] 2>/dev/null || continue
-    mervqt_valid_wl_subif "$_meq_iface" || return 1
+    mervqt_valid_managed_iface "$_meq_iface" || return 1
     _meq_dump=$(_merv_ebtables_get_dump) || return 1
     _meq_rule="-i $_meq_iface --logical-in br0 -j DROP"
     [ "$(merv_ebtables_rule_count_exact "$_meq_dump" "$MERV_QT_CHAIN" "$_meq_rule")" = 1 ] || {
@@ -2769,7 +2799,86 @@ merv_qt_ensure_expected_rules() {
   done <<EOF
 $_meq_pairs
 EOF
+  # Additive repair above preserves protection. If stale or duplicate children
+  # remain, remove only the offending rule instances; never flush the chain.
+  _meq_dump=$(_merv_ebtables_get_dump) || return 1
+  while IFS= read -r _meq_line; do
+    case "$_meq_line" in
+      "ebtables -t filter -A $MERV_QT_CHAIN "*)
+        _meq_rule=${_meq_line#"ebtables -t filter -A $MERV_QT_CHAIN "}
+        ;;
+      "-A $MERV_QT_CHAIN "*)
+        _meq_rule=${_meq_line#"-A $MERV_QT_CHAIN "}
+        ;;
+      *) continue ;;
+    esac
+    # ASUSWRT's --Lx form can retain a trailing space after a rendered rule.
+    # Compare and delete normalized rule tokens, never presentation padding.
+    _meq_rule=$(printf '%s' "$_meq_rule" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    _meq_known=0
+    while IFS=' ' read -r _meq_iface _meq_vid; do
+      [ -n "$_meq_iface" ] && [ -n "$_meq_vid" ] || continue
+      _meq_expected="-i $_meq_iface --logical-in br0 -j DROP"
+      [ "$_meq_rule" = "$_meq_expected" ] && { _meq_known=1; break; }
+    done <<EOF
+$_meq_pairs
+EOF
+    [ "$_meq_known" -eq 1 ] && continue
+    set -- $_meq_rule
+    ebtables -t filter -D "$MERV_QT_CHAIN" "$@" 2>/dev/null || return 1
+  done <<EOF
+$_meq_dump
+EOF
+  while IFS=' ' read -r _meq_iface _meq_vid; do
+    [ -n "$_meq_iface" ] && [ -n "$_meq_vid" ] || continue
+    case "$_meq_vid" in ''|*[!0-9]*) continue ;; esac
+    [ "$_meq_vid" -ge 2 ] 2>/dev/null || continue
+    _meq_rule="-i $_meq_iface --logical-in br0 -j DROP"
+    while [ "$(merv_ebtables_rule_count_exact "$(_merv_ebtables_get_dump 2>/dev/null || printf '')" "$MERV_QT_CHAIN" "$_meq_rule")" -gt 1 ]; do
+      ebtables -t filter -D "$MERV_QT_CHAIN" -i "$_meq_iface" --logical-in br0 -j DROP 2>/dev/null || return 1
+    done
+  done <<EOF
+$_meq_pairs
+EOF
   merv_qt_verify_exact
+}
+
+# Final strict restorers. The earlier compatibility implementations remain in
+# this file for older source layouts, but these definitions are authoritative:
+# a guard tick is healthy only when the same exact verifier accepts its state.
+restore_merv_qt_shield() {
+  _mrqs_dump="${1:-}"
+  mervqt_has_ebtables || return 3
+  [ -n "$_mrqs_dump" ] || _mrqs_dump=$(_merv_ebtables_get_dump) || return 1
+  merv_qt_verify_exact "$_mrqs_dump" && return 0
+  merv_qt_ensure_expected_rules || return $?
+  _mrqs_dump=$(_merv_ebtables_get_dump) || return 1
+  merv_qt_verify_exact "$_mrqs_dump"
+}
+
+restore_merv_mac_shield() {
+  _mrms_dump="${1:-}"
+  mervqt_has_ebtables || return 3
+  [ -n "$_mrms_dump" ] || _mrms_dump=$(_merv_ebtables_get_dump) || return 1
+  merv_mac_shield_verify_exact "$_mrms_dump" && return 0
+  ebt_mac_shield_init_and_apply "$(merv_mac_best_db 2>/dev/null || printf '')" || return $?
+  _mrms_dump=$(_merv_ebtables_get_dump) || return 1
+  merv_mac_shield_verify_exact "$_mrms_dump"
+}
+
+merv_l2_guard_restore_all() {
+  _mlgra_dump="${1:-}"
+  mervqt_has_ebtables || return 3
+  [ -n "$_mlgra_dump" ] || _mlgra_dump=$(_merv_ebtables_get_dump) || return 1
+  restore_merv_qt_shield "$_mlgra_dump" || return $?
+  restore_merv_mac_shield "$_mlgra_dump" || return $?
+  merv_dhcp_hold_restore_if_active || return $?
+  return 0
+}
+
+merv_guard_tick() {
+  _mgt_dump=$(_merv_ebtables_get_dump) || return 1
+  merv_l2_guard_restore_all "$_mgt_dump"
 }
 
 merv_qt_teardown() {
