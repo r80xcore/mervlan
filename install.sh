@@ -1102,15 +1102,63 @@ select_install_source() {
     echo "Select the MerVLAN source:"
     echo "  1) Latest stable release (recommended)"
     echo "  2) Development branch"
+    echo "  3) Custom branch (advanced)"
     while :; do
-        printf 'Enter choice [1-2, default %s]: ' "$default_choice"
+        printf 'Enter choice [1-3, default %s]: ' "$default_choice"
         IFS= read -r choice || choice=""
         [ -n "$choice" ] || choice="$default_choice"
         case "$choice" in
             1) BRANCH="main"; SOURCE_DESCRIPTION="latest stable release"; return 0 ;;
             2) BRANCH="dev"; SOURCE_DESCRIPTION="development branch"; return 0 ;;
-            *) echo "[install] Invalid choice. Please enter 1 or 2." ;;
+            3) prompt_custom_install_branch && return 0 ;;
+            *) echo "[install] Invalid choice. Please enter 1, 2, or 3." ;;
         esac
+    done
+}
+
+install_custom_branch_name_valid() {
+    _icbv_branch="${1:-}"
+    case "$_icbv_branch" in
+        ""|/*|*..*|*//*|*/|*/.|*.lock|*[!A-Za-z0-9._/-]*) return 1 ;;
+    esac
+    return 0
+}
+
+prompt_custom_install_branch() {
+    local branch curl_bin probe version
+    curl_bin="$(merv_cmd /usr/sbin/curl 2>/dev/null || merv_cmd curl 2>/dev/null)"
+    [ -n "$curl_bin" ] || {
+        echo "[install] ERROR: curl is required to validate a custom branch" >&2
+        return 1
+    }
+    mkdir -p "$TMP_DIR" 2>/dev/null || return 1
+    probe="$TMP_DIR/install-custom-branch.$$.txt"
+    while :; do
+        echo ""
+        echo "Custom branches are for directed development or recovery testing."
+        printf 'Enter branch name (blank to return): '
+        IFS= read -r branch || branch=""
+        [ -n "$branch" ] || { rm -f "$probe" 2>/dev/null || :; return 1; }
+        if ! install_custom_branch_name_valid "$branch"; then
+            echo "[install] Invalid branch name. Use letters, numbers, . _ - and single / separators."
+            continue
+        fi
+        if "$curl_bin" -fsL --retry 2 --connect-timeout 15 --max-time 60 \
+            "https://raw.githubusercontent.com/r80xcore/mervlan/$branch/changelog.txt" \
+            -o "$probe" 2>/dev/null; then
+            version="$(sed -n '1s/\r$//;1p' "$probe" 2>/dev/null)"
+            case "$version" in
+                mervlan\ v[0-9]*)
+                    BRANCH="$branch"
+                    SOURCE_DESCRIPTION="custom branch $branch ($version)"
+                    RESULT_SOURCE="PASS - custom branch $branch"
+                    rm -f "$probe" 2>/dev/null || :
+                    return 0
+                    ;;
+            esac
+        fi
+        rm -f "$probe" 2>/dev/null || :
+        echo "[install] Branch was not found or does not publish a readable MerVLAN version."
     done
 }
 
@@ -1260,6 +1308,17 @@ resolve_download_source() {
         SOURCE_DESCRIPTION="development branch"
         GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$SOURCE_REF"
         RESULT_SOURCE="PASS - dev branch"
+        return 0
+    fi
+    if [ "$BRANCH" != "main" ]; then
+        install_custom_branch_name_valid "$BRANCH" || {
+            installer_warning "The selected custom branch name is unsafe."
+            return 1
+        }
+        SOURCE_REF="refs/heads/$BRANCH"
+        SOURCE_DESCRIPTION="custom branch $BRANCH"
+        GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$SOURCE_REF"
+        RESULT_SOURCE="PASS - custom branch $BRANCH"
         return 0
     fi
     curl_bin="$(merv_cmd /usr/sbin/curl 2>/dev/null || merv_cmd curl 2>/dev/null)"
@@ -2694,14 +2753,17 @@ mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js 2>/dev/null || {
 if [ "$TEST_RUN" = "1" ]; then
     TEST_MENU_ENTRY_ADDED=1
 else
-    am_settings_set mervlan_page "$am_webui_page"
-    am_settings_set mervlan_state "enabled"
+    am_settings_set mervlan_page "$am_webui_page" || { RESULT_MENU="FAIL - metadata page"; exit 1; }
+    am_settings_set mervlan_state "enabled" || { RESULT_MENU="FAIL - metadata state"; exit 1; }
     MERVLAN_VERSION="$(awk 'NF { print $NF; exit }' "$MERV_BASE/changelog.txt" 2>/dev/null)"
     case "$MERVLAN_VERSION" in
         v*) : ;;
         *) MERVLAN_VERSION="unknown" ;;
     esac
-    am_settings_set mervlan_version "$MERVLAN_VERSION"
+    am_settings_set mervlan_version "$MERVLAN_VERSION" || { RESULT_MENU="FAIL - metadata version"; exit 1; }
+    [ "$(am_settings_get mervlan_page 2>/dev/null)" = "$am_webui_page" ] || { RESULT_MENU="FAIL - metadata page verification"; exit 1; }
+    [ "$(am_settings_get mervlan_state 2>/dev/null)" = "enabled" ] || { RESULT_MENU="FAIL - metadata state verification"; exit 1; }
+    [ "$(am_settings_get mervlan_version 2>/dev/null)" = "$MERVLAN_VERSION" ] || { RESULT_MENU="FAIL - metadata version verification"; exit 1; }
 fi
 
 if grep -q "tabName: \"$MENU_LABEL\"" /tmp/menuTree.js 2>/dev/null; then

@@ -794,6 +794,33 @@ extraction. The original archive is never modified. A safe archive still has
 to contain a complete MerVLAN package; it follows the same backup, activation,
 rollback, node, and log-policy lifecycle as a remote update.
 
+##### Staging a Local Update Archive
+
+Use this sequence when a computer downloads a selected branch/archive and the
+router must perform the normal Update transaction from that local file.
+
+1. On the computer, download the exact archive you intend to test. For a
+   branch, the codeload URL is
+   `https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/<branch>`.
+2. Copy the archive to a temporary router path. ASUSWRT may require legacy SCP:
+
+   ```sh
+   ssh admin@<ROUTER_IP> "mkdir -p /tmp/mervlan_local_update"
+   scp -O mervlan-<branch>.tar.gz admin@<ROUTER_IP>:/tmp/mervlan_local_update/
+   ```
+
+3. On the MAIN router, validate the retained archive and run the local Update:
+
+   ```sh
+   cd /jffs/addons/mervlan
+   archive=/tmp/mervlan_local_update/mervlan-<branch>.tar.gz
+   tar -tzf "$archive" >/dev/null && \
+   sh functions/update_mervlan.sh local "$archive" --logs=keep
+   ```
+
+The archive remains caller-owned at its staging path. The updater reads it,
+copies it into its own temporary workspace, and never modifies the original.
+
 #### Emergency Update Repair
 
 Use repair when the installed updater, its support libraries, node-sync helpers, or related update/runtime files are missing, damaged, or have incorrect permissions. Repair restores branch-owned program and static components only; it preserves settings, SSH keys, databases, and backups. It does not start an update, synchronize nodes, apply VLANs, restart services, or reboot. Run the normal update after repair when ready.
@@ -853,12 +880,12 @@ For `dev`, replace the `main` URL segment and final `main` argument with `dev`. 
 
 | Command | What it does |
 | --- | --- |
-| `sh install.sh full` | Start the guided installer. Choose Stable or Development, review node SSH settings, and preserve or replace an existing installation. |
+| `sh install.sh full` | Start the guided installer. Choose Stable, Development, or a validated Custom Branch; then review node SSH settings and preserve or replace an existing installation. |
 | `sh install.sh full --test-run` | Run the installer in isolated test paths without changing the active installation. It can optionally create a temporary **MerVLAN Test** page and removes the test files afterward. |
 | `sh install.sh full dev` | Compatibility alias that opens the guided installer with Development preselected. |
 | `sh install.sh credentials` | Change the SSH username and port used for configured nodes. |
 
-Stable installation uses the latest published release. If that cannot be resolved, the installer tries the newest stable version tag and then uses `main` as a fallback. Installer warnings and errors are saved in `/tmp/mervlan-installer-last.log` until the next full installer run.
+Stable installation uses the latest published release. If that cannot be resolved, the installer tries the newest stable version tag and then uses `main` as a fallback. **Custom Branch** is intended for directed testing: the installer validates the branch name and that branch's readable MerVLAN version before downloading it. Installer warnings and errors are saved in `/tmp/mervlan-installer-last.log` until the next full installer run.
 
 If test mode creates the temporary Web UI page, refresh any already-open Merlin page after the test finishes so the removed test tab disappears from its menu.
 
@@ -906,11 +933,10 @@ Use `tarball` when the source archive has already been staged locally.
 | Command | What it does |
 | --- | --- |
 | `sh uninstall.sh` | Remove the web UI and service hooks while preserving the addon files, settings, and stored data. |
-| `sh uninstall.sh full` | Completely remove MerVLAN, including its files, settings, stored data, and reachable node installations. Saved update and manual backups are kept. |
-| `sh uninstall.sh full && rm -rf /jffs/addons/mervlan_backups` | Run a full uninstall, then permanently delete all saved update and manual backups. |
+| `sh uninstall.sh full` | Prompts before removing MerVLAN files, settings, stored data, and reachable node installations; it also asks whether to delete retained update/manual backups. |
 
 > [!CAUTION]
-> A full uninstall permanently removes MerVLAN data. Adding the backup-removal command also permanently deletes every saved backup. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
+> A full uninstall permanently removes MerVLAN data. Choosing backup deletion also permanently removes every saved backup. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
 
 ### Service and Boot Control
 

@@ -156,15 +156,14 @@ If the web UI looks out of sync after manual file changes, use the log-preservin
 
 <h2 id="uninstall">Uninstall <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-Standard uninstall removes the web UI and service hooks while preserving MerVLAN files and stored data. Full uninstall removes the complete addon and its settings, but keeps saved update and manual backups unless you delete them separately.
+Standard uninstall removes the web UI and service hooks while preserving MerVLAN files and stored data. Full uninstall removes the complete addon and its settings, then explicitly asks whether retained update/manual backups should be deleted too.
 
 | Command | What it does |
 | --- | --- |
-| `sh uninstall.sh full` | Fully uninstall MerVLAN while keeping saved backups. |
-| `sh uninstall.sh full && rm -rf /jffs/addons/mervlan_backups` | Fully uninstall MerVLAN and permanently delete all saved backups. |
+| `sh uninstall.sh full` | Fully uninstall MerVLAN after confirmation, with a separate backup-deletion choice. |
 
 > [!CAUTION]
-> The second command permanently deletes every saved MerVLAN backup.
+> Choosing backup deletion permanently removes every saved MerVLAN backup.
 
 For standard uninstall and UI refresh commands, see [Install, Reinstall, and Uninstall Commands](docs/HELP.md#install-reinstall-and-uninstall-commands).
 

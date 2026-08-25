@@ -28,6 +28,37 @@ LOGTAG="VLAN"
 ACTION="${1:-standard}"
 . /usr/sbin/helper.sh
 
+FULL_DELETE_BACKUPS=0
+
+confirm_full_uninstall() {
+    [ "$ACTION" = "full" ] || return 0
+    echo ""
+    echo "WARNING: Full uninstall removes MerVLAN from this router and every verified configured node."
+    echo "It removes settings, keys, runtime data, hooks, and durable MerVLAN state."
+    printf 'Type UNINSTALL to continue: '
+    IFS= read -r _cfu_confirm || _cfu_confirm=""
+    [ "$_cfu_confirm" = "UNINSTALL" ] || {
+        echo "[uninstall] Full uninstall cancelled. No changes were made."
+        return 1
+    }
+    printf 'Also permanently delete retained MerVLAN update/manual backups? [y/N]: '
+    IFS= read -r _cfu_backups || _cfu_backups=""
+    case "$_cfu_backups" in y|Y|yes|YES) FULL_DELETE_BACKUPS=1 ;; esac
+    return 0
+}
+
+mervlan_metadata_remove_all() {
+    _mmra_file="${_am_settings_path:-/jffs/addons/custom_settings.txt}"
+    [ -f "$_mmra_file" ] || return 0
+    for _mmra_key in \
+        mervlan_page mervlan_state mervlan_version \
+        merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version
+    do
+        sed -i "\\~^$_mmra_key ~d" "$_mmra_file" 2>/dev/null || return 1
+    done
+    return 0
+}
+
 # ---- merv: portable `command -v` replacement ----
 if ! type merv_has >/dev/null 2>&1; then
   merv_has() { type "$1" >/dev/null 2>&1; }
@@ -849,6 +880,7 @@ EOF
     return 0
 }
 
+confirm_full_uninstall || exit 0
 uninstall_maintenance_admit || exit 1
 trap 'uninstall_maintenance_exit_handler' EXIT
 
@@ -1030,12 +1062,10 @@ fi
 # 5. Mark addon disabled / cleanup settings
 ########################################
 if [ "$ACTION" != "reinstall" ]; then
-    am_settings_set mervlan_state "disabled"
-    am_settings_set mervlan_page ""
-    am_settings_set mervlan_version ""
-    am_settings_set merlin_vlan_manager_state "disabled"
-    am_settings_set merlin_vlan_manager_page ""
-    am_settings_set merlin_vlan_manager_version ""
+    if ! mervlan_metadata_remove_all; then
+        echo "[uninstall] ERROR: could not remove only MerVLAN addon metadata" >&2
+        exit 1
+    fi
 fi
 
 if [ "$ACTION" = "reinstall" ]; then
@@ -1063,6 +1093,15 @@ if [ "$ACTION" = "full" ]; then
             /jffs/addons/mervlan_state) rm -rf "$MERV_STATE_ROOT" 2>/dev/null || FULL_NODE_CLEANUP_OK=0 ;;
             *) echo "[uninstall] Preserving non-default durable state root: $MERV_STATE_ROOT" ;;
         esac
+    fi
+    if [ "$FULL_DELETE_BACKUPS" = "1" ]; then
+        rm -rf /jffs/addons/mervlan_backups 2>/dev/null || {
+            echo "[uninstall] ERROR: could not remove retained MerVLAN backups" >&2
+            exit 1
+        }
+        echo "[uninstall] Retained MerVLAN backups removed"
+    else
+        echo "[uninstall] Retained MerVLAN backups were kept"
     fi
     echo "[uninstall] All addon files and data removed"
 fi

@@ -25,6 +25,12 @@ Fixed: Installer, hook ownership, and upgrade-lock recovery
   derives hyphenated/custom branch names from the archive top-level directory.
 - Installer archive probing no longer relies on wildcard `tar -O` extraction,
   and the offline guide documents legacy `scp -O` for routers without SFTP.
+- The full installer now accepts a validated Custom Branch source for directed
+  testing, while preserving the stable and development channel behavior.
+- Installer publication now verifies Merlin's namespaced `mervlan_page`,
+  `mervlan_state`, and `mervlan_version` metadata writes. Full uninstall
+  removes only those MerVLAN/legacy metadata keys, asks for explicit consent,
+  and offers a separate retained-backup deletion choice.
 
 Fixed: WAN Native clean-state and trunk configuration
 - MAIN ASUS/default recovery IP is optional while using a numeric WAN Native

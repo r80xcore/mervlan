@@ -37,6 +37,14 @@ grep -Fq 'eval "BRANCH=\${TARBALL_BRANCH_$sel}"' "$INSTALL" || fail 'selected ta
 grep -Fq 'topname="$(tar -tzf' "$INSTALL" || fail 'archive top-level branch discovery missing'
 grep -Fq 'install-hooks.$$' "$INSTALL" || fail 'installer hook diagnostics capture missing'
 ! grep -Fq '*/changelog.txt' "$INSTALL" || fail 'wildcard member-to-stdout tar extraction remains'
+grep -Fq '3) Custom branch (advanced)' "$INSTALL" || fail 'full installer custom-branch option missing'
+grep -Fq 'prompt_custom_install_branch && return 0' "$INSTALL" || fail 'full installer custom-branch selection missing'
+grep -Fq 'SOURCE_REF="refs/heads/$BRANCH"' "$INSTALL" || fail 'custom installer branch does not resolve to an explicit head ref'
+grep -Fq 'am_settings_set mervlan_version "$MERVLAN_VERSION"' "$INSTALL" || fail 'installer MerVLAN version metadata write missing'
+grep -Fq 'metadata version verification' "$INSTALL" || fail 'installer MerVLAN version metadata verification missing'
+grep -Fq 'confirm_full_uninstall || exit 0' "$UNINSTALL" || fail 'full uninstall confirmation missing'
+grep -Fq 'Also permanently delete retained MerVLAN update/manual backups?' "$UNINSTALL" || fail 'full uninstall backup-deletion prompt missing'
+grep -Fq 'mervlan_metadata_remove_all' "$UNINSTALL" || fail 'precise MerVLAN metadata cleanup missing'
 
 # Exercise the selected-item metadata rather than only inspecting source text.
 # Reverse sort lists main before dev; selecting item 1 must therefore resolve
@@ -73,6 +81,64 @@ if printf '1\ny\n' | TEST_ROOT="$TEST_ROOT" sh -c '
   [ "$(cat "$TEST_ROOT/tag-result")" = 'main|mervlan-main-v3.0.tar.gz' ] || fail 'stable tag lost main channel metadata'
 else
   fail 'stable tag selection fixture failed'
+fi
+
+# Exercise the custom-branch prompt and resolver with an isolated curl stub.
+extract_function() {
+  awk -v name="$2" '
+    $0 ~ "^" name "\\(\\) \\{" { emit=1 }
+    emit {
+      print
+      opens=gsub(/\{/, "{")
+      closes=gsub(/\}/, "}")
+      depth+=opens-closes
+      if (depth == 0) exit
+    }
+  ' "$1" > "$3" || return 1
+  [ -s "$3" ]
+}
+extract_function "$INSTALL" install_custom_branch_name_valid "$TEST_ROOT/custom-helper.sh" || fail 'custom branch validator extraction'
+extract_function "$INSTALL" prompt_custom_install_branch "$TEST_ROOT/custom-prompt.sh" || fail 'custom branch prompt extraction'
+extract_function "$INSTALL" resolve_download_source "$TEST_ROOT/custom-resolve.sh" || fail 'custom branch resolver extraction'
+cat "$TEST_ROOT/custom-prompt.sh" "$TEST_ROOT/custom-resolve.sh" >> "$TEST_ROOT/custom-helper.sh" || fail 'custom helper assembly'
+printf '%s\n' '#!/bin/sh' 'out=""' 'while [ "$#" -gt 0 ]; do' '  case "$1" in -o) shift; out="$1" ;; esac' '  shift' 'done' '[ -n "$out" ] || exit 1' "printf 'mervlan v0.53.28-dev\n' > \"\$out\"" > "$TEST_ROOT/fake-curl.sh"
+chmod 700 "$TEST_ROOT/fake-curl.sh"
+if printf 'bad..branch\npre_v0.53.28-dev\n' | TEST_ROOT="$TEST_ROOT" sh -c '
+  merv_cmd() { printf "%s\n" "$TEST_ROOT/fake-curl.sh"; }
+  . "$TEST_ROOT/custom-helper.sh" || exit 1
+  TMP_DIR="$TEST_ROOT/stage"; mkdir -p "$TMP_DIR" || exit 2
+  BRANCH=main; RESULT_SOURCE=""; SOURCE_DESCRIPTION=""
+  prompt_custom_install_branch >/dev/null || exit 3
+  [ "$BRANCH" = pre_v0.53.28-dev ] || exit 4
+  resolve_download_source || exit 5
+  printf "%s|%s\n" "$SOURCE_REF" "$GITHUB_URL" > "$TEST_ROOT/custom-result"
+'; then
+  [ "$(cat "$TEST_ROOT/custom-result")" = 'refs/heads/pre_v0.53.28-dev|https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/pre_v0.53.28-dev' ] || fail 'custom installer branch resolved incorrectly'
+else
+  fail 'custom installer branch prompt fixture failed'
+fi
+
+# Full uninstall confirmation must be explicit, offer backup deletion, and
+# remove only the MerVLAN/legacy metadata keys from Merlin's flat settings API.
+extract_function "$UNINSTALL" confirm_full_uninstall "$TEST_ROOT/uninstall-helper.sh" || fail 'uninstall confirmation extraction'
+extract_function "$UNINSTALL" mervlan_metadata_remove_all "$TEST_ROOT/metadata-helper.sh" || fail 'metadata cleanup extraction'
+if printf 'UNINSTALL\ny\n' | TEST_ROOT="$TEST_ROOT" sh -c '
+  . "$TEST_ROOT/uninstall-helper.sh" || exit 1
+  ACTION=full; FULL_DELETE_BACKUPS=0
+  confirm_full_uninstall >/dev/null || exit 2
+  [ "$FULL_DELETE_BACKUPS" = 1 ]
+'; then :; else fail 'full uninstall confirmation fixture failed'; fi
+printf 'other_addon_state enabled\nmervlan_page user1.asp\nmervlan_state enabled\nmervlan_version v0\nmerlin_vlan_manager_page user2.asp\nother_addon_version v9\n' > "$TEST_ROOT/custom_settings.txt"
+if TEST_ROOT="$TEST_ROOT" sh -c '
+  . "$TEST_ROOT/metadata-helper.sh" || exit 1
+  _am_settings_path="$TEST_ROOT/custom_settings.txt"
+  mervlan_metadata_remove_all
+'; then
+  grep -Fqx 'other_addon_state enabled' "$TEST_ROOT/custom_settings.txt" || fail 'metadata cleanup removed another addon state'
+  grep -Fqx 'other_addon_version v9' "$TEST_ROOT/custom_settings.txt" || fail 'metadata cleanup removed another addon version'
+  ! grep -Eq '^(mervlan_|merlin_vlan_manager_)' "$TEST_ROOT/custom_settings.txt" || fail 'MerVLAN metadata remained after cleanup'
+else
+  fail 'MerVLAN metadata cleanup fixture failed'
 fi
 
 printf 'INSTALL_UNINSTALL_CONTRACT_OK\n'
