@@ -162,13 +162,15 @@ esac
 MERV_MAINTENANCE_ENTRY_ADMITTED=0
 MERV_INSTALL_BOOTSTRAP_FRESH=0
 
-# A first online install starts with only this downloaded install.sh.  There is
-# no installed library tree from which to load the normal owner contract yet.
-# Admit exactly that empty bootstrap shape, but never use it for a partial or
-# existing installation, or when durable maintenance state is present.
+# A first online or staged-offline install starts with only this downloaded
+# install.sh. There is no installed library tree from which to load the normal
+# owner contract yet. Admit exactly that empty bootstrap shape, but never use
+# it for a partial or existing installation, or when durable maintenance state
+# is present.
 install_bootstrap_full_fresh_context() {
     local _ibfc_path
-    [ "$MODE" = "full" ] && [ "$TEST_RUN" != "1" ] || return 1
+    case "$MODE" in full|tarball) ;; *) return 1 ;; esac
+    [ "$TEST_RUN" != "1" ] || return 1
     [ -f "$MERV_BASE/install.sh" ] || return 1
     for _ibfc_path in \
         "$MERV_BASE/uninstall.sh" \

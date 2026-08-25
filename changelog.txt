@@ -49,6 +49,9 @@ Fixed: Installer, hook ownership, and upgrade-lock recovery
   maintenance state; the Help guide documents both online custom-branch and
   offline archive installation sequences, including the correct Raw GitHub
   custom-branch URL form.
+- The same strict fresh-bootstrap admission now supports an explicitly staged
+  offline tarball install, so a valid first offline installation can provide
+  its owner-lock library without weakening partial-install safeguards.
 
 Fixed: WAN Native clean-state and trunk configuration
 - MAIN ASUS/default recovery IP is optional while using a numeric WAN Native

@@ -122,9 +122,10 @@ else
   fail 'custom installer branch prompt fixture failed'
 fi
 
-# The official online bootstrap intentionally starts with only install.sh.  It
-# must admit that exact fresh shape while rejecting an incomplete runtime tree
-# or any existing maintenance state, where normal owner libraries are required.
+# The official online and staged-offline bootstraps intentionally start with
+# only install.sh. They must admit that exact fresh shape while rejecting an
+# incomplete runtime tree or any existing maintenance state, where normal owner
+# libraries are required.
 extract_function "$INSTALL" install_bootstrap_full_fresh_context "$TEST_ROOT/bootstrap-helper.sh" || fail 'bootstrap helper extraction'
 if TEST_ROOT="$TEST_ROOT" sh -c '
   MODE=full; TEST_RUN=0
@@ -142,6 +143,22 @@ if TEST_ROOT="$TEST_ROOT" sh -c '
   : > "$TMP_DIR/locks/mervlan_maintenance.lock" || exit 9
   if install_bootstrap_full_fresh_context; then exit 10; fi
 '; then :; else fail 'fresh bootstrap admission fixture failed'; fi
+
+# Offline tarball mode has the same intentionally-empty runtime shape as a
+# first online install. It must be admitted so the staged archive can provide
+# the owner library needed by normal maintenance admission.
+if TEST_ROOT="$TEST_ROOT" sh -c '
+  MODE=tarball; TEST_RUN=0
+  MERV_BASE="$TEST_ROOT/tarball-bootstrap"
+  TMP_DIR="$TEST_ROOT/tarball-runtime"
+  MERV_STATE_ROOT="$TEST_ROOT/tarball-state"
+  mkdir -p "$MERV_BASE" "$TMP_DIR" || exit 1
+  : > "$MERV_BASE/install.sh" || exit 2
+  . "$TEST_ROOT/bootstrap-helper.sh" || exit 3
+  install_bootstrap_full_fresh_context || exit 4
+  mkdir -p "$MERV_BASE/settings" || exit 5
+  if install_bootstrap_full_fresh_context; then exit 6; fi
+'; then :; else fail 'fresh offline tarball bootstrap admission fixture failed'; fi
 
 # Full uninstall confirmation must be explicit, offer backup deletion, and
 # remove only the MerVLAN/legacy metadata keys from Merlin's flat settings API.
