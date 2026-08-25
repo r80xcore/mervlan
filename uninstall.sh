@@ -879,6 +879,9 @@ remove_nodes_full_install() {
     # removes the node's own MerVLAN control plane and no other addon's
     # metadata; hooks are disabled while the node runtime still exists.
     _rnf_cleanup_cmd='if [ -x /jffs/addons/mervlan/functions/mervlan_boot.sh ]; then /bin/sh /jffs/addons/mervlan/functions/mervlan_boot.sh nodedisable >/dev/null 2>&1 || exit 1; fi; for _rnf_settings in /jffs/addons/custom_settings.txt; do [ -f "$_rnf_settings" ] || continue; for _rnf_key in mervlan_page mervlan_state mervlan_version merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version; do sed -i "\\~^$_rnf_key ~d" "$_rnf_settings" || exit 1; done; done; rm -rf '
+    # The command runs on the verified node, not MAIN. Mark it local so the
+    # node does not try to repeat MAIN-owned SSH trust preflight/propagation.
+    _rnf_cleanup_cmd="MERV_NODE_CONTEXT=1; export MERV_NODE_CONTEXT; $_rnf_cleanup_cmd"
     _rnf_cleanup_cmd="$_rnf_cleanup_cmd$_rnf_remove_paths"
     _rnf_ok=1
     while IFS=' ' read -r _rnf_id _rnf_ip _rnf_extra || [ -n "$_rnf_id" ]; do

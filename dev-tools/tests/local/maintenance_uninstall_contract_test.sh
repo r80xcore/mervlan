@@ -149,6 +149,7 @@ if TEST_ROOT="$TEST_ROOT" REMOTE_HELPER="$REMOTE_HELPER" sh -c '
   . "$REMOTE_HELPER" || exit 2
   remove_nodes_full_install || exit 3
 '; then :; else fail full-uninstall-node-cleanup-command; fi
+grep -Fq 'MERV_NODE_CONTEXT=1; export MERV_NODE_CONTEXT;' "$TEST_ROOT/remote-cleanup.sh" || fail full-uninstall-node-cleanup-local-context
 for cleanup_path in \
   '/jffs/addons/mervlan' \
   '/tmp/mervlan_tmp' \
