@@ -878,6 +878,25 @@ For `dev`, replace the `main` URL segment and final `main` argument with `dev`. 
 
 #### Install
 
+For a **first online install**, download the small installer bootstrap and run
+its guided `full` mode. This is a sequence: the first command only retrieves
+the installer, and the second starts the guided installation.
+
+```sh
+mkdir -p /jffs/addons/mervlan && \
+/usr/sbin/curl -fsL --retry 3 --connect-timeout 15 \
+  "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/install.sh" \
+  -o /jffs/addons/mervlan/install.sh && \
+chmod 0755 /jffs/addons/mervlan/install.sh
+
+/bin/sh /jffs/addons/mervlan/install.sh full
+```
+
+For directed testing of a custom branch, replace `main` in the bootstrap URL
+with that branch name, then choose **Custom branch** in the wizard and enter
+the same name. The installer validates the branch before downloading its
+complete package.
+
 | Command | What it does |
 | --- | --- |
 | `sh install.sh full` | Start the guided installer. Choose Stable, Development, or a validated Custom Branch; then review node SSH settings and preserve or replace an existing installation. |

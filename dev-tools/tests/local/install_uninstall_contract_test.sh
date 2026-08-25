@@ -42,6 +42,8 @@ grep -Fq 'prompt_custom_install_branch && return 0' "$INSTALL" || fail 'full ins
 grep -Fq 'SOURCE_REF="refs/heads/$BRANCH"' "$INSTALL" || fail 'custom installer branch does not resolve to an explicit head ref'
 grep -Fq 'am_settings_set mervlan_version "$MERVLAN_VERSION"' "$INSTALL" || fail 'installer MerVLAN version metadata write missing'
 grep -Fq 'metadata version verification' "$INSTALL" || fail 'installer MerVLAN version metadata verification missing'
+grep -Fq 'install_bootstrap_full_fresh_context' "$INSTALL" || fail 'fresh bootstrap admission helper missing'
+grep -Fq 'Fresh bootstrap detected; normal maintenance ownership begins after the package is installed' "$INSTALL" || fail 'fresh bootstrap admission missing'
 grep -Fq 'confirm_full_uninstall || exit 0' "$UNINSTALL" || fail 'full uninstall confirmation missing'
 grep -Fq 'Also permanently delete retained MerVLAN update/manual backups?' "$UNINSTALL" || fail 'full uninstall backup-deletion prompt missing'
 grep -Fq 'mervlan_metadata_remove_all' "$UNINSTALL" || fail 'precise MerVLAN metadata cleanup missing'
@@ -118,6 +120,27 @@ if printf 'bad..branch\npre_v0.53.28-dev\n' | TEST_ROOT="$TEST_ROOT" sh -c '
 else
   fail 'custom installer branch prompt fixture failed'
 fi
+
+# The official online bootstrap intentionally starts with only install.sh.  It
+# must admit that exact fresh shape while rejecting an incomplete runtime tree
+# or any existing maintenance state, where normal owner libraries are required.
+extract_function "$INSTALL" install_bootstrap_full_fresh_context "$TEST_ROOT/bootstrap-helper.sh" || fail 'bootstrap helper extraction'
+if TEST_ROOT="$TEST_ROOT" sh -c '
+  MODE=full; TEST_RUN=0
+  MERV_BASE="$TEST_ROOT/bootstrap"
+  TMP_DIR="$TEST_ROOT/runtime"
+  MERV_STATE_ROOT="$TEST_ROOT/state"
+  mkdir -p "$MERV_BASE" || exit 1
+  : > "$MERV_BASE/install.sh" || exit 2
+  . "$TEST_ROOT/bootstrap-helper.sh" || exit 3
+  install_bootstrap_full_fresh_context || exit 4
+  mkdir -p "$MERV_BASE/settings" || exit 5
+  if install_bootstrap_full_fresh_context; then exit 6; fi
+  rmdir "$MERV_BASE/settings" || exit 7
+  mkdir -p "$TMP_DIR/locks" || exit 8
+  : > "$TMP_DIR/locks/mervlan_maintenance.lock" || exit 9
+  if install_bootstrap_full_fresh_context; then exit 10; fi
+'; then :; else fail 'fresh bootstrap admission fixture failed'; fi
 
 # Full uninstall confirmation must be explicit, offer backup deletion, and
 # remove only the MerVLAN/legacy metadata keys from Merlin's flat settings API.

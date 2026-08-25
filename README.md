@@ -138,6 +138,10 @@ The guided installer lets you:
 - Review the SSH username and port used for nodes.
 - Preserve an existing MerVLAN configuration or perform a clean installation.
 
+For a directed pre-release test, replace `main` in the bootstrap URL with the
+requested branch, then select **Custom branch** and enter that same branch in
+the installer. See the Help Guide for the separate offline archive sequence.
+
 For installer test mode and other manual installation options, see [Install, Reinstall, and Uninstall Commands](docs/HELP.md#install-reinstall-and-uninstall-commands).
 
 ### Development install

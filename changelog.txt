@@ -40,6 +40,10 @@ Fixed: Installer, hook ownership, and upgrade-lock recovery
 - Full uninstall now removes the complete node-local MerVLAN control plane,
   including hooks, public assets, durable state, and selected backup storage,
   without touching other add-on metadata.
+- The official first-install bootstrap now recognizes its intentionally empty
+  pre-package state while continuing to refuse partial installs or any live
+  maintenance state; the Help guide documents both online custom-branch and
+  offline archive installation sequences.
 
 Fixed: WAN Native clean-state and trunk configuration
 - MAIN ASUS/default recovery IP is optional while using a numeric WAN Native

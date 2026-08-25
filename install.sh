@@ -160,6 +160,35 @@ case "$MODE" in
     *) MERV_MAINTENANCE_ENTRY_REQUIRED=1 ;;
 esac
 MERV_MAINTENANCE_ENTRY_ADMITTED=0
+MERV_INSTALL_BOOTSTRAP_FRESH=0
+
+# A first online install starts with only this downloaded install.sh.  There is
+# no installed library tree from which to load the normal owner contract yet.
+# Admit exactly that empty bootstrap shape, but never use it for a partial or
+# existing installation, or when durable maintenance state is present.
+install_bootstrap_full_fresh_context() {
+    local _ibfc_path
+    [ "$MODE" = "full" ] && [ "$TEST_RUN" != "1" ] || return 1
+    [ -f "$MERV_BASE/install.sh" ] || return 1
+    for _ibfc_path in \
+        "$MERV_BASE/uninstall.sh" \
+        "$MERV_BASE/mervlan.asp" \
+        "$MERV_BASE/functions" \
+        "$MERV_BASE/settings" \
+        "$MERV_BASE/www" \
+        "$MERV_BASE/.ssh"; do
+        [ ! -e "$_ibfc_path" ] || return 1
+    done
+    for _ibfc_path in \
+        "$TMP_DIR/locks/mervlan_maintenance.lock" \
+        "$TMP_DIR/update.journal" \
+        "$TMP_DIR/update.quiesce" \
+        "$MERV_STATE_ROOT/update.journal" \
+        "$MERV_STATE_ROOT/update.quiesce"; do
+        [ ! -e "$_ibfc_path" ] || return 1
+    done
+    return 0
+}
 
 install_maintenance_admit() {
     [ "$MERV_MAINTENANCE_ENTRY_REQUIRED" = "1" ] || return 0
@@ -178,6 +207,11 @@ install_maintenance_admit() {
     fi
 
     type merv_maintenance_direct_admit >/dev/null 2>&1 || {
+        if install_bootstrap_full_fresh_context; then
+            MERV_INSTALL_BOOTSTRAP_FRESH=1
+            echo "[install] Fresh bootstrap detected; normal maintenance ownership begins after the package is installed"
+            return 0
+        fi
         echo "[install] ERROR: maintenance ownership support is unavailable; refusing tree mutation" >&2
         return 1
     }
