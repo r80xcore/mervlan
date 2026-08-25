@@ -2747,18 +2747,21 @@ i.icon_help {
 /* Keep the role and WAN Native editors inside the existing MerVLAN dark form
    system without changing their draft, validation, or Save behavior. */
 .node-role-control {
-        display:inline-grid;
-        gap:4px;
+        display:inline-block;
+        width:100%;
         min-width:0 !important;
+        height:23px;
+        min-height:23px;
+	/* Native select text is vertically centered within the compact control. */
+	padding:0 7px;
+	line-height:21px;
         color:#d7e0e5 !important;
         font-size:.86em;
 }
 
-.node-role-control select,
+.node-role-control,
 .wan-native-popup__body input,
 .wan-native-popup__body select {
-        min-height:30px;
-        padding:4px 7px;
         box-sizing:border-box;
         background:#596E74;
         color:#FFFFFF;
@@ -2768,11 +2771,17 @@ i.icon_help {
         transition:border-color .2s ease, box-shadow .2s ease;
 }
 
-.node-role-control select {
-        min-width:118px;
+.wan-native-popup__body input,
+.wan-native-popup__body select {
+	padding:4px 7px;
 }
 
-.node-role-control select:focus-visible,
+.wan-native-popup__body input,
+.wan-native-popup__body select {
+        min-height:30px;
+}
+
+.node-role-control:focus-visible,
 .wan-native-popup__body input:focus-visible,
 .wan-native-popup__body select:focus-visible {
         outline:none;
@@ -2780,7 +2789,7 @@ i.icon_help {
         box-shadow:0 0 0 2px rgba(119,165,198,.25);
 }
 
-.node-role-control select:disabled,
+.node-role-control:disabled,
 .wan-native-popup__body input:disabled,
 .wan-native-popup__body select:disabled {
         background:#3a4e55;
@@ -2790,7 +2799,7 @@ i.icon_help {
         opacity:.72;
 }
 
-.node-role-control select option,
+.node-role-control option,
 .wan-native-popup__body select option {
         background:#576D73;
         color:#FFFFFF;
@@ -2824,6 +2833,4 @@ i.icon_help {
 @media (max-width:480px) {
         .wan-native-popup.modal { width:calc(100vw - 20px); padding:13px; }
         .wan-native-edit-btn { margin-left:4px; padding:0 7px; }
-        .node-role-control { width:100%; }
-        .node-role-control select { width:100%; }
 }

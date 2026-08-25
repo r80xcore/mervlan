@@ -688,18 +688,16 @@
       <label for="node1Field"><span class="node-label" data-node-index="1" title="Double-click to rename this node">Node 1</span></label>
       <div class="node-input-wrap">
         <input id="node1Field" class="input_15_table vlan-input" name="NODE1" size="12" maxlength="15" type="text" oninput="handleNodeIpInput(1, this)" title="Enter ASUS/default node IP (format: 192.168.x.x); this remains the recovery address.">
-        <span id="statusNODE1" class="status node-status" title="❌ Missing/invalid value">❌</span>
       </div>
-      <label class="node-role-control" title="AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting.">Role
-        <select name="NODE1_ROLE" data-node-role="1" onchange="setNodeRoleDraft(1, this.value)">
-          <option value="aimesh">AiMesh</option>
-          <option value="standalone">Standalone</option>
-        </select>
-      </label>
+      <select class="node-role-control" name="NODE1_ROLE" data-node-role="1" aria-label="Node mode" disabled onchange="setNodeRoleDraft(1, this.value)" title="Enter a valid node IP before choosing its mode. AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting.">
+          <option value="aimesh">Mode: AiMesh</option>
+          <option value="standalone">Mode: Standalone</option>
+      </select>
       <button type="button" class="node-row__toggle" id="nodeToggle" aria-expanded="false" aria-controls="nodeAdditional">
         <span class="node-row__toggle-icon">+</span>
         <span class="sr-only">Show additional nodes</span>
       </button>
+      <span id="statusNODE1" class="status node-status" title="❌ Missing/invalid value">❌</span>
     </div>
     <div id="nodeAdditional" class="node-additional" hidden>
     </div>
@@ -1820,14 +1818,12 @@
               <label for="node${n}Field"><span class="node-label" data-node-index="${n}" title="Double-click to rename this node">Node ${n}</span></label>
               <div class="node-input-wrap">
                 <input id="node${n}Field" class="input_15_table vlan-input" name="NODE${n}" size="12" maxlength="15" type="text" oninput="handleNodeIpInput(${n}, this)" title="Enter ASUS/default node IP (format: 192.168.x.x); this remains the recovery address.">
-                <span id="statusNODE${n}" class="status node-status" title="❌ Missing/invalid value">❌</span>
               </div>
-              <label class="node-role-control" title="AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting.">Role
-                <select name="NODE${n}_ROLE" data-node-role="${n}" onchange="setNodeRoleDraft(${n}, this.value)">
-                  <option value="aimesh">AiMesh</option>
-                  <option value="standalone">Standalone</option>
-                </select>
-              </label>
+              <select class="node-role-control" name="NODE${n}_ROLE" data-node-role="${n}" aria-label="Node mode" disabled onchange="setNodeRoleDraft(${n}, this.value)" title="Enter a valid node IP before choosing its mode. AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting.">
+                  <option value="aimesh">Mode: AiMesh</option>
+                  <option value="standalone">Mode: Standalone</option>
+              </select>
+              <span id="statusNODE${n}" class="status node-status" title="❌ Missing/invalid value">❌</span>
             </div>`).join("");
         }
 
@@ -1841,7 +1837,18 @@
           const persisted = normalizeNodeRole(cache[`NODE${node}_ROLE`], "standalone");
           return configured ? persisted : "aimesh";
         }
+        function setNodeRoleControlEnabled(node, enabled) {
+          const title = enabled
+            ? "AiMesh nodes inherit MAIN WAN Native; Standalone nodes use their own WAN Native setting."
+            : "Enter a valid node IP before choosing its role.";
+          document.querySelectorAll(`[data-node-role="${node}"]`).forEach(el => {
+            el.disabled = !enabled;
+            el.title = title;
+          });
+        }
         function setNodeRoleDraft(node, value) {
+          const nodeInput = document.querySelector(`input[name="NODE${node}"]`);
+          if (!nodeInput || !statusNodeIpIsValid(nodeInput.value.trim())) return;
           const role = normalizeNodeRole(value, "aimesh");
           if (CURRENT_SETTINGS_CACHE) CURRENT_SETTINGS_CACHE[`NODE${node}_ROLE`] = role;
           document.querySelectorAll(`[data-node-role="${node}"]`).forEach(el => { el.value = role; });
@@ -1852,7 +1859,9 @@
           const cache = CURRENT_SETTINGS_CACHE || {};
           const wasConfigured = statusNodeIpIsValid(String(cache[`NODE${node}`] || ""));
           validateNodeField(input);
-          if (!wasConfigured && statusNodeIpIsValid(input.value)) setNodeRoleDraft(node, "aimesh");
+          const configured = statusNodeIpIsValid(input.value.trim());
+          setNodeRoleControlEnabled(node, configured);
+          if (!wasConfigured && configured) setNodeRoleDraft(node, "aimesh");
           markEdited(`NODE${node}`);
         }
 
@@ -4043,22 +4052,18 @@ function showTooltip() {
 
     function refreshNodeStatus(index){
       const current = currentNodeStatusSnapshot(index);
-      const saved = persistedNodeStatusSnapshot(index);
-      const defaultAlias = getDefaultNodeAlias(index);
-      const currentAliasCustom = current.alias !== defaultAlias;
-      const savedConfigured = !!saved.ip || saved.alias !== defaultAlias;
       if(!current.ip){
-        if(!currentAliasCustom){
-          setStatusSymbol(`statusNODE${index}`, savedConfigured ? STATUS_SYMBOLS.changed : STATUS_SYMBOLS.empty);
-          return;
-        }
-        setStatusSymbol(`statusNODE${index}`, statusSnapshotEqual(current, saved) ? STATUS_SYMBOLS.saved : STATUS_SYMBOLS.changed);
+        // An alias is presentation metadata, not a configured node.  Empty
+        // node addresses must remain visibly unconfigured even when a legacy
+        // or pre-created custom alias is retained for later use.
+        setStatusSymbol(`statusNODE${index}`, STATUS_SYMBOLS.empty);
         return;
       }
       if(!statusNodeIpIsValid(current.ip)){
         setStatusSymbol(`statusNODE${index}`, STATUS_SYMBOLS.invalid);
         return;
       }
+      const saved = persistedNodeStatusSnapshot(index);
       setStatusSymbol(`statusNODE${index}`, statusSnapshotEqual(current, saved) ? STATUS_SYMBOLS.saved : STATUS_SYMBOLS.changed);
     }
 
@@ -8657,6 +8662,7 @@ async function runMacRefresh() {
         }
         const roleInput = f[`NODE${i}_ROLE`];
         if (roleInput) roleInput.value = v ? normalizeNodeRole(flat[`NODE${i}_ROLE`], "standalone") : "aimesh";
+        setNodeRoleControlEnabled(i, statusNodeIpIsValid(v));
       }
 
       // Update input names to match the current LAN target (main or configured node)
@@ -8795,7 +8801,9 @@ async function runMacRefresh() {
         const cachedWanNativeIp = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[`NODE${i}_WAN_NATIVE_IP`];
         out[`vlanmgr_NODE${i}_WAN_NATIVE_IP`] = toNone(cachedWanNativeIp || (wanNativeIpInput ? wanNativeIpInput.value.trim() : ""));
         const roleInput = f[`NODE${i}_ROLE`];
-        out[`vlanmgr_NODE${i}_ROLE`] = normalizeNodeRole(roleInput ? roleInput.value : "", raw ? "standalone" : "aimesh");
+        if (statusNodeIpIsValid(raw)) {
+          out[`vlanmgr_NODE${i}_ROLE`] = normalizeNodeRole(roleInput ? roleInput.value : "", "standalone");
+        }
         if (aliasInput) {
           aliasInput.value = aliasValue;
         }
@@ -9008,7 +9016,9 @@ async function runMacRefresh() {
         );
         flat[`NODE${i}_ALIAS`] = aliasValue;
         flat[`NODE${i}_WAN_NATIVE_IP`] = toNone((CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE[`NODE${i}_WAN_NATIVE_IP`]) || f[`NODE${i}_WAN_NATIVE_IP`]?.value || "");
-        flat[`NODE${i}_ROLE`] = normalizeNodeRole(f[`NODE${i}_ROLE`]?.value || "", flat[`NODE${i}`] === "none" ? "aimesh" : "standalone");
+        if (statusNodeIpIsValid(flat[`NODE${i}`])) {
+          flat[`NODE${i}_ROLE`] = normalizeNodeRole(f[`NODE${i}_ROLE`]?.value || "", "standalone");
+        }
         if(aliasInput){
           aliasInput.value = aliasValue;
         }

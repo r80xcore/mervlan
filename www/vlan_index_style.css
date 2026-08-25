@@ -128,8 +128,14 @@ body {
         --controls-button-min-width: 104px;
         --controls-button-padding-x: 10px;
         --panel-stack-gap: 2px;
-        --table-col-width-vlan: 90px;
-        --table-col-width-status: 62px;
+	--table-col-width-vlan: 90px;
+	--table-col-width-status: 62px;
+	/* Status rail: adjust --status-icon-size to resize every form status icon. */
+	--status-icon-size:14px;
+	/* SSID is the alignment reference; LAN and node rows resolve to this rail. */
+	--status-rail-inset:34px;
+	/* Node rows live inside the node section's 16px content inset. */
+	--node-status-rail-offset:14.7px;
         --table-col-width-name: 270px;
         --table-col-width-id: 117px;
         --ssid-assign-extension:127px;
@@ -512,10 +518,22 @@ body {
         letter-spacing:0.08em;
 }
 
-/* Fourth header (Status) in SSID table - right-align the header text */
-#ssidTable th:nth-child(4) {
-        text-align: center;
-        padding-right: 12px; /* Adjust this value for padding to align with symbols or content */
+/* Both Status labels are centered on the same SSID-defined status rail. */
+#ssidTable th:nth-child(4),
+#lanTable th:nth-child(3) {
+        position:relative;
+        color:transparent;
+}
+
+#ssidTable th:nth-child(4)::before,
+#lanTable th:nth-child(3)::before {
+        content:"Status";
+        position:absolute;
+        top:50%;
+        right:var(--status-rail-inset);
+        transform:translate(50%, -50%);
+        color:#FFFFFF;
+        white-space:nowrap;
 }
 
 #lanTable td:first-child {
@@ -552,18 +570,17 @@ body {
         box-sizing:border-box;
 }
 
-/* Third column (Status) */
-#lanTable th:nth-child(3),
-#lanTable td:nth-child(3) {
-        text-align: right;
-        padding-right: 18px; /* Adjust this value (e.g., 20px-40px) to match the symbol's position */
+/* SSID establishes the status rail. LAN shares its exact icon position even
+   though its Status column is intentionally wider for the WAN Native editor. */
+#ssidTable td:nth-child(4) .status,
+#lanTable td:nth-child(3) .status {
+	position:absolute;
+	top:50%;
+	right:calc(var(--status-rail-inset) - (var(--status-icon-size) / 2));
+	transform:translateY(-50%);
+	margin:0;
 }
 
-/* Third header (Status) - right-align the header text */
-#lanTable th:nth-child(3) {
-        text-align: right;
-        padding-right: 12px; 
-}
 .form-box .FormTable_table td.select_table,
 .form-box .FormTable_table th.edit_table {
         width:auto;
@@ -601,22 +618,34 @@ body {
         vertical-align:middle;
 }
 .vlan-table td .status {
-        display:inline-flex;
-        align-items:center;
-        min-height:16.4px;
-        height:auto;
-        line-height:16.4px;
+	display:inline-flex;
+	align-items:center;
+	justify-content:center;
+	width:var(--status-icon-size);
+	min-width:var(--status-icon-size);
+	height:var(--status-icon-size);
+	min-height:var(--status-icon-size);
+	font-size:var(--status-icon-size);
+	line-height:1;
+	box-sizing:border-box;
 }
 .vlan-table .input_6_table {
         min-width:90px;
         text-align:center;
 }
 .node-status {
-        position:static;
-        align-items:center;
-        font-size:16px;
-        margin-left:6px;
-        flex-shrink:0;
+	position:static;
+	align-items:center;
+	justify-content:center;
+	width:var(--status-icon-size);
+	min-width:var(--status-icon-size);
+	height:var(--status-icon-size);
+	min-height:var(--status-icon-size);
+	font-size:var(--status-icon-size);
+	line-height:1;
+	margin-left:0;
+	box-sizing:border-box;
+	flex-shrink:0;
 }
 .node-section {
         margin: var(--panel-stack-gap) auto var(--panel-stack-gap) auto;
@@ -638,38 +667,47 @@ body {
         border-bottom:1px solid #222;
 }
 .node-row {
-        display:flex;
+	display:grid;
+	position:relative;
+	grid-template-columns:104px 160px 135px minmax(0, 1fr);
         align-items:center;
-        gap:12px;
-        flex-wrap:wrap;
-        padding: 0px 16px;
+        column-gap:6px;
+        row-gap:0;
+        padding:6px 12px;
         background-color:#475A5F;
 }
 .node-row label {
-        min-width:120px;
+        min-width:0;
         font-weight:400;
         color:#FFFFFF;
 }
 .node-label {
         display:inline-block;
-        min-width:120px;
+        min-width:0;
         cursor:text;
 }
 .node-label:focus {
         outline:none;
 }
 .node-row--primary {
-        position:relative;
+	grid-template-columns:104px 160px 135px 24px minmax(0, 1fr);
 }
 .node-input-wrap {
         display:flex;
         align-items:center;
-        gap:8px;
-        flex:1;
+        min-width:0;
 }
 .node-input-wrap input {
-        flex:1;
-        max-width:220px;
+        flex:1 1 auto;
+        width:100%;
+        max-width:none;
+        min-width:0;
+}
+.node-status {
+	position:absolute;
+	top:50%;
+	right:calc(var(--status-rail-inset) - var(--node-status-rail-offset) - (var(--status-icon-size) / 2));
+	transform:translateY(-50%);
 }
 .node-row__toggle {
         background-color:#1F2D35;
@@ -684,7 +722,10 @@ body {
         cursor:pointer;
         transition:background-color 0.2s ease, color 0.2s ease;
         flex-shrink:0;
-        margin-left:auto;
+	margin-left:0;
+}
+.node-row--primary .node-row__toggle {
+	grid-column:4;
 }
 .node-row__toggle-icon {
         font-size:18px;

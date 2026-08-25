@@ -7,6 +7,8 @@ Improved: VLAN safety, node policy, and offline Update
 - Nodes now have an explicit AiMesh or Standalone role. AiMesh nodes inherit
   MAIN's WAN Native transport while keeping their own reservation; existing
   nodes retain their independent behavior until explicitly changed.
+- Node role controls activate only after a valid node address is configured;
+  empty named slots remain unconfigured and are omitted from node settings.
 - Client refresh publishes a new inventory only when every required collector
   succeeds, retaining the last known-good list after a failed collection.
 - Update can safely install a local archive after validating its path,
