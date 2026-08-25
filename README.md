@@ -161,6 +161,7 @@ Standard uninstall removes the web UI and service hooks while preserving MerVLAN
 | Command | What it does |
 | --- | --- |
 | `sh uninstall.sh full` | Fully uninstall MerVLAN after confirmation, with a separate backup-deletion choice. |
+| `sh uninstall.sh full --yes --delete-backups` | Fully uninstall MerVLAN non-interactively, including retained backups, for a controlled automation run. |
 
 > [!CAUTION]
 > Choosing backup deletion permanently removes every saved MerVLAN backup.

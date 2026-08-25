@@ -31,6 +31,9 @@ Fixed: Installer, hook ownership, and upgrade-lock recovery
   `mervlan_state`, and `mervlan_version` metadata writes. Full uninstall
   removes only those MerVLAN/legacy metadata keys, asks for explicit consent,
   and offers a separate retained-backup deletion choice.
+- Controlled lifecycle automation can use `uninstall.sh full --yes
+  --delete-backups`; the ordinary full-uninstall path remains explicitly
+  interactive.
 
 Fixed: WAN Native clean-state and trunk configuration
 - MAIN ASUS/default recovery IP is optional while using a numeric WAN Native

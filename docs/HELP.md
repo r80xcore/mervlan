@@ -934,9 +934,10 @@ Use `tarball` when the source archive has already been staged locally.
 | --- | --- |
 | `sh uninstall.sh` | Remove the web UI and service hooks while preserving the addon files, settings, and stored data. |
 | `sh uninstall.sh full` | Prompts before removing MerVLAN files, settings, stored data, and reachable node installations; it also asks whether to delete retained update/manual backups. |
+| `sh uninstall.sh full --yes --delete-backups` | Non-interactive full uninstall for a controlled automation run. It explicitly confirms both complete removal and backup deletion. |
 
 > [!CAUTION]
-> A full uninstall permanently removes MerVLAN data. Choosing backup deletion also permanently removes every saved backup. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
+> A full uninstall permanently removes MerVLAN data. Choosing backup deletion also permanently removes every saved backup. The non-interactive form requires both explicit flags; it is intended only for controlled automation. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
 
 ### Service and Boot Control
 

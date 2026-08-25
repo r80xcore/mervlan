@@ -25,13 +25,52 @@
 MERV_BASE="/jffs/addons/mervlan"
 ADDON="Merlin_VLAN_Manager"
 LOGTAG="VLAN"
-ACTION="${1:-standard}"
+if [ "$#" -gt 0 ]; then
+    ACTION="$1"
+    shift
+else
+    ACTION="standard"
+fi
 . /usr/sbin/helper.sh
 
 FULL_DELETE_BACKUPS=0
+FULL_UNINSTALL_ASSUME_YES=0
+FULL_DELETE_BACKUPS_REQUESTED=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --yes) FULL_UNINSTALL_ASSUME_YES=1 ;;
+        --delete-backups) FULL_DELETE_BACKUPS_REQUESTED=1 ;;
+        *)
+            echo "[uninstall] ERROR: unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+if [ "$ACTION" != "full" ] &&
+   { [ "$FULL_UNINSTALL_ASSUME_YES" = "1" ] || [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ]; }; then
+    echo "[uninstall] ERROR: --yes and --delete-backups are valid only with 'full'" >&2
+    exit 2
+fi
+if [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ] && [ "$FULL_UNINSTALL_ASSUME_YES" != "1" ]; then
+    echo "[uninstall] ERROR: --delete-backups requires explicit full-uninstall --yes confirmation" >&2
+    exit 2
+fi
 
 confirm_full_uninstall() {
     [ "$ACTION" = "full" ] || return 0
+    if [ "$FULL_UNINSTALL_ASSUME_YES" = "1" ]; then
+        FULL_DELETE_BACKUPS="$FULL_DELETE_BACKUPS_REQUESTED"
+        echo "[uninstall] Full uninstall confirmed by explicit --yes"
+        if [ "$FULL_DELETE_BACKUPS" = "1" ]; then
+            echo "[uninstall] Retained-backup deletion confirmed by explicit --delete-backups"
+        else
+            echo "[uninstall] Retained MerVLAN backups will be kept"
+        fi
+        return 0
+    fi
     echo ""
     echo "WARNING: Full uninstall removes MerVLAN from this router and every verified configured node."
     echo "It removes settings, keys, runtime data, hooks, and durable MerVLAN state."

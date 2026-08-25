@@ -45,6 +45,7 @@ grep -Fq 'metadata version verification' "$INSTALL" || fail 'installer MerVLAN v
 grep -Fq 'confirm_full_uninstall || exit 0' "$UNINSTALL" || fail 'full uninstall confirmation missing'
 grep -Fq 'Also permanently delete retained MerVLAN update/manual backups?' "$UNINSTALL" || fail 'full uninstall backup-deletion prompt missing'
 grep -Fq 'mervlan_metadata_remove_all' "$UNINSTALL" || fail 'precise MerVLAN metadata cleanup missing'
+grep -Fq -- '--delete-backups requires explicit full-uninstall --yes confirmation' "$UNINSTALL" || fail 'full uninstall automation requires explicit confirmation'
 
 # Exercise the selected-item metadata rather than only inspecting source text.
 # Reverse sort lists main before dev; selecting item 1 must therefore resolve
@@ -128,6 +129,13 @@ if printf 'UNINSTALL\ny\n' | TEST_ROOT="$TEST_ROOT" sh -c '
   confirm_full_uninstall >/dev/null || exit 2
   [ "$FULL_DELETE_BACKUPS" = 1 ]
 '; then :; else fail 'full uninstall confirmation fixture failed'; fi
+if TEST_ROOT="$TEST_ROOT" sh -c '
+  . "$TEST_ROOT/uninstall-helper.sh" || exit 1
+  ACTION=full; FULL_DELETE_BACKUPS=0
+  FULL_UNINSTALL_ASSUME_YES=1; FULL_DELETE_BACKUPS_REQUESTED=1
+  confirm_full_uninstall >/dev/null || exit 2
+  [ "$FULL_DELETE_BACKUPS" = 1 ]
+'; then :; else fail 'automated full uninstall confirmation fixture failed'; fi
 printf 'other_addon_state enabled\nmervlan_page user1.asp\nmervlan_state enabled\nmervlan_version v0\nmerlin_vlan_manager_page user2.asp\nother_addon_version v9\n' > "$TEST_ROOT/custom_settings.txt"
 if TEST_ROOT="$TEST_ROOT" sh -c '
   . "$TEST_ROOT/metadata-helper.sh" || exit 1
