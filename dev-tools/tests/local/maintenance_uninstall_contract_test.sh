@@ -109,4 +109,28 @@ local_line=$(grep -n 'rm -rf /jffs/addons/mervlan' "$UNINSTALL" | tail -n 1 | cu
 grep -Fq 'local control plane, settings, and trust were retained' "$UNINSTALL" || fail partial-failure-message
 pass full-uninstall-preflight-and-recovery-order
 
+# Existing installations can have a configured node that predates persisted
+# AUTO_NODE<n>_MAC.  Full uninstall must pass that explicit legacy `none`
+# identity to the same strict endpoint-bound SSH preflight, not fail before
+# the verifier gets a chance to authenticate it.
+PREFLIGHT_HELPER="$TEST_ROOT/uninstall-preflight.sh"
+sed -n '/^preflight_full_uninstall_nodes() {/,/^}/p' "$UNINSTALL" > "$PREFLIGHT_HELPER" || fail preflight-extract
+[ -s "$PREFLIGHT_HELPER" ] || fail preflight-helper-empty
+if TEST_ROOT="$TEST_ROOT" PREFLIGHT_HELPER="$PREFLIGHT_HELPER" sh -c '
+  ACTION=full
+  TMPDIR="$TEST_ROOT/tmp"
+  SETTINGS_FILE="$TEST_ROOT/settings.json"
+  LOGTAG=test
+  mkdir -p "$TMPDIR" || exit 1
+  merv_node_list() { printf "%s\\n" "1 192.0.2.10"; }
+  json_get_flag() { printf "%s" ""; }
+  get_node_ssh_port() { printf "%s\\n" 22; }
+  logger() { :; }
+  merv_ssh_preflight_node_set() { cat "$1" > "$TEST_ROOT/preflight.tsv"; return 0; }
+  . "$PREFLIGHT_HELPER" || exit 2
+  preflight_full_uninstall_nodes || exit 3
+  [ "$(cat "$TEST_ROOT/preflight.tsv")" = "1 192.0.2.10 none" ]
+'; then :; else fail full-uninstall-legacy-node-preflight; fi
+pass full-uninstall-legacy-node-preflight
+
 printf 'MAINTENANCE_UNINSTALL_CONTRACT_OK\n'

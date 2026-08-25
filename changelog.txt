@@ -34,6 +34,9 @@ Fixed: Installer, hook ownership, and upgrade-lock recovery
 - Controlled lifecycle automation can use `uninstall.sh full --yes
   --delete-backups`; the ordinary full-uninstall path remains explicitly
   interactive.
+- Full uninstall now accepts the established endpoint-bound SSH trust path for
+  legacy node settings that predate a stored node MAC; it still refuses an
+  unverified node.
 
 Fixed: WAN Native clean-state and trunk configuration
 - MAIN ASUS/default recovery IP is optional while using a numeric WAN Native

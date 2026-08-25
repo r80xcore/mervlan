@@ -902,7 +902,11 @@ preflight_full_uninstall_nodes() {
         [ -n "$_puf_id" ] || continue
         [ -z "$_puf_extra" ] || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
         _puf_mac="$(json_get_flag "AUTO_NODE${_puf_id}_MAC" "" "$SETTINGS_FILE" 2>/dev/null)"
-        [ -n "$_puf_mac" ] || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
+        # Older node entries may predate AUTO_NODE<n>_MAC.  The shared SSH
+        # preflight treats `none` as the explicit legacy identity and binds
+        # trust to the configured ASUS/recovery endpoint instead; do not
+        # reject that supported, still verified path before it reaches it.
+        [ -n "$_puf_mac" ] || _puf_mac="none"
         printf '%s %s %s\n' "$_puf_id" "$_puf_ip" "$_puf_mac" >> "$_puf_file" || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
     done <<EOF
 $_puf_nodes
