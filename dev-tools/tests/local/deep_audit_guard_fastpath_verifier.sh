@@ -1,8 +1,8 @@
 #!/bin/sh
-# Round 5 audit fixture: QT and MAC restorers fast-path on chain presence plus
-# two parent jumps, while exact verification rejects empty/partial child rules.
-# This harness uses a temporary fake ebtables command and extracted production
-# functions only; it never changes runtime source or router/device state.
+# Historical Round 5 reproduction fixture: an incomplete chain with valid
+# parent jumps must be rejected by the strict QT and MAC restorers. This harness
+# uses a temporary fake ebtables command and extracted production functions
+# only; it never changes runtime source or router/device state.
 
 set -u
 
@@ -75,8 +75,17 @@ for _entry in \
     'merv_ebtables_chain_rule_count merv_ebtables_chain_rule_count' \
     'merv_ebtables_verify_parent_jumps merv_ebtables_verify_parent_jumps' \
     'merv_mac_shield_verify_exact merv_mac_shield_verify_exact' \
+    'mervqt_valid_managed_iface mervqt_valid_managed_iface' \
+    'merv_qt_expected_iface_vid_list merv_qt_expected_iface_vid_list' \
     'merv_qt_verify_exact merv_qt_verify_exact' \
     'merv_l2_guard_verify_exact merv_l2_guard_verify_exact' \
+    '_merv_ebtables_chain_present _merv_ebtables_chain_present' \
+    '_merv_ebtables_parent_jump_present_once _merv_ebtables_parent_jump_present_once' \
+    'ebt_mac_shield_init ebt_mac_shield_init' \
+    'ebt_mac_shield_flush ebt_mac_shield_flush' \
+    'ebt_mac_shield_apply ebt_mac_shield_apply' \
+    'ebt_mac_shield_init_and_apply ebt_mac_shield_init_and_apply' \
+    'merv_qt_ensure_expected_rules merv_qt_ensure_expected_rules' \
     'restore_merv_mac_shield restore_merv_mac_shield' \
     'restore_merv_qt_shield restore_merv_qt_shield'; do
     _name=${_entry%% *}
@@ -124,11 +133,10 @@ if restore_merv_mac_shield "$(cat "$DUMP_FILE")"; then
 else
     MAC_FAST_RC=$?
 fi
-[ "$QT_FAST_RC" -eq 0 ] || fail "QT restorer rejected intact-chain fixture (rc=$QT_FAST_RC)"
-[ "$MAC_FAST_RC" -eq 0 ] || fail "MAC restorer rejected intact-chain fixture (rc=$MAC_FAST_RC)"
-[ "${_MERV_QT_SHIELD_STATE:-}" = ok ] || fail 'QT restorer did not take stable fast path'
-[ "${_MERV_MAC_SHIELD_STATE:-}" = ok ] || fail 'MAC restorer did not take stable fast path'
-grep -q -- '-D FORWARD' "$EBT_CALLS" || fail 'QT fast path did not perform its expected stale-gate sweep'
+[ "$QT_FAST_RC" -ne 0 ] || fail 'QT restorer accepted incomplete child-rule fixture'
+[ "$MAC_FAST_RC" -ne 0 ] || fail 'MAC restorer accepted incomplete child-rule fixture'
+[ -z "${_MERV_QT_SHIELD_STATE:-}" ] || fail 'QT restorer marked incomplete state healthy'
+[ -z "${_MERV_MAC_SHIELD_STATE:-}" ] || fail 'MAC restorer marked incomplete state healthy'
 
 if merv_qt_verify_exact; then
     QT_EXACT_RC=0
@@ -151,8 +159,8 @@ fi
 
 printf 'FIXTURE: MERV_QT and MERV_MAC chains present; FORWARD/INPUT each have one jump\n'
 printf 'CHILD_RULES: QT empty; MAC has one wrong ACCEPT rule instead of expected DROP\n'
-printf 'FAST_PATH: QT rc=%s, MAC rc=%s (both accepted)\n' "$QT_FAST_RC" "$MAC_FAST_RC"
+printf 'STRICT_RESTORE: QT rc=%s, MAC rc=%s (both rejected)\n' "$QT_FAST_RC" "$MAC_FAST_RC"
 printf 'EXACT_VERIFY: QT rc=%s, MAC rc=%s, combined L2 rc=%s (all rejected)\n' \
     "$QT_EXACT_RC" "$MAC_EXACT_RC" "$L2_EXACT_RC"
-printf 'EVIDENCE: restorers test chain+jump presence only; exact verifiers test expected child-rule state\n'
+printf 'EVIDENCE: restorers and exact verifiers both reject incomplete child-rule state\n'
 printf 'DEEP_AUDIT_GUARD_FASTPATH_VERIFIER_OK\n'

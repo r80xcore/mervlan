@@ -1037,6 +1037,10 @@ detect_existing_installation() {
     local required marker
     INSTALL_STATE="absent"
     if settings_file_looks_valid "$ACTIVE_MERV_BASE/settings/settings.json"; then
+        # Keep the classifier anchored to the last complete runtime shape.
+        # Newly introduced reconcile helpers are package requirements, but
+        # their absence alone must not turn an otherwise valid pre-correction
+        # installation into a damaged tree before the package is downloaded.
         for required in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh; do
             [ -f "$ACTIVE_MERV_BASE/$required" ] || { INSTALL_STATE="partial"; return 0; }
         done
@@ -1374,7 +1378,7 @@ install_tree_valid() {
     [ -d "$_itv_root" ] || return 1
     for _itv_required in \
         install.sh uninstall.sh mervlan.asp www/index.html \
-        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
         settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
         functions/ssh_trust_action.sh
     do
@@ -1859,6 +1863,29 @@ select_and_validate_tarball() {
 #   Supports 'download' mode (fetch only) and 'tarball' mode (install from existing)
 INSTALL_DOWNLOAD_WORK=""
 
+normalize_install_script_permissions() {
+    local f depth
+    # Preserve the historical default: runtime shell entry points are
+    # executable.  Libraries and configuration shells are data-only sources.
+    for depth in "" "*/" "*/*/"; do
+        for f in $MERV_BASE/${depth}*.sh; do
+            [ -f "$f" ] 2>/dev/null || continue
+            case "$f" in
+                "$MERV_BASE"/settings/lib_*.sh|\
+                "$MERV_BASE"/settings/log_settings.sh|\
+                "$MERV_BASE"/settings/var_settings.sh|\
+                "$MERV_BASE"/settings/mac_shield_snapshot.sh|\
+                "$MERV_BASE"/templates/mervlan_templates.sh)
+                    chmod 644 "$f" 2>/dev/null || :
+                    ;;
+                *)
+                    chmod 755 "$f" 2>/dev/null || :
+                    ;;
+            esac
+        done
+    done
+}
+
 cleanup_install_download_work() {
   [ -n "$INSTALL_DOWNLOAD_WORK" ] || return 0
   case "$INSTALL_DOWNLOAD_WORK" in
@@ -2112,7 +2139,7 @@ download_mervlan() {
         echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
             functions/mervlan_boot.sh functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
-            settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
@@ -2132,29 +2159,10 @@ download_mervlan() {
     return 1
   fi
 
-        # Permissions: BusyBox-safe glob (no find). Default 755 for all .sh; case statement
-    # overrides library/config files (settings/lib_*.sh, mac_shield_snapshot.sh,
-    # mervlan_templates.sh, log_settings.sh, var_settings.sh) to 644.
+        # Permissions: BusyBox-safe glob (no find). Default 755 for runtime
+        # scripts; every settings library is explicitly normalized to 644.
         echo "[download_mervlan] adjusting file permissions (.sh)"
-    for depth in "" "*/" "*/*/"; do
-        for f in $MERV_BASE/${depth}*.sh; do
-            [ -f "$f" ] 2>/dev/null || continue
-            base="$(basename "$f")"
-            case "$base" in
-                log_settings.sh|var_settings.sh|\
-                lib_debug.sh|lib_json.sh|lib_ssh.sh|lib_action_ack.sh|\
-                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|lib_owner_lock.sh|\
-                lib_radio.sh|\
-                mervlan_templates.sh|mac_shield_snapshot.sh|\
-                lib_br0_guard.sh)
-                    chmod 644 "$f" 2>/dev/null || :
-                    ;;
-                *)
-                    chmod 755 "$f" 2>/dev/null || :
-                    ;;
-            esac
-        done
-    done
+        normalize_install_script_permissions
         echo "[download_mervlan] permission step complete"
     RESULT_FILES="PASS"
 
@@ -2815,7 +2823,7 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh functions/settings_reconcile.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do

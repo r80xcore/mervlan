@@ -90,6 +90,27 @@ tar -czf "$WORK/hardlink-member.tar.gz" -C "$WORK/links" root
 expect_reject validate_update_archive_members "$WORK/hardlink-member.tar.gz"
 pass link-members-rejected
 
+# ASUSWRT-Merlin BusyBox v1.25.1 target qualification (NODE1, 2026-08-24):
+# verbose symlinks begin with `l`, and hardlinks are rendered as a normal file
+# with ` -> target`. Exercise the exact production validator against that
+# observed representation without running an Update or extracting anything.
+tar() {
+  case " $* " in
+    *' -tzf '*) printf '%s\n' root/ root/hardlink root/symlink root/regular ;;
+    *' -tvzf '*)
+      printf '%s\n' \
+        'drwxrwxrwx 0/0         0 2026-08-24 10:42:19 root/' \
+        '-rw-rw-rw- 0/0         6 2026-08-24 10:42:19 root/hardlink' \
+        'lrwxrwxrwx 0/0         0 2026-08-24 10:42:19 root/symlink -> regular' \
+        '-rw-rw-rw- 0/0         0 2026-08-24 10:42:19 root/regular -> root/hardlink'
+      ;;
+    *) return 1 ;;
+  esac
+}
+expect_reject validate_update_archive_members "$WORK/asus-busybox-links.tar.gz"
+unset -f tar
+pass asus-busybox-link-representation-rejected
+
 mkdir -p "$WORK/roots/root-a" "$WORK/roots/root-b"
 printf a >"$WORK/roots/root-a/file"; printf b >"$WORK/roots/root-b/file"
 tar -czf "$WORK/multiple-roots.tar.gz" -C "$WORK/roots" root-a root-b

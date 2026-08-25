@@ -723,7 +723,7 @@
           <p class="wan-native-popup__intro">These addresses are not assigned by MerVLAN. Enter the fixed DHCP reservations configured on your upstream router.</p>
           <p id="wanNativePopupRequirement" class="wan-native-popup__requirement" aria-live="polite"></p>
           <label>WAN Native VLAN ID
-            <input id="wanNativePopupVlan" type="text" inputmode="numeric" maxlength="4" placeholder="ASUS" oninput="updateWanNativePopupRequirement()">
+            <input id="wanNativePopupVlan" type="text" inputmode="numeric" maxlength="4" placeholder="ASUS" oninput="handleWanNativePopupVlanInput()">
           </label>
           <label id="wanNativePopupAsusIpRow">ASUS/default DHCP reservation (optional)
             <input id="wanNativePopupAsusIp" type="text" inputmode="decimal" maxlength="15" placeholder="Not configured">
@@ -740,7 +740,7 @@
             <input id="wanNativePopupNodeIp" type="text" inputmode="decimal" maxlength="15" placeholder="Not configured">
           </label>
           <label id="wanNativePopupRoleRow">Node role
-            <select id="wanNativePopupRole" onchange="updateWanNativePopupRequirement()">
+            <select id="wanNativePopupRole" onchange="handleWanNativePopupRoleChange()">
               <option value="aimesh">AiMesh — inherit MAIN</option>
               <option value="standalone">Standalone — own WAN Native</option>
             </select>
@@ -5732,6 +5732,36 @@ function toggleCliFullsize() {
           const slot = Number(String(target || '').replace(/^NODE/, ''));
           return normalizeNodeRole((CURRENT_SETTINGS_CACHE || {})[`NODE${slot}_ROLE`], "standalone");
         }
+        function renderWanNativePopupNodeDraft() {
+          if (!WAN_NATIVE_POPUP_STATE || WAN_NATIVE_POPUP_STATE.target === 'main') return;
+          const state = WAN_NATIVE_POPUP_STATE;
+          const target = state.target;
+          const roleInput = wanNativePopupInput('wanNativePopupRole');
+          const role = normalizeNodeRole(roleInput.value, "aimesh");
+          const cache = CURRENT_SETTINGS_CACHE || {};
+          const vlanInput = wanNativePopupInput('wanNativePopupVlan');
+          const inheritedVlan = String(cache.WAN_NATIVE_MAIN || 'none');
+          const displayedVlan = role === 'aimesh' ? inheritedVlan : String(state.standaloneVlanDraft || 'none');
+          state.role = role;
+          vlanInput.value = displayedVlan.toLowerCase() === 'none' ? '' : displayedVlan;
+          vlanInput.disabled = role === 'aimesh';
+          const label = wanNativeTargetLabel(target);
+          document.getElementById('wanNativePopupTarget').textContent = role === 'aimesh'
+            ? `${label} follows MAIN WAN Native; its independent value is retained for Standalone use.`
+            : `Configure ${label}'s WAN Native DHCP reservation.`;
+          updateWanNativePopupRequirement();
+        }
+        function handleWanNativePopupRoleChange() {
+          if (!WAN_NATIVE_POPUP_STATE || WAN_NATIVE_POPUP_STATE.target === 'main') return;
+          renderWanNativePopupNodeDraft();
+        }
+        function handleWanNativePopupVlanInput() {
+          if (WAN_NATIVE_POPUP_STATE && WAN_NATIVE_POPUP_STATE.target !== 'main' &&
+              WAN_NATIVE_POPUP_STATE.role === 'standalone') {
+            WAN_NATIVE_POPUP_STATE.standaloneVlanDraft = wanNativePopupInput('wanNativePopupVlan').value.trim() || 'none';
+          }
+          updateWanNativePopupRequirement();
+        }
         function updateWanNativePopupRequirement() {
           if (!WAN_NATIVE_POPUP_STATE) return;
           const target = WAN_NATIVE_POPUP_STATE.target;
@@ -5754,17 +5784,15 @@ function toggleCliFullsize() {
           const vlan = String(cache[getWanNativeFlatKey(target)] || 'none');
           const isMain = target === 'main';
           const role = isMain ? '' : wanNativeNodeRole(target);
-          const effectiveVlan = !isMain && role === 'aimesh'
-            ? String(cache.WAN_NATIVE_MAIN || 'none') : vlan;
           const label = wanNativeTargetLabel(target);
-          WAN_NATIVE_POPUP_STATE = { target, vlan, role };
+          WAN_NATIVE_POPUP_STATE = { target, vlan, role, standaloneVlanDraft: vlan };
           const popup = document.getElementById('wanNativeConfigPopup');
           if (!popup) return;
           popup.style.display = 'block';
           document.getElementById('wanNativePopupTitle').textContent = `WAN Native VLAN — ${label}`;
-          document.getElementById('wanNativePopupTarget').textContent = isMain ? 'Configure the MAIN WAN Native reservation and, if available, the ASUS/default recovery reservation.' : (role === 'aimesh' ? `${label} follows MAIN WAN Native; its independent value is retained for Standalone use.` : `Configure ${label}'s WAN Native DHCP reservation.`);
-          wanNativePopupInput('wanNativePopupVlan').value = String(effectiveVlan).toLowerCase() === 'none' ? '' : effectiveVlan;
-          wanNativePopupInput('wanNativePopupVlan').disabled = !isMain && role === 'aimesh';
+          document.getElementById('wanNativePopupTarget').textContent = isMain ? 'Configure the MAIN WAN Native reservation and, if available, the ASUS/default recovery reservation.' : '';
+          wanNativePopupInput('wanNativePopupVlan').value = String(vlan).toLowerCase() === 'none' ? '' : vlan;
+          wanNativePopupInput('wanNativePopupVlan').disabled = false;
           wanNativePopupInput('wanNativePopupNativeIp').value = isMain && String(cache.MAIN_WAN_NATIVE_IP || '').toLowerCase() !== 'none' ? String(cache.MAIN_WAN_NATIVE_IP) : '';
           wanNativePopupInput('wanNativePopupAsusIp').value = isMain && String(cache.MAIN_ASUS_IP || '').toLowerCase() !== 'none' ? String(cache.MAIN_ASUS_IP) : '';
           wanNativePopupInput('wanNativePopupNodeIp').value = !isMain && String(cache[target + '_WAN_NATIVE_IP'] || '').toLowerCase() !== 'none' ? String(cache[target + '_WAN_NATIVE_IP']) : '';
@@ -5777,7 +5805,8 @@ function toggleCliFullsize() {
           nodeAsusRow.hidden = isMain;
           nodeAsusRow.style.display = isMain ? 'none' : '';
           document.getElementById('wanNativePopupNodeAsusIp').textContent = wanNativeNodeAsusIp(target) || 'Not configured';
-          updateWanNativePopupRequirement();
+          if (isMain) updateWanNativePopupRequirement();
+          else renderWanNativePopupNodeDraft();
           document.getElementById('wanNativePopupError').textContent = '';
           anchorModalToForm(popup);
           syncInfoLatchVisibility();
@@ -5789,7 +5818,12 @@ function toggleCliFullsize() {
           const asusIp = wanNativePopupInput('wanNativePopupAsusIp').value.trim() || 'none';
           const nodeIp = wanNativePopupInput('wanNativePopupNodeIp').value.trim() || 'none';
           const role = target === 'main' ? '' : normalizeNodeRole(wanNativePopupInput('wanNativePopupRole').value, 'aimesh');
-          const vlan = wanNativePopupInput('wanNativePopupVlan').value.trim() || 'none';
+          if (target !== 'main' && role === 'standalone') {
+            WAN_NATIVE_POPUP_STATE.standaloneVlanDraft = wanNativePopupInput('wanNativePopupVlan').value.trim() || 'none';
+          }
+          const vlan = target === 'main'
+            ? (wanNativePopupInput('wanNativePopupVlan').value.trim() || 'none')
+            : String(WAN_NATIVE_POPUP_STATE.standaloneVlanDraft || 'none');
           const effectiveVlan = target !== 'main' && role === 'aimesh'
             ? String((CURRENT_SETTINGS_CACHE || {}).WAN_NATIVE_MAIN || 'none') : vlan;
           const numeric = managedVlanNumber(effectiveVlan) !== null;
@@ -5813,7 +5847,8 @@ function toggleCliFullsize() {
           if (mainEndpoint && target === 'main') mainEndpoint.value = nativeIp === 'none' ? '' : nativeIp;
           if (mainAsusEndpoint && target === 'main') mainAsusEndpoint.value = asusIp === 'none' ? '' : asusIp;
           updateWanNativeSummary(target);
-          markEdited(getWanNativeFlatKey(target));
+          if (target === 'main' || role === 'standalone') markEdited(getWanNativeFlatKey(target));
+          if (target !== 'main') markEdited(`${target}_ROLE`);
           WAN_NATIVE_POPUP_STATE = null;
           const popup = document.getElementById('wanNativeConfigPopup'); if (popup) { popup.style.display = 'none'; releaseAnchoredModal(popup); }
           refreshFormStatuses();

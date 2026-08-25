@@ -819,6 +819,7 @@ functions/hw_probe.sh
 functions/mervlan_trunk.sh
 functions/mervlan_wan.sh
 functions/save_settings.sh
+functions/settings_reconcile.sh
 functions/update_mervlan.sh
 settings/settings.json
 settings/var_settings.sh
@@ -828,6 +829,7 @@ settings/lib_owner_lock.sh
 settings/lib_ssh.sh
 settings/lib_update_state.sh
 settings/lib_node_reconcile.sh
+settings/lib_settings_reconcile.sh
 templates/mervlan_templates.sh
 www/index.html
 www/vlan_form_style.css
@@ -1976,43 +1978,39 @@ if ! update_cleanup_tree "$STAGE_DIR"; then
 	fail_update building_tree "Validated staging copy could not be removed from RAM"
 fi
 
+update_normalize_script_permissions() {
+	local _update_permission_root="$1" f depth target
+	[ -d "$_update_permission_root" ] || return 1
+
+	# Default: runtime shell entry points are executable (755).
+	for depth in "" "*/" "*/*/"; do
+		for f in "$_update_permission_root"/${depth}*.sh; do
+			[ -f "$f" ] 2>/dev/null || continue
+			chmod 755 "$f" 2>/dev/null || return 1
+		done
+	done
+
+	# Every settings library is source-only data and must remain non-executable.
+	for target in "$_update_permission_root"/settings/lib_*.sh; do
+		[ -f "$target" ] || continue
+		chmod 644 "$target" 2>/dev/null || return 1
+	done
+
+	for target in \
+		"$_update_permission_root/settings/var_settings.sh" \
+		"$_update_permission_root/settings/log_settings.sh" \
+		"$_update_permission_root/settings/mac_shield_snapshot.sh" \
+		"$_update_permission_root/templates/mervlan_templates.sh"
+	do
+		[ -f "$target" ] || continue
+		chmod 644 "$target" 2>/dev/null || return 1
+	done
+}
+
 # CHMOD: normalize script permissions in new tree
 info -c cli,vlan "Normalizing script permissions in new tree"
-
-# 1) Default: make all .sh files under MERVLAN_UPDATED_TREE_DIR executable (755)
-for depth in "" "*/" "*/*/"; do
-	for f in "$MERVLAN_UPDATED_TREE_DIR"/${depth}*.sh; do
-		[ -f "$f" ] 2>/dev/null || continue
-		if ! chmod 755 "$f" 2>/dev/null; then
-			fail_update permissions "Could not set executable permissions on $f"
-		fi
-	done
-done
-
-# 2) Override: specific .sh files that must *not* be executable → 644
-for rel_path in \
-	"settings/var_settings.sh" \
-	"settings/log_settings.sh" \
-	"templates/mervlan_templates.sh" \
-	"settings/lib_debug.sh" \
-	"settings/lib_action_ack.sh" \
-	"settings/lib_json.sh" \
-	"settings/lib_owner_lock.sh" \
-	"settings/lib_ssh.sh" \
-	"settings/lib_update_state.sh" \
-	"settings/lib_node_reconcile.sh" \
-	"settings/lib_ssid_filter.sh" \
-	"settings/lib_stp.sh" \
-	"settings/lib_mervqt.sh" \
-	"settings/lib_radio.sh" \
-	"settings/mac_shield_snapshot.sh" \
-	"settings/lib_br0_guard.sh"
-do
-target="$MERVLAN_UPDATED_TREE_DIR/$rel_path"
-	if [ -f "$target" ] && ! chmod 644 "$target" 2>/dev/null; then
-		fail_update permissions "Could not set safe permissions on $target"
-	fi
-done
+update_normalize_script_permissions "$MERVLAN_UPDATED_TREE_DIR" || \
+	fail_update permissions "Could not normalize script permissions in updated tree"
 
 
 # ========================================================================== #

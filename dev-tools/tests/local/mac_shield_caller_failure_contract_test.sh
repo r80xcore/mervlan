@@ -68,7 +68,14 @@ merv_iface_vid_list() { :; }
 merv_mac_best_db() { printf '%s\n' "$MANAGER_ROOT/active.db"; }
 ebt_mac_shield_init_and_apply() { : > "$MANAGER_ROOT/apply-attempted"; return 1; }
 ebt_cleanup_all_trunk_rules() { : > "$MANAGER_ROOT/destructive-cleanup"; }
-eval "$(sed -n '1664,1737p' "$BASE_DIR/functions/mervlan_manager.sh")"
+# Extract the complete named cleanup function through its stable following
+# section marker.  Fixed line slicing previously truncated nested control flow
+# as production evolved and tested a syntactically incomplete fragment.
+_manager_cleanup="$MANAGER_ROOT/cleanup_existing_config.sh"
+sed -n '/^cleanup_existing_config()[[:space:]]*{/,/^# --- rc\/queue helpers/p' \
+  "$BASE_DIR/functions/mervlan_manager.sh" | sed '$d' > "$_manager_cleanup"
+[ -s "$_manager_cleanup" ] || fail 'manager cleanup extraction failed'
+. "$_manager_cleanup"
 if cleanup_existing_config; then
   fail 'manager cleanup returned success after strict shield failure'
 fi
@@ -124,7 +131,13 @@ merv_dhcp_hold_arm() { : > "$LEGACY_ROOT/dhcp-hold-armed"; return 0; }
 merv_dhcp_hold_release() { : > "$LEGACY_ROOT/dhcp-hold-release"; return 0; }
 merv_boot_shield_lan_configured() { return 0; }
 ebt_mac_shield_init_and_apply() { : > "$LEGACY_ROOT/prearm-failed"; return 1; }
-eval "$(sed -n '102,225p' "$BASE_DIR/functions/mervlan_boot_wrap.sh")"
+# The wrapper function is delimited by the next named watchdog section, not
+# source line numbers, so this remains a behavior fixture as comments move.
+_legacy_shield="$LEGACY_ROOT/mode_shield_legacy.sh"
+sed -n '/^_mode_shield_legacy()[[:space:]]*{/,/^# Token-owned boot watchdog/p' \
+  "$BASE_DIR/functions/mervlan_boot_wrap.sh" | sed '$d' > "$_legacy_shield"
+[ -s "$_legacy_shield" ] || fail 'legacy shield extraction failed'
+. "$_legacy_shield"
 _mode_shield_legacy || fail 'legacy boot shield wrapper unexpectedly failed'
 [ -f "$LEGACY_ROOT/dhcp-hold-armed" ] || fail 'boot wrapper did not arm DHCP hold before failed MAC pre-arm'
 [ -f "$LEGACY_ROOT/prearm-failed" ] || fail 'boot wrapper did not attempt persistent MAC pre-arm'

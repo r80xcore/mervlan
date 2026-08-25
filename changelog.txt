@@ -60,6 +60,24 @@ Maintenance: Save, node, update, and regression coverage
   the new runtime helper. Added isolated WAN Native transition/rollback/node
   selftests and BusyBox-compatible shell coverage.
 
+Fixed: Post-implementation safety and convergence corrections
+- Restored the strict public L2 guard coordinator used by manager wait paths:
+  QT, MAC Shield, and active DHCP Hold restoration share one ebtables dump and
+  propagate any child failure instead of reporting a healthy guard state.
+- Node-relevant MAIN settings Saves now leave a backend-owned durable
+  convergence obligation even if the browser disappears or publication of the
+  WebUI settings artifact fails. APMO/Hardware Probe publishes the final
+  authoritative generation; disabled automatic sync is explicitly paused,
+  while SSH trust blocks remain durable without unattended retry.
+- Reconciliation normalizes only current validated settings and current node
+  topology. Malformed metadata is quarantined under normal serialized Sync
+  ownership; removing the final node clears obsolete intent, and deferred Sync
+  work no longer reports verified completion.
+- Fresh Install, Update, Repair, and Sync Nodes now agree that every
+  `settings/lib_*.sh` library is mode 0644. Supported pre-correction installs
+  remain valid upgrade sources even though final-package validation requires
+  the new reconciliation files.
+
 mervlan v0.53.27-dev
 
 Fixed: Audit-remediation ownership and recovery contracts

@@ -98,7 +98,9 @@ write_fake_stat "$$" "424242" || exit 2
 
 # The fake backend stores one plain-text rule file per chain. It implements only
 # the ebtables operations used by the DHCP-hold API and supports deterministic
-# command failure through FAKE_EBTABLES_FAIL_MATCH.
+# command failure through FAKE_EBTABLES_FAIL_MATCH.  The continuity monitor is
+# deliberately evaluated after each successful kernel mutation so a repair
+# cannot hide a flush/delete-to-add gap behind an outer checkpoint.
 cat > "$SELFTEST_FAKE_BIN" <<'FAKE_EBTABLES'
 #!/bin/sh
 set -u
@@ -180,6 +182,48 @@ case "$op" in
     ;;
   *) exit 64 ;;
 esac
+
+case "$op" in
+  -N|-A|-I|-D|-F|-X)
+    if [ -f "$state/continuous-required" ]; then
+      mutation_file="$state/continuous-mutations"
+      mutation_count=$(cat "$mutation_file" 2>/dev/null || printf 0)
+      case "$mutation_count" in ''|*[!0-9]*) mutation_count=0 ;; esac
+      mutation_count=$((mutation_count + 1))
+      printf '%s\n' "$mutation_count" > "$mutation_file"
+
+      child_file="$state/chains/${MERV_DHCP_HOLD_CHAIN:-MERV_DHCP_HOLD}"
+      forward_file="$state/chains/FORWARD"
+      input_file="$state/chains/INPUT"
+      child_exact=0 forward_exact=0 input_exact=0
+      [ -f "$child_file" ] && child_exact=$(grep -Fxc -- '-p IPv4 --ip-proto udp --ip-dport 67 -j DROP' "$child_file" 2>/dev/null || :)
+      [ -f "$forward_file" ] && forward_exact=$(grep -Fxc -- "-j ${MERV_DHCP_HOLD_CHAIN:-MERV_DHCP_HOLD}" "$forward_file" 2>/dev/null || :)
+      [ -f "$input_file" ] && input_exact=$(grep -Fxc -- "-j ${MERV_DHCP_HOLD_CHAIN:-MERV_DHCP_HOLD}" "$input_file" 2>/dev/null || :)
+      case "$child_exact" in ''|*[!0-9]*) child_exact=0 ;; esac
+      case "$forward_exact" in ''|*[!0-9]*) forward_exact=0 ;; esac
+      case "$input_exact" in ''|*[!0-9]*) input_exact=0 ;; esac
+      if [ "$child_exact" -ge 1 ] 2>/dev/null && { [ "$forward_exact" -ge 1 ] 2>/dev/null || [ "$input_exact" -ge 1 ] 2>/dev/null; }; then
+        : > "$state/continuous-established"
+      elif [ -f "$state/continuous-established" ]; then
+        printf 'gap mutation=%s command=%s child=%s forward=%s input=%s\n' \
+          "$mutation_count" "$op $chain $*" "$child_exact" "$forward_exact" "$input_exact" \
+          >> "$state/continuous-gaps"
+      fi
+
+      case "${FAKE_EBTABLES_POST_FAIL_AT:-}" in
+        "$mutation_count") exit 72 ;;
+      esac
+      case "${FAKE_EBTABLES_SIGNAL_AFTER:-}" in
+        "$mutation_count")
+          case "${FAKE_EBTABLES_SIGNAL_PID:-}" in
+            ''|*[!0-9]*) ;;
+            *) kill "-${FAKE_EBTABLES_SIGNAL_NAME:-TERM}" "$FAKE_EBTABLES_SIGNAL_PID" 2>/dev/null || : ;;
+          esac
+          ;;
+      esac
+    fi
+    ;;
+esac
 exit 0
 FAKE_EBTABLES
 chmod 700 "$SELFTEST_FAKE_BIN" || exit 2
@@ -223,6 +267,20 @@ exit "$_cece_rc"
 CONCURRENT_ENFORCE_CHILD
 chmod 700 "$SELFTEST_CONCURRENT_CHILD" || exit 2
 
+SELFTEST_DHCP_SIGNAL_CHILD="$SELFTEST_ROOT/bin/dhcp-enforce-signal-child"
+cat > "$SELFTEST_DHCP_SIGNAL_CHILD" <<'DHCP_ENFORCE_SIGNAL_CHILD'
+#!/bin/sh
+. "$MERV_BASE/settings/var_settings.sh" || exit 2
+. "$MERV_BASE/settings/lib_identity.sh" || exit 2
+. "$MERV_BASE/settings/lib_owner_lock.sh" || exit 2
+. "$MERV_BASE/settings/lib_mervqt.sh" || exit 2
+FAKE_EBTABLES_SIGNAL_PID="$$"
+export FAKE_EBTABLES_SIGNAL_PID
+merv_dhcp_hold_enforce
+exit $?
+DHCP_ENFORCE_SIGNAL_CHILD
+chmod 700 "$SELFTEST_DHCP_SIGNAL_CHILD" || exit 2
+
 selftest_reset() {
   case "$SELFTEST_FAKE_STATE" in "$SELFTEST_ROOT"/*) ;; *) return 1 ;; esac
   rm -rf "$SELFTEST_FAKE_STATE" "$SELFTEST_STATE" 2>/dev/null || return 1
@@ -230,8 +288,10 @@ selftest_reset() {
   : > "$SELFTEST_FAKE_STATE/chains/FORWARD"
   : > "$SELFTEST_FAKE_STATE/chains/INPUT"
   rm -f "$MERV_DHCP_HOLD_LEGACY_MARKER"
-  unset FAKE_EBTABLES_FAIL_MATCH MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
-  export FAKE_EBTABLES_FAIL_MATCH MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  unset FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
+    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  export FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
+    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
 }
 
 pass() {
@@ -400,6 +460,157 @@ test_dhcp_rule_exactness() {
   export MERV_DHCP_HOLD_PROC_ROOT
 }
 
+# Return true when the fake ebtables state has an effective DHCP server
+# protection path: an exact child DROP plus at least one exact parent jump.
+# The production contract ultimately requires both parents, but this narrower
+# predicate detects the dangerous transition from an already-protective
+# damaged state to no protection at all.
+selftest_dhcp_effective_protection() {
+  _sdep_child="$SELFTEST_FAKE_STATE/chains/$MERV_DHCP_HOLD_CHAIN"
+  _sdep_forward="$SELFTEST_FAKE_STATE/chains/FORWARD"
+  _sdep_input="$SELFTEST_FAKE_STATE/chains/INPUT"
+  _sdep_child_count=0 _sdep_forward_count=0 _sdep_input_count=0
+  [ -f "$_sdep_child" ] && _sdep_child_count=$(grep -Fxc -- '-p IPv4 --ip-proto udp --ip-dport 67 -j DROP' "$_sdep_child" 2>/dev/null || :)
+  [ -f "$_sdep_forward" ] && _sdep_forward_count=$(grep -Fxc -- "-j $MERV_DHCP_HOLD_CHAIN" "$_sdep_forward" 2>/dev/null || :)
+  [ -f "$_sdep_input" ] && _sdep_input_count=$(grep -Fxc -- "-j $MERV_DHCP_HOLD_CHAIN" "$_sdep_input" 2>/dev/null || :)
+  case "$_sdep_child_count" in ''|*[!0-9]*) _sdep_child_count=0 ;; esac
+  case "$_sdep_forward_count" in ''|*[!0-9]*) _sdep_forward_count=0 ;; esac
+  case "$_sdep_input_count" in ''|*[!0-9]*) _sdep_input_count=0 ;; esac
+  [ "$_sdep_child_count" -ge 1 ] 2>/dev/null && \
+    { [ "$_sdep_forward_count" -ge 1 ] 2>/dev/null || [ "$_sdep_input_count" -ge 1 ] 2>/dev/null; }
+}
+
+selftest_dhcp_continuity_arm() {
+  rm -f "$SELFTEST_FAKE_STATE/continuous-required" \
+    "$SELFTEST_FAKE_STATE/continuous-established" \
+    "$SELFTEST_FAKE_STATE/continuous-gaps" \
+    "$SELFTEST_FAKE_STATE/continuous-mutations"
+  : > "$SELFTEST_FAKE_STATE/continuous-required"
+  selftest_dhcp_effective_protection && : > "$SELFTEST_FAKE_STATE/continuous-established"
+}
+
+selftest_dhcp_continuity_seed() {
+  _sdcs_mode="$1"
+  selftest_reset || return 1
+  merv_dhcp_hold_enforce || return 1
+  case "$_sdcs_mode" in
+    extra-child)
+      "$SELFTEST_FAKE_BIN" -t filter -A "$MERV_DHCP_HOLD_CHAIN" -j DROP ;;
+    duplicate-drop)
+      "$SELFTEST_FAKE_BIN" -t filter -A "$MERV_DHCP_HOLD_CHAIN" \
+        -p IPv4 --ip-proto udp --ip-dport 67 -j DROP ;;
+    duplicate-forward)
+      "$SELFTEST_FAKE_BIN" -t filter -A FORWARD -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    duplicate-input)
+      "$SELFTEST_FAKE_BIN" -t filter -A INPUT -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    conditional-parent)
+      "$SELFTEST_FAKE_BIN" -t filter -A FORWARD -p IPv4 -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    missing-drop)
+      "$SELFTEST_FAKE_BIN" -t filter -D "$MERV_DHCP_HOLD_CHAIN" \
+        -p IPv4 --ip-proto udp --ip-dport 67 -j DROP ;;
+    missing-forward)
+      "$SELFTEST_FAKE_BIN" -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    chain-absent)
+      "$SELFTEST_FAKE_BIN" -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" || return 1
+      "$SELFTEST_FAKE_BIN" -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" || return 1
+      "$SELFTEST_FAKE_BIN" -t filter -F "$MERV_DHCP_HOLD_CHAIN" || return 1
+      "$SELFTEST_FAKE_BIN" -t filter -X "$MERV_DHCP_HOLD_CHAIN" ;;
+    partial-flush)
+      "$SELFTEST_FAKE_BIN" -t filter -F "$MERV_DHCP_HOLD_CHAIN" ;;
+    *) return 2 ;;
+  esac
+}
+
+selftest_dhcp_continuity_no_gap() {
+  [ ! -s "$SELFTEST_FAKE_STATE/continuous-gaps" ]
+}
+
+selftest_dhcp_continuity_case() {
+  _sdcc_label="$1" _sdcc_mode="$2" _sdcc_signal="$3"
+  selftest_dhcp_continuity_seed "$_sdcc_mode" || { fail "DHCP continuity $_sdcc_label seed"; return 1; }
+  selftest_dhcp_continuity_arm
+  if [ -n "$_sdcc_signal" ]; then
+    FAKE_EBTABLES_SIGNAL_AFTER="$_sdcc_signal" \
+      FAKE_EBTABLES_SIGNAL_NAME="$_sdcc_label" \
+      /bin/sh "$SELFTEST_DHCP_SIGNAL_CHILD" >/dev/null 2>&1
+    _sdcc_rc=$?
+  else
+    merv_dhcp_hold_enforce
+    _sdcc_rc=$?
+  fi
+  _sdcc_mutations=$(cat "$SELFTEST_FAKE_STATE/continuous-mutations" 2>/dev/null || printf 0)
+  case "$_sdcc_mutations" in ''|*[!0-9]*) _sdcc_mutations=0 ;; esac
+  if [ -n "$_sdcc_signal" ]; then
+    [ "$_sdcc_rc" -ne 0 ] && pass "DHCP continuity $_sdcc_mode signal $_sdcc_label interrupts owner" ||
+      fail "DHCP continuity $_sdcc_mode signal $_sdcc_label interrupts owner"
+  else
+    [ "$_sdcc_rc" -eq 0 ] && pass "DHCP continuity $_sdcc_mode repairs" ||
+      fail "DHCP continuity $_sdcc_mode repairs (rc=$_sdcc_rc)"
+  fi
+  selftest_dhcp_continuity_no_gap && pass "DHCP continuity $_sdcc_mode preserves effective protection" || {
+    fail "DHCP continuity $_sdcc_mode has a protection gap"; cat "$SELFTEST_FAKE_STATE/continuous-gaps" >&2 2>/dev/null || :;
+  }
+  unset FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+  export FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+  assert_ok "DHCP continuity $_sdcc_mode reconciles exactly" merv_dhcp_hold_enforce
+  assert_ok "DHCP continuity $_sdcc_mode final state exact" merv_dhcp_hold_rules_present
+  SELFTEST_CONTINUITY_MUTATIONS="$_sdcc_mutations"
+  export SELFTEST_CONTINUITY_MUTATIONS
+}
+
+test_dhcp_continuous_repair() {
+  for _tdcr_mode in extra-child duplicate-drop duplicate-forward duplicate-input \
+    conditional-parent missing-drop missing-forward chain-absent partial-flush; do
+    selftest_dhcp_continuity_case baseline "$_tdcr_mode" ""
+    _tdcr_mutations="${SELFTEST_CONTINUITY_MUTATIONS:-0}"
+    case "$_tdcr_mutations" in ''|*[!0-9]*) _tdcr_mutations=0 ;; esac
+    _tdcr_i=1
+    while [ "$_tdcr_i" -le "$_tdcr_mutations" ]; do
+      selftest_dhcp_continuity_seed "$_tdcr_mode" || { fail "DHCP continuity $_tdcr_mode post-failure seed"; break; }
+      selftest_dhcp_continuity_arm
+      FAKE_EBTABLES_POST_FAIL_AT="$_tdcr_i"
+      export FAKE_EBTABLES_POST_FAIL_AT
+      merv_dhcp_hold_enforce >/dev/null 2>&1
+      _tdcr_fail_rc=$?
+      if [ "$_tdcr_fail_rc" -ne 0 ]; then
+        pass "DHCP continuity $_tdcr_mode post-failure $_tdcr_i is visible"
+      elif merv_dhcp_hold_rules_present; then
+        # `-N` can report failure after successfully creating the chain.  The
+        # production idempotence check is allowed to prove that semantic
+        # success and continue to an exact held state.
+        pass "DHCP continuity $_tdcr_mode post-failure $_tdcr_i is recovered inline"
+      else
+        fail "DHCP continuity $_tdcr_mode post-failure $_tdcr_i is visible"
+      fi
+      selftest_dhcp_continuity_no_gap && pass "DHCP continuity $_tdcr_mode post-failure $_tdcr_i retains protection" ||
+        fail "DHCP continuity $_tdcr_mode post-failure $_tdcr_i has a protection gap"
+      unset FAKE_EBTABLES_POST_FAIL_AT
+      export FAKE_EBTABLES_POST_FAIL_AT
+      assert_ok "DHCP continuity $_tdcr_mode post-failure $_tdcr_i reconciles" merv_dhcp_hold_enforce
+      assert_ok "DHCP continuity $_tdcr_mode post-failure $_tdcr_i exact" merv_dhcp_hold_rules_present
+
+      for _tdcr_signal in TERM INT; do
+        selftest_dhcp_continuity_seed "$_tdcr_mode" || { fail "DHCP continuity $_tdcr_mode $_tdcr_signal seed"; continue; }
+        selftest_dhcp_continuity_arm
+        FAKE_EBTABLES_SIGNAL_AFTER="$_tdcr_i"
+        FAKE_EBTABLES_SIGNAL_NAME="$_tdcr_signal"
+        export FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+        /bin/sh "$SELFTEST_DHCP_SIGNAL_CHILD" >/dev/null 2>&1
+        _tdcr_signal_rc=$?
+        [ "$_tdcr_signal_rc" -ne 0 ] && pass "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i interrupts owner" ||
+          fail "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i interrupts owner"
+        selftest_dhcp_continuity_no_gap && pass "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i retains protection" ||
+          fail "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i has a protection gap"
+        unset FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+        export FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+        assert_ok "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i reconciles" merv_dhcp_hold_enforce
+        assert_ok "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i exact" merv_dhcp_hold_rules_present
+      done
+      _tdcr_i=$((_tdcr_i + 1))
+    done
+  done
+}
+
 test_l2_guard_dump_contract() {
   _tlgd_human='Bridge chain: MERV_MAC, entries: 1, policy: ACCEPT
 -s 02:00:00:00:00:01 --logical-in br0 -j DROP
@@ -509,6 +720,178 @@ test_mac_shield_lifecycle() {
   DRY_RUN="$_tms_old_dry"
   export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
   return "$_tms_rc"
+}
+
+test_l2_guard_coordinator_contract() {
+  _tlgc_ok=1
+  for _tlgc_name in restore_merv_qt_shield restore_merv_mac_shield \
+    merv_dhcp_hold_restore_if_active merv_l2_guard_restore_all merv_guard_tick \
+    merv_guarded_sleep; do
+    type "$_tlgc_name" >/dev/null 2>&1 && pass "L2 guard public API exposes $_tlgc_name" || {
+      fail "L2 guard public API exposes $_tlgc_name"
+      _tlgc_ok=0
+    }
+  done
+
+  _tlgc_case() {
+    _tlgc_expected="$1"
+    _tlgc_fail="$2"
+    _tlgc_trace="$SELFTEST_ROOT/guard-coordinator.$_tlgc_expected.trace"
+    _tlgc_dump="$SELFTEST_ROOT/guard-coordinator.$_tlgc_expected.dump"
+    _tlgc_calls="$SELFTEST_ROOT/guard-coordinator.$_tlgc_expected.calls"
+    rm -f "$_tlgc_trace" "$_tlgc_dump" "$_tlgc_calls"
+    (
+      mervqt_has_ebtables() { return 0; }
+      ebtables() {
+        case "$*" in
+          *" -L --Lx")
+            printf '%s\n' 'ebtables -t filter -N MERV_QT' > "$_tlgc_dump"
+            printf '%s\n' dump >> "$_tlgc_calls"
+            cat "$_tlgc_dump"
+            ;;
+          *) return 64 ;;
+        esac
+      }
+      restore_merv_qt_shield() {
+        printf 'qt:%s\n' "$1" >> "$_tlgc_trace"
+        [ "$_tlgc_fail" = qt ] && return 17
+        return 0
+      }
+      restore_merv_mac_shield() {
+        printf 'mac:%s\n' "$1" >> "$_tlgc_trace"
+        [ "$_tlgc_fail" = mac ] && return 18
+        return 0
+      }
+      merv_dhcp_hold_restore_if_active() {
+        printf 'dhcp\n' >> "$_tlgc_trace"
+        [ "$_tlgc_fail" = dhcp ] && return 19
+        return 0
+      }
+      merv_l2_guard_restore_all
+    )
+    _tlgc_rc=$?
+    case "$_tlgc_fail" in
+      '') _tlgc_expected_rc=0; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\nmac:ebtables -t filter -N MERV_QT\ndhcp\n') ;;
+      qt) _tlgc_expected_rc=17; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\n') ;;
+      mac) _tlgc_expected_rc=18; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\nmac:ebtables -t filter -N MERV_QT\n') ;;
+      dhcp) _tlgc_expected_rc=19; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\nmac:ebtables -t filter -N MERV_QT\ndhcp\n') ;;
+      *) _tlgc_expected_rc=1; _tlgc_expected_trace='' ;;
+    esac
+    if [ "$_tlgc_rc" -eq "$_tlgc_expected_rc" ] &&
+       [ "$(cat "$_tlgc_trace" 2>/dev/null)" = "${_tlgc_expected_trace%\n}" ] &&
+       [ "$(wc -l < "$_tlgc_calls" 2>/dev/null | tr -d ' ')" = 1 ]; then
+      pass "L2 guard coordinator $_tlgc_expected propagates failure and shares one dump"
+    else
+      fail "L2 guard coordinator $_tlgc_expected propagates failure and shares one dump (rc=$_tlgc_rc)"
+      _tlgc_ok=0
+    fi
+  }
+
+  _tlgc_case success ''
+  _tlgc_case qt qt
+  _tlgc_case mac mac
+  _tlgc_case dhcp dhcp
+
+  _tlgc_tick_trace="$SELFTEST_ROOT/guard-tick.trace"
+  _tlgc_tick_calls="$SELFTEST_ROOT/guard-tick.calls"
+  rm -f "$_tlgc_tick_trace" "$_tlgc_tick_calls"
+  (
+    mervqt_has_ebtables() { return 0; }
+    ebtables() {
+      case "$*" in
+        *" -L --Lx") printf '%s\n' 'ebtables -t filter -N MERV_QT' >> "$_tlgc_tick_calls"; printf '%s\n' 'ebtables -t filter -N MERV_QT' ;;
+        *) return 64 ;;
+      esac
+    }
+    restore_merv_qt_shield() { printf 'qt:%s\n' "$1" >> "$_tlgc_tick_trace"; return 0; }
+    restore_merv_mac_shield() { printf 'mac:%s\n' "$1" >> "$_tlgc_tick_trace"; return 0; }
+    merv_dhcp_hold_restore_if_active() { printf 'dhcp\n' >> "$_tlgc_tick_trace"; return 0; }
+    merv_guard_tick
+  )
+  _tlgc_rc=$?
+  if [ "$_tlgc_rc" -eq 0 ] && [ "$(wc -l < "$_tlgc_tick_calls" 2>/dev/null | tr -d ' ')" = 1 ]; then
+    pass "L2 guard tick performs one shared table dump"
+  else
+    fail "L2 guard tick performs one shared table dump (rc=$_tlgc_rc)"
+    _tlgc_ok=0
+  fi
+
+  selftest_reset || return 1
+  _tlgc_old_dry="${DRY_RUN:-no}"
+  _tlgc_old_active="$MERV_MAC_DB_ACTIVE"
+  _tlgc_old_jffs="$MERV_MAC_DB_JFFS"
+  _tlgc_old_override="$MERV_MAC_OVERRIDE_DB"
+  _tlgc_empty_db="$SELFTEST_ROOT/guard-empty.db"
+  : > "$_tlgc_empty_db"
+  MERV_MAC_DB_ACTIVE="$_tlgc_empty_db"
+  MERV_MAC_DB_JFFS="$_tlgc_empty_db"
+  MERV_MAC_OVERRIDE_DB="$SELFTEST_ROOT/guard-empty.override"
+  DRY_RUN=no
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  ebtables() { "$SELFTEST_FAKE_BIN" "$@"; }
+  merv_iface_vid_list() { printf 'wl0.2 189\n'; }
+  merv_managed_eth_iface_vid_list() { :; }
+  assert_ok "L2 guard healthy state can be armed" merv_qt_ensure_expected_rules
+  assert_ok "L2 guard healthy MAC state can be armed" ebt_mac_shield_init_and_apply "$_tlgc_empty_db"
+  : > "$SELFTEST_FAKE_STATE/commands"
+  assert_ok "L2 guard healthy coordinator verifies exact state" merv_l2_guard_restore_all
+  if grep -E -- ' -[NFAIDX]( |$)' "$SELFTEST_FAKE_STATE/commands" >/dev/null 2>&1; then
+    fail "L2 guard healthy coordinator performs no mutating writes"
+    _tlgc_ok=0
+  else
+    pass "L2 guard healthy coordinator performs no mutating writes"
+  fi
+  unset -f ebtables merv_iface_vid_list merv_managed_eth_iface_vid_list 2>/dev/null || :
+  MERV_MAC_DB_ACTIVE="$_tlgc_old_active"
+  MERV_MAC_DB_JFFS="$_tlgc_old_jffs"
+  MERV_MAC_OVERRIDE_DB="$_tlgc_old_override"
+  DRY_RUN="$_tlgc_old_dry"
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+
+  _tlgc_sleep_trace="$SELFTEST_ROOT/guarded-sleep.trace"
+  rm -f "$_tlgc_sleep_trace"
+  (
+    merv_guard_tick() { printf '%s\n' tick >> "$_tlgc_sleep_trace"; return 23; }
+    sleep() { printf '%s\n' sleep >> "$_tlgc_sleep_trace"; return 0; }
+    merv_guarded_sleep 2
+  )
+  _tlgc_rc=$?
+  if [ "$_tlgc_rc" -eq 23 ] && [ "$(cat "$_tlgc_sleep_trace" 2>/dev/null)" = tick ]; then
+    pass "guarded sleep propagates guard failure before sleeping"
+  else
+    fail "guarded sleep propagates guard failure before sleeping (rc=$_tlgc_rc)"
+    _tlgc_ok=0
+  fi
+
+  _tlgc_manager="$MERV_BASE/functions/mervlan_manager.sh"
+  _tlgc_wait_fn="$SELFTEST_ROOT/manager-wait-for-interface.sh"
+  awk '
+    /^wait_for_interface\(\) \{/ { emit=1 }
+    emit { print }
+    emit && /^}$/ { exit }
+  ' "$_tlgc_manager" > "$_tlgc_wait_fn"
+  if [ -s "$_tlgc_wait_fn" ]; then
+    _tlgc_manager_trace="$SELFTEST_ROOT/manager-wait.trace"
+    rm -f "$_tlgc_manager_trace"
+    (
+      . "$_tlgc_wait_fn"
+      iface_exists() { return 1; }
+      merv_guard_tick() { printf '%s\n' guard >> "$_tlgc_manager_trace"; return 29; }
+      sleep() { printf '%s\n' sleep >> "$_tlgc_manager_trace"; return 0; }
+      wait_for_interface eth-test
+    )
+    _tlgc_rc=$?
+    if [ "$_tlgc_rc" -eq 1 ] && [ "$(cat "$_tlgc_manager_trace" 2>/dev/null)" = guard ]; then
+      pass "manager wait-for-interface caller propagates guard failure"
+    else
+      fail "manager wait-for-interface caller propagates guard failure (rc=$_tlgc_rc)"
+      _tlgc_ok=0
+    fi
+  else
+    fail "manager wait-for-interface caller fixture extracted"
+    _tlgc_ok=0
+  fi
+  return "$_tlgc_ok"
 }
 
 test_process_identity() {
@@ -3028,7 +3411,8 @@ test_payload_contract() {
      grep -Fq 'settings/lib_owner_lock.sh' "$_tpc_install" &&
      grep -Fq 'settings/lib_owner_lock.sh' "$SELFTEST_SCRIPT" &&
      grep -A25 'FILES_TO_COPY_CHMOD_644=' "$_tpc_sync" | grep -Fq 'settings/lib_owner_lock.sh' &&
-     grep -A20 'for rel_path in' "$_tpc_update" | grep -Fq 'settings/lib_owner_lock.sh'; then
+     sed -n '/^CORE_STAGE_FILES="/,/^OPTIONAL_STAGE_FILES="/p' "$_tpc_update" | grep -Fq 'settings/lib_owner_lock.sh' &&
+     sed -n '/^update_stage_core_valid() {/,/^}/p' "$_tpc_update" | grep -Fq 'for _update_stage_required in $CORE_STAGE_FILES'; then
     pass "Full runtime manifests include lib_owner_lock.sh"
   else
     fail "Full runtime manifests include lib_owner_lock.sh"
@@ -4820,6 +5204,8 @@ run_one() {
     dhcp-api) test_dhcp_api ;;
     dhcp-ebtables-failures) test_dhcp_ebtables_failures ;;
     dhcp-rule-exactness) test_dhcp_rule_exactness ;;
+    dhcp-continuous-repair) test_dhcp_continuous_repair ;;
+    l2-guard-coordinator) test_l2_guard_coordinator_contract ;;
     l2-guard-dump) test_l2_guard_dump_contract ;;
     l2-guard-exactness) test_l2_guard_exactness_contract ;;
     mac-shield-lifecycle) test_mac_shield_lifecycle ;;
@@ -4913,7 +5299,7 @@ if [ "$SELFTEST_ACTION" = "_fault-child" ]; then
 fi
 
 if [ "$SELFTEST_ACTION" = all ]; then
-  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness l2-guard-dump l2-guard-exactness mac-shield-lifecycle \
+  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness dhcp-continuous-repair l2-guard-coordinator l2-guard-dump l2-guard-exactness mac-shield-lifecycle \
     process-identity nonce-uniqueness owner-lock-contract maintenance-lock-interop lock-publication lock-reclaim dhcp-incomplete-lock router-portability dhcp-owners dhcp-phases dhcp-crash-points \
     heal-handoff boot-handoff duplicate-events manager-ownership \
     settle-watchdog recovery failsafe-status post-apply observation-lock observation-concurrency \

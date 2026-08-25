@@ -33,6 +33,9 @@ fi
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+if [ -f "$MERV_BASE/settings/lib_settings_reconcile.sh" ]; then
+    . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || exit 75
+fi
 if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
     . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 fi
@@ -401,12 +404,14 @@ sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
 # require synchronization after the save.
 _save_node_sync_before_digest=""
 case "$SAVE_SCOPE" in
-    normal|full)
+    normal|full|override)
         if [ -f "${SETTINGS_FILE}" ]; then
             _save_node_sync_before_digest=$(merv_settings_node_sync_digest "${SETTINGS_FILE}" 2>/dev/null) ||
                 _save_node_sync_before_digest="unavailable"
+            _save_auto_sync_before=$(json_get_flag "AUTO_SYNC_SETTINGS" "0" "${SETTINGS_FILE}" 2>/dev/null)
         else
             _save_node_sync_before_digest="missing"
+            _save_auto_sync_before="0"
         fi
         ;;
 esac
@@ -1287,6 +1292,13 @@ if [ -n "${_save_node_sync_before_digest}" ] && [ -f "${_save_candidate}" ]; the
         info -c vlan "save_settings.sh: only main-router/WebUI-local settings changed"
     fi
 fi
+_save_auto_sync_after=$(json_get_flag "AUTO_SYNC_SETTINGS" "0" "${_save_candidate}" 2>/dev/null)
+_save_auto_sync_changed=no
+case "$SAVE_SCOPE" in
+    normal|full)
+        [ "${_save_auto_sync_before:-0}" = "${_save_auto_sync_after:-0}" ] || _save_auto_sync_changed=yes
+        ;;
+esac
 
 # ============================================================================ #
 # STEP 4: Convert to pretty JSON format                                        #
@@ -1360,16 +1372,16 @@ else
 fi
 
 # ============================================================================ #
-# STEP 6: Auto-sync settings to configured nodes (if enabled)                 #
-# Defer auto-sync if SAVE_SCOPE is override (APMO handles sync after probe)   #
-# or clientmeta.                                                               #
+# STEP 6: Publish backend-owned node convergence, then optionally accelerate #
+# it with an immediate Sync.  A paused marker is still durable while automatic #
+# synchronization is disabled.                                                 #
 # ============================================================================ #
 
 _save_node_sync_status="skipped"
 if [ "$_save_public_status" != "ok" ]; then
     _save_node_sync_status="skipped-public-failure"
 fi
-if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "clientmeta" ] && [ "${SAVE_SCOPE:-full}" != "wan_native" ]; then
+if [ "${SAVE_SCOPE:-full}" != "clientmeta" ] && [ "${SAVE_SCOPE:-full}" != "wan_native" ]; then
     _auto_sync_flag=$(json_get_flag "AUTO_SYNC_SETTINGS" "" "${SETTINGS_FILE}" 2>/dev/null)
     _nodes_configured=""
     for _n_idx in 1 2 3 4 5 6 7 8 9 10; do
@@ -1392,37 +1404,56 @@ if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] 
         fi
     fi
 
-    if [ "$_should_auto_sync" = "yes" ] && [ "${_save_node_sync_required:-yes}" = "yes" ]; then
-        if [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
-            # The WebUI Save action must finish its local persistence phase
-            # before a node-mutating operation starts.  The browser queues the
-            # settings-only action separately so it can own preflight,
-            # trust-review pause/resume, and terminal progress reporting.
+    if { [ -n "$_nodes_configured" ] && { [ "${_save_node_sync_required:-yes}" = "yes" ] || [ "$_save_auto_sync_changed" = yes ]; }; } || \
+       { [ -z "$_nodes_configured" ] && [ "${_save_node_sync_required:-yes}" = "yes" ]; }; then
+        # Authoritative local commit begins convergence ownership independently
+        # of public WebUI publication. The durable marker is the handoff to a
+        # browser/reconciliation-owned settings-only sync.
+        _save_reconcile_published="no"
+        _save_node_list_digest=""
+        if type merv_settings_reconcile_normalize_current >/dev/null 2>&1; then
+            if merv_settings_reconcile_normalize_current publish; then
+                _save_reconcile_published="yes"
+            fi
+        fi
+
+        if [ "$_save_reconcile_published" != "yes" ]; then
+            _save_node_sync_status="failed"
+            warn -c vlan,cli "save_settings.sh: node settings intent could not be durably published; local settings saved"
+        elif [ "$_save_public_status" != ok ]; then
+            if [ "$_should_auto_sync" = yes ]; then _save_node_sync_status="pending"; else _save_node_sync_status="paused"; fi
+            info -c vlan,cli "Node settings convergence is durable; public settings publication failed"
+        elif [ "$_should_auto_sync" != yes ]; then
+            _save_node_sync_status="paused"
+            info -c vlan,cli "Node settings convergence is paused while automatic synchronization is disabled"
+        elif [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+            # A WebUI Save never owns the nested node mutation.  The browser
+            # or backend reconciler may start the separate settings-only
+            # action after this terminal Save acknowledgement, and the
+            # durable marker survives browser loss or a failed start.
             _save_node_sync_status="pending"
             info -c vlan,cli "Node settings auto-sync queued after local save"
         else
+            # Direct/CLI Save retains its historical immediate follow-up, but
+            # only after the durable intent exists.  A failed start therefore
+            # leaves the current generation available for reconciliation.
             info -c vlan,cli "Auto-syncing settings to nodes..."
-        # The nested sync is owned by this Save transaction. Do not reuse the
-        # Save progress token for the child action, otherwise the child could
-        # overwrite the Save progress/ack record.
-        if ! MERV_ACTION_LOCK_PARENT_HELD=1 MERV_PROGRESS_TOKEN="" \
-           sh "$MERV_BASE/functions/sync_nodes.sh" --settings-only; then
-            _save_node_sync_status="failed"
-            warn -c vlan,cli "⚠️ Node settings auto-sync completed with warnings; local settings saved"
-        else
-            _save_node_sync_status="ok"
-            info -c vlan,cli "✓ Node settings auto-sync complete"
-        fi
+            if ! MERV_ACTION_LOCK_PARENT_HELD=1 MERV_PROGRESS_TOKEN="" \
+               sh "$MERV_BASE/functions/sync_nodes.sh" --settings-only; then
+                _save_node_sync_status="failed"
+                warn -c vlan,cli "⚠️ Node settings auto-sync completed with warnings; local settings saved"
+            elif merv_settings_reconcile_read; then
+                _save_node_sync_status="deferred"
+                info -c vlan,cli "Node settings synchronization was deferred; current settings remain pending"
+            else
+                _save_node_sync_status="ok"
+                info -c vlan,cli "✓ Node settings auto-sync complete"
+            fi
         fi
     elif [ "$_should_auto_sync" = "yes" ]; then
         _save_node_sync_status="skipped-local-only"
         info -c vlan,cli "Skipping node settings auto-sync; only main-router/WebUI-local settings changed"
     fi
-fi
-
-if [ "${SAVE_SCOPE:-full}" = "override" ]; then
-    # APMO owns the ordered follow-up (probe, reload, optional node sync).
-    _save_node_sync_status="deferred-apmo"
 fi
 
 # Publish a correlated terminal result when the browser supplied a save token.
@@ -1437,7 +1468,7 @@ if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 
     fi
     if [ "$_save_public_status" != "ok" ]; then
         "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            '{"local_saved":"1","public_settings":"failed","node_sync":"skipped"}' \
+            "{\"local_saved\":\"1\",\"public_settings\":\"failed\",\"node_sync\":\"$_save_node_sync_status\"}" \
             "Settings saved locally, but public settings publication failed: $_save_public_reason" \
             '["public-settings-publication-failed"]' >/dev/null 2>&1 || :
     elif [ "$_save_node_sync_status" = "failed" ]; then
@@ -1445,10 +1476,10 @@ if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 
             '{"local_saved":"1","node_sync":"failed"}' \
             "Settings saved locally; node settings synchronization failed." \
             '["node-settings-sync-failed"]' >/dev/null 2>&1 || :
-    elif [ "$_save_node_sync_status" = "pending" ]; then
+    elif [ "$_save_node_sync_status" = "pending" ] || [ "$_save_node_sync_status" = "deferred" ] || [ "$_save_node_sync_status" = "paused" ]; then
         "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            '{"local_saved":"1","node_sync":"pending"}' \
-            "Settings saved successfully; node settings synchronization is queued." '[]' >/dev/null 2>&1 || :
+            "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \
+            "Settings saved successfully; node settings synchronization is ${_save_node_sync_status}." '[]' >/dev/null 2>&1 || :
     else
         "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
             "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \

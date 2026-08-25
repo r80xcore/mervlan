@@ -35,6 +35,8 @@ fi
 if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
     . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 fi
+[ -n "${LIB_SETTINGS_RECONCILE_LOADED:-}" ] || \
+    . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || :
 # =========================================== End of MerVLAN environment setup #
 
 # APMO may pass a verified request token as the first argument. The normal
@@ -182,6 +184,17 @@ else
 fi
 
 info "Hardware override target: $_OVR_TARGET (IS_NODE=${_OVR_IS_NODE:-0}, NODE_ID=${_OVR_NODE_ID:-none})"
+
+# Only a verified APMO request is part of the serialized MAIN Save/probe
+# transaction. Boot and legacy tokenless probes retain their historical local
+# behavior and never create a MAIN-to-node synchronization obligation here.
+_hp_reconcile_capture=no
+_hp_reconcile_before=""
+if [ "$_OVR_IS_NODE" != "1" ] && [ -n "$ACTION_REQUEST_TOKEN" ] && \
+   type merv_settings_node_sync_digest >/dev/null 2>&1; then
+  _hp_reconcile_before=$(merv_settings_node_sync_digest "$SETTINGS_FILE" 2>/dev/null || printf '')
+  [ -n "$_hp_reconcile_before" ] && _hp_reconcile_capture=yes
+fi
 
 # Read override values for resolved target via two-level nested JSON helper
 _ovr_get() { json_get_section2_value "Hardware_Override" "$_OVR_TARGET" "$1" "$SETTINGS_FILE" 2>/dev/null; }
@@ -541,6 +554,21 @@ if [ "$_OVR_IS_NODE" != "1" ]; then
     fi
     _node_i=$((_node_i + 1))
   done
+fi
+
+# The probe can change authoritative Hardware and MAIN MAX_ETH_PORTS_NODEn
+# values after an override Save. Publish only its final observed generation;
+# this makes the browser follow-up an accelerator, not a durability owner.
+if [ "$_hp_reconcile_capture" = yes ]; then
+  _hp_reconcile_after=$(merv_settings_node_sync_digest "$SETTINGS_FILE" 2>/dev/null || printf '')
+  if [ -n "$_hp_reconcile_after" ] && [ "$_hp_reconcile_before" != "$_hp_reconcile_after" ]; then
+    if type merv_settings_reconcile_normalize_current >/dev/null 2>&1; then
+      merv_settings_reconcile_normalize_current publish || \
+        warn "Hardware probe changed settings but could not publish node convergence intent"
+    else
+      warn "Hardware probe changed settings but reconciliation support is unavailable"
+    fi
+  fi
 fi
 
 # ============================================================================ #

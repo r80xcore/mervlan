@@ -47,7 +47,10 @@ grep -q 'merv_settings_node_sync_digest' "$JSON_FILE" || fail 'node-relevant set
 grep -q 'only main-router/WebUI-local settings changed' "$SAVE_FILE" || fail 'local-only save skip path missing'
 grep -q '_save_node_sync_required' "$SAVE_FILE" || fail 'save path does not gate node sync on node-relevant changes'
 grep -q 'Node settings auto-sync queued after local save' "$SAVE_FILE" || fail 'token-backed Save does not defer node sync'
-grep -q 'node_sync":"pending"' "$SAVE_FILE" || fail 'deferred node-sync acknowledgement missing'
+grep -Fq '\"node_sync\":\"$_save_node_sync_status\"' "$SAVE_FILE" || fail 'Save result does not serialize authoritative node-sync status'
+grep -Fq '_save_node_sync_status" = "pending"' "$SAVE_FILE" || fail 'pending durable state is not explicit'
+grep -Fq '_save_node_sync_status" = "paused"' "$SAVE_FILE" || fail 'paused durable state is not explicit'
+grep -Fq '_save_node_sync_status" = "deferred"' "$SAVE_FILE" || fail 'deferred durable state is not explicit'
 grep -q 'queueAutomaticNodeSettingsSync' "$UI_FILE" || fail 'Save/APMO shared node-sync queue helper missing'
 grep -q 'loadingTask.completion' "$UI_FILE" || fail 'automatic node sync does not wait for explicit loading completion'
 grep -q 'MerVLANLoading.close();' "$UI_FILE" || fail 'Save loader is not released before automatic node sync'
@@ -72,6 +75,9 @@ sync_line=$(line_of 'const queued = await queueAutomaticNodeSettingsSync({ annou
 [ -n "$complete_line" ] && [ -n "$await_line" ] && [ -n "$close_line" ] && [ -n "$pending_guard_line" ] && [ -n "$sync_line" ] || fail 'Save-to-node-sync lifecycle markers missing'
 [ "$complete_line" -lt "$await_line" ] && [ "$await_line" -lt "$close_line" ] && [ "$close_line" -lt "$pending_guard_line" ] && [ "$pending_guard_line" -lt "$sync_line" ] || fail 'Save loader is not released before pending node sync'
 grep -Fq '? { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 }' "$UI_FILE" || fail 'MerVLAN-owned Save omits minLoadingMs zero'
-grep -Fq ': { loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0 }' "$UI_FILE" || fail 'loading:false Save path omits minLoadingMs zero'
+# The no-loader branch is formatted as a nested ternary.  Assert the branch
+# semantics instead of relying on the colon sharing the object-literal line.
+NO_LOADING_BLOCK=$(sed -n '/loadingOverride === false/,/: { skipRefresh: true, waitSec: 0 }/p' "$UI_FILE")
+printf '%s\n' "$NO_LOADING_BLOCK" | grep -Fq 'loading: false, skipRefresh: true, waitSec: 0, minLoadingMs: 0' || fail 'loading:false Save path omits minLoadingMs zero'
 
 printf 'SERVICE_SETTINGS_CONTRACT_OK\n'

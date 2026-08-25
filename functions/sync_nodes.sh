@@ -27,6 +27,10 @@ fi
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_SETTINGS_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || {
+    error -c cli,vlan "Unable to load the settings reconciliation library; refusing node synchronization"
+    exit 75
+}
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
     error -c cli,vlan "Unable to load the owner-lock library; refusing node synchronization"
     exit 1
@@ -141,10 +145,81 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# A regular settings-only or full Sync can satisfy a pending backend-owned
+# Save obligation.  Capture its generation only after argument parsing, then
+# acknowledge it only while this action still owns the normal serialization.
+SYNC_RECONCILE_ACTIVE=0
+SYNC_RECONCILE_VERIFIED=0
+SYNC_DEFERRED=0
+SYNC_DEFERRED_REASON=""
+sync_settings_reconcile_capture() {
+    [ "$DRY_RUN" != "yes" ] || return 0
+    # This action already owns the normal global action serialization. Repair
+    # stale topology metadata or quarantine/rebuild malformed metadata here,
+    # never from the periodic observer without that ownership.
+    merv_settings_reconcile_normalize_current existing
+    _ssrc_normalize_rc=$?
+    case "$_ssrc_normalize_rc" in
+        0|2) ;;
+        *) warn -c vlan "Sync: settings convergence metadata could not be normalized"; return 0 ;;
+    esac
+    [ -z "${MERV_SETTINGS_RECONCILE_QUARANTINED:-}" ] || \
+        warn -c vlan "Sync: malformed settings convergence metadata was quarantined and rebuilt from current settings"
+    merv_settings_reconcile_read || return 0
+    _ssrc_settings=$(merv_settings_node_sync_digest "$SETTINGS_FILE" 2>/dev/null || printf '')
+    _ssrc_nodes=$(merv_node_list_digest 2>/dev/null || printf '')
+    [ -n "$_ssrc_settings" ] && [ -n "$_ssrc_nodes" ] || return 0
+    [ "$_ssrc_settings" = "$MERV_SETTINGS_RECONCILE_SETTINGS_DIGEST" ] || return 0
+    SYNC_RECONCILE_ACTIVE=1
+    SYNC_RECONCILE_GENERATION="$MERV_SETTINGS_RECONCILE_GENERATION"
+    SYNC_RECONCILE_SETTINGS_DIGEST="$MERV_SETTINGS_RECONCILE_SETTINGS_DIGEST"
+    SYNC_RECONCILE_NODE_LIST_DIGEST="$MERV_SETTINGS_RECONCILE_NODE_LIST_DIGEST"
+    # The persisted list digest records the Save-time topology.  Synchronizing
+    # must instead exact-verify the currently configured set: a removed node
+    # cannot keep an otherwise-current generation pending forever.
+    SYNC_RECONCILE_CURRENT_NODE_LIST_DIGEST="$_ssrc_nodes"
+    SYNC_RECONCILE_ATTEMPT="$MERV_SETTINGS_RECONCILE_ATTEMPT"
+    return 0
+}
+
+sync_settings_reconcile_finish() {
+    [ "${SYNC_RECONCILE_ACTIVE:-0}" -eq 1 ] || return 0
+    merv_settings_reconcile_read || return 0
+    [ "$MERV_SETTINGS_RECONCILE_GENERATION" = "$SYNC_RECONCILE_GENERATION" ] || return 0
+    _ssrf_settings=$(merv_settings_node_sync_digest "$SETTINGS_FILE" 2>/dev/null || printf '')
+    _ssrf_nodes=$(merv_node_list_digest 2>/dev/null || printf '')
+    [ "$_ssrf_settings" = "$SYNC_RECONCILE_SETTINGS_DIGEST" ] || return 0
+    [ "$_ssrf_nodes" = "$SYNC_RECONCILE_CURRENT_NODE_LIST_DIGEST" ] || return 0
+    if [ "${SYNC_RECONCILE_VERIFIED:-0}" -eq 1 ]; then
+        merv_settings_reconcile_clear "$SYNC_RECONCILE_GENERATION" || \
+            warn -c vlan "Sync: verified settings convergence could not clear its matching marker"
+        return 0
+    fi
+    _ssrf_attempt=$((SYNC_RECONCILE_ATTEMPT + 1))
+    [ "$_ssrf_attempt" -le 100000 ] 2>/dev/null || _ssrf_attempt=100000
+    _ssrf_delay=$((_ssrf_attempt * 30))
+    [ "$_ssrf_delay" -le 300 ] 2>/dev/null || _ssrf_delay=300
+    _ssrf_now=$(date +%s 2>/dev/null || printf '0')
+    case "$_ssrf_now" in ''|*[!0-9]*) _ssrf_now=0 ;; esac
+    _ssrf_status=retry
+    _ssrf_next=$((_ssrf_now + _ssrf_delay))
+    _ssrf_ssh_reason="${MERV_SSH_TRUST_LAST_REASON:-${MERV_SSH_LAST_REASON:-}}"
+    case "$_ssrf_ssh_reason" in
+        ssh-trust-required|trust-*|key-or-endpoint-changed|endpoint-changed|host-key-*|identity-*)
+            _ssrf_status=blocked; _ssrf_next=0
+            ;;
+    esac
+    merv_settings_reconcile_update "$SYNC_RECONCILE_GENERATION" \
+        "$SYNC_RECONCILE_SETTINGS_DIGEST" "$SYNC_RECONCILE_NODE_LIST_DIGEST" \
+        "$_ssrf_status" "$_ssrf_attempt" "$_ssrf_next" || \
+        warn -c vlan "Sync: settings convergence marker was retained without a retry update"
+}
+
 if [ -z "${DRY_RUN:-}" ]; then
     DRY_RUN="$(json_get_flag "DRY_RUN" "yes" "$SETTINGS_FILE" 2>/dev/null)"
 fi
 [ -z "$DRY_RUN" ] && DRY_RUN="yes"
+sync_settings_reconcile_capture
 
 DEBUG_JSON_FLAG="$(json_get_flag "SYNC_DEBUG" "0" "$SETTINGS_FILE" 2>/dev/null)"
 case "${DEBUG_JSON_FLAG}" in
@@ -243,6 +318,9 @@ _cleanup_sync_tmp() {
             warn -c cli,vlan "Sync cleanup could not remove its expected-settings breadcrumbs"
         fi
     done
+    # The action lock is still held here.  Do not release it before the
+    # generation-conditional terminal update/clear has completed.
+    sync_settings_reconcile_finish || :
     if [ "${SYNC_LOCK_ACQUIRED:-0}" -eq 1 ]; then
         if ! merv_owner_lock_release "$SYNC_LOCK" "${SYNC_LOCK_NONCE:-}" 2>/dev/null; then
             _sync_cleanup_failed=1
@@ -262,7 +340,9 @@ _cleanup_sync_tmp() {
     [ "$_sync_cleanup_failed" -eq 0 ] || _sync_cleanup_rc=1
     if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ] &&
        [ "${MERV_ACTION_PROGRESS_FINAL:-0}" -eq 0 ]; then
-        if [ "$_sync_cleanup_rc" -eq 0 ]; then
+        if [ "${SYNC_DEFERRED:-0}" -eq 1 ]; then
+            merv_action_progress_complete "Synchronization deferred; current settings remain pending"
+        elif [ "$_sync_cleanup_rc" -eq 0 ]; then
             merv_action_progress_complete "Synchronization complete"
         else
             merv_action_progress_fail "Synchronization stopped before completion"
@@ -306,6 +386,8 @@ if [ "$DRY_RUN" != "yes" ] && type merv_owner_lock_acquire >/dev/null 2>&1; then
         case "$(merv_owner_lock_state "$LOCKDIR/mervlan_manager.lock")" in
             live|unknown)
                 warn -c cli,vlan "Sync: mervlan_manager is applying config — skipping this run"
+                SYNC_DEFERRED=1
+                SYNC_DEFERRED_REASON=manager-active
                 exit 0
                 ;;
         esac
@@ -315,6 +397,9 @@ if [ "$DRY_RUN" != "yes" ] && type merv_owner_lock_acquire >/dev/null 2>&1; then
         SYNC_LOCK_NONCE="$MERV_LOCK_NONCE"
     else
         warn -c cli,vlan "Sync: another sync_nodes run is in progress — skipping"
+        SYNC_RECONCILE_VERIFIED=0
+        SYNC_DEFERRED=1
+        SYNC_DEFERRED_REASON=sync-active
         exit 0
     fi
 fi
@@ -344,6 +429,7 @@ settings/lib_action_ack.sh
 settings/lib_radio.sh
 settings/lib_update_state.sh
 settings/lib_node_reconcile.sh
+settings/lib_settings_reconcile.sh
 settings/lib_progress.sh
 settings/lib_action_progress.sh
 settings/mac_shield_snapshot.sh
@@ -361,6 +447,7 @@ functions/mervlan_trunk.sh
 functions/mervlan_wan.sh
 functions/mac_refresh.sh
 functions/ssh_hostkey_probe.sh
+functions/settings_reconcile.sh
 templates/mervlan_templates.sh
 "
 
@@ -396,6 +483,7 @@ functions/mervlan_trunk.sh
 functions/mervlan_wan.sh
 functions/mac_refresh.sh
 functions/ssh_hostkey_probe.sh
+functions/settings_reconcile.sh
 "
 FILES_TO_COPY_CHMOD="$FILES_TO_COPY_CHMOD $DEV_TOOLS_FILES_TO_COPY_CHMOD"
 # FILES_TO_COPY_CHMOD_644 — Config scripts that should remain non-executable
@@ -417,6 +505,7 @@ settings/lib_action_ack.sh
 settings/lib_radio.sh
 settings/lib_update_state.sh
 settings/lib_node_reconcile.sh
+settings/lib_settings_reconcile.sh
 settings/lib_progress.sh
 settings/lib_action_progress.sh
 settings/mac_shield_snapshot.sh
@@ -543,6 +632,9 @@ dbg_var NODE_IPS
 
 if [ -z "$NODE_IPS" ]; then
     warn -c cli,vlan "No nodes configured in settings.json"
+    # Exact verification of the currently empty required set is vacuous but
+    # intentional.  The terminal handler still rechecks digest/generation.
+    SYNC_RECONCILE_VERIFIED=1
     merv_action_progress_complete "No configured nodes; nothing to synchronize"
     exit 0
 fi
@@ -2473,6 +2565,7 @@ if [ "$overall_success" = "true" ]; then
     else
         merv_action_progress_complete "Synchronization complete"
     fi
+    SYNC_RECONCILE_VERIFIED=1
     exit 0
 else
     if [ "$DRY_RUN" = "yes" ]; then

@@ -35,6 +35,7 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 [ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
+[ -n "${LIB_SETTINGS_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
@@ -1160,6 +1161,14 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # This is deliberately only a cheap persistent due check.  The separately
+  # owned worker takes the global action lock before any SSH work, so this
+  # health lock is never retained across a node synchronization.
+  if [ -x "$MERV_BASE/functions/settings_reconcile.sh" ] &&
+      { { type merv_settings_reconcile_active >/dev/null 2>&1 && merv_settings_reconcile_active; } || \
+        [ -e "${MERV_SETTINGS_RECONCILE_FILE:-$MERV_STATE_ROOT/settings_reconcile.state}" ]; }; then
+    sh "$MERV_BASE/functions/settings_reconcile.sh" due >/dev/null 2>&1 || :
+  fi
   if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ] &&
      type merv_node_reconcile_active >/dev/null 2>&1 && merv_node_reconcile_active; then
     sh "$MERV_BASE/functions/mervlan_boot.sh" reconcile-pending >/dev/null 2>&1 ||

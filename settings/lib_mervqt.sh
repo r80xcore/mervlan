@@ -153,335 +153,7 @@ merv_mac_best_db() {
   return 1
 }
 
-# ============================================================================
-# MERV_MAC ebtables chain lifecycle
-# ============================================================================
 
-# ebt_mac_shield_init
-# Create MERV_MAC chain and insert FORWARD/INPUT jump rules. Idempotent.
-# Must be called before ebt_mac_shield_apply — chain must exist before
-# rules are appended.
-ebt_mac_shield_init() {
-  mervqt_has_ebtables || return 0
-  [ "${DRY_RUN:-no}" = "yes" ] && return 0
-
-  ebtables -t filter -N "$MERV_MAC_CHAIN" 2>/dev/null || true
-  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF "$MERV_MAC_CHAIN" || \
-    ebtables -t filter -I FORWARD -j "$MERV_MAC_CHAIN" 2>/dev/null || true
-  ebtables -t filter -L INPUT 2>/dev/null | grep -qF "$MERV_MAC_CHAIN" || \
-    ebtables -t filter -I INPUT -j "$MERV_MAC_CHAIN" 2>/dev/null || true
-}
-
-# ebt_mac_shield_flush
-# Flush per-MAC DROP rules from MERV_MAC. Chain and jumps survive.
-# Must be called before every ebt_mac_shield_apply to prevent accumulation.
-ebt_mac_shield_flush() {
-  mervqt_has_ebtables || return 0
-  [ "${DRY_RUN:-no}" = "yes" ] && return 0
-  ebtables -t filter -F "$MERV_MAC_CHAIN" 2>/dev/null || true
-}
-
-# ebt_mac_shield_teardown
-# Full removal: flush rules → delete jump refs → delete chain.
-# Called from mervlan_boot.sh disable flows. Mirrors ebt_quarantine_teardown.
-# Safe to call even if chain does not exist.
-ebt_mac_shield_teardown() {
-  mervqt_has_ebtables || return 0
-  ebtables -t filter -F "$MERV_MAC_CHAIN" 2>/dev/null || true
-  ebtables -t filter -D FORWARD -j "$MERV_MAC_CHAIN" 2>/dev/null || true
-  ebtables -t filter -D INPUT   -j "$MERV_MAC_CHAIN" 2>/dev/null || true
-  ebtables -t filter -X "$MERV_MAC_CHAIN" 2>/dev/null || true
-}
-
-# ebt_mac_shield_apply [db_path]
-# Load DROP rules from db into MERV_MAC chain.
-#
-# Caller MUST call ebt_mac_shield_flush() first (see file header contract).
-# Caller MUST call ebt_mac_shield_init() first — chain must exist.
-#
-# Validates all 4 fields per record. Uses mervqt_mac_lower before validation.
-# Silently skips malformed records. Logs armed count and skip count.
-#
-# Override-aware: MACs listed in MERV_MAC_OVERRIDE_DB are kept in the shield db
-# but their DROP rule is suppressed (no rule armed). Removing the override and
-# reloading re-locks the MAC. The override list is read once up-front.
-#
-# Rule shape: -s <mac> --logical-in br0 -j DROP
-#   Fires only while the client's wl interface is enslaved to br0.
-#   Goes dormant automatically once the interface is in its correct VLAN bridge.
-#   No per-rule cleanup is needed after correct bridge placement.
-ebt_mac_shield_apply() {
-  mervqt_has_ebtables || return 0
-  [ "${DRY_RUN:-no}" = "yes" ] && return 0
-
-  local db="${1:-$MERV_MAC_DB_ACTIVE}"
-  [ -f "$db" ] || return 0
-
-  local _ovr_list
-  _ovr_list=$(mervqt_override_list_read 2>/dev/null)
-
-  local ts mac iface vid rules=0 skipped=0 overridden=0
-
-  while IFS=' ' read -r ts mac iface vid; do
-    [ -n "$ts" ] && [ -n "$mac" ] && [ -n "$iface" ] && [ -n "$vid" ] || {
-      skipped=$((skipped + 1)); continue
-    }
-    case "$ts" in ''|*[!0-9]*) skipped=$((skipped+1)); continue ;; esac
-    mac=$(mervqt_mac_lower "$mac")
-    mervqt_valid_mac      "$mac"   || { skipped=$((skipped+1)); continue; }
-    mervqt_valid_wl_subif "$iface" || { skipped=$((skipped+1)); continue; }
-    mervqt_valid_vid      "$vid"   || { skipped=$((skipped+1)); continue; }
-
-    if mervqt_mac_is_overridden "$mac" "$_ovr_list"; then
-      overridden=$((overridden + 1))
-      continue
-    fi
-
-    ebtables -t filter -A "$MERV_MAC_CHAIN" \
-      -s "$mac" --logical-in br0 -j DROP 2>/dev/null || true
-    rules=$((rules + 1))
-  done < "$db"
-
-  info -c vlan "MERV_MAC: armed ${rules} rule(s) from $(basename "$db") (overridden: ${overridden}, skipped malformed: ${skipped})"
-}
-
-# ebt_mac_shield_init_and_apply [db_path]
-# Convenience wrapper: init → flush → apply. A first-run or post-teardown
-# reload must create/re-link the chain before its per-MAC rules are flushed.
-# Use this for single-call sites (cleanup_existing_config, boot_init).
-ebt_mac_shield_init_and_apply() {
-  local db="${1:-$MERV_MAC_DB_ACTIVE}"
-  ebt_mac_shield_init
-  ebt_mac_shield_flush
-  ebt_mac_shield_apply "$db"
-}
-
-# Script-level state for repair-log deduplication — reset once per process invocation.
-_MERV_MAC_SHIELD_STATE=""
-
-# ============================================================================
-# restore_merv_mac_shield
-# Called every tick inside wait_for_rc_quiet alongside restore_merv_qt_shield.
-# Idempotent: fast-paths when chain + jumps are both intact.
-# Accepts an optional pre-fetched ebtables dump ($1) to avoid redundant reads.
-#
-# Repair logic (mirrors restore_merv_qt_shield split):
-#   1. Chain + both jump rules intact: return immediately (no-op)
-#   2. Chain intact, jumps flushed (orphaned): ebt_mac_shield_init only —
-#      chain and per-MAC DROP rules are intact; just re-link jumps.
-#   3. Chain wiped: init → flush → apply from best available db
-# ============================================================================
-restore_merv_mac_shield() {
-  mervqt_has_ebtables || return 0
-
-  # Accept shared dump from wait_for_rc_quiet, or fetch independently
-  local full_rules="${1:-}"
-  [ -n "$full_rules" ] || full_rules=$(ebtables -t filter -L 2>/dev/null)
-
-  local chain_exists=1 jumps_exist=1
-
-  # 1. Did the chain survive?
-  printf '%s' "$full_rules" | grep -qF "Bridge chain: $MERV_MAC_CHAIN" || chain_exists=0
-
-  # 2. Did both jump rules (FORWARD and INPUT) survive?
-  # MERV_MAC's own rules use -j DROP, so any '-j $MERV_MAC_CHAIN' match
-  # originates exclusively from FORWARD/INPUT jump rules.
-  # Count >= 2 means both are present.
-  # Pattern "j $MERV_MAC_CHAIN" (no leading dash): matches '-j CHAIN' jump rules but NOT
-  # 'Bridge chain: CHAIN' (preceding char is ':' not 'j'). Avoids BusyBox v1.25.1
-  # grep misinterpreting a leading '-j' pattern as an option flag.
-  if [ "$chain_exists" -eq 1 ]; then
-    if [ "$(printf '%s' "$full_rules" | grep -cF "j $MERV_MAC_CHAIN")" -lt 2 ]; then
-      jumps_exist=0
-    fi
-  else
-    jumps_exist=0
-  fi
-
-  # Fast path: chain and both jump rules intact
-  if [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ]; then
-    case "$_MERV_MAC_SHIELD_STATE" in
-      ""|"ok") ;;
-      *) info -c vlan "Heal: MERV_MAC shield stable — firmware flushing stopped" ;;
-    esac
-    _MERV_MAC_SHIELD_STATE="ok"
-    return 0
-  fi
-
-  if [ "$chain_exists" -eq 0 ]; then
-    # Full chain wipe: create/re-link first, then flush and apply from db.
-    ebt_mac_shield_init
-    ebt_mac_shield_flush
-    local db
-    db=$(merv_mac_best_db 2>/dev/null) || true
-    if [ -n "$db" ]; then
-      ebt_mac_shield_apply "$db"
-      [ "$_MERV_MAC_SHIELD_STATE" = "wiped" ] || \
-        info -c vlan "Heal: MERV_MAC chain flushed by rc — fully rebuilt shield"
-    else
-      [ "$_MERV_MAC_SHIELD_STATE" = "wiped" ] || \
-        info -c vlan "Heal: MERV_MAC chain flushed by rc — re-linked (no db, rules empty until next snapshot)"
-    fi
-    _MERV_MAC_SHIELD_STATE="wiped"
-  else
-    # Orphaned: chain and MAC rules intact — re-link jumps only (no flush, no rule reload)
-    ebt_mac_shield_init
-    [ "$_MERV_MAC_SHIELD_STATE" = "orphaned" ] || \
-      info -c vlan "Heal: MERV_MAC orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
-    _MERV_MAC_SHIELD_STATE="orphaned"
-  fi
-}
-
-# ============================================================================
-# MERV_QT (L2 quarantine) restore — shared between heal and manager
-# Chain name comes from $MERV_QT_CHAIN (var_settings). All literal "MERV_QT"
-# references below are kept for BusyBox grep-pattern stability; they match the
-# canonical default. Both values are identical by construction.
-# ============================================================================
-
-# Script-level state for repair-log deduplication — reset once per process.
-_MERV_QT_SHIELD_STATE=""
-
-# merv_qt_ensure_expected_rules
-# Authoritative MERV_QT builder: create chain, link FORWARD/INPUT jumps, then
-# install one DROP rule (scoped --logical-in br0) per MERVLAN-managed VLAN VAP.
-# Expensive (calls merv_mac_build_expected_iface_vid). Call once before a wait
-# loop, not per-tick — restore_merv_qt_shield handles cheap per-tick repair.
-merv_qt_ensure_expected_rules() {
-  local iface vid qt_rules _qt_pairs
-
-  type ebtables >/dev/null 2>&1 || return 0
-  [ "${DRY_RUN:-no}" = "yes" ] && return 0
-
-  ebtables -t filter -N MERV_QT 2>/dev/null || true
-  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -L INPUT 2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I INPUT -j MERV_QT 2>/dev/null || true
-
-  type merv_mac_build_expected_iface_vid >/dev/null 2>&1 || return 0
-
-  # Use cached wrapper when available (manager apply path); falls through to
-  # the raw builder otherwise.
-  if type merv_iface_vid_list >/dev/null 2>&1; then
-    _qt_pairs=$(merv_iface_vid_list)
-  else
-    _qt_pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null)
-  fi
-  printf '%s\n' "$_qt_pairs" | while IFS=' ' read -r iface vid; do
-    [ -n "$iface" ] && [ -n "$vid" ] || continue
-    # Only quarantine VLAN-bound VAPs (real VID >= 2, purely numeric).
-    # Never quarantine intentionally-native/br0 interfaces.
-    case "$vid" in
-      ''|none|trunk|0|1|*[!0-9]*) continue ;;
-    esac
-    [ "$vid" -ge 2 ] 2>/dev/null || continue
-
-    qt_rules=$(ebtables -t filter -L MERV_QT 2>/dev/null)
-    if printf '%s\n' "$qt_rules" | grep -qF -- "-i $iface" &&
-       printf '%s\n' "$qt_rules" | grep -qF -- "logical-in br0"; then
-      continue
-    fi
-
-    ebtables -t filter -A MERV_QT -i "$iface" --logical-in br0 -j DROP 2>/dev/null || true
-  done
-}
-
-# restore_merv_qt_shield [ebtables_dump]
-# Cheap per-tick re-arm of the MERV_QT chain after rc flushed ebtables.
-# Fast paths:
-#   chain + both jumps intact -> no-op (one stale-gate sweep only)
-#   chain intact, jumps gone  -> relink jumps only (no DROP-rule rebuild)
-#   chain wiped               -> relink jumps + rebuild expected DROP rules
-# Accepts an optional pre-fetched `ebtables -t filter -L` dump to avoid a
-# redundant read when called from a guard tick.
-restore_merv_qt_shield() {
-  type ebtables >/dev/null 2>&1 || return 0
-
-  local full_rules="${1:-}"
-  [ -n "$full_rules" ] || full_rules=$(ebtables -t filter -L 2>/dev/null)
-
-  local chain_exists=1
-  local jumps_exist=1
-
-  printf '%s' "$full_rules" | grep -qF 'Bridge chain: MERV_QT' || chain_exists=0
-
-  # MERV_QT's own rules use -j DROP, so any '-j MERV_QT' match originates only
-  # from FORWARD/INPUT jumps. Count >= 2 means both are present. Pattern
-  # 'j MERV_QT' (no leading dash) avoids BusyBox grep treating '-j' as a flag.
-  if [ "$chain_exists" -eq 1 ]; then
-    if [ "$(printf '%s' "$full_rules" | grep -cF 'j MERV_QT')" -lt 2 ]; then
-      jumps_exist=0
-    fi
-  else
-    jumps_exist=0
-  fi
-
-  # Fast path: shield completely intact. Sweep any stale emergency DHCP gate a
-  # crashed re-link path may have left in FORWARD (-D is a no-op if absent).
-  if [ "$chain_exists" -eq 1 ] && [ "$jumps_exist" -eq 1 ]; then
-    ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-      --logical-in br0 -j DROP 2>/dev/null || true
-    case "$_MERV_QT_SHIELD_STATE" in
-      ""|"ok") ;;
-      *) info -c vlan "Heal: MERV_QT shield stable — firmware flushing stopped" ;;
-    esac
-    _MERV_QT_SHIELD_STATE="ok"
-    return 0
-  fi
-
-  # Re-link jumps. Reactive DHCP gate covers the <2ms window where the chain
-  # exists but is not yet jumped from FORWARD. Stale-gate cleanup is idempotent.
-  ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-    --logical-in br0 -j DROP 2>/dev/null || true
-  ebtables -t filter -I FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-    --logical-in br0 -j DROP 2>/dev/null || true
-  ebtables -t filter -N MERV_QT 2>/dev/null || true
-  ebtables -t filter -L FORWARD 2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I FORWARD -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -L INPUT   2>/dev/null | grep -qF 'MERV_QT' || \
-    ebtables -t filter -I INPUT   -j MERV_QT 2>/dev/null || true
-  ebtables -t filter -D FORWARD -p IPv4 --ip-proto udp --ip-dport 67 \
-    --logical-in br0 -j DROP 2>/dev/null || true
-
-  # Rebuild per-interface DROP rules only when the chain itself was wiped.
-  if [ "$chain_exists" -eq 0 ]; then
-    if type merv_qt_ensure_expected_rules >/dev/null 2>&1; then
-      merv_qt_ensure_expected_rules
-    elif type merv_iface_vid_list >/dev/null 2>&1; then
-      merv_iface_vid_list | while IFS=' ' read -r _qt_iface _qt_vid; do
-        [ -n "$_qt_iface" ] && [ -n "$_qt_vid" ] || continue
-        case "$_qt_vid" in
-          ''|none|trunk|0|1|*[!0-9]*) continue ;;
-        esac
-        [ "$_qt_vid" -ge 2 ] 2>/dev/null || continue
-        ebtables -t filter -A MERV_QT -i "$_qt_iface" --logical-in br0 -j DROP 2>/dev/null || true
-      done
-    elif type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
-      merv_mac_build_expected_iface_vid 2>/dev/null | while IFS=' ' read -r _qt_iface _qt_vid; do
-        [ -n "$_qt_iface" ] && [ -n "$_qt_vid" ] || continue
-        case "$_qt_vid" in
-          ''|none|trunk|0|1|*[!0-9]*) continue ;;
-        esac
-        [ "$_qt_vid" -ge 2 ] 2>/dev/null || continue
-        ebtables -t filter -A MERV_QT -i "$_qt_iface" --logical-in br0 -j DROP 2>/dev/null || true
-      done
-    else
-      # Last-resort sysfs scan (partial-install/test recovery only).
-      for _qt_path in /sys/class/net/wl*.* /sys/class/net/ra*.* /sys/class/net/ath*.*; do
-        [ -e "$_qt_path" ] || continue
-        ebtables -t filter -A MERV_QT -i "${_qt_path##*/}" --logical-in br0 -j DROP 2>/dev/null || true
-      done
-    fi
-    [ "$_MERV_QT_SHIELD_STATE" = "wiped" ] || \
-      info -c vlan "Heal: MERV_QT chain flushed by rc — fully rebuilt shield"
-    _MERV_QT_SHIELD_STATE="wiped"
-  else
-    [ "$_MERV_QT_SHIELD_STATE" = "orphaned" ] || \
-      info -c vlan "Heal: MERV_QT orphaned by rc (FORWARD/INPUT jumps flushed) — re-linked shield"
-    _MERV_QT_SHIELD_STATE="orphaned"
-  fi
-}
 
 # ============================================================================
 # MERV_DHCP_HOLD — critical-section DHCP kill switch (shared)
@@ -940,6 +612,117 @@ _merv_dhcp_first_target_rule() {
   '
 }
 
+# Print the first rule in chain that is not exactly the supplied canonical
+# rule.  Used by the DHCP Hold repairer only after that canonical protection
+# has been installed/retained, so removing stale children cannot create a
+# DROP-less window.
+_merv_dhcp_first_nonexact_rule() {
+  local _mdfne_chain="$1" _mdfne_exact="$2" _mdfne_dump
+  _mdfne_dump=$(_merv_dhcp_list_chain "$_mdfne_chain") || return 1
+  printf '%s\n' "$_mdfne_dump" | awk -v chain="$_mdfne_chain" -v exact="$_mdfne_exact" '
+    function normalize(s, p) {
+      gsub(/[[:space:]]+/, " ", s)
+      sub(/^ /, "", s); sub(/ $/, "", s)
+      p = "-A " chain " "
+      if (index(s, p) > 0) s = substr(s, index(s, p) + length(p))
+      return s
+    }
+    {
+      line = normalize($0)
+      if (line ~ /^-/ && line != exact) { print line; exit }
+    }
+  '
+}
+
+# Print the first jump to target that is not the canonical unconditional
+# parent jump.  A conditional/wrong jump is stale even though it names the
+# same target chain.
+_merv_dhcp_first_noncanonical_target_rule() {
+  local _mdfnc_chain="$1" _mdfnc_exact="$2" _mdfnc_target="$3" _mdfnc_dump
+  _mdfnc_dump=$(_merv_dhcp_list_chain "$_mdfnc_chain") || return 1
+  printf '%s\n' "$_mdfnc_dump" | awk -v chain="$_mdfnc_chain" -v exact="$_mdfnc_exact" -v target="$_mdfnc_target" '
+    function normalize(s, p) {
+      gsub(/[[:space:]]+/, " ", s)
+      sub(/^ /, "", s); sub(/ $/, "", s)
+      p = "-A " chain " "
+      if (index(s, p) > 0) s = substr(s, index(s, p) + length(p))
+      return s
+    }
+    {
+      line = normalize($0)
+      if (line !~ /^-/ || line == exact) next
+      n = split(line, word, " ")
+      for (i = 1; i < n; i++)
+        if (word[i] == "-j" && word[i + 1] == target) { print line; exit }
+    }
+  '
+}
+
+# Add/retain one canonical child DROP, then remove only surplus child rules.
+# Never flush a chain that still contains effective protection.
+_merv_dhcp_ensure_child_drop() {
+  local _mdecd_rule='-p IPv4 --ip-proto udp --ip-dport 67 -j DROP'
+  local _mdecd_stats _mdecd_exact _mdecd_stale _mdecd_count=0
+
+  _mdecd_stats=$(_merv_dhcp_rule_stats "$MERV_DHCP_HOLD_CHAIN" "$_mdecd_rule" "") || return 4
+  set -- $_mdecd_stats
+  _mdecd_exact="${1:-0}"
+  if [ "$_mdecd_exact" -lt 1 ] 2>/dev/null; then
+    _merv_dhcp_ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" $_mdecd_rule 2>/dev/null || return 4
+  fi
+
+  while :; do
+    _mdecd_stale=$(_merv_dhcp_first_nonexact_rule "$MERV_DHCP_HOLD_CHAIN" "$_mdecd_rule" 2>/dev/null)
+    [ -n "$_mdecd_stale" ] || break
+    set -- $_mdecd_stale
+    _merv_dhcp_ebtables -t filter -D "$MERV_DHCP_HOLD_CHAIN" "$@" 2>/dev/null || return 4
+    _mdecd_count=$((_mdecd_count + 1))
+    [ "$_mdecd_count" -lt 128 ] || return 4
+  done
+
+  while :; do
+    _mdecd_stats=$(_merv_dhcp_rule_stats "$MERV_DHCP_HOLD_CHAIN" "$_mdecd_rule" "") || return 4
+    set -- $_mdecd_stats
+    [ "${1:-0}" -gt 1 ] 2>/dev/null || return 0
+    _merv_dhcp_ebtables -t filter -D "$MERV_DHCP_HOLD_CHAIN" $_mdecd_rule 2>/dev/null || return 4
+    _mdecd_count=$((_mdecd_count + 1))
+    [ "$_mdecd_count" -lt 128 ] || return 4
+  done
+}
+
+# Add/retain one exact parent jump before pruning duplicate or conditional
+# target jumps.  This ordering keeps an existing child DROP reachable through
+# at least one parent during every individual ebtables mutation.
+_merv_dhcp_ensure_parent_jump() {
+  local _mdepj_parent="$1" _mdepj_rule="-j $MERV_DHCP_HOLD_CHAIN"
+  local _mdepj_stats _mdepj_exact _mdepj_stale _mdepj_count=0
+
+  _mdepj_stats=$(_merv_dhcp_rule_stats "$_mdepj_parent" "$_mdepj_rule" "$MERV_DHCP_HOLD_CHAIN") || return 4
+  set -- $_mdepj_stats
+  _mdepj_exact="${1:-0}"
+  if [ "$_mdepj_exact" -lt 1 ] 2>/dev/null; then
+    _merv_dhcp_ebtables -t filter -I "$_mdepj_parent" -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || return 4
+  fi
+
+  while :; do
+    _mdepj_stale=$(_merv_dhcp_first_noncanonical_target_rule "$_mdepj_parent" "$_mdepj_rule" "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null)
+    [ -n "$_mdepj_stale" ] || break
+    set -- $_mdepj_stale
+    _merv_dhcp_ebtables -t filter -D "$_mdepj_parent" "$@" 2>/dev/null || return 4
+    _mdepj_count=$((_mdepj_count + 1))
+    [ "$_mdepj_count" -lt 128 ] || return 4
+  done
+
+  while :; do
+    _mdepj_stats=$(_merv_dhcp_rule_stats "$_mdepj_parent" "$_mdepj_rule" "$MERV_DHCP_HOLD_CHAIN") || return 4
+    set -- $_mdepj_stats
+    [ "${1:-0}" -gt 1 ] 2>/dev/null || return 0
+    _merv_dhcp_ebtables -t filter -D "$_mdepj_parent" -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || return 4
+    _mdepj_count=$((_mdepj_count + 1))
+    [ "$_mdepj_count" -lt 128 ] || return 4
+  done
+}
+
 _merv_dhcp_remove_target_jumps() {
   local _mdrtj_parent="$1" _mdrtj_rule _mdrtj_count=0
   while :; do
@@ -1040,23 +823,16 @@ _merv_dhcp_hold_enforce_locked() {
           { _merv_dhcp_enforce_fail 4 chain-create-failed; return $?; }
         ;;
       enforce-after-drop)
-        _merv_dhcp_ebtables -t filter -F "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
-          { _merv_dhcp_enforce_fail 4 chain-flush-failed; return $?; }
-        _merv_dhcp_ebtables -t filter -A "$MERV_DHCP_HOLD_CHAIN" \
-          -p IPv4 --ip-proto udp --ip-dport 67 -j DROP 2>/dev/null || \
-          { _merv_dhcp_enforce_fail 4 drop-install-failed; return $?; }
+        _merv_dhcp_ensure_child_drop || \
+          { _merv_dhcp_enforce_fail 4 child-repair-failed; return $?; }
         ;;
       enforce-after-forward)
-        _merv_dhcp_remove_target_jumps FORWARD || \
-          { _merv_dhcp_enforce_fail 4 forward-cleanup-failed; return $?; }
-        _merv_dhcp_ebtables -t filter -I FORWARD -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
-          { _merv_dhcp_enforce_fail 4 forward-install-failed; return $?; }
+        _merv_dhcp_ensure_parent_jump FORWARD || \
+          { _merv_dhcp_enforce_fail 4 forward-repair-failed; return $?; }
         ;;
       enforce-after-input)
-        _merv_dhcp_remove_target_jumps INPUT || \
-          { _merv_dhcp_enforce_fail 4 input-cleanup-failed; return $?; }
-        _merv_dhcp_ebtables -t filter -I INPUT -j "$MERV_DHCP_HOLD_CHAIN" 2>/dev/null || \
-          { _merv_dhcp_enforce_fail 4 input-install-failed; return $?; }
+        _merv_dhcp_ensure_parent_jump INPUT || \
+          { _merv_dhcp_enforce_fail 4 input-repair-failed; return $?; }
         ;;
       enforce-before-verify) ;;
     esac
@@ -2374,21 +2150,6 @@ merv_observation_wait_idle() {
   return 0
 }
 
-merv_l2_guard_restore_all() {
-  local _rules="${1:-}"
-  type ebtables >/dev/null 2>&1 || return 0
-  [ -n "$_rules" ] || _rules=$(ebtables -t filter -L 2>/dev/null)
-
-  type restore_merv_qt_shield          >/dev/null 2>&1 && restore_merv_qt_shield  "$_rules"
-  type restore_merv_mac_shield         >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
-  type merv_dhcp_hold_restore_if_active >/dev/null 2>&1 && merv_dhcp_hold_restore_if_active
-}
-
-merv_guard_tick() {
-  local _rules=""
-  type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
-  merv_l2_guard_restore_all "$_rules"
-}
 
 merv_guarded_sleep() {
   local _n="${1:-1}"
@@ -2843,9 +2604,8 @@ EOF
   merv_qt_verify_exact
 }
 
-# Final strict restorers. The earlier compatibility implementations remain in
-# this file for older source layouts, but these definitions are authoritative:
-# a guard tick is healthy only when the same exact verifier accepts its state.
+# Strict restorers use the same exact verifiers as the guard tick, so a healthy
+# state is accepted only when the complete expected rule set is present.
 restore_merv_qt_shield() {
   _mrqs_dump="${1:-}"
   mervqt_has_ebtables || return 3
@@ -2866,6 +2626,9 @@ restore_merv_mac_shield() {
   merv_mac_shield_verify_exact "$_mrms_dump"
 }
 
+# One authoritative guard coordinator.  Callers that already fetched a table
+# dump pass it through so QT and MAC verification share one observation; DHCP
+# Hold retains its own state-lock/ownership verification path.
 merv_l2_guard_restore_all() {
   _mlgra_dump="${1:-}"
   mervqt_has_ebtables || return 3
@@ -2880,6 +2643,7 @@ merv_guard_tick() {
   _mgt_dump=$(_merv_ebtables_get_dump) || return 1
   merv_l2_guard_restore_all "$_mgt_dump"
 }
+
 
 merv_qt_teardown() {
   [ "${DRY_RUN:-no}" = yes ] && return 0
