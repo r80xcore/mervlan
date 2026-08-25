@@ -895,7 +895,8 @@ chmod 0755 /jffs/addons/mervlan/install.sh
 For directed testing of a custom branch, replace `main` in the bootstrap URL
 with that branch name, then choose **Custom branch** in the wizard and enter
 the same name. The installer validates the branch before downloading its
-complete package.
+complete package. Raw GitHub URLs use the branch name directly—use
+`.../pre_v0.53.28-dev/install.sh`, not `.../refs/heads/pre_v0.53.28-dev/install.sh`.
 
 | Command | What it does |
 | --- | --- |
