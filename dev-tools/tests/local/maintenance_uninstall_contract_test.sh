@@ -133,4 +133,33 @@ if TEST_ROOT="$TEST_ROOT" PREFLIGHT_HELPER="$PREFLIGHT_HELPER" sh -c '
 '; then :; else fail full-uninstall-legacy-node-preflight; fi
 pass full-uninstall-legacy-node-preflight
 
+# Full node cleanup must leave no node-local MerVLAN control-plane directories,
+# remove only MerVLAN metadata, and disable node hooks before its runtime is
+# erased.  Capture the authenticated remote command through the real helper.
+REMOTE_HELPER="$TEST_ROOT/remove-nodes.sh"
+sed -n '/^remove_nodes_full_install() {/,/^}/p' "$UNINSTALL" > "$REMOTE_HELPER" || fail remove-nodes-extract
+[ -s "$REMOTE_HELPER" ] || fail remove-nodes-helper-empty
+if TEST_ROOT="$TEST_ROOT" REMOTE_HELPER="$REMOTE_HELPER" sh -c '
+  SSH_KEY="$TEST_ROOT/router-node-key"
+  FULL_DELETE_BACKUPS=1
+  printf x > "$SSH_KEY" || exit 1
+  merv_node_list() { printf "%s\\n" "1 192.0.2.10"; }
+  logger() { :; }
+  merv_ssh_exec() { printf "%s" "$3" > "$TEST_ROOT/remote-cleanup.sh"; return 0; }
+  . "$REMOTE_HELPER" || exit 2
+  remove_nodes_full_install || exit 3
+'; then :; else fail full-uninstall-node-cleanup-command; fi
+for cleanup_path in \
+  '/jffs/addons/mervlan' \
+  '/tmp/mervlan_tmp' \
+  '/www/user/mervlan' \
+  '/www/user/merlin_vlan_manager' \
+  '/jffs/addons/mervlan_state' \
+  '/jffs/addons/mervlan_backups'; do
+  grep -Fq "$cleanup_path" "$TEST_ROOT/remote-cleanup.sh" || fail "node-cleanup-path-missing:$cleanup_path"
+done
+grep -Fq 'mervlan_boot.sh nodedisable' "$TEST_ROOT/remote-cleanup.sh" || fail node-hook-cleanup-missing
+grep -Fq 'mervlan_version' "$TEST_ROOT/remote-cleanup.sh" || fail node-metadata-cleanup-missing
+pass full-uninstall-node-cleanup-command
+
 printf 'MAINTENANCE_UNINSTALL_CONTRACT_OK\n'

@@ -37,6 +37,9 @@ Fixed: Installer, hook ownership, and upgrade-lock recovery
 - Full uninstall now accepts the established endpoint-bound SSH trust path for
   legacy node settings that predate a stored node MAC; it still refuses an
   unverified node.
+- Full uninstall now removes the complete node-local MerVLAN control plane,
+  including hooks, public assets, durable state, and selected backup storage,
+  without touching other add-on metadata.
 
 Fixed: WAN Native clean-state and trunk configuration
 - MAIN ASUS/default recovery IP is optional while using a numeric WAN Native

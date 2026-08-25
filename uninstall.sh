@@ -867,14 +867,24 @@ remove_nodes_full_install_legacy() {
 }
 
 remove_nodes_full_install() {
+    local _rnf_cleanup_cmd _rnf_remove_paths
     _rnf_nodes="$(merv_node_list 2>/dev/null || printf '')"
     [ -n "$_rnf_nodes" ] || return 0
     [ -f "$SSH_KEY" ] || return 1
+    _rnf_remove_paths="/jffs/addons/mervlan /tmp/mervlan_tmp /www/user/mervlan /www/user/merlin_vlan_manager /jffs/addons/mervlan_state"
+    if [ "${FULL_DELETE_BACKUPS:-0}" = "1" ]; then
+        _rnf_remove_paths="$_rnf_remove_paths /jffs/addons/mervlan_backups"
+    fi
+    # This command is sent only after the complete, strict SSH preflight.  It
+    # removes the node's own MerVLAN control plane and no other addon's
+    # metadata; hooks are disabled while the node runtime still exists.
+    _rnf_cleanup_cmd='if [ -x /jffs/addons/mervlan/functions/mervlan_boot.sh ]; then /bin/sh /jffs/addons/mervlan/functions/mervlan_boot.sh nodedisable >/dev/null 2>&1 || exit 1; fi; for _rnf_settings in /jffs/addons/custom_settings.txt; do [ -f "$_rnf_settings" ] || continue; for _rnf_key in mervlan_page mervlan_state mervlan_version merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version; do sed -i "\\~^$_rnf_key ~d" "$_rnf_settings" || exit 1; done; done; rm -rf '
+    _rnf_cleanup_cmd="$_rnf_cleanup_cmd$_rnf_remove_paths"
     _rnf_ok=1
     while IFS=' ' read -r _rnf_id _rnf_ip _rnf_extra || [ -n "$_rnf_id" ]; do
         [ -n "$_rnf_id" ] || continue
         [ -z "$_rnf_extra" ] || { _rnf_ok=0; continue; }
-        if merv_ssh_exec "$_rnf_id" "$_rnf_ip" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
+        if merv_ssh_exec "$_rnf_id" "$_rnf_ip" "$_rnf_cleanup_cmd" >/dev/null 2>&1; then
             logger -t "$LOGTAG" "Node cleanup success: $_rnf_ip"
         else
             logger -t "$LOGTAG" "WARNING: verified node cleanup failed for $_rnf_ip"
