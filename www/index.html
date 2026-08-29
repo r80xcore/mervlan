@@ -1029,7 +1029,7 @@
         <div id="sshTrustOverlay" class="ssh-trust-overlay" aria-hidden="true"></div>
         <aside id="sshTrustPausedTray" class="ssh-trust-paused-tray" role="dialog" aria-modal="true" aria-labelledby="sshTrustPausedTrayTitle" aria-hidden="true">
           <h3 id="sshTrustPausedTrayTitle" class="ssh-trust-paused-tray__title">MerVLAN loading paused</h3>
-          <p class="ssh-trust-paused-tray__copy">SSH host-key approval is still required before the stored action can continue. <span id="sshTrustPausedTrayCountdown" class="ssh-trust-countdown">Auto-abort in 5:00</span></p>
+          <p class="ssh-trust-paused-tray__copy">SSH host-key approval is still required before the stored action can continue. <span id="sshTrustPausedTrayCountdown" class="ssh-trust-countdown">Decision expires in 5:00</span></p>
           <div class="ssh-trust-paused-tray__actions">
             <button id="sshTrustPausedResumeBtn" type="button" class="button_gen" onclick="resumeSshTrustReview()">Review nodes</button>
             <button id="sshTrustPausedAbortBtn" type="button" class="button_gen" onclick="submitSshTrustAbort()">Abort action</button>
@@ -1043,7 +1043,7 @@
           <div class="modal__body">
             <div class="ssh-trust-paused-banner">
               <strong>MerVLAN loading paused</strong>
-              <span id="sshTrustModalCountdown" class="ssh-trust-countdown">Auto-abort in 5:00</span>
+              <span id="sshTrustModalCountdown" class="ssh-trust-countdown">Decision expires in 5:00</span>
             </div>
             <p id="sshTrustIntro">MerVLAN received host keys that are not yet trusted by this router. Review the listed node(s) before continuing.</p>
             <div id="sshTrustNodes" class="ssh-trust-registry-list ssh-trust-decision-list" role="list"></div>
@@ -1453,21 +1453,12 @@
       </div>
 
       <div id="advOverrideError" class="adv-override-error" style="display:none;"></div>
-      <div class="adv-override-help" style="margin-top:6px;"><strong>Save</strong> stores the overrides. Auto-refresh re-runs hardware detection after saving.</div>
-      <div class="adv-override-help" style="margin-top:4px;">If nodes are configured, use <strong>Auto-sync Nodes</strong> to sync now, or run <strong>Sync Nodes</strong> later.</div>
-      <div class="adv-override-auto-refresh" style="margin-top:4px; margin-bottom:2px;">
-        <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:0.92em; color:#ccc;">
-          <input type="checkbox" id="advOverrideAutoRefreshHw" onchange="toggleOverrideBtnText()">
-          <span title="When ticked, pressing Save &amp; Apply will also trigger a HW Profile refresh so the UI updates immediately.&#10;This setting resets every time and is not saved.&#10;If unticked, press Refresh HW Profile afterwards to update the UI.">Auto-refresh HW Profile</span>
-        </label>
-      </div>
-      <div class="adv-override-auto-sync" style="margin-top:4px; margin-bottom:2px;">
-        <span class="svc-settings-hint" style="font-size:0.88em; color:#aaa;">Auto-sync settings to nodes is governed by the persistent Settings option.</span>
-      </div>
+      <div class="adv-override-help" style="margin-top:6px;"><strong>Save</strong> stores the overrides. <strong>Save &amp; Refresh Hardware</strong> also refreshes MAIN's hardware profile.</div>
+      <div class="adv-override-help" style="margin-top:4px;">When <strong>Automatically sync settings to nodes</strong> is enabled in Settings, either action also synchronizes configured nodes and refreshes each node's hardware profile. If it is disabled, run <strong>Sync Nodes</strong> manually after saving.</div>
     </div>
     <div class="modal__actions">
-      <button type="button" class="button_gen" id="advOverrideApplyBtn" onclick="applyAdvancedOverride()">Save</button>
-      <button type="button" class="button_gen" id="advOverrideRefreshHwBtn" onclick="refreshHwProfile()" title="Re-run hardware detection to refresh the Hardware profile in settings.json.&#10;&#10;You must Save your settings first for override changes to take effect.&#10;Use this to revert to auto-detected hardware after disabling an override.">Refresh HW Profile</button>
+      <button type="button" class="button_gen" id="advOverrideSaveBtn" onclick="applyAdvancedOverride(false)" title="Save this device's port mapping override. If automatic node synchronization is enabled in Settings, MerVLAN also synchronizes configured nodes; otherwise run Sync Nodes manually.">Save</button>
+      <button type="button" class="button_gen" id="advOverrideSaveRefreshBtn" onclick="applyAdvancedOverride(true)" title="Save this port mapping override, refresh MAIN's hardware profile, then synchronize configured nodes when automatic node synchronization is enabled. Each synchronized node refreshes its own hardware profile. This does not apply VLAN configuration.">Save &amp; Refresh HW</button>
       <button type="button" class="button_gen" onclick="hideAdvancedOverrideModal()">Cancel</button>
     </div>
   </div>
@@ -1535,9 +1526,17 @@
     .svc-dot-off    { color: #555; }
     .svc-unit-mac   { font-size: 0.82em; margin-left: auto; }
     .svc-transaction-status { margin-top: 8px; min-height: 1.35em; font-size: 0.85em; color: #aaa; }
-    .svc-transaction-status.is-success { color: #7bd77b; }
-    .svc-transaction-status.is-warning { color: #ffb432; }
-    .svc-transaction-status.is-error { color: #ff8a8a; }
+    .svc-transaction-row { display: none; align-items: center; gap: 6px; min-height: 1.35em; }
+    .svc-transaction-row.is-visible { display: flex; }
+    .svc-transaction-label { flex: 0 0 62px; color: #aaa; font-weight: 600; }
+    .svc-transaction-message { min-width: 0; }
+    .svc-transaction-activity { display: none; width: 8px; height: 8px; border: 2px solid rgba(125, 184, 232, 0.35); border-top-color: #7db8e8; border-radius: 50%; animation: svc-transaction-spin .8s linear infinite; }
+    .svc-transaction-row.is-info { color: #7db8e8; }
+    .svc-transaction-row.is-info .svc-transaction-activity { display: inline-block; }
+    .svc-transaction-row.is-success { color: #7bd77b; }
+    .svc-transaction-row.is-warning { color: #ffb432; }
+    .svc-transaction-row.is-error { color: #ff8a8a; }
+    @keyframes svc-transaction-spin { to { transform: rotate(360deg); } }
 
     /* ---- paused indicator on Settings button ---- */
     #serviceSettingsBtn.is-paused {
@@ -1682,7 +1681,17 @@
       </div>
       <!-- Full status detail panel: hidden until ⟳ is pressed -->
       <div id="svcStatusDetail" class="svc-status-detail" style="display:none;"></div>
-      <div id="svcTransactionStatus" class="svc-transaction-status" role="status" aria-live="polite"></div>
+      <div id="svcTransactionStatus" class="svc-transaction-status" role="status" aria-live="polite">
+        <div id="svcTransactionSettings" class="svc-transaction-row">
+          <span class="svc-transaction-label">Settings</span>
+          <span class="svc-transaction-message"></span>
+        </div>
+        <div id="svcTransactionAutoSync" class="svc-transaction-row">
+          <span class="svc-transaction-label">Auto-sync</span>
+          <span class="svc-transaction-activity" aria-hidden="true"></span>
+          <span class="svc-transaction-message"></span>
+        </div>
+      </div>
 
     </div>
     <div class="modal__actions">
@@ -3421,10 +3430,13 @@ function showTooltip() {
       clearSettingsAuthorityStatusTimers();
       let message = '';
       const mainPageDirty = state === 'ready' && MAIN_PAGE_SAVE_DIRTY;
+      const invalidNodeIp = state === 'ready' ? firstInvalidNodeIpDraft() : 0;
       if (state === 'loading') {
         message = 'Loading settings... Save and Apply are paused.';
       } else if (state === 'ready') {
-        message = mainPageDirty
+        message = invalidNodeIp
+          ? `Correct or clear the invalid Node ${invalidNodeIp} IP before saving.`
+          : mainPageDirty
           ? 'Unsaved changes. Click Save to persist.'
           : SETTINGS_NODE_STATE === 'configured'
           ? 'Settings loaded. Nodes are configured.'
@@ -3438,8 +3450,8 @@ function showTooltip() {
         message = 'Settings are not loaded. Click Load before Save or Apply.';
       }
       if (status) {
-        const visualState = mainPageDirty ? 'dirty' : state;
-        const color = state === 'failed' ? '#f28b82'
+        const visualState = invalidNodeIp ? 'invalid' : (mainPageDirty ? 'dirty' : state);
+        const color = state === 'failed' || invalidNodeIp ? '#f28b82'
           : (mainPageDirty ? '#f0ad4e' : (state === 'ready' && SETTINGS_NODE_STATE !== 'unknown' ? '#8bc34a' : '#f0ad4e'));
         const currentMessage = status.textContent;
         const messageChanged = currentMessage !== message || status.dataset.state !== visualState;
@@ -3475,7 +3487,7 @@ function showTooltip() {
         // Successful informational messages hide themselves after their fade-in
         // and hold period. Persistent loading/error/dirty messages only leave
         // when a new authority state replaces them.
-        const hideSuccess = state === 'ready' && !mainPageDirty && SETTINGS_NODE_STATE !== 'unknown';
+        const hideSuccess = state === 'ready' && !mainPageDirty && !invalidNodeIp && SETTINGS_NODE_STATE !== 'unknown';
         if (hideSuccess) {
           const successDelay = SETTINGS_STATUS_SUCCESS_HOLD_MS + SETTINGS_STATUS_FADE_IN_MS +
             (messageChanged && currentMessage ? SETTINGS_STATUS_FADE_OUT_MS : 0);
@@ -3498,12 +3510,16 @@ function showTooltip() {
         }
       }
       if (saveBtn) {
-        saveBtn.disabled = state !== 'ready';
+        saveBtn.disabled = state !== 'ready' || !!invalidNodeIp;
         saveBtn.classList.toggle('is-dirty', state === 'ready' && mainPageDirty);
-        saveBtn.title = state === 'ready' && mainPageDirty
+        saveBtn.title = invalidNodeIp
+          ? `Correct or clear the invalid Node ${invalidNodeIp} IP before saving.`
+          : state === 'ready' && mainPageDirty
           ? 'Unsaved main-page changes. Click Save to persist.'
           : 'Save the current MerVLAN configuration.';
-        saveBtn.setAttribute('aria-label', state === 'ready' && mainPageDirty
+        saveBtn.setAttribute('aria-label', invalidNodeIp
+          ? `Save unavailable. Correct or clear the invalid Node ${invalidNodeIp} IP.`
+          : state === 'ready' && mainPageDirty
           ? 'Save. Unsaved main-page changes need persistence.'
           : 'Save the current MerVLAN configuration.');
       }
@@ -3709,6 +3725,20 @@ function showTooltip() {
       const persisted = PERSISTED_SETTINGS_FLAT_BASELINE
         ? extractMainPageSaveKeys(PERSISTED_SETTINGS_FLAT_BASELINE) : null;
       return !!draft && !!persisted && !shallowEqual(draft, persisted);
+    }
+
+    // Empty node rows are intentionally unconfigured. A non-empty value that
+    // is not a valid IPv4 address remains an unsaved draft error and cannot be
+    // submitted as a node-management endpoint.
+    function firstInvalidNodeIpDraft() {
+      const form = document.getElementById('settingsForm');
+      if (!form) return 0;
+      for (let node = 1; node <= MAX_NODES; node++) {
+        const input = form[`NODE${node}`];
+        const value = String(input ? input.value : '').trim();
+        if (value && value.toLowerCase() !== 'none' && !statusNodeIpIsValid(value)) return node;
+      }
+      return 0;
     }
 
     function refreshMainSaveNeededState() {
@@ -5234,6 +5264,8 @@ function showTooltip() {
           // correlated completion result for verified backend actions
           ACTION_RESULT: "tmp/results/action_result.json",
           ACTION_RESULTS_DIR: "tmp/results/actions/",
+          // read-only projection of backend-owned settings convergence state
+          SETTINGS_RECONCILE_STATUS: "tmp/results/settings_reconcile.json",
           // backup inventory and correlated backup/restore operation result
           BACKUP_INVENTORY: "tmp/results/backup_inventory.json",
           MAINTENANCE_RESULT: "tmp/results/maintenance_result.json"
@@ -6202,7 +6234,7 @@ function renderClientMetaEditor(data){
   }
   html += '</div>';
   html += '<div class="cm-editor-actions">'+
-          '<button type="button" class="button_gen" onclick="saveClientMeta(this)" title="Save client names and Unlock selections, apply the MAC shield changes, and refresh client information.">Save Client Metadata</button>'+
+          '<button type="button" class="button_gen" onclick="saveClientMeta(this)" title="Save client names and Unlock selections. If MAC Shield has an active database, apply them immediately and refresh client information; otherwise Unlock selections are staged for the next MAC Shield rebuild.">Save Client Metadata</button>'+
           '<button type="button" class="button_gen" onclick="toggleClientMetaEdit(false)" title="Discard unsaved metadata changes and return to the client overview.">Cancel</button>'+
           '</div>';
   html += '</div>';
@@ -6463,7 +6495,7 @@ async function saveClientMeta(btn){
 
   let metadataLoadingTask = null;
   if (typeof MerVLANLoading !== 'undefined') {
-    metadataLoadingTask = MerVLANLoading.start('macclientmeta_vlanmgr', 'Save Client Metadata', {
+    metadataLoadingTask = MerVLANLoading.start('macclientmeta_vlanmgr', 'Saving Client Metadata', {
       progressBacked: true
     });
     if (metadataLoadingTask) metadataLoadingTask.phase('Preparing client metadata...', 10);
@@ -6472,7 +6504,7 @@ async function saveClientMeta(btn){
   appendCliText(`Saving client metadata (${_cmPayloadStr.length} bytes)...\n`, {scroll:'force'});
   const saveResult = (typeof window.parent.MVM_save_quiet === 'function')
     ? window.parent.MVM_save_quiet(merlinPayload)
-    : window.parent.MVM_save(merlinPayload, { loading:false, waitSec:0, skipRefresh:true });
+    : window.parent.MVM_save(merlinPayload, { loading:false, waitSec:0, skipRefresh:true, minLoadingMs:0 });
   if (saveResult === false) {
     if (metadataLoadingTask) metadataLoadingTask.fail('Client metadata could not be saved.');
     appendCliText('Client metadata save was rejected by the parent page.\n', {scroll:'force'});
@@ -6517,7 +6549,10 @@ async function saveClientMeta(btn){
 
   // Settings are on disk; now materialize the DBs, reload the shield, recollect.
   appendCliText('Applying client metadata...\n', {scroll:'force'});
-  if (metadataLoadingTask) metadataLoadingTask.phase('Applying client metadata...', 68);
+  if (metadataLoadingTask) {
+    metadataLoadingTask.setLabel('Applying Client Metadata');
+    metadataLoadingTask.phase('Starting client metadata apply...', 58);
+  }
   const metaStartTime = Date.now();
   const prevRunIdForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.run_id;
   const prevGenForMeta = LAST_CLIENTS_DATA && LAST_CLIENTS_DATA.generated;
@@ -6526,17 +6561,25 @@ async function saveClientMeta(btn){
     // The frontend still waits for fresh inventory, while the backend progress
     // token can fail the task early if DB materialization or collection fails.
     metaSubmitted = window.parent.MVM_macClientMeta({
-      progressToken: metadataLoadingTask ? metadataLoadingTask.token : ''
+      progressToken: metadataLoadingTask ? metadataLoadingTask.token : '',
+      loading: false,
+      skipRefresh: true,
+      waitSec: 0,
+      minLoadingMs: 0
     });
   } else if (window.parent && typeof window.parent.MVM_trigger === 'function') {
-    metaSubmitted = window.parent.MVM_trigger('macclientmeta_vlanmgr');
+    metaSubmitted = window.parent.MVM_trigger('macclientmeta_vlanmgr', {
+      loading: false,
+      skipRefresh: true,
+      waitSec: 0,
+      minLoadingMs: 0
+    });
   }
   if (metaSubmitted === false || !metaSubmitted) {
     if (metadataLoadingTask) metadataLoadingTask.fail('Client metadata apply could not be started.');
     appendCliText('Client metadata apply could not be started.\n', {scroll:'force'});
     return;
   }
-  if (metadataLoadingTask) metadataLoadingTask.phase('Refreshing client inventory...', 84);
   pollForFreshClientData(metaStartTime, {
     previousRunId: prevRunIdForMeta,
     previousGenerated: prevGenForMeta,
@@ -6947,7 +6990,11 @@ function withActionLock(name, fn, cooldownMs = 8000, holdUntilReleased = false) 
     }
     if (actionLocks.has(name)) {
         appendCliText(`[Action skipped] ${name} - too recent\n`, { scroll: 'force' });
-        return Promise.resolve();
+        // Callers use a boolean outcome to distinguish a real submission from
+        // a client-side duplicate. Never turn a suppressed action into an
+        // implicit success: a durable node-sync marker must remain pending
+        // until an actual settings-only action is accepted and verified.
+        return Promise.resolve(false);
     }
     const lockStarted = Date.now();
     actionLocks.set(name, lockStarted);
@@ -6988,7 +7035,7 @@ const MVM_LOADING_DEFAULT_CONFIG = {
     poll_ms: 1000
   },
   syncsettings_vlanmgr: {
-    label: 'Syncing settings to node(s)...',
+    label: 'Auto-sync Settings to Node(s)',
     display: 'panel',
     mode: 'phase',
     poll_ms: 1000
@@ -7024,7 +7071,10 @@ const MVM_LOADING_DEFAULT_CONFIG = {
     label: 'Save Client Metadata',
     display: 'panel',
     mode: 'phase',
-    poll_ms: 1000
+    poll_ms: 1000,
+    // This action's determinate percentages come from the backend worker.
+    // It must not suppress them as a browser-owned client refresh would.
+    frontend_owned: false
   },
   macrefresh_vlanmgr: {
     label: 'Rebuild MAC Shield',
@@ -7293,13 +7343,20 @@ const MerVLANLoading = (() => {
     // Keep the permanent compact slot in step with the active action's
     // current phase. Terminal snapshots own their text so a late phase update
     // cannot overwrite Completed/Failed or restart their timers.
-    if (active && !active.terminal) {
+    if (active && !active.terminal && !active.embedded) {
       setCompactState('running', value || active.label || 'Running');
     }
   }
 
   function renderStart() {
     if (!active) return;
+    if (active.embedded) {
+      // The Settings modal is the visible observer for this automatic action.
+      // Keep the shared token/polling lifecycle, but do not cover the modal
+      // with the global panel or publish a separate compact-slot status.
+      setPanelOpen(false);
+      return;
+    }
     const actionEl = el('mervlanLoadingAction');
     const error = el('mervlanLoadingError');
     const close = el('mervlanLoadingCloseBtn');
@@ -7323,9 +7380,18 @@ const MerVLANLoading = (() => {
     ));
   }
 
+  function notifyProgressSubscribers(status) {
+    if (!active || !Array.isArray(active.progressSubscribers) || !active.progressSubscribers.length) return;
+    const snapshot = status && typeof status === 'object' ? Object.assign({}, status) : status;
+    active.progressSubscribers.slice().forEach(listener => {
+      try { listener(snapshot); } catch (_) {}
+    });
+  }
+
   function applyStatus(status) {
     if (!active || !status || status.token !== active.token) return;
     active.statusSeen = true;
+    notifyProgressSubscribers(status);
     // Client refreshes own their meaningful 0-100 progress in the browser.
     // A nested SSH trust probe is still polled for a terminal trust decision,
     // but its transient “Probing” record must not replace collection stages.
@@ -7392,7 +7458,13 @@ const MerVLANLoading = (() => {
         if (/^r\.[A-Za-z0-9._-]{3,160}$/.test(resumeId)) {
           window.setTimeout(() => submitSshTrustResume(resumeId), 550);
         } else {
-          window.setTimeout(clearSshTrustDecision, 550);
+          // A direct trust probe has no stored action to resume. Clear its
+          // decision UI, then reload the router-owned registry so the modal
+          // immediately reflects the committed host-key pin.
+          window.setTimeout(() => {
+            clearSshTrustDecision();
+            if (typeof refreshSshTrustRegistry === 'function') refreshSshTrustRegistry();
+          }, 550);
         }
       }
       return;
@@ -7500,7 +7572,7 @@ const MerVLANLoading = (() => {
       }
       setMessage(message, 'Complete');
       setProgress(100, 'determinate');
-      setCompactState('completed', 'Completed — ' + active.label);
+      if (!active.embedded) setCompactState('completed', 'Completed — ' + active.label);
     } else {
       if (error) {
         error.textContent = String(message || 'Action failed.');
@@ -7508,9 +7580,9 @@ const MerVLANLoading = (() => {
       }
       if (closeButton) closeButton.style.display = '';
       setMessage(kind === 'expired' ? 'Trust request expired.' : (kind === 'trust-required' ? 'SSH trust decision required.' : 'Action failed.'));
-      setCompactState('failed', 'Failed — ' + active.label);
+      if (!active.embedded) setCompactState('failed', 'Failed — ' + active.label);
     }
-    if (lastTerminal.successful) scheduleCompletedIdle(lastTerminal);
+    if (lastTerminal.successful && !active.embedded) scheduleCompletedIdle(lastTerminal);
     const terminalToken = active.token;
     const terminalSequence = active.sequence;
     window.setTimeout(() => {
@@ -7536,7 +7608,7 @@ const MerVLANLoading = (() => {
     }
     clearTimers();
     setPanelOpen(false);
-    if (lastTerminal) {
+    if (!active.embedded && lastTerminal) {
       setCompactState(lastTerminal.successful ? 'completed' : 'failed',
         (lastTerminal.successful ? 'Completed — ' : 'Failed — ') + lastTerminal.label);
     }
@@ -7591,7 +7663,9 @@ const MerVLANLoading = (() => {
       deadlineAt: Date.now() + Math.min(Math.max(Number(options.timeoutMs || config.timeout_ms || 300000), 15000), 900000),
       progressBacked: options.progressBacked !== false,
       frontendOwned: options.frontendOwned === true || config.frontend_owned === true,
+      embedded: options.embedded === true,
       completionResolve,
+      progressSubscribers: typeof options.onProgress === 'function' ? [options.onProgress] : [],
       minimized: false
     };
     renderStart();
@@ -7604,8 +7678,10 @@ const MerVLANLoading = (() => {
       token,
       action: actionName,
       phase: (message, percent) => updateTask(token, message, percent),
+      setLabel: label => setTaskLabel(token, label),
       complete: message => completeTask(token, message),
       fail: message => failTask(token, message),
+      subscribeProgress: listener => subscribeTaskProgress(token, listener),
       completion,
       isRunning: () => !!active && active.token === token && active.state === 'running'
     };
@@ -7618,6 +7694,21 @@ const MerVLANLoading = (() => {
     if (Number.isFinite(numeric) && numeric >= 0 && numeric <= 100) {
       setProgress(numeric, 'determinate');
     }
+    return true;
+  }
+
+  function setTaskLabel(token, label) {
+    if (!active || active.token !== token || active.state !== 'running') return false;
+    active.label = String(label || active.label);
+    const actionEl = el('mervlanLoadingAction');
+    if (actionEl) actionEl.textContent = active.label;
+    setCompactState('running', 'Running — ' + active.label);
+    return true;
+  }
+
+  function subscribeTaskProgress(token, listener) {
+    if (!active || active.token !== token || typeof listener !== 'function') return false;
+    active.progressSubscribers.push(listener);
     return true;
   }
 
@@ -7833,6 +7924,8 @@ function triggerAction(actionScriptName, button, description) {
     let _svcSettingsLoadSequence = 0;
     let _svcSettingsLoadPromise = null;
     let _svcSettingsLoadState = 'idle';
+    let _svcConvergenceObservationSequence = 0;
+    let _svcConvergenceObservation = null;
     // Last successful status check result — persists for the page session so
     // reopening the modal still shows the previous check. Cleared on page reload.
     let _svcLastStatusData = null;
@@ -7847,17 +7940,7 @@ function triggerAction(actionScriptName, button, description) {
       if (control) definition.writeControl(control, String(value));
     }
 
-    function syncServiceSettingsControls(source = CURRENT_SETTINGS_CACHE) {
-      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
-        const value = getServiceSettingValue(definition, source);
-        writeServiceSettingControl(definition, value);
-        if (definition.hiddenControlId) {
-          const hidden = document.getElementById(definition.hiddenControlId);
-          if (hidden) hidden.value = value;
-        }
-      });
-
-      // Dynamic UI prerequisite check for AUTO_SYNC_SETTINGS
+    function serviceSettingsAutoSyncPrerequisites(source = CURRENT_SETTINGS_CACHE) {
       let hasNodes = false;
       if (source) {
         for (let i = 1; i <= MAX_NODES; i++) {
@@ -7870,29 +7953,37 @@ function triggerAction(actionScriptName, button, description) {
       }
       const hasKeys = !!(source && (source['SSH_KEYS_INSTALLED'] === '1' || source['SSH_KEYS_INSTALLED'] === 'true' || source['SSH_KEYS_INSTALLED'] === 'yes'));
       const hasTrust = typeof sshTrustRegistryNeeds !== 'undefined' && Array.isArray(sshTrustRegistryNeeds) ? (sshTrustRegistryNeeds.length === 0) : false;
+      if (!hasNodes) return { ready: false, message: 'Disabled: No nodes are configured.' };
+      if (!hasKeys) return { ready: false, message: 'Disabled: SSH keys are not installed. Run SSH Key Install first.' };
+      if (!hasTrust) return { ready: false, message: 'Disabled: Configured node host keys are not verified. Run Verify SSH Host Keys first.' };
+      return { ready: true, message: 'Keep node settings.json updated automatically on save.' };
+    }
+
+    function syncServiceSettingsControls(source = CURRENT_SETTINGS_CACHE) {
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        const value = getServiceSettingValue(definition, source);
+        writeServiceSettingControl(definition, value);
+        if (definition.hiddenControlId) {
+          const hidden = document.getElementById(definition.hiddenControlId);
+          if (hidden) hidden.value = value;
+        }
+      });
 
       const autoSyncInput = document.getElementById('svcToggleAutoSync');
       const autoSyncHint = document.getElementById('svcToggleAutoSyncHint');
       const autoSyncDefinition = SERVICE_SETTINGS_DEFINITIONS.find(definition => definition.key === 'AUTO_SYNC_SETTINGS');
       const persistedAutoSyncValue = autoSyncDefinition ? getServiceSettingValue(autoSyncDefinition, source) : '1';
+      const prerequisites = serviceSettingsAutoSyncPrerequisites(source);
 
       if (autoSyncInput) {
         autoSyncInput.dataset.persistedValue = persistedAutoSyncValue;
-        if (!hasNodes) {
+        if (!prerequisites.ready) {
           autoSyncInput.disabled = true;
           autoSyncInput.checked = false;
-          if (autoSyncHint) autoSyncHint.textContent = 'Disabled: No nodes are configured.';
-        } else if (!hasKeys) {
-          autoSyncInput.disabled = true;
-          autoSyncInput.checked = false;
-          if (autoSyncHint) autoSyncHint.textContent = 'Disabled: SSH keys are not installed. Run SSH Key Install first.';
-        } else if (!hasTrust) {
-          autoSyncInput.disabled = true;
-          autoSyncInput.checked = false;
-          if (autoSyncHint) autoSyncHint.textContent = 'Disabled: Configured node host keys are not verified. Run Verify SSH Host Keys first.';
+          if (autoSyncHint) autoSyncHint.textContent = prerequisites.message;
         } else {
           autoSyncInput.disabled = false;
-          if (autoSyncHint) autoSyncHint.textContent = 'Keep node settings.json updated automatically on save.';
+          if (autoSyncHint) autoSyncHint.textContent = prerequisites.message;
         }
       }
     }
@@ -7937,8 +8028,6 @@ function triggerAction(actionScriptName, button, description) {
 
     function buildServiceSettingsTransaction(changes) {
       const stages = [];
-      const settingChanges = changes.filter(change => change.definition.kind === 'setting');
-      if (settingChanges.length) stages.push({ type: 'settings-save', changes: settingChanges });
       const pending = new Map(
         changes.filter(change => change.definition.kind === 'action').map(change => [change.key, change])
       );
@@ -7955,6 +8044,12 @@ function triggerAction(actionScriptName, button, description) {
           pending.delete(change.key);
         });
       }
+      // An action-backed setting (currently Boot) owns the global action lock.
+      // Finish it before the normal Save publishes a durable convergence
+      // generation; the backend can then accelerate that generation without
+      // racing a later stage from this same Settings transaction.
+      const settingChanges = changes.filter(change => change.definition.kind === 'setting');
+      if (settingChanges.length) stages.push({ type: 'settings-save', changes: settingChanges });
       return stages;
     }
 
@@ -7966,19 +8061,52 @@ function triggerAction(actionScriptName, button, description) {
       return out;
     }
 
-    function setServiceTransactionStatus(message, state = '') {
-      const el = document.getElementById('svcTransactionStatus');
+    function setServiceTransactionRow(id, row = null) {
+      const el = document.getElementById(id);
       if (!el) return;
-      el.textContent = message || '';
-      el.classList.remove('is-success', 'is-warning', 'is-error');
+      const visible = !!(row && row.message);
+      el.classList.remove('is-visible', 'is-info', 'is-success', 'is-warning', 'is-error');
+      if (!visible) return;
+      const allowed = new Set(['info', 'success', 'warning', 'error']);
+      const state = allowed.has(row.state) ? row.state : '';
+      const label = el.querySelector('.svc-transaction-label');
+      const message = el.querySelector('.svc-transaction-message');
+      if (label) label.textContent = row.label || '';
+      if (message) message.textContent = row.message;
+      el.classList.add('is-visible');
       if (state) el.classList.add('is-' + state);
+    }
+
+    function setServiceTransactionRows(settings = null, autoSync = null) {
+      setServiceTransactionRow('svcTransactionSettings', settings);
+      setServiceTransactionRow('svcTransactionAutoSync', autoSync);
+    }
+
+    function setServiceTransactionStatus(message, state = '') {
+      setServiceTransactionRows(message ? { label: 'Status', message, state } : null, null);
+    }
+
+    function describeServiceConvergenceSettings(publicFailure = false) {
+      return publicFailure
+        ? { label: 'MAIN', message: 'Settings saved; WebUI publication warning', state: 'warning' }
+        : { label: 'MAIN', message: 'Settings saved ✓', state: 'success' };
+    }
+
+    function setServiceConvergenceStatus(message, state = 'info', options = {}) {
+      setServiceTransactionRows(
+        describeServiceConvergenceSettings(options.publicFailure === true),
+        message ? { label: 'Auto-sync', message, state } : null
+      );
     }
 
     function setServiceSettingsBusy(busy) {
       _svcTransactionActive = busy;
       SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
         const control = document.getElementById(definition.controlId);
-        if (control) control.disabled = busy || _svcSettingsLoadState !== 'ready';
+        if (!control) return;
+        const autoSyncBlocked = definition.key === 'AUTO_SYNC_SETTINGS' &&
+          !serviceSettingsAutoSyncPrerequisites(CURRENT_SETTINGS_CACHE).ready;
+        control.disabled = busy || _svcSettingsLoadState !== 'ready' || autoSyncBlocked;
       });
       const applyBtn = document.getElementById('svcSettingsApplyBtn');
       if (applyBtn) applyBtn.disabled = busy || _svcSettingsLoadState !== 'ready' || !_svcSnapshot;
@@ -7992,6 +8120,185 @@ function triggerAction(actionScriptName, button, description) {
       _svcSettingsLoadState = state;
       setServiceTransactionStatus(message || '', status);
       setServiceSettingsBusy(_svcTransactionActive);
+    }
+
+    function parseServiceConvergenceStatus(raw) {
+      if (!raw || typeof raw !== 'object') return null;
+      const allowed = new Set(['pending', 'queued', 'running', 'blocked', 'retry', 'paused', 'verified']);
+      const fields = new Set(['format', 'active', 'generation', 'status', 'attempt', 'next_epoch', 'updated_epoch']);
+      if (Object.keys(raw).some(key => !fields.has(key))) return null;
+      const generation = Number(raw.generation);
+      const attempt = Number(raw.attempt);
+      const nextEpoch = Number(raw.next_epoch);
+      const updatedEpoch = Number(raw.updated_epoch);
+      if (raw.format !== 1 || typeof raw.active !== 'boolean' || !Number.isInteger(generation) || generation < 1 ||
+          !allowed.has(raw.status) || !Number.isInteger(attempt) || attempt < 0 ||
+          !Number.isInteger(nextEpoch) || nextEpoch < 0 || !Number.isInteger(updatedEpoch) || updatedEpoch < 0) {
+        return null;
+      }
+      return { generation, active: raw.active, status: raw.status, attempt, nextEpoch, updatedEpoch };
+    }
+
+    // A modal opened mid-convergence has no correlated Save acknowledgement,
+    // but an active durable record is still the current operation. Adopt that
+    // generation once so its later verified projection can replace the live
+    // in-progress row. Inactive historical records remain intentionally silent.
+    function adoptServiceConvergenceGeneration(expectedGeneration, status) {
+      const expected = Number.isInteger(Number(expectedGeneration)) && Number(expectedGeneration) > 0
+        ? Number(expectedGeneration) : 0;
+      if (expected || !status || !status.active || !Number.isInteger(Number(status.generation)) || Number(status.generation) < 1) {
+        return expected;
+      }
+      return Number(status.generation);
+    }
+
+    function describeServiceSyncProgress(status) {
+      if (!status || typeof status !== 'object') return null;
+      const state = String(status.state || '');
+      if (state !== 'starting' && state !== 'running') return null;
+      const message = String(status.message || status.phase || '').trim();
+      return message ? { state: 'info', message } : null;
+    }
+
+    function describeServiceConvergence(status, expectedGeneration = 0) {
+      if (!status) {
+        if (!expectedGeneration) return { terminal: true, silent: true };
+        return { terminal: false, state: 'warning', message: 'Convergence status is unavailable; backend reconciliation continues safely.' };
+      }
+      // On a later modal open we have no Save-generation expectation. Only an
+      // active backend obligation is meaningful; an old terminal projection
+      // must not be presented as proof for unrelated current settings.
+      if (!expectedGeneration && !status.active) return { terminal: true, silent: true };
+      if (expectedGeneration && status.generation < expectedGeneration) {
+        return { terminal: false, state: 'info', message: 'Waiting for the current synchronization generation…' };
+      }
+      if (expectedGeneration && status.generation > expectedGeneration) {
+        return { terminal: false, state: 'info', generation: status.generation, message: 'A newer settings change superseded this synchronization.' };
+      }
+      if (!status.active && status.status === 'verified') {
+        return { terminal: true, state: 'success', message: 'Settings synchronized ✓' };
+      }
+      switch (status.status) {
+        case 'pending':
+        case 'queued':
+          return { terminal: false, state: 'info', message: 'Synchronization is pending…' };
+        case 'running':
+          return { terminal: false, state: 'info', message: 'Synchronizing settings…' };
+        case 'retry':
+          return { terminal: false, state: 'warning', message: 'Synchronization is pending retry.' };
+        case 'blocked':
+          return { terminal: false, state: 'warning', message: 'SSH trust or identity verification is required.' };
+        case 'paused':
+          return { terminal: false, state: 'warning', message: 'Disabled — node settings are not yet verified.' };
+        default:
+          return { terminal: false, state: 'warning', message: 'Synchronization state is awaiting verification.' };
+      }
+    }
+
+    async function fetchServiceConvergenceStatus() {
+      try {
+        const response = await fetch(PATHS.SETTINGS_RECONCILE_STATUS + '?_=' + Date.now(), {
+          cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
+        });
+        if (!response.ok) return null;
+        return parseServiceConvergenceStatus(await response.json());
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function stopServiceConvergenceObservation() {
+      _svcConvergenceObservationSequence++;
+      _svcConvergenceObservation = null;
+    }
+
+    function observeServiceConvergence(generation = 0, options = {}) {
+      const modal = document.getElementById('serviceSettingsModal');
+      if (!modal || modal.style.display === 'none') return;
+      const token = ++_svcConvergenceObservationSequence;
+      const expected = Number.isInteger(Number(generation)) && Number(generation) > 0 ? Number(generation) : 0;
+      const retainedWarning = _svcConvergenceObservation && _svcConvergenceObservation.generation === expected &&
+        _svcConvergenceObservation.publicFailure === true;
+      _svcConvergenceObservation = { token, generation: expected, publicFailure: options.publicFailure === true || retainedWarning };
+      const poll = async () => {
+        if (token !== _svcConvergenceObservationSequence || modal.style.display === 'none') return;
+        const status = await fetchServiceConvergenceStatus();
+        if (token !== _svcConvergenceObservationSequence || modal.style.display === 'none') return;
+        const observedGeneration = adoptServiceConvergenceGeneration(
+          _svcConvergenceObservation?.generation || expected, status
+        );
+        if (_svcConvergenceObservation && observedGeneration) _svcConvergenceObservation.generation = observedGeneration;
+        const description = describeServiceConvergence(status, observedGeneration);
+        if (description.generation && _svcConvergenceObservation) _svcConvergenceObservation.generation = description.generation;
+        if (!description.silent) {
+          setServiceConvergenceStatus(description.message, description.state, {
+            publicFailure: _svcConvergenceObservation?.publicFailure === true
+          });
+        }
+        if (!description.terminal) window.setTimeout(poll, 1200);
+      };
+      void poll();
+    }
+
+    function mirrorServiceAutoSyncProgress(status, generation = 0, options = {}) {
+      const modal = document.getElementById('serviceSettingsModal');
+      if (!modal || modal.style.display === 'none') return;
+      const expected = Number.isInteger(Number(generation)) && Number(generation) > 0 ? Number(generation) : 0;
+      if (_svcConvergenceObservation?.generation && expected && _svcConvergenceObservation.generation !== expected) return;
+      const progress = describeServiceSyncProgress(status);
+      if (progress) setServiceConvergenceStatus(progress.message, progress.state, {
+        publicFailure: options.publicFailure === true || _svcConvergenceObservation?.publicFailure === true
+      });
+    }
+
+    function describeServiceSaveResult(saveResult) {
+      const publicFailure = saveResult && saveResult.publicSettings === 'failed';
+      const nodeStatus = String(saveResult?.nodeSyncStatus || 'not-required');
+      const generation = Number(saveResult?.nodeSyncGeneration || 0);
+      if (['pending', 'queued', 'running', 'retry', 'blocked', 'paused'].includes(nodeStatus)) {
+        return { observe: true, generation, publicFailure };
+      }
+      if (nodeStatus === 'failed' || nodeStatus === 'unknown') {
+        return { observe: false, publicFailure, state: 'warning', message: 'MAIN: Saved ✓ · Nodes: Synchronization requires attention.' };
+      }
+      return { observe: false, publicFailure, state: publicFailure ? 'warning' : 'success',
+        message: publicFailure ? 'MAIN: Saved ✓ · Public WebUI settings publication failed.' : 'Settings saved.' };
+    }
+
+    function unwrapVerifiedActionAcknowledgement(verifiedAck) {
+      // waitForVerifiedActionResult() owns request-token/action validation and
+      // returns a wrapper. Its `.result` is the complete raw acknowledgement;
+      // the action-specific payload lives one explicit level below at
+      // `.result.result`. Settings Save must interpret that defined boundary,
+      // not confuse the verified wrapper with its action payload.
+      const acknowledgement = verifiedAck && verifiedAck.result;
+      if (!acknowledgement || typeof acknowledgement !== 'object' ||
+          !acknowledgement.result || typeof acknowledgement.result !== 'object') return null;
+      return acknowledgement;
+    }
+
+    function normalizeSettingsSaveAcknowledgement(verifiedAck) {
+      const acknowledgement = unwrapVerifiedActionAcknowledgement(verifiedAck);
+      const result = acknowledgement ? acknowledgement.result : {};
+      const wrapperStatus = String(verifiedAck?.status || '');
+      const acknowledgementStatus = String(acknowledgement?.status || '');
+      if (!acknowledgement || !['ok', 'partial'].includes(acknowledgementStatus) || wrapperStatus !== acknowledgementStatus) {
+        return { ok: false, error: verifiedAck?.message || 'Settings save acknowledgement was not successful.' };
+      }
+      if (String(result.local_saved || '') !== '1') {
+        return { ok: false, error: acknowledgement.message || verifiedAck?.message || 'Settings save acknowledgement did not confirm MAIN persistence.' };
+      }
+      const generation = Number(result.node_sync_generation || 0);
+      return {
+        // A partial terminal acknowledgement can still prove that MAIN was
+        // saved. Public publication and node convergence are independent
+        // post-commit outcomes and must retain their own truthful states.
+        ok: true,
+        publicSettings: result.public_settings === 'failed' ? 'failed' : 'ok',
+        nodeSyncStatus: result.node_sync ? String(result.node_sync) : 'ok',
+        nodeSyncGeneration: Number.isInteger(generation) && generation > 0 ? generation : 0,
+        warning: acknowledgement.status === 'partial' ? (acknowledgement.message || verifiedAck?.message || 'Settings saved with warnings.') : ''
+      };
     }
 
     function applySettingChangesToForm(changes) {
@@ -8051,26 +8358,38 @@ function triggerAction(actionScriptName, button, description) {
       while (Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 750));
         try {
-          const controller = typeof AbortController === 'function' ? new AbortController() : null;
-          const timer = controller ? setTimeout(() => controller.abort(), 2500) : null;
           let result = null;
-          try {
-            const response = await fetch('tmp/results/actions/' + encodeURIComponent(requestToken) + '.json?_=' + Date.now(), {
-              cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
-              signal: controller ? controller.signal : undefined
-            });
-            if (response.ok) {
+          // The per-token record is the normal path.  ASUS httpd can
+          // transiently fail a newly-created nested result path even after the
+          // same atomic acknowledgement was published at the stable result
+          // path.  Accept either only after exact token/action validation.
+          const ackPaths = [
+            PATHS.ACTION_RESULTS_DIR + encodeURIComponent(requestToken) + '.json?_=' + Date.now(),
+            PATHS.ACTION_RESULT + '?_=' + Date.now()
+          ];
+          for (const ackPath of ackPaths) {
+            const controller = typeof AbortController === 'function' ? new AbortController() : null;
+            const timer = controller ? setTimeout(() => controller.abort(), 2500) : null;
+            try {
+              const response = await fetch(ackPath, {
+                cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+                signal: controller ? controller.signal : undefined
+              });
+              if (!response.ok) continue;
               const parsed = await response.json();
-              result = parsed && typeof parsed === 'object' ? parsed : null;
+              if (parsed && typeof parsed === 'object' &&
+                  parsed.request_token === requestToken && parsed.action === actionName) {
+                result = parsed;
+                break;
+              }
+            } finally {
+              if (timer) clearTimeout(timer);
             }
-          } finally {
-            if (timer) clearTimeout(timer);
           }
           if (!result) {
             transportUnknown = true;
             continue;
           }
-          if (result.request_token !== requestToken || result.action !== actionName) continue;
           if (result.status === 'ssh_trust_required' || result.status === 'ssh_trust_pending' || result.status === 'expired') {
             return { ok: false, status: result.status, message: result.message || 'SSH trust requires a fresh decision.', result };
           }
@@ -8215,6 +8534,9 @@ function triggerAction(actionScriptName, button, description) {
 
       // The modal was made visible before the asynchronous settings load.
       // Only its contents and controls need updating after the load completes.
+      // This is an observer only. It neither owns nor restarts backend
+      // convergence, so closing the modal cannot cancel pending node work.
+      observeServiceConvergence();
     }
 
     function closeServiceSettingsModal() {
@@ -8225,6 +8547,7 @@ function triggerAction(actionScriptName, button, description) {
       _svcSettingsLoadSequence++;
       _svcSettingsLoadPromise = null;
       _svcSettingsLoadState = 'idle';
+      stopServiceConvergenceObservation();
       const modal = document.getElementById('serviceSettingsModal');
       if (modal) {
         modal.style.display = 'none';
@@ -8279,6 +8602,7 @@ function triggerAction(actionScriptName, button, description) {
       setServiceSettingsBusy(true);
       stopPolling();
       const transactionWarnings = [];
+      let settingsSaveResult = null;
       try {
         for (let index = 0; index < transaction.length; index++) {
           const stage = transaction[index];
@@ -8299,6 +8623,10 @@ function triggerAction(actionScriptName, button, description) {
             if (!saveResult || !saveResult.ok) {
               throw new Error(saveResult?.error || 'Settings could not be confirmed on disk.');
             }
+            settingsSaveResult = saveResult;
+            if (saveResult.publicSettings === 'failed') {
+              transactionWarnings.push('MAIN settings were saved, but public WebUI settings publication failed.');
+            }
             if (saveResult.nodeSyncStatus === 'failed') {
               transactionWarnings.push('Settings were saved locally, but node settings synchronization failed.');
             } else if (saveResult.nodeSyncStatus === 'unknown') {
@@ -8314,11 +8642,23 @@ function triggerAction(actionScriptName, button, description) {
               error.warnings = actionResult.warnings || [];
               throw error;
             }
+            // Preserve a verified action outcome in the authoritative browser
+            // cache when a later public settings publication failure prevents
+            // the normal post-transaction reload.
+            if (CURRENT_SETTINGS_CACHE) CURRENT_SETTINGS_CACHE[stage.change.key] = stage.change.desired;
           }
         }
 
-        setServiceTransactionStatus('Refreshing settings…');
-        await refreshSettingsCacheFromDisk();
+        const saveSummary = describeServiceSaveResult(settingsSaveResult);
+        if (saveSummary.publicFailure) {
+          // MAIN's authoritative save succeeded but the public WebUI artifact
+          // did not. Keep the staged authoritative draft rather than turning
+          // that separate warning into a false node-sync or reload failure.
+          appendCliText('Settings saved on MAIN; public WebUI settings publication failed.\n', { scroll: 'force' });
+        } else {
+          setServiceTransactionStatus('Refreshing settings…');
+          await refreshSettingsCacheFromDisk();
+        }
         _svcSnapshot = captureServiceSettingsSnapshot();
         syncServiceSettingsControls();
         updatePauseIndicator();
@@ -8326,10 +8666,15 @@ function triggerAction(actionScriptName, button, description) {
         updateBootStatusLineFromCache();
         setServiceSettingsBusy(false);
         markSvcSettingsDirty();
-        setServiceTransactionStatus(
-          transactionWarnings.length ? 'Settings Saved locally with warnings.' : 'Settings Saved!',
-          transactionWarnings.length ? 'warning' : 'success'
-        );
+        if (saveSummary.observe) {
+          observeServiceConvergence(saveSummary.generation, {
+            publicFailure: saveSummary.publicFailure
+          });
+        } else if (transactionWarnings.length) {
+          setServiceTransactionStatus(transactionWarnings.join(' '), 'warning');
+        } else {
+          setServiceTransactionStatus(saveSummary.message, saveSummary.state);
+        }
         if (transactionWarnings.length) {
           appendCliText(transactionWarnings.join(' ') + '\n', { scroll: 'force' });
         }
@@ -8866,11 +9211,27 @@ async function runMacRefresh() {
       return out;
     }
 
+    // APMO only exposes configured nodes as editable targets.  Keep its
+    // scoped payload aligned with that contract: sending defaults for every
+    // unused NODE slot makes the router rewrite and verify 121 nested values
+    // for a one-node installation.
+    function configuredAdvancedOverrideTargets() {
+      const cache = CURRENT_SETTINGS_CACHE || {};
+      const form = document.getElementById("settingsForm");
+      return ADV_OVERRIDE_TARGETS.filter(target => {
+        if (target === "MAIN") return true;
+        const node = target.slice("NODE".length);
+        const field = form && form["NODE" + node];
+        const value = String((field && field.value) || cache["NODE" + node] || "").trim();
+        return statusNodeIpIsValid(value);
+      });
+    }
+
     function buildOverridePayloadForMerlin() {
       if (!requireAuthoritativeSettings('saving hardware overrides')) throw new Error('Settings are unavailable. Click Load to retry.');
       const out = { vlanmgr_SAVE_SCOPE: "override" };
       if (CURRENT_SETTINGS_CACHE) {
-        nodeTokens(true).forEach(t => {
+        configuredAdvancedOverrideTargets().forEach(t => {
           out[`vlanmgr_OVERRIDE_${t}_MAP_OVERRIDE`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_MAP_OVERRIDE`] || "0";
           out[`vlanmgr_OVERRIDE_${t}_WAN`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_WAN`] || "eth0";
           out[`vlanmgr_OVERRIDE_${t}_MAX_ETH_PORTS`] = CURRENT_SETTINGS_CACHE[`OVERRIDE_${t}_MAX_ETH_PORTS`] || "0";
@@ -9190,9 +9551,14 @@ function anchorModalToForm(modal) {
       const modalHeight = modal.offsetHeight || 0;
       anchorOffset = Math.max(0, (formRect.height - modalHeight) / 2);
     }
+    const modalIsInForm = modal.parentElement === form;
     modal.classList.add('modal--anchored');
-    modal.style.left = `${scrollX + formRect.left + (formRect.width + assignExtension) / 2}px`;
-    modal.style.top = `${scrollY + formRect.top + anchorOffset}px`;
+    modal.style.left = modalIsInForm
+      ? `${(form.clientWidth + assignExtension) / 2}px`
+      : `${scrollX + formRect.left + (formRect.width + assignExtension) / 2}px`;
+    modal.style.top = modalIsInForm
+      ? `${anchorOffset}px`
+      : `${scrollY + formRect.top + anchorOffset}px`;
   });
 }
 
@@ -9361,7 +9727,7 @@ function formatSshTrustCountdown(seconds) {
   const total = Math.max(0, Math.ceil(Number(seconds) || 0));
   const minutes = Math.floor(total / 60);
   const remainder = String(total % 60).padStart(2, '0');
-  return `Auto-abort in ${minutes}:${remainder}`;
+  return `Decision expires in ${minutes}:${remainder}`;
 }
 
 function setSshTrustCountdownText(text) {
@@ -10328,7 +10694,12 @@ function revokeSshTrustNode(node) {
     setSshTrustRegistryMessage('Wait for the current SSH trust status request to finish.', 'warning');
     return false;
   }
-  const safeNode = trustRegistryNodeForDisplay(node, 'trusted');
+  // Registry rows retain the normalized camelCase nodeId for their click
+  // handler. Reconstruct the backend-shaped field before validating again so
+  // a trusted row can reach the confirmation and router-owned revoke action.
+  const safeNode = trustRegistryNodeForDisplay(Object.assign({}, node || {}, {
+    node_id: node && typeof node === 'object' ? node.nodeId : ''
+  }), 'trusted');
   if (!safeNode || (safeNode.status !== 'verified' && safeNode.status !== 'expired')) return false;
   if (typeof window.confirm === 'function' && !window.confirm(`Revoke the SSH host-key pin for Node ${safeNode.slot}? The node must be verified again before the next SSH action.`)) return false;
   const task = (typeof MerVLANLoading !== 'undefined')
@@ -11325,6 +11696,49 @@ function fillAdvancedOverrideModalFromCache() {
   });
 }
 
+// APMO remains open across its Save/Refresh actions. clearFields() correctly
+// resets the main configuration form after those authoritative reloads, but it
+// also clears this modal's controls. A save acknowledgement proves the local
+// override commit before the separately served settings artifact necessarily
+// catches up, so retain those acknowledged keys while rehydrating this editor.
+function refreshOpenAdvancedOverrideModalFromCache(confirmedOverrides = null) {
+  const modal = document.getElementById("advancedOverrideModal");
+  if (!modal || modal.style.display === "none") return;
+
+  const requestedTarget = advancedOverrideCurrentTarget;
+  if (confirmedOverrides && CURRENT_SETTINGS_CACHE) {
+    ADV_OVERRIDE_TARGETS.forEach(target => {
+      const prefix = `OVERRIDE_${target}_`;
+      ["MAP_OVERRIDE", "WAN", "MAX_ETH_PORTS", "LAN1", "LAN2", "LAN3", "LAN4", "LAN5", "LAN6", "LAN7", "LAN8"].forEach(field => {
+        const key = prefix + field;
+        if (Object.prototype.hasOwnProperty.call(confirmedOverrides, key)) {
+          CURRENT_SETTINGS_CACHE[key] = String(confirmedOverrides[key] ?? "");
+        }
+      });
+    });
+  }
+  fillAdvancedOverrideModalFromCache();
+
+  const sel = document.getElementById("advOverrideTargetSelect");
+  if (sel) {
+    populateAdvOverrideSelect();
+    updateAdvOverrideTargetOptions(sel);
+  }
+  const selectedOption = sel && Array.from(sel.options).find(opt =>
+    opt.value === requestedTarget && !opt.disabled
+  );
+  const target = selectedOption ? requestedTarget : "MAIN";
+  advancedOverrideCurrentTarget = target;
+  if (sel) sel.value = target;
+  updateAdvancedOverrideTargetLabel(target);
+  loadTargetFields(target);
+  if (!advancedOverrideState[target] || advancedOverrideState[target].MAP_OVERRIDE !== "1") {
+    loadAdvancedOverrideDefaults(target, false);
+  }
+  updateAdvancedOverrideOptionDisabling();
+  validateAdvancedOverrideDuplicates();
+}
+
 function syncAdvancedOverrideToCache() {
   if (!CURRENT_SETTINGS_CACHE) return;
   ADV_OVERRIDE_TARGETS.forEach(t => {
@@ -11512,7 +11926,10 @@ function updateAdvancedOverrideOptionDisabling() {
 
 function validateAdvancedOverrideDuplicates() {
   const errEl = document.getElementById("advOverrideError");
-  const applyBtn = document.getElementById("advOverrideApplyBtn");
+  const applyBtns = [
+    document.getElementById("advOverrideSaveBtn"),
+    document.getElementById("advOverrideSaveRefreshBtn")
+  ].filter(Boolean);
   const maxSel = document.getElementById("advOverrideMaxLan");
   const maxN = maxSel ? parseInt(maxSel.value, 10) || 0 : 0;
   const wanSel = document.getElementById("advOverrideWan");
@@ -11541,7 +11958,7 @@ function validateAdvancedOverrideDuplicates() {
       const cv = (lanCustom ? lanCustom.value : "").trim();
       if (!cv) {
         if (errEl) { errEl.textContent = "LAN" + i + " has custom selected but no value entered."; errEl.style.display = ""; }
-        if (applyBtn) applyBtn.disabled = true;
+        applyBtns.forEach(btn => { btn.disabled = true; });
         return false;
       }
     }
@@ -11561,12 +11978,12 @@ function validateAdvancedOverrideDuplicates() {
   }
   if (dupes.length > 0) {
     if (errEl) { errEl.textContent = "Duplicate interface: " + dupes.join("; "); errEl.style.display = ""; }
-    if (applyBtn) applyBtn.disabled = true;
+    applyBtns.forEach(btn => { btn.disabled = true; });
     return false;
   }
 
   if (errEl) { errEl.textContent = ""; errEl.style.display = "none"; }
-  if (applyBtn) applyBtn.disabled = false;
+  applyBtns.forEach(btn => { btn.disabled = false; });
   return true;
 }
 
@@ -11612,6 +12029,13 @@ function showAdvancedOverrideModal() {
   const modal = document.getElementById("advancedOverrideModal");
   if (!modal) return;
   ensureConfigViewForModal();
+  // Keep APMO in the form pane with the addon-local overlay and loading
+  // backdrop. A page-level sibling would sit above that backdrop regardless
+  // of local z-index, while this preserves the normal modal/loader contract.
+  const formPane = document.querySelector('.form-box--main');
+  if (formPane && modal.parentElement !== formPane) {
+    try { formPane.appendChild(modal); } catch (e) { /* ignore */ }
+  }
   const overlay = document.getElementById("leftPanelOverlay");
 
   fillAdvancedOverrideModalFromCache();
@@ -11648,6 +12072,7 @@ function hideAdvancedOverrideModal() {
     releaseModalCentering(modal);
     releaseAnchoredModal(modal);
   }
+  clearAdvancedOverrideLoadingPresentation();
   const overlay = document.getElementById("leftPanelOverlay");
   if (overlay) {
     const cliPanelEl = document.getElementById('cliPanel');
@@ -11662,13 +12087,34 @@ function hideAdvancedOverrideModal() {
   scheduleHostIframeResize();
 }
 
-function toggleOverrideBtnText() {
-  var cb = document.getElementById("advOverrideAutoRefreshHw");
-  var btn = document.getElementById("advOverrideApplyBtn");
-  if (btn) btn.textContent = (cb && cb.checked) ? "Save & Apply" : "Save";
+// APMO and the shared loader now share .form-box--main, so the loader remains
+// scoped to the addon. Its panel is positioned over the APMO editor rather than
+// over the entire form during these actions.
+function clearAdvancedOverrideLoadingPresentation() {
+  const backdrop = document.getElementById("mervlanLoadingBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.remove("mervlan-loading-backdrop--apmo");
+  backdrop.style.removeProperty("--apmo-loader-center-x");
+  backdrop.style.removeProperty("--apmo-loader-center-y");
 }
 
-function applyAdvancedOverride() {
+function prepareAdvancedOverrideLoadingLayer() {
+  const modal = document.getElementById("advancedOverrideModal");
+  const backdrop = document.getElementById("mervlanLoadingBackdrop");
+  const form = document.querySelector('.form-box--main');
+  if (!modal || !backdrop || !form || modal.style.display === "none") return;
+  const formRect = form.getBoundingClientRect();
+  const modalRect = modal.getBoundingClientRect();
+  if (!formRect.width || !modalRect.width) return;
+
+  const centerX = modalRect.left - formRect.left + modalRect.width / 2;
+  const centerY = modalRect.top - formRect.top + modalRect.height / 2;
+  backdrop.classList.add("mervlan-loading-backdrop--apmo");
+  backdrop.style.setProperty("--apmo-loader-center-x", `${Math.round(centerX)}px`);
+  backdrop.style.setProperty("--apmo-loader-center-y", `${Math.round(centerY)}px`);
+}
+
+function applyAdvancedOverride(refreshHardware) {
   if (!validateAdvancedOverrideDuplicates()) return;
   saveCurrentTargetFields();
 
@@ -11689,25 +12135,32 @@ function applyAdvancedOverride() {
 
   syncAdvancedOverrideToCache();
 
-  const autoRefresh = document.getElementById("advOverrideAutoRefreshHw");
-  const wantHwProbe = !!(autoRefresh && autoRefresh.checked);
-  const autoSyncVal = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['AUTO_SYNC_SETTINGS'];
-  const wantAutoSync = autoSyncVal == null || autoSyncVal === '' || autoSyncVal === '1' || autoSyncVal === 'true' || autoSyncVal === 'yes';
-
-  // Reset transient follow-up options (never persisted).
-  if (autoRefresh) autoRefresh.checked = false;
-  toggleOverrideBtnText();
+  const wantHwProbe = refreshHardware === true;
 
   if (wantHwProbe) {
     // Keep the APMO modal open while the loading panel runs and after it ends.
-    applyOverrideWithHwProbe({ autoSyncNodes: wantAutoSync });
+    applyOverrideWithHwProbe({ autoSyncNodes: true });
   } else {
     // Override-only: persist Hardware_Override keys, no full form save needed
-    applyOverrideSaveOnly({ autoSyncNodes: wantAutoSync });
+    applyOverrideSaveOnly({ autoSyncNodes: true });
   }
 }
 
+// Read this only after the action's normal settings Load has refreshed the
+// authoritative browser cache. Reading it at click time can retain a stale
+// disabled value when the user just re-enabled automatic synchronization.
+function autoSyncAdvancedOverrideNodesEnabled() {
+  const value = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['AUTO_SYNC_SETTINGS'];
+  return value == null || value === '' || value === '1' || value === 'true' || value === 'yes';
+}
+
 async function queueAutomaticNodeSettingsSync(options = {}) {
+  const automatic = options.automatic === true;
+  const convergenceGeneration = Number.isInteger(Number(options.convergenceGeneration)) && Number(options.convergenceGeneration) > 0
+    ? Number(options.convergenceGeneration) : 0;
+  const actionDescription = options.description || (automatic
+    ? 'Auto-sync Settings to Node(s)'
+    : 'Syncing settings to node(s)...');
   if (options.checkNodes !== false) {
     const nodeState = await checkForConfiguredNodes();
     if (nodeState !== 'configured') {
@@ -11721,17 +12174,62 @@ async function queueAutomaticNodeSettingsSync(options = {}) {
   }
 
   if (options.announce !== false) {
-    appendCliText("Syncing settings to node(s)...\n", { scroll: "force" });
+    appendCliText((automatic ? "Auto-syncing settings to node(s)...\n" : "Syncing settings to node(s)...\n"), { scroll: "force" });
   }
-  return queueServiceAction('syncsettings_vlanmgr', {
-    description: options.description || 'Syncing settings to node(s)...',
+
+  // A settings-only action always owns a MerVLAN loading task. If a prior
+  // browser transport ended unexpectedly and left only its local action lock,
+  // that lock cannot represent live work and must not suppress the durable
+  // convergence accelerator. Do not release a lock while its matching loader
+  // is active; the router-side owner lock remains the final concurrency guard.
+  const syncAction = 'syncsettings_vlanmgr';
+  const activeLoader = (typeof MerVLANLoading !== 'undefined') ? MerVLANLoading.active : null;
+  if (actionLocks.has(syncAction) && (!activeLoader || activeLoader.action !== syncAction)) {
+    appendCliText('Recovering a stale local settings-sync action lock.\n', { scroll: 'force' });
+    releaseActionLock(syncAction);
+  }
+  const mirrorProgress = status => {
+    if (convergenceGeneration && typeof mirrorServiceAutoSyncProgress === 'function') {
+      mirrorServiceAutoSyncProgress(status, convergenceGeneration, {
+        publicFailure: options.publicFailure === true
+      });
+    }
+    if (typeof options.onProgress === 'function') options.onProgress(status);
+  };
+  return queueServiceAction(syncAction, {
+    description: actionDescription,
     cooldownMs: 8000,
-    loadingOptions: { progressBacked: true },
-    passProgressToken: true
+    loadingOptions: { progressBacked: true, embedded: automatic, onProgress: mirrorProgress },
+    passProgressToken: true,
+    // Keep the separate action's terminal result visible in the Settings
+    // workflow as well as in its progress panel. Do not await this promise:
+    // the synchronizer remains independently owned and can still handle SSH
+    // trust pause/resume without blocking the completed local Save.
+    afterSubmit: automatic ? (loadingTask) => {
+      if (!loadingTask || !loadingTask.completion) return;
+      void loadingTask.completion.then(terminal => {
+        if (!terminal) return;
+        if (terminal.state === 'complete') {
+          appendCliText('Auto-sync settings to node(s) complete.\n', { scroll: 'force' });
+        } else if (terminal.state === 'partial') {
+          appendCliText('Auto-sync settings to node(s) completed with warnings: ' + (terminal.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
+        } else {
+          appendCliText('Auto-sync settings to node(s) failed: ' + (terminal.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
+        }
+        // The loader terminal is only a prompt to inspect the durable marker;
+        // it is not sufficient proof that the matching generation verified.
+        if (convergenceGeneration && typeof observeServiceConvergence === 'function') {
+          observeServiceConvergence(convergenceGeneration);
+        }
+      });
+    } : undefined
   });
 }
 
 async function autoSyncAdvancedOverrideNodes() {
+  // APMO remains open across the separate Sync Nodes action; keep its loader
+  // panel aligned with the same modal while retaining addon-local dimming.
+  prepareAdvancedOverrideLoadingLayer();
   return queueAutomaticNodeSettingsSync();
 }
 
@@ -11741,6 +12239,7 @@ async function applyOverrideWithHwProbe(options = {}) {
     let loadingTask = null;
     try {
       if (typeof MerVLANLoading !== 'undefined') {
+        prepareAdvancedOverrideLoadingLayer();
         loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
           progressBacked: false,
           frontendOwned: true
@@ -11777,18 +12276,6 @@ async function applyOverrideWithHwProbe(options = {}) {
         return;
       }
 
-      appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
-      const persisted = await waitForSettingsToMatch(expectedManaged, {
-        timeoutMs: 25000,
-        intervalMs: 700,
-        scope: "override",
-        subset: true
-      });
-      if (!persisted) {
-        appendCliText("Override settings did not persist; HW profile refresh was skipped.\n", { scroll: "force" });
-        if (loadingTask) loadingTask.fail('Override settings did not persist in time.');
-        return;
-      }
       const saveAck = await waitForVerifiedActionResult(saveRequestToken, 'save_vlanmgr', { local_saved: '1' }, 120000);
       if (!saveAck.ok) {
         appendCliText("Override save acknowledgement failed; HW profile refresh was skipped.\n", { scroll: "force" });
@@ -11796,6 +12283,20 @@ async function applyOverrideWithHwProbe(options = {}) {
         return;
       }
       await settleCorrelatedTransport(saveSubmission, 'Override save');
+      // The token-bound router acknowledgement is the authority for the save.
+      // Public settings publication is still checked for UI freshness, but a
+      // delayed browser fetch must not discard a committed override or skip
+      // its required HW-probe/node-sync follow-up.
+      appendCliText("Confirming published override settings...\n", { scroll: "force" });
+      const persisted = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs: 8000,
+        intervalMs: 700,
+        scope: "override",
+        subset: true
+      });
+      if (!persisted) {
+        appendCliText("Override save confirmed by router; public settings refresh is delayed. Continuing safely.\n", { scroll: "force" });
+      }
       if (loadingTask) loadingTask.phase('Verifying saved overrides...', 45);
 
       // Step 2: Wait for the correlated HW probe completion acknowledgement.
@@ -11807,7 +12308,10 @@ async function applyOverrideWithHwProbe(options = {}) {
         return;
       }
 
-      // Step 3: Reload only after the probe has completed.
+      // Step 3: Match the ordinary Save flow: clear stale form controls first,
+      // then perform the normal authoritative Load as the final UI state.
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
       if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
       const reloaded = await loadSettings();
@@ -11817,12 +12321,16 @@ async function applyOverrideWithHwProbe(options = {}) {
         appendCliText(error + "\n", { scroll: "force" });
         return;
       }
-      appendCliText("Clearing form fields...\n", { scroll: "force" });
-      clearFields();
+      refreshOpenAdvancedOverrideModalFromCache(expectedManaged);
       appendCliText("Save + HW profile refresh complete.\n", { scroll: "force" });
       if (loadingTask) loadingTask.complete('Hardware overrides saved and profile refreshed.');
       if (loadingTask && loadingTask.completion) await loadingTask.completion;
-      if (options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
+      // completion resolves before its terminal panel closes. The separate
+      // settings-only action must own a fresh loading task.
+      if (typeof MerVLANLoading !== 'undefined') MerVLANLoading.close();
+      if (options.autoSyncNodes && autoSyncAdvancedOverrideNodesEnabled()) {
+        await autoSyncAdvancedOverrideNodes();
+      }
 
     } catch (err) {
       if (loadingTask) loadingTask.fail('Hardware override save failed.');
@@ -11892,6 +12400,7 @@ async function applyOverrideSaveOnly(options = {}) {
     let loadingTask = null;
     try {
       if (typeof MerVLANLoading !== 'undefined') {
+        prepareAdvancedOverrideLoadingLayer();
         loadingTask = MerVLANLoading.start('apmo_save_vlanmgr', 'Save Hardware Overrides', {
           progressBacked: false,
           frontendOwned: true
@@ -11926,13 +12435,6 @@ async function applyOverrideSaveOnly(options = {}) {
         return;
       }
 
-      appendCliText("Waiting for override settings to persist...\n", { scroll: "force" });
-      const ok = await waitForSettingsToMatch(expectedManaged, {
-        timeoutMs: 25000,
-        intervalMs: 700,
-        scope: "override",
-        subset: true
-      });
       const saveAck = await waitForVerifiedActionResult(saveRequestToken, 'save_vlanmgr', { local_saved: '1' }, 120000);
       if (!saveAck.ok) {
         if (loadingTask) loadingTask.fail(saveAck.message || 'Override save was not confirmed by the router.');
@@ -11940,7 +12442,19 @@ async function applyOverrideSaveOnly(options = {}) {
         return;
       }
       await settleCorrelatedTransport(saveSubmission, 'Override save');
+      appendCliText("Confirming published override settings...\n", { scroll: "force" });
+      const persisted = await waitForSettingsToMatch(expectedManaged, {
+        timeoutMs: 8000,
+        intervalMs: 700,
+        scope: "override",
+        subset: true
+      });
+      if (!persisted) {
+        appendCliText("Override save confirmed by router; public settings refresh is delayed. Continuing safely.\n", { scroll: "force" });
+      }
       if (loadingTask) loadingTask.phase('Verifying saved overrides...', 65);
+      appendCliText("Clearing form fields...\n", { scroll: "force" });
+      clearFields();
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
       if (loadingTask) loadingTask.phase('Loading saved hardware profile...', 85);
       const reloaded = await loadSettings();
@@ -11950,21 +12464,16 @@ async function applyOverrideSaveOnly(options = {}) {
         appendCliText(error + "\n", { scroll: "force" });
         return;
       }
-      if (ok) {
-        appendCliText("Clearing form fields...\n", { scroll: "force" });
-        clearFields();
+      refreshOpenAdvancedOverrideModalFromCache(expectedManaged);
+      appendCliText(persisted ? "Override save complete.\n" : "Override save complete; public settings refresh is delayed.\n", { scroll: "force" });
+      if (loadingTask) loadingTask.complete('Hardware overrides saved.');
+      if (loadingTask && loadingTask.completion) await loadingTask.completion;
+      // completion resolves before its terminal panel closes. The separate
+      // settings-only action must own a fresh loading task.
+      if (typeof MerVLANLoading !== 'undefined') MerVLANLoading.close();
+      if (options.autoSyncNodes && autoSyncAdvancedOverrideNodesEnabled()) {
+        await autoSyncAdvancedOverrideNodes();
       }
-      appendCliText(
-        ok ? "Override save complete.\n"
-           : "Override save: settings did not persist in time. Loaded latest available.\n",
-        { scroll: "force" }
-      );
-      if (loadingTask) {
-        if (ok) loadingTask.complete('Hardware overrides saved.');
-        else loadingTask.fail('Override settings did not persist in time.');
-      }
-      if (ok && loadingTask && loadingTask.completion) await loadingTask.completion;
-      if (ok && options.autoSyncNodes) await autoSyncAdvancedOverrideNodes();
 
     } catch (err) {
       if (loadingTask) loadingTask.fail('Hardware override save failed.');
@@ -11978,6 +12487,8 @@ async function refreshHwProfile() {
     let loadingTask = null;
     try {
       if (typeof MerVLANLoading !== 'undefined') {
+        // Keep APMO available and align the addon-local loading panel over it.
+        prepareAdvancedOverrideLoadingLayer();
         loadingTask = MerVLANLoading.start('hwprobe_vlanmgr', 'Refresh HW Profile', {
           progressBacked: true
         });
@@ -11994,7 +12505,8 @@ async function refreshHwProfile() {
       if (loadingTask) loadingTask.phase('Loading hardware profile...', 75);
       clearFields();
       appendCliText("Reloading settings from disk...\n", { scroll: "force" });
-      await loadSettings();
+      const reloaded = await loadSettings();
+      if (reloaded) refreshOpenAdvancedOverrideModalFromCache();
       appendCliText("HW profile refresh complete.\n", { scroll: "force" });
       if (loadingTask) loadingTask.complete('HW profile refreshed.');
       return result;
@@ -12881,6 +13393,13 @@ async function uploadSettingsAndSave(btn, options = {}) {
       return { ok: false, changed: false, error: 'Settings are unavailable. Click Load to retry.' };
     }
     if (!isScopedSave) {
+      const invalidNodeIp = firstInvalidNodeIpDraft();
+      if (invalidNodeIp) {
+        const error = `Correct or clear the invalid Node ${invalidNodeIp} IP before saving.`;
+        appendCliText('Save blocked: ' + error + '\n', { scroll: 'force' });
+        refreshFormStatuses();
+        return { ok: false, changed: false, error };
+      }
       const wanNativeValidation = validateAllWanNativeSettings();
       if (!wanNativeValidation.ok) {
         appendCliText('Save blocked: ' + wanNativeValidation.error + '\n', { scroll: 'force' });
@@ -12959,55 +13478,69 @@ async function uploadSettingsAndSave(btn, options = {}) {
         return { ok: false, changed: true, error };
       }
 
-      if (loadingTask) loadingTask.phase('Waiting for settings to persist...', 50);
-      appendCliText('Waiting for settings to persist...\n', { scroll: 'force' });
-      if (loadingTask) loadingTask.phase('Verifying saved settings...', 75);
-      const ok = await waitForSettingsToMatch(expectedManaged, {
-        timeoutMs,
-        intervalMs,
-        scope: verificationScope,
-        subset: isScopedSave
-      });
-
-      if (!ok) {
-        const error = 'Settings did not match the requested values before the save timeout.';
-        if (loadingTask) loadingTask.fail(error);
-        appendCliText('Save verification failed: ' + error + '\n', { scroll: 'force' });
-        return { ok: false, changed: true, error };
-      }
-
       // The correlated backend acknowledgement is terminal truth for the
       // Save.  Keep the editable draft intact until it confirms durable
       // local persistence; transport acceptance alone is not sufficient.
       let nodeSyncStatus = 'unknown';
+      let nodeSyncGeneration = 0;
+      let publicSettings = 'ok';
+      let saveWarning = '';
       let saveCompletionMessage = 'Saved settings loaded';
       if (saveRequestToken) {
-        if (loadingTask) loadingTask.phase('Confirming node settings synchronization...', 90);
+        if (loadingTask) loadingTask.phase('Confirming settings save...', 50);
+        appendCliText('Confirming settings save...\n', { scroll: 'force' });
         const saveAck = await waitForVerifiedActionResult(
           saveRequestToken,
           'save_vlanmgr',
           { local_saved: '1' },
           Math.max(timeoutMs, 120000)
         );
-        if (saveAck.status === 'partial') {
-          nodeSyncStatus = 'failed';
-          saveCompletionMessage = 'Settings saved locally; node sync failed';
-          appendCliText('Settings saved locally, but node settings synchronization failed: ' +
-            (saveAck.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
-          if (loadingTask) loadingTask.fail(saveAck.message || 'Settings save completed only partially.');
-          return { ok: false, changed: true, error: saveAck.message || 'Settings save completed only partially.' };
-        } else if (!saveAck.ok) {
+        const acknowledged = normalizeSettingsSaveAcknowledgement(saveAck);
+        if (!acknowledged.ok) {
           nodeSyncStatus = 'unknown';
-          saveCompletionMessage = 'Settings saved locally; node sync status unavailable';
-          appendCliText('Settings saved locally, but node synchronization could not be confirmed: ' +
-            (saveAck.message || 'see the VLAN log for details.') + '\n', { scroll: 'force' });
-          if (loadingTask) loadingTask.fail(saveAck.message || 'Settings save acknowledgement was not successful.');
-          return { ok: false, changed: true, error: saveAck.message || 'Settings save acknowledgement was not successful.' };
-        } else {
-          nodeSyncStatus = saveAck.result && saveAck.result.node_sync
-            ? String(saveAck.result.node_sync) : 'ok';
+          saveCompletionMessage = 'Settings save was not confirmed on MAIN';
+          appendCliText('Settings save acknowledgement failed: ' + acknowledged.error + '\n', { scroll: 'force' });
+          if (loadingTask) loadingTask.fail(acknowledged.error);
+          return { ok: false, changed: true, error: acknowledged.error };
         }
-        await settleCorrelatedTransport(saveSubmission, 'Settings save');
+        nodeSyncStatus = acknowledged.nodeSyncStatus;
+        nodeSyncGeneration = acknowledged.nodeSyncGeneration;
+        publicSettings = acknowledged.publicSettings;
+        saveWarning = acknowledged.warning;
+        if (saveWarning) appendCliText('Settings saved on MAIN with warning: ' + saveWarning + '\n', { scroll: 'force' });
+        // The correlated router acknowledgement is published only after the
+        // Save worker has reached its terminal state and released its action
+        // ownership. ASUS's hidden-frame load is merely transport telemetry;
+        // on some mobile/firmware combinations it can remain delayed after
+        // that acknowledgement. Do not let it suppress the distinct durable
+        // settings-only synchronization action.
+        void settleCorrelatedTransport(saveSubmission, 'Settings save').catch(error => {
+          appendCliText('Settings save transport observation failed: ' + (error?.message || error) + '\n', { scroll: 'force' });
+        });
+      }
+
+      // A lock refusal and every other terminal worker error above must be
+      // shown directly.  Only a router-confirmed Save is eligible for the
+      // public-artifact value check below, so a concurrent action can never
+      // degrade into a misleading settings-match timeout.
+      if (publicSettings !== 'failed') {
+        if (loadingTask) loadingTask.phase('Verifying saved settings...', 75);
+        appendCliText('Waiting for settings to persist...\n', { scroll: 'force' });
+        const ok = await waitForSettingsToMatch(expectedManaged, {
+          timeoutMs,
+          intervalMs,
+          scope: verificationScope,
+          subset: isScopedSave
+        });
+
+        if (!ok) {
+          const error = 'Settings did not match the requested values before the save timeout.';
+          if (loadingTask) loadingTask.fail(error);
+          appendCliText('Save verification failed: ' + error + '\n', { scroll: 'force' });
+          return { ok: false, changed: true, error };
+        }
+      } else {
+        appendCliText('MAIN settings are saved; public WebUI settings publication failed.\n', { scroll: 'force' });
       }
 
       // Clear only after durable acknowledgement. The following authoritative
@@ -13017,7 +13550,7 @@ async function uploadSettingsAndSave(btn, options = {}) {
         clearFields();
       }
 
-      if (reloadAfterSave) {
+      if (reloadAfterSave && publicSettings !== 'failed') {
         if (loadingTask) loadingTask.phase('Loading saved settings...', 90);
         appendCliText('Reloading settings from disk...\n', { scroll: 'force' });
         const reloaded = await loadSettings();
@@ -13032,6 +13565,9 @@ async function uploadSettingsAndSave(btn, options = {}) {
       if (nodeSyncStatus === 'pending') {
         saveCompletionMessage = 'Settings saved locally; node synchronization queued';
       }
+      if (publicSettings === 'failed') {
+        saveCompletionMessage = 'Settings saved on MAIN; public WebUI settings publication failed';
+      }
       if (loadingTask) {
         loadingTask.complete(saveCompletionMessage);
         if (loadingTask.completion) await loadingTask.completion;
@@ -13045,23 +13581,31 @@ async function uploadSettingsAndSave(btn, options = {}) {
       // separate settings-only action so its own loading task can pause for
       // SSH trust review and resume the same settings-only action.
       if (nodeSyncStatus === 'pending') {
-        appendCliText('Starting node settings synchronization...\n', { scroll: 'force' });
+        appendCliText('Starting auto-sync settings to node(s)...\n', { scroll: 'force' });
         // The backend already confirmed configured nodes and node-relevant
         // changes before returning `pending`. Do not let a stale/partial UI
         // cache suppress the authoritative follow-up action; its backend
         // preflight remains the final guard.
-        const queued = await queueAutomaticNodeSettingsSync({ announce: false, checkNodes: false });
-        if (queued === false) {
-          nodeSyncStatus = 'failed';
-          saveCompletionMessage = 'Settings saved locally; node synchronization could not start';
-          appendCliText(saveCompletionMessage + '.\n', { scroll: 'force' });
+        const queued = await queueAutomaticNodeSettingsSync({
+          automatic: true,
+          announce: false,
+          checkNodes: false,
+          convergenceGeneration: nodeSyncGeneration,
+          publicFailure: publicSettings === 'failed'
+        });
+        if (queued !== true) {
+          // The browser is only an accelerator. A backend due worker may
+          // already own this durable generation, so a local busy/refusal is
+          // never authoritative evidence that node convergence failed.
+          saveCompletionMessage = 'Settings saved locally; observing durable node synchronization';
+          appendCliText('Browser auto-sync accelerator did not start; observing backend convergence.\n', { scroll: 'force' });
         } else {
           nodeSyncStatus = 'queued';
-          saveCompletionMessage = 'Settings saved locally; node synchronization queued';
+          saveCompletionMessage = 'Settings saved locally; auto-sync settings to node(s) started';
           appendCliText(saveCompletionMessage + '.\n', { scroll: 'force' });
         }
       }
-      return { ok: true, changed: true, nodeSyncStatus, nodeSyncMessage: saveCompletionMessage };
+      return { ok: true, changed: true, nodeSyncStatus, nodeSyncGeneration, publicSettings, saveWarning, nodeSyncMessage: saveCompletionMessage };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       if (loadingTask) loadingTask.fail(message);

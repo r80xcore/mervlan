@@ -11,6 +11,9 @@
 
 : "${MERV_STATE_ROOT:=/jffs/addons/mervlan_state}"
 : "${MERV_SETTINGS_RECONCILE_FILE:=$MERV_STATE_ROOT/settings_reconcile.state}"
+: "${PUBLIC_MERV_BASE:=/www/user/mervlan}"
+: "${MERV_SETTINGS_RECONCILE_PUBLIC_ROOT:=$PUBLIC_MERV_BASE}"
+: "${MERV_SETTINGS_RECONCILE_PUBLIC_FILE:=$MERV_SETTINGS_RECONCILE_PUBLIC_ROOT/tmp/results/settings_reconcile.json}"
 
 # Keep the record deliberately small.  Digests are labels emitted by the
 # existing settings/node digest helpers (for example md5:<hex> or
@@ -71,6 +74,75 @@ merv_settings_reconcile_status_valid() {
         pending|queued|running|blocked|retry|paused|verified) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# The browser-facing file is a deliberately narrow, non-authoritative
+# projection of the protected marker.  Its default location is fixed below
+# the public MerVLAN root; tests may provide a private absolute path with the
+# same controlled suffix.  No caller reads this file to make a reconciliation
+# decision and no digest is ever emitted here.
+merv_settings_reconcile_public_path_valid() {
+    _msrpp_path="${1:-${MERV_SETTINGS_RECONCILE_PUBLIC_FILE:-}}"
+    _msrpp_root="${MERV_SETTINGS_RECONCILE_PUBLIC_ROOT:-}"
+    [ -n "$_msrpp_path" ] || return 1
+    [ -n "$_msrpp_root" ] || return 1
+    case "$_msrpp_path" in
+        "$_msrpp_root"/tmp/results/settings_reconcile.json) ;;
+        *) return 1 ;;
+    esac
+    case "$_msrpp_path" in
+        *..*|*//*|*[!A-Za-z0-9._/-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# Publish only bounded display state.  This helper intentionally reports
+# failure to its callers so they can ignore it: a public projection outage
+# must never turn a protected marker operation into a failed convergence
+# operation.
+merv_settings_reconcile_public_write() {
+    _msrpp_generation="${1:-}"
+    _msrpp_status="${2:-}"
+    _msrpp_attempt="${3:-}"
+    _msrpp_next_epoch="${4:-}"
+    _msrpp_updated_epoch="${5:-}"
+    _msrpp_path="${MERV_SETTINGS_RECONCILE_PUBLIC_FILE:-}"
+
+    merv_settings_reconcile_public_path_valid "$_msrpp_path" || return 1
+    merv_settings_reconcile_generation_valid "$_msrpp_generation" || return 1
+    merv_settings_reconcile_status_valid "$_msrpp_status" || return 1
+    merv_settings_reconcile_uint_valid "$_msrpp_attempt" "$MERV_SETTINGS_RECONCILE_MAX_ATTEMPT" || return 1
+    merv_settings_reconcile_uint_valid "$_msrpp_next_epoch" "$MERV_SETTINGS_RECONCILE_MAX_EPOCH" || return 1
+    merv_settings_reconcile_uint_valid "$_msrpp_updated_epoch" "$MERV_SETTINGS_RECONCILE_MAX_EPOCH" || return 1
+
+    case "$_msrpp_status" in
+        pending|queued|running|blocked|retry|paused) _msrpp_active=true ;;
+        verified) _msrpp_active=false ;;
+        *) return 1 ;;
+    esac
+    _msrpp_dir=${_msrpp_path%/settings_reconcile.json}
+    [ "$_msrpp_dir" != "$_msrpp_path" ] || return 1
+    mkdir -p "$_msrpp_dir" 2>/dev/null || return 1
+    : "${MERV_SETTINGS_RECONCILE_SEQ:=0}"
+    MERV_SETTINGS_RECONCILE_SEQ=$((MERV_SETTINGS_RECONCILE_SEQ + 1))
+    _msrpp_tmp="$_msrpp_path.tmp.$$.$MERV_SETTINGS_RECONCILE_SEQ"
+    ( umask 022
+        printf '{"format":1,"active":%s,"generation":%s,"status":"%s","attempt":%s,"next_epoch":%s,"updated_epoch":%s}\n' \
+            "$_msrpp_active" "$_msrpp_generation" "$_msrpp_status" \
+            "$_msrpp_attempt" "$_msrpp_next_epoch" "$_msrpp_updated_epoch"
+    ) > "$_msrpp_tmp" 2>/dev/null || { rm -f "$_msrpp_tmp" 2>/dev/null || :; return 1; }
+    chmod 644 "$_msrpp_tmp" 2>/dev/null || { rm -f "$_msrpp_tmp" 2>/dev/null || :; return 1; }
+    mv -f "$_msrpp_tmp" "$_msrpp_path" 2>/dev/null || {
+        rm -f "$_msrpp_tmp" 2>/dev/null || :
+        return 1
+    }
+    return 0
+}
+
+merv_settings_reconcile_public_remove() {
+    _msrppr_path="${MERV_SETTINGS_RECONCILE_PUBLIC_FILE:-}"
+    merv_settings_reconcile_public_path_valid "$_msrppr_path" || return 1
+    rm -f "$_msrppr_path" 2>/dev/null
 }
 
 # Validate the complete record and load its values into shell variables.  The
@@ -212,6 +284,8 @@ merv_settings_reconcile_publish() {
         return 1
     }
     MERV_SETTINGS_RECONCILE_GENERATION="$_msrp_generation"
+    merv_settings_reconcile_public_write "$_msrp_generation" "$_msrp_status" \
+        "$_msrp_attempt" "$_msrp_next_epoch" "$_msrp_now" || :
     return 0
 }
 
@@ -263,6 +337,8 @@ merv_settings_reconcile_update() {
     MERV_SETTINGS_RECONCILE_STATUS="$_msru_status"
     MERV_SETTINGS_RECONCILE_ATTEMPT="$_msru_attempt"
     MERV_SETTINGS_RECONCILE_NEXT_EPOCH="$_msru_next_epoch"
+    merv_settings_reconcile_public_write "$_msru_generation" "$_msru_status" \
+        "$_msru_attempt" "$_msru_next_epoch" "$_msru_now" || :
     return 0
 }
 
@@ -276,7 +352,14 @@ merv_settings_reconcile_clear() {
     merv_settings_reconcile_read || return 1
     [ "$_msrc_generation" = "$MERV_SETTINGS_RECONCILE_GENERATION" ] || return 1
     merv_settings_reconcile_path_valid "$MERV_SETTINGS_RECONCILE_FILE" || return 1
-    rm -f "$MERV_SETTINGS_RECONCILE_FILE" 2>/dev/null
+    rm -f "$MERV_SETTINGS_RECONCILE_FILE" 2>/dev/null || return 1
+    # The protected marker is gone first; this terminal projection is only a
+    # read-only observer result and cannot make the durable clear fail.
+    _msrc_now=$(date +%s 2>/dev/null || printf '0')
+    merv_settings_reconcile_uint_valid "$_msrc_now" "$MERV_SETTINGS_RECONCILE_MAX_EPOCH" || _msrc_now=0
+    merv_settings_reconcile_public_write "$_msrc_generation" verified 0 0 \
+        "$_msrc_now" || :
+    return 0
 }
 
 # Return the current authoritative values needed to decide whether MAIN must
@@ -310,6 +393,9 @@ merv_settings_reconcile_quarantine_invalid() {
     _msrqi_target="${MERV_SETTINGS_RECONCILE_FILE}.invalid.${_msrqi_now}.$$.${MERV_SETTINGS_RECONCILE_SEQ}"
     mv "$MERV_SETTINGS_RECONCILE_FILE" "$_msrqi_target" 2>/dev/null || return 1
     MERV_SETTINGS_RECONCILE_QUARANTINED="$_msrqi_target"
+    # A malformed protected marker has no trustworthy generation.  Remove any
+    # old observer projection so a no-node recovery cannot display stale work.
+    merv_settings_reconcile_public_remove || :
     return 0
 }
 

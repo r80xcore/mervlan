@@ -77,6 +77,39 @@ printf '%s\n' \
 
 . "$MERV_BASE/settings/lib_node_jobs.sh"
 
+# Execute the production Dry Run/control-plane decision seam directly.  This
+# proves that an inherited saved DRY_RUN=yes cannot suppress settings-only
+# convergence, while an explicit CLI --dry-run remains a simulation.
+SYNC_DRYRUN_SEAM=$(sed -n '/^if \[ -z "${DRY_RUN:-}" \]; then$/,/^sync_settings_reconcile_capture$/p' "$MERV_BASE/functions/sync_nodes.sh")
+[ -n "$SYNC_DRYRUN_SEAM" ] || fail 'could not extract sync dry-run decision seam'
+
+run_settings_control_plane_case() {
+    SETTINGS_ONLY=1
+    DRY_RUN_FORCED=0
+    SETTINGS_CONTROL_PLANE=0
+    unset DRY_RUN
+    json_get_flag() { printf '%s\n' yes; }
+    sync_settings_reconcile_capture() { :; }
+    eval "$SYNC_DRYRUN_SEAM"
+    assert_eq 1 "$SETTINGS_CONTROL_PLANE" 'settings-only inherited Dry Run enables control-plane transfer'
+    assert_eq no "$DRY_RUN" 'settings-only inherited Dry Run does not become a simulation'
+}
+
+run_explicit_dry_run_case() {
+    SETTINGS_ONLY=1
+    DRY_RUN_FORCED=1
+    SETTINGS_CONTROL_PLANE=0
+    DRY_RUN=yes
+    json_get_flag() { printf '%s\n' yes; }
+    sync_settings_reconcile_capture() { :; }
+    eval "$SYNC_DRYRUN_SEAM"
+    assert_eq 0 "$SETTINGS_CONTROL_PLANE" 'explicit dry-run does not enable control-plane transfer'
+    assert_eq yes "$DRY_RUN" 'explicit dry-run remains a simulation'
+}
+
+run_settings_control_plane_case
+run_explicit_dry_run_case
+
 run_contract_tests() {
     _prefix="$1"
 

@@ -108,6 +108,18 @@ Fixed: Post-implementation safety and convergence corrections
   remain valid upgrade sources even though final-package validation requires
   the new reconciliation files.
 
+Improved: Settings synchronization and operation feedback
+- The Settings modal now reports MAIN persistence separately from the durable
+  automatic node-settings synchronization, including its verified terminal
+  state after the modal is reopened. A saved Dry Run preference no longer
+  turns this settings-only control-plane transfer into a simulation; an
+  explicit CLI `--dry-run` remains a simulation.
+- Hardware Profile refresh now writes a concise operator summary to the CLI
+  log and detailed detected model/interface information to the VLAN log.
+  Client Metadata actions show continuous staged progress and safely retain
+  saved overrides for the next MAC Shield rebuild when no shield database is
+  active.
+
 mervlan v0.53.27-dev
 
 Fixed: Audit-remediation ownership and recovery contracts

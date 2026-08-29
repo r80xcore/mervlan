@@ -1807,6 +1807,16 @@ body {
         display:flex;
 }
 
+/* APMO shares the form pane with the addon-local loading backdrop. During an
+   APMO action, position the progress panel over the modal itself; the backdrop
+   still dims only the addon form. */
+.mervlan-loading-backdrop.mervlan-loading-backdrop--apmo .mervlan-loading-panel {
+        position:absolute;
+        left:var(--apmo-loader-center-x, 50%);
+        top:var(--apmo-loader-center-y, 50%);
+        transform:translate(-50%, -50%);
+}
+
 .mervlan-loading-panel {
         width:min(400px, calc(100% - 32px));
         box-sizing:border-box;

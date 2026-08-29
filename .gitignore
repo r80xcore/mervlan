@@ -2,6 +2,7 @@
 .agents
 .tmp/
 .agent_docs/
+.codex-remote-attachments/
 agent_docs/
 agent.md
 agents.md

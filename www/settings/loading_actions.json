@@ -2,7 +2,7 @@
   "version": 1,
   "actions": {
     "syncsettings_vlanmgr": {
-      "label": "Syncing settings to node(s)...",
+      "label": "Auto-sync Settings to Node(s)",
       "display": "panel",
       "mode": "phase",
       "poll_ms": 1000,
@@ -80,7 +80,6 @@
       "display": "panel",
       "mode": "phase",
       "poll_ms": 1000,
-      "frontend_owned": true,
       "phases": [
         { "id": "prepare", "label": "Preparing client metadata", "start": 0, "end": 20 },
         { "id": "persist", "label": "Saving metadata settings", "start": 20, "end": 50 },

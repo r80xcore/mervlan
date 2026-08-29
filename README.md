@@ -132,6 +132,12 @@ SSH into the AP and run this command. The addon will be placed under **LAN → M
 mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/install.sh" -o "/jffs/addons/mervlan/install.sh" && chmod 0755 /jffs/addons/mervlan/install.sh && /jffs/addons/mervlan/install.sh full
 ```
 
+Need an offline or locally staged installation archive instead? Follow the
+[local-tarball installation flow](docs/HELP.md#install-from-a-local-tarball).
+For an already-installed addon, use the separate
+[local-tarball update flow](docs/HELP.md#update-from-a-local-tarball), not the
+installer.
+
 The guided installer lets you:
 
 - Choose the latest stable release or the development branch.

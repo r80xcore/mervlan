@@ -120,6 +120,10 @@ DRY_RUN_FORCED=0
 DEBUG_FORCED=0
 
 SETTINGS_ONLY=0
+# A settings-only convergence copies and verifies settings.json but never runs
+# the VLAN manager or hardware probe. It is a control-plane action, not a
+# network mutation.
+SETTINGS_CONTROL_PLANE=0
 ORIGINAL_ARGS="$*"
 
 # ───── CLI arg parsing: dryrun + debug + settings-only ─────
@@ -170,7 +174,6 @@ sync_settings_reconcile_capture() {
     _ssrc_nodes=$(merv_node_list_digest 2>/dev/null || printf '')
     [ -n "$_ssrc_settings" ] && [ -n "$_ssrc_nodes" ] || return 0
     [ "$_ssrc_settings" = "$MERV_SETTINGS_RECONCILE_SETTINGS_DIGEST" ] || return 0
-    SYNC_RECONCILE_ACTIVE=1
     SYNC_RECONCILE_GENERATION="$MERV_SETTINGS_RECONCILE_GENERATION"
     SYNC_RECONCILE_SETTINGS_DIGEST="$MERV_SETTINGS_RECONCILE_SETTINGS_DIGEST"
     SYNC_RECONCILE_NODE_LIST_DIGEST="$MERV_SETTINGS_RECONCILE_NODE_LIST_DIGEST"
@@ -179,6 +182,17 @@ sync_settings_reconcile_capture() {
     # cannot keep an otherwise-current generation pending forever.
     SYNC_RECONCILE_CURRENT_NODE_LIST_DIGEST="$_ssrc_nodes"
     SYNC_RECONCILE_ATTEMPT="$MERV_SETTINGS_RECONCILE_ATTEMPT"
+    # This action now owns normal configuration serialization. Reflect that
+    # fact in the durable authority before remote work starts, so a modal can
+    # distinguish an outstanding generation from one actively synchronizing.
+    # A conditional update refuses any generation superseded by a newer Save.
+    if ! merv_settings_reconcile_update "$SYNC_RECONCILE_GENERATION" \
+        "$SYNC_RECONCILE_SETTINGS_DIGEST" "$SYNC_RECONCILE_NODE_LIST_DIGEST" \
+        running "$SYNC_RECONCILE_ATTEMPT" 0; then
+        warn -c vlan "Sync: settings convergence generation was superseded before it could be marked running"
+        return 0
+    fi
+    SYNC_RECONCILE_ACTIVE=1
     return 0
 }
 
@@ -219,6 +233,13 @@ if [ -z "${DRY_RUN:-}" ]; then
     DRY_RUN="$(json_get_flag "DRY_RUN" "yes" "$SETTINGS_FILE" 2>/dev/null)"
 fi
 [ -z "$DRY_RUN" ] && DRY_RUN="yes"
+# Keep an explicit CLI --dry-run as a simulation. The ordinary settings-only
+# path must still converge a newly saved DRY_RUN=yes value; otherwise a node
+# that was previously live would never receive its safety setting.
+if [ "$SETTINGS_ONLY" -eq 1 ] && [ "$DRY_RUN_FORCED" -eq 0 ] && [ "$DRY_RUN" = "yes" ]; then
+    SETTINGS_CONTROL_PLANE=1
+    DRY_RUN=no
+fi
 sync_settings_reconcile_capture
 
 DEBUG_JSON_FLAG="$(json_get_flag "SYNC_DEBUG" "0" "$SETTINGS_FILE" 2>/dev/null)"
@@ -241,7 +262,7 @@ DBG_CHANNEL="vlan,cli"
 : "${DBG_PREFIX:=[DEBUG]}"
 
 dbg_log "sync_nodes.sh invoked with args: ${ORIGINAL_ARGS}"
-dbg_var DRY_RUN DRY_RUN_FORCED DEBUG DEBUG_FORCED DEBUG_JSON
+dbg_var DRY_RUN DRY_RUN_FORCED SETTINGS_CONTROL_PLANE DEBUG DEBUG_FORCED DEBUG_JSON
 
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
@@ -270,6 +291,9 @@ else
     SYNC_PROGRESS_ACTION="sync_vlanmgr"
     SYNC_PROGRESS_LABEL="Sync Nodes"
     SYNC_PROGRESS_PREP="Preparing synchronization..."
+fi
+if [ "${SETTINGS_CONTROL_PLANE:-0}" -eq 1 ]; then
+    info -c cli,vlan "Settings-only control-plane mode: synchronizing settings despite configured Dry Run (no VLAN apply or hardware probe)"
 fi
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$SYNC_PROGRESS_ACTION" \
     "$SYNC_PROGRESS_LABEL" "$SYNC_PROGRESS_PREP"

@@ -44,7 +44,7 @@ grep -Fq 'am_settings_set mervlan_version "$MERVLAN_VERSION"' "$INSTALL" || fail
 grep -Fq 'metadata version verification' "$INSTALL" || fail 'installer MerVLAN version metadata verification missing'
 grep -Fq 'install_bootstrap_full_fresh_context' "$INSTALL" || fail 'fresh bootstrap admission helper missing'
 grep -Fq 'Fresh bootstrap detected; normal maintenance ownership begins after the package is installed' "$INSTALL" || fail 'fresh bootstrap admission missing'
-grep -Fq 'Raw GitHub URLs use the branch name directly' "$MERV_BASE/docs/HELP.md" || fail 'custom bootstrap raw-url guidance missing'
+grep -Fq 'raw.githubusercontent.com/r80xcore/mervlan/refs/heads/pre_v0.53.28-dev/install.sh' "$MERV_BASE/docs/HELP.md" || fail 'custom bootstrap raw-url guidance missing'
 grep -Fq 'confirm_full_uninstall || exit 0' "$UNINSTALL" || fail 'full uninstall confirmation missing'
 grep -Fq 'Also permanently delete retained MerVLAN update/manual backups?' "$UNINSTALL" || fail 'full uninstall backup-deletion prompt missing'
 grep -Fq 'mervlan_metadata_remove_all' "$UNINSTALL" || fail 'precise MerVLAN metadata cleanup missing'

@@ -17,6 +17,10 @@ need '<option value="aimesh">Mode: AiMesh</option>' "$HTML"
 need 'function setNodeRoleControlEnabled(node, enabled)' "$HTML"
 need 'setNodeRoleControlEnabled(i, statusNodeIpIsValid(v));' "$HTML"
 need 'if (statusNodeIpIsValid(raw)) {' "$HTML"
+need 'function firstInvalidNodeIpDraft()' "$HTML"
+need 'Correct or clear the invalid Node ${invalidNodeIp} IP before saving.' "$HTML"
+need "saveBtn.disabled = state !== 'ready' || !!invalidNodeIp;" "$HTML"
+need 'const invalidNodeIp = firstInvalidNodeIpDraft();' "$HTML"
 need 'setStatusSymbol(`statusNODE${index}`, STATUS_SYMBOLS.empty);' "$HTML"
 need 'id="wanNativePopupRole"' "$HTML"
 need 'AiMesh — inherit MAIN' "$HTML"
@@ -29,6 +33,9 @@ need 'vlanmgr_NODE${i}_ROLE' "$HTML"
 need 'NODE([0-9]+)(?:_ALIAS|_WAN_NATIVE_IP|_ROLE)?' "$HTML"
 need 'invalid node role' "$SAVE"
 need 'NODE[1-9]_ROLE|NODE10_ROLE' "$SAVE"
+need 'validate_node_endpoint_kv()' "$SAVE"
+need 'invalid node management address' "$SAVE"
+need 'if ! validate_node_endpoint_kv "$_vne_key" "$_vne_value"; then' "$SAVE"
 need '.node-role-control {' "$FORM_CSS"
 need 'height:23px;' "$FORM_CSS"
 need '--status-icon-size:14px;' "$INDEX_CSS"
@@ -57,4 +64,22 @@ case "$additional_row" in
   *'id="node${n}Field"'*'name="NODE${n}_ROLE"'*'id="statusNODE${n}"'*) ;;
   *) fail 'additional node rows do not retain IP, mode, status order' ;;
 esac
+
+# Execute the exact production endpoint validator. Browser-side control state
+# can be bypassed, so malformed NODE<n> input must also be rejected before a
+# settings candidate can be published.
+node_endpoint_validator=$(sed -n '/^validate_node_endpoint_kv() {/,/^}/p' "$SAVE")
+[ -n "$node_endpoint_validator" ] || fail 'node endpoint validator extraction failed'
+eval "$node_endpoint_validator"
+validate_node_endpoint_kv NODE2 '' || fail 'empty node endpoint rejected'
+validate_node_endpoint_kv NODE2 none || fail 'none node endpoint rejected'
+validate_node_endpoint_kv NODE2 192.168.186.201 || fail 'valid IPv4 node endpoint rejected'
+validate_node_endpoint_kv NODE10 203.0.113.10 || fail 'valid NODE10 endpoint rejected'
+validate_node_endpoint_kv NODE2 192.168.186 >/dev/null 2>&1 && fail 'partial node endpoint accepted'
+validate_node_endpoint_kv NODE2 192.168.186.999 >/dev/null 2>&1 && fail 'out-of-range node endpoint accepted'
+validate_node_endpoint_kv NODE2 example.invalid >/dev/null 2>&1 && fail 'hostname node endpoint accepted'
+endpoint_guard_line=$(grep -n 'if ! validate_node_endpoint_kv "$_vne_key" "$_vne_value"; then' "$SAVE" | head -n 1 | cut -d: -f1)
+commit_line=$(grep -n 'mv -f "${_save_candidate}" "${SETTINGS_FILE}"' "$SAVE" | head -n 1 | cut -d: -f1)
+[ -n "$endpoint_guard_line" ] && [ -n "$commit_line" ] && [ "$endpoint_guard_line" -lt "$commit_line" ] || fail 'node endpoint guard does not precede authoritative commit'
+printf '%s\n' 'PASS: node endpoint validation'
 printf 'NODE_ROLE_UI_CONTRACT_OK\n'

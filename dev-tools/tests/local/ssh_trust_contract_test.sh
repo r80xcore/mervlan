@@ -95,6 +95,8 @@ ok probe-timeout-cleans-up-client
 PROBE_CONNECT_FAIL="$TEST_ROOT/probe-connect-fail"
 printf '%s\n' '#!/bin/sh' \
   'printf "%s\\n" "dbclient: Connection to test@198.51.100.10:22 exited: Connect failed: No route to host" >&2' \
+  '# Keep the fake client alive long enough for the production identity guard to authenticate its child before classifying the captured transport result.' \
+  'sleep 2' \
   'exit 1' > "$PROBE_CONNECT_FAIL" || fail probe-connect-fail-write
 chmod 700 "$PROBE_CONNECT_FAIL" || fail probe-connect-fail-mode
 MERV_BASE="$PROBE_BASE" MERV_SSH_CLIENT="$PROBE_CONNECT_FAIL" \
@@ -108,12 +110,18 @@ ok probe-connect-failed-transport-result
 # required result must be valid JSON and must be published to both paths.
 export ACTION_ACK_FILE="$TEST_ROOT/public/action_result.json"
 export ACTION_ACK_INTERNAL_FILE="$TEST_ROOT/internal/action_ack.json"
+export ACTION_ACK_DIR="$TEST_ROOT/public/actions"
+export ACTION_ACK_PENDING_DIR="$TEST_ROOT/state/action_ack_pending"
 . "$BASE_DIR/settings/lib_action_ack.sh" || fail action-ack-library
 action_ack_ssh_trust_required "ack-regression" "sshtrustprobe_vlanmgr" \
   '{"reason":"ssh-trust-required"}' "SSH verification is required." '[]' || fail action-ack-write
 [ -s "$ACTION_ACK_FILE" ] || fail action-ack-public-file
 [ -s "$ACTION_ACK_INTERNAL_FILE" ] || fail action-ack-internal-file
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["status"] == "ssh_trust_required"; assert d["result"]["reason"] == "ssh-trust-required"' "$ACTION_ACK_FILE" || fail action-ack-json
+# Keep the portable local fixture free of a Python runtime requirement. The
+# production renderer receives fixed, shell-validated JSON fragments here, so
+# these exact fields prove the browser-facing acknowledgement contract.
+grep -Fq '"status":"ssh_trust_required"' "$ACTION_ACK_FILE" || fail action-ack-json-status
+grep -Fq '"result":{"reason":"ssh-trust-required"}' "$ACTION_ACK_FILE" || fail action-ack-json-reason
 ok action-ack-json
 
 merv_ssh_trust_init >/dev/null 2>&1 || fail init

@@ -427,6 +427,14 @@ dispatch_if_executable() {
   # malformed owner metadata is treated as busy and is never reclaimed by age.
   _se_key=$(printf '%s' "${RAW:-${SCRIPT_PATH##*/}}" | tr -cd 'A-Za-z0-9._-')
   [ -n "$_se_key" ] || return 1
+  # Progress-token actions carry the token in their dispatch spelling, but the
+  # correlated acknowledgement is a public action contract.  Keep lock
+  # refusals observable by the browser under the same base action it requested.
+  # (For example, save_vlanmgr_pgt_<token> acknowledges as save_vlanmgr.)
+  case "$_se_key" in
+    *_pgt_*) _se_ack_action="${_se_key%%_pgt_*}" ;;
+    *) _se_ack_action="$_se_key" ;;
+  esac
   _se_event_lock="${LOCKDIR%/}/${_se_key}.lock"
   merv_action_lock_enter "$_se_event_lock"
   _se_event_rc=$?
@@ -438,7 +446,7 @@ dispatch_if_executable() {
       merv_action_progress_fail "The event action owner could not be verified; no work was started."
     fi
     if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
-      action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_event_rc" event >/dev/null 2>&1 || \
+      action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_ack_action" "$_se_event_rc" event >/dev/null 2>&1 || \
         logger -t "VLANMgr" "handler: lock-failure acknowledgement failed for $_se_key"
     fi
     logger -t "VLANMgr" "handler: $_se_key owner lock unavailable (rc=$_se_event_rc); refusing dispatch"
@@ -463,7 +471,7 @@ dispatch_if_executable() {
         merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
         merv_action_progress_fail "The action lock could not be reconciled; recovery is required."
         if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
-          action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+          action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" \
             '{"reason":"cleanup-failed","lock":"event"}' \
             "The event action lock could not be cleaned up; recovery is required." \
             '["action-lock-cleanup-failed"]' action-lock-cleanup-failed >/dev/null 2>&1 || :
@@ -477,7 +485,7 @@ dispatch_if_executable() {
         merv_action_progress_fail "The global action owner could not be verified; no work was started."
       fi
       if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
-        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_global_rc" global >/dev/null 2>&1 || \
+        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_ack_action" "$_se_global_rc" global >/dev/null 2>&1 || \
           logger -t "VLANMgr" "handler: global lock-failure acknowledgement failed for $_se_key"
       fi
       logger -t "VLANMgr" "handler: global action lock unavailable (rc=$_se_global_rc); refusing $_se_key"
@@ -594,7 +602,7 @@ dispatch_if_executable() {
       merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
       merv_action_progress_fail "The action owner context was invalid; no work was started."
       if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
-        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" \
           '{"reason":"child-context-export-failed"}' \
           "The action owner context was invalid; no work was started." \
           '["child-context-export-failed"]' child-context-export-failed >/dev/null 2>&1 || :
@@ -679,9 +687,31 @@ dispatch_if_executable() {
     if [ "$_se_script_rc" -eq 0 ]; then
       _se_script_rc=75
       if [ "$_se_ack_finalized" -eq 0 ] && type action_ack_error >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
-        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
+        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
       fi
     fi
+  fi
+  # A successful WebUI Save may have published a durable node-settings
+  # generation.  The browser can accelerate it, but browser transport must
+  # never be the only way convergence starts.  Kick the existing due worker
+  # only after this dispatcher has conclusively released its event/global
+  # ownership.  The worker rechecks AUTO_SYNC, Update eligibility, marker
+  # state, and the normal global owner lock before it launches SSH work.
+  case "${RAW:-}" in
+    save_vlanmgr|save_vlanmgr_pgt_*) _se_successful_save=1 ;;
+    *) _se_successful_save=0 ;;
+  esac
+  if [ "$_se_successful_save" -eq 1 ] && [ "$_se_script_rc" -eq 0 ] && [ "$_se_release_rc" -eq 0 ] && \
+     [ -f "$MERV_BASE/functions/settings_reconcile.sh" ]; then
+    (
+      unset MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+        MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
+        MERV_PROGRESS_TOKEN MERV_ACTION_ACK_STAGE
+      exec </dev/null
+      exec >/dev/null 2>&1
+      sh "$MERV_BASE/functions/settings_reconcile.sh" due
+    ) &
+    logger -t "VLANMgr" "handler: settings reconciliation kick scheduled after save"
   fi
   return "$_se_script_rc"
 

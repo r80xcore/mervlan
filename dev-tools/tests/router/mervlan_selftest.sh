@@ -2995,6 +2995,7 @@ test_apmo_completion_contract() {
   _tapm_ui="$MERV_BASE/www/index.html"
   _tapm_handler="$MERV_BASE/functions/service-event-handler.sh"
   _tapm_probe="$MERV_BASE/functions/hw_probe.sh"
+  _tapm_css="$MERV_BASE/www/vlan_index_style.css"
   _tapm_ok=1
 
   if grep -q 'async function runVerifiedHardwareProbe' "$_tapm_ui" &&
@@ -3023,6 +3024,54 @@ test_apmo_completion_contract() {
     pass "HW probe publishes correlated terminal acknowledgements"
   else
     fail "HW probe publishes correlated terminal acknowledgements"
+    _tapm_ok=0
+  fi
+
+  _tapm_refresh=$(sed -n '/async function refreshHwProfile/,/async function checkForUpdates/p' "$_tapm_ui")
+  _tapm_probe_save=$(sed -n '/async function applyOverrideWithHwProbe/,/function extractOverrideSaveExpected/p' "$_tapm_ui")
+  _tapm_save_only=$(sed -n '/async function applyOverrideSaveOnly/,/async function refreshHwProfile/p' "$_tapm_ui")
+  _tapm_auto_sync=$(sed -n '/async function autoSyncAdvancedOverrideNodes/,/async function applyOverrideWithHwProbe/p' "$_tapm_ui")
+  _tapm_payload=$(sed -n '/function buildOverridePayloadForMerlin/,/function buildClientMetaPayloadForMerlin/p' "$_tapm_ui")
+  _tapm_ack_wait=$(sed -n '/async function waitForVerifiedActionResult/,/async function executeVerifiedServiceAction/p' "$_tapm_ui")
+  _tapm_modal=$(sed -n '/function showAdvancedOverrideModal/,/function hideAdvancedOverrideModal/p' "$_tapm_ui")
+  if printf '%s\n' "$_tapm_refresh" | grep -q 'prepareAdvancedOverrideLoadingLayer();' &&
+     printf '%s\n' "$_tapm_refresh" | awk '/await loadSettings\(\);/ { loaded = NR } /refreshOpenAdvancedOverrideModalFromCache\(\);/ { refreshed = NR } END { exit !(loaded && refreshed && loaded < refreshed) }' &&
+     ! printf '%s\n' "$_tapm_refresh" | grep -q 'hideAdvancedOverrideModal();' &&
+     printf '%s\n' "$_tapm_auto_sync" | grep -q 'prepareAdvancedOverrideLoadingLayer();' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/waitForVerifiedActionResult\(saveRequestToken/ { ack = NR } /waitForSettingsToMatch\(expectedManaged/ { persist = NR } END { exit !(ack && persist && ack < persist) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/waitForVerifiedActionResult\(saveRequestToken/ { ack = NR } /waitForSettingsToMatch\(expectedManaged/ { persist = NR } END { exit !(ack && persist && ack < persist) }' &&
+     grep -Fq 'function prepareAdvancedOverrideLoadingLayer()' "$_tapm_ui" &&
+     printf '%s\n' "$_tapm_modal" | grep -Fq 'try { formPane.appendChild(modal); } catch (e) { /* ignore */ }' &&
+     ! grep -Fq 'document.body.appendChild(backdrop)' "$_tapm_ui" &&
+     grep -Fq '.mervlan-loading-backdrop.mervlan-loading-backdrop--apmo .mervlan-loading-panel' "$_tapm_css" &&
+     grep -Fq 'left:var(--apmo-loader-center-x, 50%);' "$_tapm_css" &&
+     grep -Fq 'top:var(--apmo-loader-center-y, 50%);' "$_tapm_css" &&
+     grep -Fq 'const modalIsInForm = modal.parentElement === form;' "$_tapm_ui" &&
+     grep -Fq 'function refreshOpenAdvancedOverrideModalFromCache(confirmedOverrides = null)' "$_tapm_ui" &&
+     grep -Fq 'Object.prototype.hasOwnProperty.call(confirmedOverrides, key)' "$_tapm_ui" &&
+     grep -Fq 'function autoSyncAdvancedOverrideNodesEnabled()' "$_tapm_ui" &&
+     grep -Fq 'function configuredAdvancedOverrideTargets()' "$_tapm_ui" &&
+     printf '%s\n' "$_tapm_payload" | grep -Fq 'configuredAdvancedOverrideTargets().forEach(t => {' &&
+     ! printf '%s\n' "$_tapm_payload" | grep -Fq 'nodeTokens(true).forEach(t => {' &&
+     printf '%s\n' "$_tapm_ack_wait" | grep -Fq 'PATHS.ACTION_RESULTS_DIR + encodeURIComponent(requestToken)' &&
+     printf '%s\n' "$_tapm_ack_wait" | grep -Fq 'PATHS.ACTION_RESULT +' &&
+     printf '%s\n' "$_tapm_ack_wait" | grep -Fq 'parsed.request_token === requestToken && parsed.action === actionName' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/clearFields\(\);/ { cleared = NR } /await loadSettings\(\);/ { loaded = NR } /refreshOpenAdvancedOverrideModalFromCache\(expectedManaged\);/ { refreshed = NR } END { exit !(cleared && loaded && refreshed && cleared < loaded && loaded < refreshed) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/clearFields\(\);/ { cleared = NR } /await loadSettings\(\);/ { loaded = NR } /refreshOpenAdvancedOverrideModalFromCache\(expectedManaged\);/ { refreshed = NR } END { exit !(cleared && loaded && refreshed && cleared < loaded && loaded < refreshed) }' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/await loadSettings\(\);/ { loaded = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(loaded && auto && loaded < auto) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/await loadSettings\(\);/ { loaded = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(loaded && auto && loaded < auto) }' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/loadingTask\.completion/ { completed = NR } /MerVLANLoading\.close\(\);/ { released = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(completed && released && auto && completed < released && released < auto) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/loadingTask\.completion/ { completed = NR } /MerVLANLoading\.close\(\);/ { released = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(completed && released && auto && completed < released && released < auto) }' &&
+     grep -Fq 'info -c cli "Refreshing hardware profile for $_OVR_TARGET..."' "$_tapm_probe" &&
+     grep -Fq 'info -c cli "Hardware profile refreshed: $MODEL ($MAX_ETH_PORTS LAN ports; WAN $WAN_IF)"' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware detection complete"' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware model:' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware Ethernet:' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware profile stored in settings.json' "$_tapm_probe" &&
+     ! grep -Fq 'info -c cli,vlan' "$_tapm_probe"; then
+    pass "manual HW refresh exposes its loading state, summarizes CLI output, and keeps diagnostics in the VLAN log"
+  else
+    fail "manual HW refresh exposes its loading state, summarizes CLI output, and keeps diagnostics in the VLAN log"
     _tapm_ok=0
   fi
 
@@ -3593,10 +3642,14 @@ test_failure_propagation_contract() {
      grep -q 'exit 2' "$_tfpc_meta" &&
      grep -q '_meta_partial=1' "$_tfpc_meta" &&
      grep -q 'Client metadata persisted, but MAC shield enforcement or follow-up work requires recovery' "$_tfpc_meta" &&
+     grep -q '_shield_reload=staged' "$_tfpc_meta" &&
+     grep -q 'Client metadata saved; MAC Shield has no active database' "$_tfpc_meta" &&
+     grep -q 'merv_action_progress_update collect 4 4 94 "Refreshing client inventory..."' "$_tfpc_meta" &&
+     grep -q 'merv_action_progress_update complete 1 1 98 "Finalizing client metadata..."' "$_tfpc_meta" &&
      ! grep -q '_name_pairs\|name entries:' "$_tfpc_meta"; then
-    pass "MAC refresh and metadata actions publish terminal failure states"
+    pass "MAC refresh and metadata actions distinguish strict failures from safely staged metadata"
   else
-    fail "MAC refresh and metadata actions publish terminal failure states"
+    fail "MAC refresh and metadata actions distinguish strict failures from safely staged metadata"
     _tfpc_ok=0
   fi
 
@@ -3741,7 +3794,7 @@ test_ssh_trust_contract() {
      grep -Fq 'pauseForSshTrust' "$_tst_ui" &&
      grep -Fq 'waitsForSshTrustAck' "$_tst_ui" &&
      grep -Fq 'sshTrustDecisionSelectedChallengeIds' "$_tst_ui" &&
-     grep -Fq 'Auto-abort in' "$_tst_ui" &&
+     grep -Fq 'Decision expires in' "$_tst_ui" &&
      grep -Fq '#sshTrustModal {' "$_tst_ui" &&
      grep -Fq 'max-height: calc(100vh - 28px);' "$_tst_ui" &&
      grep -Fq 'formPane.appendChild(overlay)' "$_tst_ui" &&

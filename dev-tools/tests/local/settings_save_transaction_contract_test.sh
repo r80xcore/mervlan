@@ -44,17 +44,23 @@ grep -Fq 'public-settings-publication-failed' "$SAVE_FILE" || fail 'public publi
 
 # Normal Save retains the draft until acknowledgement, then clears it before
 # reloading the authoritative settings so the final visible form is populated.
+# A structured partial acknowledgement can still prove MAIN persistence (for
+# example public publication failed while durable node convergence is pending),
+# so it must not be flattened into a false failed Save.
 save_line=$(grep -n "Clearing form fields" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 ack_line=$(grep -n "waitForVerifiedActionResult" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 reload_line=$(grep -n "const reloaded = await loadSettings()" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 [ "$save_line" -gt "$ack_line" ] || fail 'normal Save clears draft before acknowledgement'
 [ "$save_line" -lt "$reload_line" ] || fail 'normal Save does not clear draft before authoritative reload'
-grep -Fq "if (saveAck.status === 'partial')" "$UI_FILE" || fail 'partial acknowledgement branch missing'
-grep -Fq "} else if (!saveAck.ok)" "$UI_FILE" || fail 'failed acknowledgement branch missing'
-grep -Fq "return { ok: false, changed: true" "$UI_FILE" || fail 'failed or partial acknowledgement does not retain draft'
-partial_line=$(grep -n "if (saveAck.status === 'partial')" "$UI_FILE" | tail -n 1 | cut -d: -f1)
-failed_line=$(grep -n "} else if (!saveAck.ok)" "$UI_FILE" | tail -n 1 | cut -d: -f1)
-[ "$partial_line" -lt "$save_line" ] && [ "$failed_line" -lt "$save_line" ] || fail 'failed or partial Save can reach draft clearing'
+grep -Fq "function normalizeSettingsSaveAcknowledgement(verifiedAck)" "$UI_FILE" || fail 'structured Save acknowledgement parser missing'
+grep -Fq "function unwrapVerifiedActionAcknowledgement(verifiedAck)" "$UI_FILE" || fail 'verified Save wrapper unwrapping helper missing'
+grep -Fq "const result = acknowledgement ? acknowledgement.result : {};" "$UI_FILE" || fail 'Save acknowledgement does not explicitly unwrap the action payload'
+grep -Fq "wrapperStatus !== acknowledgementStatus" "$UI_FILE" || fail 'Save acknowledgement accepts mismatched verified-wrapper state'
+grep -Fq "String(result.local_saved || '') !== '1'" "$UI_FILE" || fail 'Save acknowledgement no longer requires authoritative MAIN persistence'
+grep -Fq "publicSettings: result.public_settings === 'failed' ? 'failed' : 'ok'" "$UI_FILE" || fail 'public publication failure is not kept separate from node convergence'
+grep -Fq "nodeSyncStatus: result.node_sync ? String(result.node_sync) : 'ok'" "$UI_FILE" || fail 'node convergence status is not preserved from structured acknowledgement'
+reject_line=$(grep -n "if (!acknowledged.ok)" "$UI_FILE" | tail -n 1 | cut -d: -f1)
+[ "$reject_line" -lt "$save_line" ] || fail 'unconfirmed MAIN Save can reach draft clearing'
 grep -Fq "Client metadata apply did not reach a terminal refresh; keeping the editor draft." "$UI_FILE" || fail 'ClientMeta timeout does not retain draft'
 
 printf 'SETTINGS_SAVE_TRANSACTION_CONTRACT_OK\n'

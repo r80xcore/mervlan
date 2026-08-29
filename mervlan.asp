@@ -493,8 +493,7 @@ const MVM_WAIT_OVERRIDE = {
 // Optional: actions that need a minimum loading screen time (milliseconds)
 const MVM_MIN_LOADING_MS = {
   "save_vlanmgr": 8000,  // Show loading for at least 8s to allow clear+reload verification
-  "hwprobe_vlanmgr": 8000,  // Show loading for at least 8s while hw_probe runs
-  "macclientmeta_vlanmgr": 8000  // Show loading while DBs are written, shield reloads, inventory refreshes
+  "hwprobe_vlanmgr": 8000  // Show loading for at least 8s while hw_probe runs
 };
 
 /* Build final opts for an action using the policy + any per-call override */
@@ -707,11 +706,23 @@ function MVM_hwprobeAsync(opts) {
   return MVM_execAsync("hwprobe_vlanmgr", payload, mvmOptsFor("hwprobe_vlanmgr", execOpts));
 }
 function MVM_macRefresh(opts)                 { return MVM_exec("macrefresh_vlanmgr",    null,        mvmOptsFor("macrefresh_vlanmgr",    opts)); }
-function MVM_macClientMeta(opts)             { return MVM_exec("macclientmeta_vlanmgr", null,        mvmOptsFor("macclientmeta_vlanmgr", opts)); }
+function MVM_macClientMeta(opts) {
+  // The embedded client-metadata editor owns its progress panel.  In addition
+  // to the policy-set guard, force the parent transport to avoid its generic
+  // ASUS loader and its minimum-loader hold for this action.
+  var actionOpts = mvmOptsFor("macclientmeta_vlanmgr", opts);
+  actionOpts.loading = false;
+  actionOpts.skipRefresh = true;
+  actionOpts.waitSec = 0;
+  actionOpts.minLoadingMs = 0;
+  return MVM_exec("macclientmeta_vlanmgr", null, actionOpts);
+}
 
 // Convenience helper for silent saves invoked from the embedded SPA
 function MVM_save_quiet(settingsObj) {
-  return MVM_save(settingsObj, { loading: false, waitSec: 0, skipRefresh: true });
+  // A silent caller must also override save_vlanmgr's generic minimum loader
+  // hold; otherwise the ASUS overlay remains visible despite loading:false.
+  return MVM_save(settingsObj, { loading: false, waitSec: 0, skipRefresh: true, minLoadingMs: 0 });
 }
 </script>
 </head>

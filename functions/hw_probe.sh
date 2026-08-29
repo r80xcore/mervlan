@@ -183,7 +183,10 @@ else
   _OVR_TARGET="MAIN"
 fi
 
-info "Hardware override target: $_OVR_TARGET (IS_NODE=${_OVR_IS_NODE:-0}, NODE_ID=${_OVR_NODE_ID:-none})"
+# The CLI is an operator-facing action summary.  Keep the detailed probe
+# record in the VLAN log, where it remains available for troubleshooting.
+info -c cli "Refreshing hardware profile for $_OVR_TARGET..."
+info -c vlan "Hardware probe target: $_OVR_TARGET"
 
 # Only a verified APMO request is part of the serialized MAIN Save/probe
 # transaction. Boot and legacy tokenless probes retain their historical local
@@ -487,7 +490,7 @@ fi
 # determine target JSON file (HW_SETTINGS_FILE is an alias to settings.json)
 HW_TARGET="${HW_SETTINGS_FILE:-${SETTINGS_FILE}}"
 
-info "Writing hardware profile into: $HW_TARGET (Hardware section)"
+info -c vlan "Writing hardware profile to settings.json (Hardware section)"
 
 # Ensure the store exists before attempting changes
 ensure_json_store "$HW_TARGET" || {
@@ -568,23 +571,19 @@ fi
 # interfaces for troubleshooting.                                              #
 # ============================================================================ #
 
-# Log detected hardware configuration
-info "Hardware detection complete:"
-echo "  Model: $MODEL ($PRODUCTID)"
-echo "  Radios: $RADIOS"
-echo "  Radio indexes: $RADIO_INDEXES"
-echo "  Guest slots per radio: $GUEST_SLOTS"
-echo "  Max SSIDs: $MAX_SSIDS"
-echo "  Ethernet ports: $ETH_PORTS"
-echo "  Labels: $LAN_PORT_LABELS"
-echo "  Label overrides: ${LAN_PORT_LABEL_OVERRIDES:-none}"
-echo "  WAN interface: $WAN_IF"
-echo "  Output: $HW_TARGET (Hardware section in settings.json)"
-
-echo ""
-# Debug output: list all detected ethernet interfaces for verification
-echo "=== Debug: All detected interfaces ==="
-ls /sys/class/net/ | grep -E '^eth[0-9]' | sort
+# This script is normally launched by the service-event handler, whose stdout
+# is intentionally not the WebUI CLI stream.  Publish the operational report
+# explicitly to both supported user-visible log channels instead of relying on
+# background-action stdout.
+_hp_detected_eth=$(ls /sys/class/net/ 2>/dev/null | grep -E '^eth[0-9]' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+info -c vlan "Hardware detection complete"
+info -c vlan "Hardware model: $MODEL"
+info -c vlan "Hardware radios: $RADIOS (indexes: $RADIO_INDEXES; guest slots: $GUEST_SLOTS; max SSIDs: $MAX_SSIDS)"
+info -c vlan "Hardware Ethernet: ports: $ETH_PORTS; labels: $LAN_PORT_LABELS; WAN: $WAN_IF"
+info -c vlan "Hardware label overrides: ${LAN_PORT_LABEL_OVERRIDES:-none}"
+info -c vlan "Detected Ethernet interfaces: ${_hp_detected_eth:-none}"
+info -c vlan "Hardware profile stored in settings.json (Hardware section)"
+info -c cli "Hardware profile refreshed: $MODEL ($MAX_ETH_PORTS LAN ports; WAN $WAN_IF)"
 
 # ============================================================================ #
 #                 PUBLIC HARDWARE PROFILE CATALOG GENERATOR                   #

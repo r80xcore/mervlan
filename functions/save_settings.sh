@@ -824,12 +824,18 @@ seed_general_setting_from_normal_kv() {
 }
 
 if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "wan_native" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
-    if ! seed_general_setting_from_normal_kv "AUTO_SYNC_SETTINGS" || \
-       ! seed_general_setting_from_normal_kv "HTML_CLIENT_REFRESH_MINUTES"; then
-        error -c vlan "save_settings.sh: failed to seed General settings"
-        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
-        exit 1
-    fi
+    # Every Settings-modal control stored under General must use the structured
+    # writer.  A scoped service Save contains only its changed controls; the
+    # helper is a no-op for omitted keys, so this does not overwrite them.
+    for _save_general_key in \
+        BOOT_ENABLED PAUSE ENABLE_STP DRY_RUN EXPERIMENTAL ENABLE_NATIVE_SSID \
+        AUTO_SYNC_SETTINGS HTML_CLIENT_REFRESH_MINUTES; do
+        if ! seed_general_setting_from_normal_kv "$_save_general_key"; then
+            error -c vlan "save_settings.sh: failed to seed General setting $_save_general_key"
+            rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
+            exit 1
+        fi
+    done
 fi
 
 # WAN Native values are normal-scope settings but live in VLAN.WAN_Native in
@@ -965,6 +971,16 @@ validate_wan_native_endpoint_kv() {
     printf '%s\n' "$_vwne_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
 }
 
+# A configured NODE<n> value is its ASUS/default management endpoint. Empty
+# and `none` are unconfigured forms; every other submitted value must be a
+# strict IPv4 address before the candidate can become authoritative.
+validate_node_endpoint_kv() {
+    _vne_key="$1"; _vne_value="$2"
+    case "$_vne_key" in NODE[1-9]|NODE10) ;; *) return 0 ;; esac
+    case "$_vne_value" in ''|none|NONE) return 0 ;; esac
+    printf '%s\n' "$_vne_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+}
+
 # Roles live with the durable node identity and are accepted by both normal
 # and WAN-Native save scopes.  Missing legacy keys are interpreted by the
 # shared reader as standalone; an explicitly supplied invalid value fails
@@ -978,6 +994,14 @@ validate_node_role_kv() {
 while IFS="$(printf '\t')" read -r _vwne_key _vwne_value; do
     if ! validate_wan_native_endpoint_kv "$_vwne_key" "$_vwne_value"; then
         error -c vlan "save_settings.sh: invalid WAN Native management endpoint $_vwne_key=$_vwne_value"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+while IFS="$(printf '\t')" read -r _vne_key _vne_value; do
+    if ! validate_node_endpoint_kv "$_vne_key" "$_vne_value"; then
+        error -c vlan "save_settings.sh: invalid node management address $_vne_key (use none or IPv4)"
         rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
         exit 1
     fi
@@ -1378,6 +1402,7 @@ fi
 # ============================================================================ #
 
 _save_node_sync_status="skipped"
+_save_node_sync_generation=0
 if [ "$_save_public_status" != "ok" ]; then
     _save_node_sync_status="skipped-public-failure"
 fi
@@ -1417,9 +1442,21 @@ if [ "${SAVE_SCOPE:-full}" != "clientmeta" ] && [ "${SAVE_SCOPE:-full}" != "wan_
             fi
         fi
 
+        # The acknowledgement exposes only the monotonic generation, never a
+        # digest or node list. It lets the WebUI observe the exact durable
+        # obligation it just created without becoming a second authority.
+        if [ "$_save_reconcile_published" = "yes" ] && merv_settings_reconcile_read; then
+            _save_node_sync_generation="$MERV_SETTINGS_RECONCILE_GENERATION"
+        fi
+
         if [ "$_save_reconcile_published" != "yes" ]; then
             _save_node_sync_status="failed"
             warn -c vlan,cli "save_settings.sh: node settings intent could not be durably published; local settings saved"
+        elif [ -z "$_nodes_configured" ]; then
+            # A current empty target set is vacuously converged. In
+            # particular, final-node removal clears any older marker rather
+            # than reporting an imaginary pending generation.
+            _save_node_sync_status="skipped-no-nodes"
         elif [ "$_save_public_status" != ok ]; then
             if [ "$_should_auto_sync" = yes ]; then _save_node_sync_status="pending"; else _save_node_sync_status="paused"; fi
             info -c vlan,cli "Node settings convergence is durable; public settings publication failed"
@@ -1466,23 +1503,24 @@ if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 
         _save_ack_partial=action_ack_stage_partial
         _save_ack_ok=action_ack_stage_ok
     fi
+    _save_ack_result="{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\",\"node_sync_generation\":\"$_save_node_sync_generation\"}"
     if [ "$_save_public_status" != "ok" ]; then
         "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            "{\"local_saved\":\"1\",\"public_settings\":\"failed\",\"node_sync\":\"$_save_node_sync_status\"}" \
+            "{\"local_saved\":\"1\",\"public_settings\":\"failed\",\"node_sync\":\"$_save_node_sync_status\",\"node_sync_generation\":\"$_save_node_sync_generation\"}" \
             "Settings saved locally, but public settings publication failed: $_save_public_reason" \
             '["public-settings-publication-failed"]' >/dev/null 2>&1 || :
     elif [ "$_save_node_sync_status" = "failed" ]; then
         "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            '{"local_saved":"1","node_sync":"failed"}' \
+            "$_save_ack_result" \
             "Settings saved locally; node settings synchronization failed." \
             '["node-settings-sync-failed"]' >/dev/null 2>&1 || :
     elif [ "$_save_node_sync_status" = "pending" ] || [ "$_save_node_sync_status" = "deferred" ] || [ "$_save_node_sync_status" = "paused" ]; then
         "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \
+            "$_save_ack_result" \
             "Settings saved successfully; node settings synchronization is ${_save_node_sync_status}." '[]' >/dev/null 2>&1 || :
     else
         "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \
+            "$_save_ack_result" \
             "Settings saved successfully." '[]' >/dev/null 2>&1 || :
     fi
     if [ "$_save_public_status" != "ok" ]; then
