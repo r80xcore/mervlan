@@ -1111,7 +1111,7 @@ MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merli
 
 | Model | Ports | Notes |
 | --- | --- | --- |
-| [**DSL-AX82U**](https://github.com/r80xcore/mervlan/issues/44) | 3 | |
+| DSL-AX82U | 3 | |
 | GT-AX6000 | 5 | |
 | GT-AX11000 | 5 | |
 | GT-AX11000 Pro | 5 | |
