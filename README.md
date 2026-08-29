@@ -317,7 +317,7 @@ Thanks to everyone who ran the hardware mapper and submitted a device profile. T
 
 **Model collection from GitHub:**
 
-bieniu, pxdl, davittoncat, RikshaDriver, Mudcrab353, franzatkiermeyereu, mdraco11, tooty-1135, getBoolean, piratak, kashif789us, bigadron, MathNerd28
+bieniu, pxdl, davittoncat, RikshaDriver, Mudcrab353, franzatkiermeyereu, mdraco11, tooty-1135, getBoolean, piratak, kashif789us, bigadron, MathNerd28, [peternovakovster](https://github.com/r80xcore/mervlan/issues?q=is%3Aissue%20state%3Aopen%20author%3Apeternovakovster), [MrKlausz](https://github.com/r80xcore/mervlan/issues?q=is%3Aissue%20state%3Aopen%20author%3AMrKlausz)
 
 **Model collection from SNBForums:**
 

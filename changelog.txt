@@ -3,6 +3,8 @@ mervlan v0.53.28-dev
 Improved: VLAN safety, node policy, and offline Update
 - Added a verified DSL-AX82U hardware profile: LAN1–3 map to `eth2 eth1 eth0`
   and WAN maps to `eth3`.
+- Added a verified RT-AX68U hardware profile: LAN1–4 map to
+  `eth4 eth3 eth2 eth1` and WAN maps to `eth0`.
 - Managed wired VLAN ports now use one device-aware expected state with exact
   bridge placement and Layer-2 protection checks; unsafe or unknown state
   remains fail-closed.
