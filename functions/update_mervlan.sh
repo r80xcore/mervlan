@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.70"                   #
+#                - File: update_mervlan.sh || version="0.71"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -163,6 +163,7 @@ UPDATE_NODES_TOUCHED="0"
 UPDATE_RUNTIME_RESTORED="0"
 UPDATE_JFFS_STAGE=""
 UPDATE_JFFS_OLD=""
+UPDATE_POOL_ABORT_FAILED="0"
 UPDATE_RUN_ID="update-$(date +%s 2>/dev/null || echo 0)-$$"
 UPDATE_QUIESCE_ACTIVE="0"
 UPDATE_JFFS_RESERVE_KB="${MERV_UPDATE_JFFS_RESERVE_KB:-5120}"
@@ -1123,29 +1124,66 @@ update_backup_metadata() {
 # CLEANUP HANDLER                                                            #
 # ========================================================================== #
 
+update_pool_state_unresolved() {
+	if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+		mnj_pool_state_unresolved
+		return $?
+	fi
+	case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 1 ;; *) return 0 ;; esac
+}
+
+update_abort_node_pool() {
+	update_pool_state_unresolved || return 0
+	if ! type mnj_pool_abort_active >/dev/null 2>&1; then
+		UPDATE_POOL_ABORT_FAILED="1"
+		error -c cli,vlan "Update cleanup could not reconcile active node workers; retaining locks and recovery state"
+		return 1
+	fi
+	if ! mnj_pool_abort_active failed update-exit; then
+		UPDATE_POOL_ABORT_FAILED="1"
+		error -c cli,vlan "Update cleanup could not stop and reconcile active node workers; retaining locks and recovery state"
+		return 1
+	fi
+	if ! update_pool_state_unresolved; then UPDATE_POOL_ABORT_FAILED="0"; return 0; fi
+	UPDATE_POOL_ABORT_FAILED="1"
+	error -c cli,vlan "Update cleanup left active node workers unresolved; retaining locks and recovery state"
+	return 1
+}
+
 cleanup_tmp() {
 	_update_cleanup_rc=$?
 	_update_cleanup_failed=0
-	if [ "$UPDATE_PRESERVE_JFFS" != "1" ]; then
-		update_remove_jffs_stage "$UPDATE_JFFS_STAGE" || _update_cleanup_failed=1
+	_update_pool_cleanup_ready="1"
+	if ! update_abort_node_pool; then
+		_update_pool_cleanup_ready="0"
+		_update_cleanup_failed=1
+		UPDATE_PRESERVE_TMP="1"
+		UPDATE_PRESERVE_JFFS="1"
 	fi
-	# UPDATE_JFFS_OLD is removed only after success or restored during rollback.
-	# Preserve it if activation failed so the administrator still has the exact
-	# pre-update tree beside the persistent backups.
-	if [ "$UPDATE_PRESERVE_JFFS" != "1" ] && [ "$UPDATE_ACTIVATION_STARTED" != "1" ]; then
-		update_remove_jffs_stage "$UPDATE_JFFS_OLD" || _update_cleanup_failed=1
-	fi
-	if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ -n "$TMP_BASE" ] && [ -d "$TMP_BASE" ]; then
-		rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
-	fi
-	if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ]; then
-		if type merv_owner_lock_release >/dev/null 2>&1 &&
-		   merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" 2>/dev/null; then
-			UPDATE_MAINTENANCE_LOCK_OWNED="0"
-		else
-			_update_cleanup_failed=1
-			error -c cli,vlan "Update cleanup could not release the maintenance owner lock; recovery is required"
+	if [ "$_update_pool_cleanup_ready" = "1" ]; then
+		if [ "$UPDATE_PRESERVE_JFFS" != "1" ]; then
+			update_remove_jffs_stage "$UPDATE_JFFS_STAGE" || _update_cleanup_failed=1
 		fi
+		# UPDATE_JFFS_OLD is removed only after success or restored during rollback.
+		# Preserve it if activation failed so the administrator still has the exact
+		# pre-update tree beside the persistent backups.
+		if [ "$UPDATE_PRESERVE_JFFS" != "1" ] && [ "$UPDATE_ACTIVATION_STARTED" != "1" ]; then
+			update_remove_jffs_stage "$UPDATE_JFFS_OLD" || _update_cleanup_failed=1
+		fi
+		if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ -n "$TMP_BASE" ] && [ -d "$TMP_BASE" ]; then
+			rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
+		fi
+		if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ]; then
+			if type merv_owner_lock_release >/dev/null 2>&1 &&
+			   merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" 2>/dev/null; then
+				UPDATE_MAINTENANCE_LOCK_OWNED="0"
+			else
+				_update_cleanup_failed=1
+				error -c cli,vlan "Update cleanup could not release the maintenance owner lock; recovery is required"
+			fi
+		fi
+	else
+		error -c cli,vlan "Update cleanup preserved recovery data and maintenance owner lock because active node workers remain unresolved"
 	fi
 	[ "$_update_cleanup_failed" -eq 0 ] || _update_cleanup_rc=1
 	return "$_update_cleanup_rc"
@@ -1157,7 +1195,13 @@ handle_update_signal() {
 	UPDATE_SIGNAL_HANDLING="1"
 	trap - INT TERM
 	warn -c cli,vlan "Update interrupted; stopping safely"
-	if [ "$UPDATE_ACTIVATION_STARTED" = "1" ]; then
+	_update_signal_pool_ready="1"
+	if ! update_abort_node_pool; then
+		_update_signal_pool_ready="0"
+		UPDATE_PRESERVE_TMP="1"
+		UPDATE_PRESERVE_JFFS="1"
+	fi
+	if [ "$_update_signal_pool_ready" = "1" ] && [ "$UPDATE_ACTIVATION_STARTED" = "1" ]; then
 		if restore_update_original_tree; then
 			error -c cli,vlan "Interrupted update rolled back to the original main-router installation"
 		else

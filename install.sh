@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.64"                      #
+#                    - File: install.sh || version="0.65"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -1774,6 +1774,18 @@ installer_exit_handler() {
     exit "$status"
 }
 
+# Tarball mode keeps the user-owned archive but creates an installer-owned
+# extraction child beneath TMP_DIR. Full mode already uses the richer handler
+# above; tarball needs its own EXIT path so an invalid archive, interruption,
+# or failed copy cannot leave that RAM workspace behind.
+installer_tarball_exit_handler() {
+    local status=$?
+    trap - EXIT INT TERM
+    cleanup_install_download_work >/dev/null 2>&1 || :
+    install_maintenance_release || status=1
+    exit "$status"
+}
+
 run_install_hardware_probe() {
     local detected_product
     if [ ! -x "$MERV_BASE/functions/hw_probe.sh" ]; then
@@ -2547,6 +2559,9 @@ case "$MODE" in
         ;;
     tarball)
         # Install from previously downloaded tarball
+        trap 'installer_tarball_exit_handler' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
         logger -t "$ADDON" "Tarball mode: installing from previously downloaded package"
         create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }

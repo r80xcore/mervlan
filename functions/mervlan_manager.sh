@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.6"                #
+#             - File: mervlan_manager.sh || version="0.72.7"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -504,6 +504,75 @@ release_script_lock() {
     fi
   fi
   [ "$_rsl_failed" -eq 0 ]
+}
+
+# MAIN Apply advisory and memory evidence are intentionally best-effort. They
+# must never change a verified VLAN mutation result: the browser advisory
+# reduces accidental back-to-back wireless rebuilds, while the small durable
+# snapshot remains available if an ASUS kernel memory failure clears tmpfs
+# action progress before a terminal result can be published.
+merv_main_apply_memory_snapshot() {
+  _mmas_stage="$1"
+  case "${MERV_IS_NODE:-0}:${DRY_RUN:-yes}:${MERV_MANAGER_MODE:-normal}" in
+    1:*|*:yes:*|*:boot) return 0 ;;
+  esac
+  case "$_mmas_stage" in preflight|verified) ;; *) return 0 ;; esac
+  # Keep both sides of an Apply.  A successful verification must not overwrite
+  # the preflight sample needed to compare memory before and after the work.
+  _mmas_base="${MERV_MAIN_APPLY_MEMORY_FILE:-${MERV_STATE_ROOT:-/jffs/addons/mervlan_state}/main_apply_memory.json}"
+  case "$_mmas_base" in
+    *.json) _mmas_file="${_mmas_base%.json}.${_mmas_stage}.json" ;;
+    *) _mmas_file="${_mmas_base}.${_mmas_stage}.json" ;;
+  esac
+  _mmas_dir=${_mmas_file%/*}
+  [ -n "$_mmas_dir" ] || return 0
+  _mmas_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_mmas_now" in ''|*[!0-9]*) return 0 ;; esac
+  _mmas_values=$(awk '
+    /^(MemAvailable|MemFree|Slab|SReclaimable|SUnreclaim):/ {
+      key=$1; sub(":", "", key); value[key]=$2
+    }
+    END {
+      printf "%s %s %s %s %s", value["MemAvailable"]+0, value["MemFree"]+0,
+        value["Slab"]+0, value["SReclaimable"]+0, value["SUnreclaim"]+0
+    }
+  ' /proc/meminfo 2>/dev/null)
+  set -- $_mmas_values
+  [ "$#" -eq 5 ] || return 0
+  _mmas_tmp="${_mmas_file}.tmp.$$"
+  mkdir -p "$_mmas_dir" 2>/dev/null || return 0
+  ( umask 077
+    printf '{"format_version":1,"scope":"main-apply-memory","stage":"%s","timestamp":%s,"mem_available_kb":%s,"mem_free_kb":%s,"slab_kb":%s,"sreclaimable_kb":%s,"sunreclaim_kb":%s}\n' \
+      "$_mmas_stage" "$_mmas_now" "$1" "$2" "$3" "$4" "$5" > "$_mmas_tmp"
+  ) 2>/dev/null || { rm -f "$_mmas_tmp" 2>/dev/null || :; return 0; }
+  chmod 600 "$_mmas_tmp" 2>/dev/null || { rm -f "$_mmas_tmp" 2>/dev/null || :; return 0; }
+  mv -f "$_mmas_tmp" "$_mmas_file" 2>/dev/null || { rm -f "$_mmas_tmp" 2>/dev/null || :; return 0; }
+  return 0
+}
+
+merv_main_apply_advisory_record() {
+  case "${MERV_IS_NODE:-0}:${DRY_RUN:-yes}:${MERV_MANAGER_MODE:-normal}" in
+    1:*|*:yes:*|*:boot) return 0 ;;
+  esac
+  _mmaa_file="${MERV_MAIN_APPLY_ADVISORY_FILE:-${PUBLIC_MERV_BASE:-/www/user/mervlan}/tmp/results/main_apply_advisory.json}"
+  _mmaa_cooldown="${MERV_MAIN_APPLY_ADVISORY_COOLDOWN_SEC:-300}"
+  case "$_mmaa_cooldown" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$_mmaa_cooldown" -gt 0 ] 2>/dev/null && [ "$_mmaa_cooldown" -le 900 ] 2>/dev/null || return 0
+  _mmaa_dir=${_mmaa_file%/*}
+  [ -n "$_mmaa_dir" ] || return 0
+  _mmaa_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_mmaa_now" in ''|*[!0-9]*) return 0 ;; esac
+  _mmaa_expires=$((_mmaa_now + _mmaa_cooldown))
+  _mmaa_tmp="${_mmaa_file}.tmp.$$"
+  mkdir -p "$_mmaa_dir" 2>/dev/null || return 0
+  ( umask 022
+    printf '{"format_version":1,"scope":"main-apply","completed_at":%s,"cooldown_sec":%s,"expires_at":%s}\n' \
+      "$_mmaa_now" "$_mmaa_cooldown" "$_mmaa_expires" > "$_mmaa_tmp"
+  ) 2>/dev/null || { rm -f "$_mmaa_tmp" 2>/dev/null || :; return 0; }
+  chmod 644 "$_mmaa_tmp" 2>/dev/null || { rm -f "$_mmaa_tmp" 2>/dev/null || :; return 0; }
+  mv -f "$_mmaa_tmp" "$_mmaa_file" 2>/dev/null || { rm -f "$_mmaa_tmp" 2>/dev/null || :; return 0; }
+  info -c cli,vlan "MAIN Apply advisory recorded: wait ${_mmaa_cooldown}s before another MAIN wireless rebuild when possible"
+  return 0
 }
 
 cleanup_on_exit() {
@@ -2174,6 +2243,8 @@ post_rc_watchdog() {
 # Args: none (reads all global configuration)
 # Returns: none (exit code via mervlan_manager.sh script)
 main() {
+  # Durable evidence only; a failed snapshot must never block a safe Apply.
+  merv_main_apply_memory_snapshot preflight
   acquire_script_lock
   merv_action_progress_update prepare 0 1 5 "Preparing VLAN apply..."
   if [ "$DRY_RUN" != "yes" ] && ! merv_observation_wait_idle "${MERV_OBSERVATION_WAIT_SEC:-120}"; then
@@ -2497,6 +2568,8 @@ main() {
         return 1
       fi
       MANAGER_DHCP_TOKEN=""
+      merv_main_apply_memory_snapshot verified
+      merv_main_apply_advisory_record
     else
       error -c cli,vlan "SECURITY FAIL: final placement verification failed; converting manager lease to failsafe"
       MERV_DHCP_FAILSAFE_FAILED_INTERFACES="${WATCH_IFACES:-unknown}"

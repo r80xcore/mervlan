@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.32"                #
+#               - File: mac_shield_snapshot.sh || version="0.34"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -28,6 +28,7 @@
 #   lib_ssid_filter.sh     — get_ssid_slot_value, get_vlan_slot_value
 #   lib_ssh.sh             — merv_ssh_exec, merv_ssh_precheck, ssh_keys_effectively_installed,
 #                            _merv_timeout_run, merv_has, MERV_SSH_TIMEOUT
+#   lib_node_jobs.sh       — bounded 1–5 node pool and validated terminal results
 #   var_settings.sh        — MERV_MAC_DB_ACTIVE, MERV_MAC_DB_JFFS,
 #                            MERV_MAC_MAX_AGE_SEC, SETTINGS_FILE, MAX_SSIDS
 #   log_settings.sh        — info, warn
@@ -45,6 +46,11 @@ fi
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+# The shared bounded node pool is the only parallelism boundary for remote
+# observation and Shield propagation.  Keep this optional at source time so
+# older fixture callers can still load the library; the MAIN path below fails
+# closed (as an incomplete observation/push) when the pool is unavailable.
+[ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh" 2>/dev/null || true
 
 # ============================================================================
 # Snapshot behaviour flags (caller-overridable via env)
@@ -473,6 +479,26 @@ merv_mac_node_list() {
       '$1>=1 && $1<=max && $2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
 }
 
+# Shield is not allowed to observe, merge, enforce, or push while a generic
+# node-operation pool still has any unresolved ownership metadata.  Prefer the
+# shared predicate; retain a strict local fallback for legacy fixture callers
+# that intentionally omit lib_node_jobs.sh.
+merv_mac_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _mmpsu_rc=$?
+    case "$_mmpsu_rc" in 0) return 0 ;; 1) return 1 ;; *) return 0 ;; esac
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) ;; *) return 0 ;; esac
+  [ -n "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] && return 0
+  [ -n "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] && return 0
+  return 1
+}
+
 # ============================================================================
 # merv_mac_collect_from_node <node_id> <node_ip>
 # Run a self-contained remote collector over one SSH connection and emit
@@ -545,101 +571,185 @@ REMOTE
 }
 
 # ============================================================================
-# merv_mac_push_db_to_nodes "<node_id node_ip\n...>"
-# Stream the merged active db to each node (atomic tmp+mv over one SSH stream)
-# and reload that node's MERV_MAC ebtables chain from the pushed db. Called only
-# after the merged db's structural fingerprint changes, so stable networks
-# generate no pushes. Fully guarded: silently no-ops when the SSH toolchain,
-# keys, or db file are unavailable.
-#
-# Push-outcome counters: this function mutates the MERV_MAC_LAST_PUSH_* status
-# globals directly. The caller (merv_mac_snapshot) MUST initialize them to zero
-# before invoking. The node loop is here-doc fed (not pipe fed) so the counter
-# increments run in the current shell and survive — a pipe-fed `while read`
-# would lose them to a subshell.
+# merv_mac_collect_node_job <node_id> <node_ip>
+# Pool worker wrapper.  A worker owns only its isolated payload; the parent
+# validates the terminal result and every record before merging it into the
+# authoritative snapshot file.
 # ============================================================================
-merv_mac_push_db_to_nodes() {
-  local nodes="$1"
-  local nid nip port user _ovr_src
+merv_mac_collect_node_job() {
+  [ -n "${MERV_NODE_JOB_DIR:-}" ] || return 2
+  _mmcnj_payload="$MERV_NODE_JOB_DIR/payload"
+  : > "$_mmcnj_payload" || return 2
+  merv_mac_collect_from_node "$1" "$2" > "$_mmcnj_payload"
+}
 
-  ssh_keys_effectively_installed                   || return 1
-  [ -n "${SSH_KEY:-}" ] && [ -f "${SSH_KEY}" ]       || return 1
-  merv_has "${MERV_SSH_CLIENT:-dbclient}"          || return 1
+# Validate and normalize one worker payload in the parent shell.  Invalid
+# records make that node observation incomplete; no valid subset is merged.
+# MERV_MAC_PAYLOAD_COUNT is intentionally parent-owned state.
+merv_mac_validate_node_payload() {
+  _mmvnp_payload="$1" _mmvnp_out="$2"
+  [ -f "$_mmvnp_payload" ] || return 1
+  : > "$_mmvnp_out" || return 1
+  MERV_MAC_PAYLOAD_COUNT=0
+  _mmvnp_valid=1
+  while IFS=' ' read -r _mmvnp_ts _mmvnp_mac _mmvnp_iface _mmvnp_vid _mmvnp_extra ||
+        [ -n "$_mmvnp_ts$_mmvnp_mac$_mmvnp_iface$_mmvnp_vid$_mmvnp_extra" ]; do
+    [ -n "$_mmvnp_ts$_mmvnp_mac$_mmvnp_iface$_mmvnp_vid$_mmvnp_extra" ] || continue
+    case "$_mmvnp_ts" in ''|*[!0-9]*) _mmvnp_valid=0; continue ;; esac
+    [ -z "$_mmvnp_extra" ] || { _mmvnp_valid=0; continue; }
+    _mmvnp_mac=$(mervqt_mac_lower "$_mmvnp_mac" 2>/dev/null || printf '')
+    mervqt_valid_mac "$_mmvnp_mac" || { _mmvnp_valid=0; continue; }
+    mervqt_valid_wl_subif "$_mmvnp_iface" || { _mmvnp_valid=0; continue; }
+    mervqt_valid_vid "$_mmvnp_vid" || { _mmvnp_valid=0; continue; }
+    printf '%s %s %s %s\n' "$_mmvnp_ts" "$_mmvnp_mac" "$_mmvnp_iface" "$_mmvnp_vid" >> "$_mmvnp_out" || return 1
+    MERV_MAC_PAYLOAD_COUNT=$((MERV_MAC_PAYLOAD_COUNT + 1))
+  done < "$_mmvnp_payload"
+  [ "$_mmvnp_valid" -eq 1 ] || { rm -f "$_mmvnp_out" 2>/dev/null; return 1; }
+  return 0
+}
+
+# Parent-only progress hook for either MAC node-pool phase.  Workers never
+# mutate counters or public progress; they publish only isolated terminal
+# state and payload files.
+merv_mac_node_pool_progress() {
+  _mmnpp_root="$1" _mmnpp_phase="$2"
+  _mmnpp_total=${MERV_MAC_NODE_POOL_TOTAL:-0}; _mmnpp_done=0
+  case "$_mmnpp_phase" in collect) _mmnpp_ui_phase=node_collect; _mmnpp_percent=45; _mmnpp_label="Collecting MAC clients from nodes" ;; push) _mmnpp_ui_phase=push; _mmnpp_percent=86; _mmnpp_label="Pushing MAC Shield to nodes" ;; *) return 0 ;; esac
+  case "$_mmnpp_total" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$_mmnpp_total" -gt 0 ] 2>/dev/null || return 0
+  for _mmnpp_dir in "$_mmnpp_root"/node_*; do
+    [ -d "$_mmnpp_dir" ] || continue
+    _mmnpp_node=${_mmnpp_dir##*/node_}
+    if type mnj_result_validate >/dev/null 2>&1 &&
+       mnj_result_validate "$_mmnpp_dir/result" "$_mmnpp_node" "$_mmnpp_phase"; then
+      _mmnpp_done=$((_mmnpp_done + 1))
+    fi
+  done
+  _merv_mac_refresh_progress "$_mmnpp_ui_phase" "$_mmnpp_percent" "$_mmnpp_label — ${_mmnpp_done} of ${_mmnpp_total} complete."
+}
+
+# Pool worker for one node's atomic DB/override stream and remote Shield reload.
+# All SSH scratch state is redirected by mnj_worker to this node's isolated job
+# directory; the worker never mutates parent counters or public progress.
+merv_mac_push_node() {
+  _mmpp_nid="$1" _mmpp_configured_ip="$2"
+  _mmpp_nip=$(merv_node_resolve_endpoint "$_mmpp_nid" "$_mmpp_configured_ip" 2>/dev/null) || {
+    _merv_mac_log warn "MERV_MAC: node ${_mmpp_nid} endpoint resolution failed — db not pushed"
+    return 1
+  }
+  [ -n "$_mmpp_nip" ] || return 1
+
+  if ! merv_ssh_precheck "$_mmpp_nid" "$_mmpp_nip" >/dev/null 2>&1; then
+    _merv_mac_log warn "MERV_MAC: node ${_mmpp_nip} precheck failed — db not pushed"
+    return 1
+  fi
+  if ! merv_ssh_exec "$_mmpp_nid" "$_mmpp_nip" "mkdir -p '${MERV_MAC_DB_ACTIVE%/*}' '${MERV_MAC_OVERRIDE_DB%/*}'" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! merv_ssh_stream_file "$_mmpp_nid" "$_mmpp_nip" "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_ACTIVE"; then
+    _merv_mac_log warn "MERV_MAC: ✗ db push failed to node ${_mmpp_nip}"
+    return 1
+  fi
+
+  # Push overrides before reload.  An empty override file clears stale node
+  # state; a failed override stream remains best-effort as in the serial path.
+  _mmpp_ovr_src="${MERV_MAC_OVERRIDE_DB:-/dev/null}"
+  [ -f "$_mmpp_ovr_src" ] || _mmpp_ovr_src="/dev/null"
+  if ! merv_ssh_stream_file "$_mmpp_nid" "$_mmpp_nip" "$_mmpp_ovr_src" "$MERV_MAC_OVERRIDE_DB"; then
+    _merv_mac_log warn "MERV_MAC: override db push failed to node ${_mmpp_nip} (reloading anyway)"
+  fi
+  if ! merv_ssh_exec "$_mmpp_nid" "$_mmpp_nip" \
+       "MERV_BASE='$MERV_BASE'; MERV_NODE_CONTEXT=1; "'. "$MERV_BASE/settings/var_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null; ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"' \
+       >/dev/null 2>&1; then
+    _merv_mac_log warn "MERV_MAC: db pushed but shield reload failed on node ${_mmpp_nip}"
+    return 1
+  fi
+  _merv_mac_logv info "MERV_MAC: ✓ db pushed + shield reloaded on node ${_mmpp_nip}"
+  return 0
+}
+
+merv_mac_push_node_job() {
+  [ -n "${MERV_NODE_JOB_DIR:-}" ] || return 2
+  merv_mac_push_node "$1" "$2"
+}
+
+# merv_mac_push_db_to_nodes "<node_id node_ip\n...>"
+# Complete-set trust preflight remains serial.  The shared bounded pool then
+# owns one isolated DB/override push+reload worker per node; this parent
+# validates terminal results and aggregates counters/progress serially.
+merv_mac_push_db_to_nodes() {
+  _mmdp_nodes="$1"
+  MERV_MAC_LAST_PUSH_TOTAL=0
+  MERV_MAC_LAST_PUSH_OK=0
+  MERV_MAC_LAST_PUSH_FAILED=0
+  if merv_mac_pool_state_unresolved; then
+    MERV_MAC_LAST_REASON="node_pool_unresolved"
+    _merv_mac_log warn "MERV_MAC: node push blocked — prior node-operation pool state is unresolved"
+    return 1
+  fi
+  ssh_keys_effectively_installed || return 1
+  [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ] || return 1
+  merv_has "${MERV_SSH_CLIENT:-dbclient}" || return 1
   [ -f "$MERV_MAC_DB_ACTIVE" ] || return 0
 
-  # merv_mac_snapshot has already performed the complete-set gate before
-  # observing or mutating state. Reuse that result only when the canonical node
-  # list is unchanged; direct callers still get their own fail-closed gate.
   _mmdp_preflight_ok=0
   if [ -n "${MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST:-}" ] && type merv_node_list_digest >/dev/null 2>&1; then
     _mmdp_current_digest=$(merv_node_list_digest 2>/dev/null || printf '')
     [ "$_mmdp_current_digest" = "$MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST" ] && _mmdp_preflight_ok=1
   fi
   if [ "$_mmdp_preflight_ok" -ne 1 ]; then
-    if type merv_ssh_preflight_node_lines >/dev/null 2>&1; then
-      merv_ssh_preflight_node_lines "$nodes" "$SETTINGS_FILE" || return 1
-    else
-      return 1
-    fi
+    type merv_ssh_preflight_node_lines >/dev/null 2>&1 || return 1
+    merv_ssh_preflight_node_lines "$_mmdp_nodes" "$SETTINGS_FILE" || return 1
   fi
 
-  while read -r nid nip; do
-  [ -n "$nip" ] || continue
-  MERV_MAC_LAST_PUSH_TOTAL=$(( MERV_MAC_LAST_PUSH_TOTAL + 1 ))
+  _mmdp_now=$(date +%s 2>/dev/null || printf '%s' "$$")
+  _mmdp_root="$TMPDIR/node_jobs/mac_push.$$.$_mmdp_now"
+  _mmdp_nodes_file="$_mmdp_root/nodes"
+  mkdir -p "$_mmdp_root" || return 1
+  printf '%s\n' "$_mmdp_nodes" > "$_mmdp_nodes_file" || { rm -rf "$_mmdp_root" 2>/dev/null; return 1; }
+  MERV_MAC_NODE_POOL_TOTAL=$(printf '%s\n' "$_mmdp_nodes" | awk 'NF { n++ } END { print n + 0 }')
+  MNJ_POOL_PROGRESS_HOOK=merv_mac_node_pool_progress
+  if type mnj_pool_run >/dev/null 2>&1; then
+    mnj_pool_run "$_mmdp_root" push "${MERV_NODE_PARALLELISM:-}" "${MERV_MAC_NODE_PUSH_MAX_SEC:-720}" "$_mmdp_nodes_file" merv_mac_push_node_job
+    _mmdp_pool_rc=$?
+  else
+    _mmdp_pool_rc=2
+  fi
+  MNJ_POOL_PROGRESS_HOOK=""
+  # A setup/identity error can make the pool return before draining slots.
+  # Reconcile pending and published workers through the shared identity-safe
+  # abort path before reading results or removing the private root.
+  if [ "${_mmdp_pool_rc:-2}" -ne 0 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+    mnj_pool_abort_active failed parent-pool-error || :
+  fi
 
-  _merv_mac_refresh_progress push 86 \
-    "Pushing MAC Shield to NODE${nid}..."
-
-    nip=$(merv_node_resolve_endpoint "$nid" "$nip") || {
-      _merv_mac_log warn "MERV_MAC: node ${nid} endpoint resolution failed â€” db not pushed"
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
-      continue
-    }
-
-    if ! merv_ssh_precheck "$nid" "$nip" >/dev/null 2>&1; then
-      _merv_mac_log warn "MERV_MAC: node ${nip} precheck failed — db not pushed"
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
-      continue
-    fi
-
-    # Stream the db through the verified SSH contract and install atomically.
-    if ! merv_ssh_exec "$nid" "$nip" "mkdir -p '${MERV_MAC_DB_ACTIVE%/*}' '${MERV_MAC_OVERRIDE_DB%/*}'" >/dev/null 2>&1; then
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 )); continue
-    fi
-    if merv_ssh_stream_file "$nid" "$nip" "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_ACTIVE"; then
-
-      # Push the override DB BEFORE the reload so the node enforces with the
-      # current override set. The override DB is cluster-wide: an empty file is
-      # meaningful (it clears any stale overrides left on the node). Stream
-      # /dev/null when no override DB exists locally. Best-effort: a failed
-      # override push is logged but does not abort the reload.
-      _ovr_src="$MERV_MAC_OVERRIDE_DB"
-      [ -f "$_ovr_src" ] || _ovr_src="/dev/null"
-      if ! merv_ssh_stream_file "$nid" "$nip" "$_ovr_src" "$MERV_MAC_OVERRIDE_DB"; then
-        _merv_mac_log warn "MERV_MAC: override db push failed to node ${nip} (reloading anyway)"
-      fi
-
-      # Reload the node's shield from the freshly pushed db (no remote snapshot).
-      # init_and_apply (init → flush → apply) so a node whose chain was lost to a
-      # reboot/teardown is repaired rather than silently no-op'd.
-      if merv_ssh_exec "$nid" "$nip" \
-           "MERV_BASE='$MERV_BASE'; MERV_NODE_CONTEXT=1; "'. "$MERV_BASE/settings/var_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null; ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"' \
-           >/dev/null 2>&1; then
-        _merv_mac_logv info "MERV_MAC: ✓ db pushed + shield reloaded on node ${nip}"
-    MERV_MAC_LAST_PUSH_OK=$(( MERV_MAC_LAST_PUSH_OK + 1 ))
-    _merv_mac_refresh_progress push 86 \
-  "NODE${nid} MAC Shield updated."
-      else
-        _merv_mac_log warn "MERV_MAC: db pushed but shield reload failed on node ${nip}"
-        MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
-      fi
+  MERV_MAC_LAST_PUSH_TOTAL=0
+  MERV_MAC_LAST_PUSH_OK=0
+  MERV_MAC_LAST_PUSH_FAILED=0
+  while IFS=' ' read -r _mmdp_nid _mmdp_nip _mmdp_extra || [ -n "$_mmdp_nid" ]; do
+    [ -n "$_mmdp_nip" ] || continue
+    MERV_MAC_LAST_PUSH_TOTAL=$((MERV_MAC_LAST_PUSH_TOTAL + 1))
+    if [ -z "$_mmdp_extra" ] && type mnj_result_validate >/dev/null 2>&1 &&
+       mnj_result_validate "$_mmdp_root/node_${_mmdp_nid}/result" "$_mmdp_nid" push &&
+       [ "$MNJ_RESULT_STATE" = ok ]; then
+      MERV_MAC_LAST_PUSH_OK=$((MERV_MAC_LAST_PUSH_OK + 1))
     else
-      _merv_mac_log warn "MERV_MAC: ✗ db push failed to node ${nip}"
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
+      MERV_MAC_LAST_PUSH_FAILED=$((MERV_MAC_LAST_PUSH_FAILED + 1))
+      _merv_mac_log warn "MERV_MAC: node ${_mmdp_nip} push/reload failed"
     fi
-  done <<_PUSH_
-$nodes
-_PUSH_
+  done <<_MMDP_NODES_
+$_mmdp_nodes
+_MMDP_NODES_
+  # An identity failure leaves MNJ_POOL_ACTIVE set and its private tree
+  # retained for a safe retry; never remove a directory that may still contain
+  # an authenticated child.
+  if ! merv_mac_pool_state_unresolved; then
+    rm -rf "$_mmdp_root" 2>/dev/null || :
+  else
+    _mmdp_pool_rc=1
+    _merv_mac_log warn "MERV_MAC: retaining node push workspace while worker identity cleanup is pending"
+  fi
+  [ "$MERV_MAC_LAST_PUSH_FAILED" -eq 0 ] && [ "$_mmdp_pool_rc" -eq 0 ]
 }
 
 # ============================================================================
@@ -883,6 +993,20 @@ _merv_mac_set_counts() {
 merv_mac_snapshot() {
   [ "${DRY_RUN:-no}" = "yes" ] && return 0
 
+  # An unresolved pool is a hard stop.  In particular, do this before the
+  # Shield lock, local collection, database merge, or any replacement pool
+  # setup so retained worker metadata/workspaces remain authoritative.
+  if merv_mac_pool_state_unresolved; then
+    MERV_MAC_LAST_STATUS="pool_unresolved"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+    MERV_MAC_LAST_LOCAL_COUNT=0; MERV_MAC_LAST_NODE_COUNT=0
+    MERV_MAC_LAST_TOTAL_COUNT=0; MERV_MAC_LAST_DB_COUNT=0
+    MERV_MAC_LAST_CHANGED=0
+    MERV_MAC_LAST_NODES_TOTAL=0; MERV_MAC_LAST_NODES_OK=0; MERV_MAC_LAST_NODES_FAILED=0
+    MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
+    _merv_mac_log warn "MERV_MAC: snapshot blocked — prior node-operation pool state is unresolved"
+    return 1
+  fi
+
   _merv_mac_refresh_progress preflight 15 \
     "Verifying MAC Shield interfaces and node access..."
 
@@ -951,7 +1075,8 @@ merv_mac_snapshot() {
   # be fully probed is a hard preflight failure, not an incomplete observation
   # that can be silently merged.
   local _nodes="" _nodes_total=0 _nodes_ok=0 _nodes_failed=0 _node_total=0
-  local _node_collect_incomplete=0
+  local _node_collect_incomplete=0 _node_pool_root="" _node_pool_nodes="" _node_pool_rc=2
+  local _nid _nip _node_extra _node_dir _node_candidate _node_combined _rc _node_result_ok
   if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ] && merv_mac_is_main; then
     _nodes=$(merv_mac_node_list)
     if [ -n "$_nodes" ]; then
@@ -999,37 +1124,94 @@ merv_mac_snapshot() {
         _node_collect_incomplete=1
         _merv_mac_log warn "MERV_MAC: node sync on with configured node(s) but SSH keys unavailable — cluster observation incomplete"
       else
-        local _nid _nip _node_recs _rc
-    while read -r _nid _nip; do
-      [ -n "$_nip" ] || continue
-      _nodes_total=$(( _nodes_total + 1 ))
-
-      _merv_mac_refresh_progress node_collect 45 \
-      "Collecting MAC clients from NODE${_nid}..."
-
-      if _node_recs=$(merv_mac_collect_from_node "$_nid" "$_nip"); then
-            _nodes_ok=$(( _nodes_ok + 1 ))
-      if [ -n "$_node_recs" ]; then
-        printf '%s\n' "$_node_recs" >> "$snap_tmp"
-        _rc=$(printf '%s\n' "$_node_recs" | wc -l | tr -d ' ')
-        _node_total=$(( _node_total + _rc ))
-        _merv_mac_logv info "MERV_MAC: node ${_nip} — ${_rc} record(s)"
-        _merv_mac_refresh_progress node_collect 45 \
-        "NODE${_nid} collection complete — ${_rc} record(s)."
-      else
-        _merv_mac_logv info "MERV_MAC: node ${_nip} — 0 records"
-        _merv_mac_refresh_progress node_collect 45 \
-        "NODE${_nid} collection complete — 0 records."
-      fi
+        # Remote observations run through the shared bounded pool.  Workers
+        # write only their isolated payload/result; this parent validates and
+        # merges each complete node payload serially.
+        _node_pool_root="$TMPDIR/node_jobs/mac_collect.$$.$(date +%s 2>/dev/null || printf '%s' "$$")"
+        _node_pool_nodes="$_node_pool_root/nodes"
+        if ! mkdir -p "$_node_pool_root" || ! printf '%s\n' "$_nodes" > "$_node_pool_nodes"; then
+          _node_collect_incomplete=1
+          _merv_mac_log warn "MERV_MAC: could not create isolated node collection workspace"
+        else
+          MERV_MAC_NODE_POOL_TOTAL=$(printf '%s\n' "$_nodes" | awk 'NF { n++ } END { print n + 0 }')
+          MNJ_POOL_PROGRESS_HOOK=merv_mac_node_pool_progress
+          if type mnj_pool_run >/dev/null 2>&1; then
+            mnj_pool_run "$_node_pool_root" collect "${MERV_NODE_PARALLELISM:-}" "${MERV_MAC_NODE_COLLECT_MAX_SEC:-180}" "$_node_pool_nodes" merv_mac_collect_node_job
+            _node_pool_rc=$?
           else
-            _nodes_failed=$(( _nodes_failed + 1 ))
-            _merv_mac_logv warn "MERV_MAC: node ${_nip} — SSH/collector failed"
+            _node_pool_rc=2
           fi
-        done <<_NODES_
+          MNJ_POOL_PROGRESS_HOOK=""
+          if [ "${_node_pool_rc:-2}" -ne 0 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+            mnj_pool_abort_active failed parent-pool-error || :
+          fi
+          [ "${_node_pool_rc:-2}" -eq 0 ] || _node_collect_incomplete=1
+
+          while IFS=' ' read -r _nid _nip _node_extra || [ -n "$_nid" ]; do
+            [ -n "$_nip" ] || continue
+            _nodes_total=$(( _nodes_total + 1 ))
+            _node_dir="$_node_pool_root/node_${_nid}"
+            _node_candidate="$_node_pool_root/candidate_${_nid}"
+            _node_combined="${snap_tmp}.node_${_nid}.$$"
+            _node_result_ok=0
+            if [ -z "$_node_extra" ] && type mnj_result_validate >/dev/null 2>&1 &&
+               mnj_result_validate "$_node_dir/result" "$_nid" collect &&
+               [ "$MNJ_RESULT_STATE" = ok ] &&
+               merv_mac_validate_node_payload "$_node_dir/payload" "$_node_candidate"; then
+              _node_result_ok=1
+            fi
+            if [ "$_node_result_ok" -eq 1 ]; then
+              _rc=$(wc -l < "$_node_candidate" 2>/dev/null | tr -d ' ')
+              _rc=${_rc:-0}
+              # Publish the parent snapshot append atomically so a disk/write
+              # failure cannot leave a partial subset from an otherwise failed
+              # node observation.
+              if cat "$snap_tmp" "$_node_candidate" > "$_node_combined" &&
+                 mv "$_node_combined" "$snap_tmp" 2>/dev/null; then
+                _nodes_ok=$((_nodes_ok + 1))
+              else
+                rm -f "$_node_combined" 2>/dev/null || :
+                _node_result_ok=0
+              fi
+              if [ "$_node_result_ok" -eq 1 ]; then
+                _node_total=$((_node_total + _rc))
+                _merv_mac_logv info "MERV_MAC: node ${_nip} — ${_rc} record(s)"
+                _merv_mac_refresh_progress node_collect 45 "NODE${_nid} collection complete — ${_rc} record(s)."
+              fi
+            fi
+            if [ "$_node_result_ok" -ne 1 ]; then
+              _nodes_failed=$((_nodes_failed + 1))
+              _node_collect_incomplete=1
+              _merv_mac_logv warn "MERV_MAC: node ${_nip} — SSH/collector/payload validation failed"
+            fi
+            rm -f "$_node_candidate" 2>/dev/null || :
+            rm -f "$_node_combined" 2>/dev/null || :
+          done <<_NODES_
 $_nodes
 _NODES_
+        fi
+        if ! merv_mac_pool_state_unresolved; then
+          rm -rf "${_node_pool_root:-}" 2>/dev/null || :
+          _node_pool_root=""
+          _node_pool_nodes=""
+        else
+          _node_collect_incomplete=1
+          _merv_mac_log warn "MERV_MAC: retaining node collection workspace while worker identity cleanup is pending"
+        fi
       fi
     fi
+  fi
+
+  # A pool setup/identity failure may retain active ownership even after the
+  # parent has collected what it can.  Do not merge/build or proceed to local
+  # enforcement while that generic state remains unresolved.
+  if merv_mac_pool_state_unresolved; then
+    MERV_MAC_LAST_STATUS="pool_unresolved"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+    _merv_mac_log warn "MERV_MAC: snapshot blocked — node-operation cleanup remains unresolved"
+    rm -f "$snap_tmp" 2>/dev/null || :
+    # Keep the Shield lock owned while generic worker state is unresolved;
+    # releasing it would permit a competing snapshot to race retained workers.
+    return 1
   fi
 
   # --- Derive effective reset ----------------------------------------------
@@ -1086,6 +1268,25 @@ _NODES_
             _snap_owned=0
           fi
           return 1
+        fi
+        # The empty active database is still an authoritative Shield state.
+        # Propagate it only after MAIN enforcement succeeds, using the same
+        # bounded push/reload pool as non-empty snapshots.  Push failures remain
+        # reflected in the push counters and per-node warnings, matching the
+        # existing normal-path best-effort propagation contract.
+        if [ -n "$_nodes" ]; then
+          _merv_mac_refresh_progress push 82 \
+            "Pushing empty MAC Shield database and rules to nodes..."
+          if ! merv_mac_push_db_to_nodes "$_nodes"; then
+            if merv_mac_pool_state_unresolved; then
+              MERV_MAC_LAST_STATUS="push_failed"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+              _merv_mac_log warn "MERV_MAC: empty Shield push blocked — node-operation cleanup remains unresolved"
+              rm -f "$snap_tmp" 2>/dev/null || :
+              # Retain Shield ownership and the push workspace until the
+              # generic pool can be reconciled by its owning parent.
+              return 1
+            fi
+          fi
         fi
         MERV_MAC_LAST_STATUS="empty"; MERV_MAC_LAST_REASON="reset_no_clients"
         _merv_mac_set_counts
@@ -1175,7 +1376,15 @@ _NODES_
     "Pushing MAC Shield database and rules to nodes..."
 
     MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
-      merv_mac_push_db_to_nodes "$_nodes"
+      if ! merv_mac_push_db_to_nodes "$_nodes"; then
+        if merv_mac_pool_state_unresolved; then
+          MERV_MAC_LAST_STATUS="push_failed"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+          _merv_mac_log warn "MERV_MAC: Shield push blocked — node-operation cleanup remains unresolved"
+          # Retain Shield ownership and the push workspace until the generic
+          # pool can be reconciled by its owning parent.
+          return 1
+        fi
+      fi
     fi
   else
     _merv_mac_logv info "MERV_MAC: MAC set unchanged — ebtables rules not rebuilt"

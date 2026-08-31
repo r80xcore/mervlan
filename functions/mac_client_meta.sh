@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_client_meta.sh || version="0.12"                    #
+#               - File: mac_client_meta.sh || version="0.13"                    #
 # ============================================================================ #
 # Purpose: Materialize the two client-metadata databases from settings.json and
 #   re-enforce them, then refresh the client inventory so the UI reflects the
@@ -70,12 +70,39 @@ if merv_update_mutation_blocked; then
   merv_action_progress_fail "Client metadata save refused while Update maintenance is active"
   exit 75
 fi
+META_POOL_ABORT_FAILED=0
+meta_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    return $?
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 1 ;; *) return 0 ;; esac
+}
+meta_abort_node_pool() {
+  meta_pool_state_unresolved || return 0
+  if ! type mnj_pool_abort_active >/dev/null 2>&1; then
+    META_POOL_ABORT_FAILED=1
+    error -c cli,vlan "Client Metadata cleanup could not reconcile active node workers; retaining locks and recovery state"
+    return 1
+  fi
+  if ! mnj_pool_abort_active failed client-metadata-exit; then
+    META_POOL_ABORT_FAILED=1
+    error -c cli,vlan "Client Metadata cleanup could not stop and reconcile active node workers; retaining locks and recovery state"
+    return 1
+  fi
+  if ! meta_pool_state_unresolved; then META_POOL_ABORT_FAILED=0; return 0; fi
+  META_POOL_ABORT_FAILED=1
+  error -c cli,vlan "Client Metadata cleanup left active node workers unresolved; retaining locks and recovery state"
+  return 1
+}
+
 META_SIGNAL_HANDLING=0
 meta_handle_signal() {
   _meta_signal_status="$1"
   [ "${META_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_meta_signal_status"
   META_SIGNAL_HANDLING=1
   trap - INT TERM
+  meta_abort_node_pool || :
   if type merv_action_progress_fail >/dev/null 2>&1; then
     merv_action_progress_fail "Client metadata save interrupted; no success result was published"
   fi
@@ -97,6 +124,10 @@ merv_action_lock_export_child_context || exit 75
 META_ACTION_LOCK_RELEASED=0
 meta_release_action_lock() {
   _meta_action_exit_rc=$?
+  if ! meta_abort_node_pool; then
+    [ "$_meta_action_exit_rc" -eq 0 ] && _meta_action_exit_rc=1
+    return "$_meta_action_exit_rc"
+  fi
   if [ "${META_ACTION_LOCK_RELEASED:-0}" -eq 0 ]; then
     if merv_action_lock_leave "$META_ACTION_LOCK_PATH" "$META_ACTION_LOCK_NONCE" "$META_ACTION_LOCK_START" "$META_ACTION_LOCK_MODE" >/dev/null 2>&1; then
       META_ACTION_LOCK_RELEASED=1
@@ -130,6 +161,10 @@ if type merv_lock_acquire >/dev/null 2>&1; then
     META_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     meta_release_lock() {
       _meta_exit_rc=$?
+      if ! meta_abort_node_pool; then
+        [ "$_meta_exit_rc" -eq 0 ] && _meta_exit_rc=1
+        return "$_meta_exit_rc"
+      fi
       if [ "${META_LOCK_ACQUIRED:-0}" -eq 1 ]; then
         if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
           META_LOCK_ACQUIRED=0
@@ -281,6 +316,9 @@ fi
 # Release the metadata writer lock before entering the observation coordinator:
 # global ordering is observation lock before operation-specific locks.
 if [ "$META_LOCK_ACQUIRED" -eq 1 ]; then
+  if ! meta_abort_node_pool; then
+    exit 1
+  fi
   if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
     META_LOCK_ACQUIRED=0
   else

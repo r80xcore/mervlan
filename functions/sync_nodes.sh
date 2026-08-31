@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: sync_nodes.sh || version="0.72.6"                     #
+#             - File: sync_nodes.sh || version="0.72.7"                     #
 # ============================================================================ #
 # - Purpose:    Synchronize MerVLAN addon files to nodes using SSH keys        #
 # ============================================================================ #
@@ -299,12 +299,11 @@ merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$SYNC_PROGRESS_ACTION" \
     "$SYNC_PROGRESS_LABEL" "$SYNC_PROGRESS_PREP"
 
 sync_reconcile_signal_children() {
-    # lib_node_jobs publishes terminal worker results only after validating
-    # wrapper/child identities. Reuse that path rather than signalling a raw
-    # PID that may already belong to a different process.
-    if type mnj_reconcile_slot >/dev/null 2>&1 && [ -n "${MNJ_POOL_PHASE:-}" ]; then
-        [ -n "${MNJ_S1_PID:-}" ] && mnj_reconcile_slot 1 failed parent-signal || :
-        [ -n "${MNJ_S2_PID:-}" ] && mnj_reconcile_slot 2 failed parent-signal || :
+    # lib_node_jobs owns pending-wrapper and published-slot identities.  Use
+    # its single abort path so an interruption cannot strand either side of a
+    # launch or duplicate the five-slot reconciliation logic here.
+    if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+        mnj_pool_abort_active failed parent-signal
     fi
 }
 
@@ -328,6 +327,23 @@ sync_handle_signal() {
 _cleanup_sync_tmp() {
     _sync_cleanup_rc=$?
     _sync_cleanup_failed=0
+    _sync_pool_abort_failed=0
+    # Abort any in-flight node pool before releasing the sync/action locks.
+    # The library retains identity metadata when reconciliation is unsafe, so
+    # preserving ownership here prevents a successor from racing live work.
+    if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+        if ! mnj_pool_abort_active failed parent-exit; then
+            _sync_pool_abort_failed=1
+        fi
+    fi
+    # MNJ_POOL_ACTIVE is authoritative even when the helper was unavailable or
+    # returned without proving reconciliation. Do not turn retained pool state
+    # into a clean owner/action unlock through a caller-local flag.
+    if [ "${MNJ_POOL_ACTIVE:-0}" -ne 0 ]; then
+        _sync_pool_abort_failed=1
+        _sync_cleanup_failed=1
+        error -c cli,vlan "Sync cleanup retained ownership because node workers could not be reconciled"
+    fi
     if [ -n "${_sync_endpoint_map:-}" ] && [ -e "$_sync_endpoint_map" ]; then
         if ! rm -f "$_sync_endpoint_map" 2>/dev/null; then
             _sync_cleanup_failed=1
@@ -345,7 +361,7 @@ _cleanup_sync_tmp() {
     # The action lock is still held here.  Do not release it before the
     # generation-conditional terminal update/clear has completed.
     sync_settings_reconcile_finish || :
-    if [ "${SYNC_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    if [ "$_sync_pool_abort_failed" -eq 0 ] && [ "${SYNC_LOCK_ACQUIRED:-0}" -eq 1 ]; then
         if ! merv_owner_lock_release "$SYNC_LOCK" "${SYNC_LOCK_NONCE:-}" 2>/dev/null; then
             _sync_cleanup_failed=1
             error -c cli,vlan "Sync cleanup could not release its owner lock"
@@ -353,7 +369,7 @@ _cleanup_sync_tmp() {
             SYNC_LOCK_ACQUIRED=0
         fi
     fi
-    if [ "${SYNC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    if [ "$_sync_pool_abort_failed" -eq 0 ] && [ "${SYNC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
         if merv_action_lock_leave "${_sync_action_lock_path:-${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}}" "$_sync_action_lock_nonce" "$_sync_action_lock_start" "${_sync_action_lock_mode:-self}" >/dev/null 2>&1; then
             SYNC_ACTION_LOCK_ACQUIRED=0
         else
@@ -2502,7 +2518,7 @@ while IFS=' ' read -r node_id node_ip _sync_extra || [ -n "$node_id" ]; do
     info -c cli "Sync NODE${node_id} ($node_ip): queued; detailed progress is in the VLAN log"
 done < "$_sync_nodes_file"
 MNJ_POOL_PROGRESS_HOOK=sync_pool_progress
-if ! mnj_pool_run "$_sync_jobs_root" sync "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_SYNC_MAX_SEC:-720}" "$_sync_nodes_file" sync_node_worker; then
+if ! mnj_pool_run "$_sync_jobs_root" sync "${MERV_NODE_PARALLELISM:-}" "${MERV_NODE_SYNC_MAX_SEC:-720}" "$_sync_nodes_file" sync_node_worker; then
     overall_success=false
 fi
 MNJ_POOL_PROGRESS_HOOK=""
@@ -2554,7 +2570,10 @@ if [ "$SYNC_PROGRESS_TOTAL" -gt 0 ] 2>/dev/null &&
     if sync_worker_log_archive "$_sync_archive_state" "sync.$SYNC_RUN_ID"; then
         # The public projection is now the retained diagnostic copy. Remove
         # only this validated, terminal private job tree.
-        if ! rm -rf "$_sync_jobs_root" 2>/dev/null; then
+        if [ "${MNJ_POOL_ACTIVE:-0}" -ne 0 ]; then
+            overall_success=false
+            warn -c vlan "Sync: private worker-job cleanup deferred while node identity reconciliation is pending"
+        elif ! rm -rf "$_sync_jobs_root" 2>/dev/null; then
             overall_success=false
             warn -c vlan "Sync: private worker-job cleanup failed; logs retained"
         fi

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: execute_nodes.sh || version="0.72.4"                  #
+#              - File: execute_nodes.sh || version="0.72.5"                  #
 # ============================================================================ #
 # - Purpose:    Execute the MerVLAN Manager on configured nodes via SSH using  #
 #               the settings defined in settings.json.                         #
@@ -81,11 +81,11 @@ SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 
 execute_nodes_reconcile_signal_children() {
-  # Reconcile only identities this parent has actually published.  PID alone
-  # is never sufficient for a signal after a shell interruption.
-  if type mnj_reconcile_slot >/dev/null 2>&1 && [ -n "${MNJ_POOL_PHASE:-}" ]; then
-    [ -n "${MNJ_S1_PID:-}" ] && mnj_reconcile_slot 1 failed parent-signal || :
-    [ -n "${MNJ_S2_PID:-}" ] && mnj_reconcile_slot 2 failed parent-signal || :
+  # Reconcile pending and published node workers through the pool's single
+  # identity-safe abort path.  PID alone is never sufficient after a signal.
+  if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+    mnj_pool_abort_active failed parent-signal ||
+      error -c cli,vlan "Execute: node-pool interruption cleanup could not reconcile every worker"
   fi
   if [ -n "${main_pid:-}" ]; then
     case "${main_start:-}" in
@@ -140,16 +140,31 @@ execute_nodes_cancel_detached_nodes() {
 execute_nodes_progress_cleanup() {
   _enpc_rc=$?
   _enpc_cleanup_rc=0
+  _enpc_pool_abort_failed=0
   _enpc_runtime_rc=0
   _enpc_nodes_lock_rc=0
   _enpc_action_lock_rc=0
-  if [ "${EXEC_RUNTIME_OWNED:-0}" -eq 1 ]; then
+  # The pool must be fully reconciled before releasing either owner lock.  A
+  # failed identity check deliberately retains slot metadata for recovery.
+  if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+    if ! mnj_pool_abort_active failed parent-exit; then
+      _enpc_pool_abort_failed=1
+    fi
+  fi
+  # The shared pool, not the caller's abort flag, is authoritative. Retain
+  # every Execute ownership record if reconciliation has not proven idle.
+  if [ "${MNJ_POOL_ACTIVE:-0}" -ne 0 ]; then
+    _enpc_pool_abort_failed=1
+    _enpc_cleanup_rc=1
+    error -c cli,vlan "Execute cleanup retained ownership because node workers could not be reconciled"
+  fi
+  if [ "$_enpc_pool_abort_failed" -eq 0 ] && [ "${EXEC_RUNTIME_OWNED:-0}" -eq 1 ]; then
     merv_action_runtime_finish 2>/dev/null || { _enpc_runtime_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the action-runtime marker (rc=$_enpc_runtime_rc)"; }
   fi
-  if [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+  if [ "$_enpc_pool_abort_failed" -eq 0 ] && [ "${EXEC_NODES_LOCK_ACQUIRED:-0}" -eq 1 ]; then
     merv_owner_lock_release "$EXEC_NODES_LOCK" "${_exec_nodes_lock_nonce:-}" 2>/dev/null || { _enpc_nodes_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release its owner lock (rc=$_enpc_nodes_lock_rc)"; }
   fi
-  if [ "${EXEC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+  if [ "$_enpc_pool_abort_failed" -eq 0 ] && [ "${EXEC_ACTION_LOCK_ACQUIRED:-0}" -eq 1 ]; then
     merv_action_lock_leave "$_exec_action_lock_path" "$_exec_action_lock_nonce" "$_exec_action_lock_start" "${_exec_action_lock_mode:-self}" >/dev/null 2>&1 || { _enpc_action_lock_rc=$?; _enpc_cleanup_rc=1; error -c cli,vlan "Execute cleanup could not release the global action lock (rc=$_enpc_action_lock_rc)"; }
     [ "$_enpc_action_lock_rc" -eq 0 ] && EXEC_ACTION_LOCK_ACQUIRED=0
   fi
@@ -1044,7 +1059,7 @@ _exec_jobs_root="$TMPDIR/node_jobs/$APPLY_RUN_ID"
 merv_action_progress_update node_prepare 0 "$EXEC_NODE_COUNT" 25 \
     "Preparing nodes: 0 of $EXEC_NODE_COUNT complete..."
 MNJ_POOL_PROGRESS_HOOK=execute_nodes_progress_hook
-if ! mnj_pool_run "$_exec_jobs_root/prepare" prepare "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_PREPARE_MAX_SEC:-180}" "$_exec_nodes_file" execute_prepare_job; then
+if ! mnj_pool_run "$_exec_jobs_root/prepare" prepare "${MERV_NODE_PARALLELISM:-}" "${MERV_NODE_PREPARE_MAX_SEC:-180}" "$_exec_nodes_file" execute_prepare_job; then
     overall_success=false
 fi
 execute_nodes_progress_hook "$_exec_jobs_root/prepare" prepare
@@ -1112,7 +1127,7 @@ else
         merv_action_progress_update apply 0 "$EXEC_NODE_COUNT" 45 \
             "Starting VLAN configuration on router and $_execute_ready_count node(s)..."
     fi
-    if ! mnj_pool_run "$_exec_jobs_root/launch" launch "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_LAUNCH_MAX_SEC:-180}" "$_exec_jobs_root/ready" execute_launch_job; then
+    if ! mnj_pool_run "$_exec_jobs_root/launch" launch "${MERV_NODE_PARALLELISM:-}" "${MERV_NODE_LAUNCH_MAX_SEC:-180}" "$_exec_jobs_root/ready" execute_launch_job; then
         overall_success=false
     fi
     execute_nodes_progress_hook "$_exec_jobs_root/launch" launch
@@ -1209,7 +1224,7 @@ else
                 "Verifying node completion: 0 of $EXEC_NODE_COUNT complete..."
         fi
         MNJ_POOL_PROGRESS_HOOK=execute_nodes_progress_hook
-        if ! mnj_pool_run "$_exec_jobs_root/status" status "${MERV_NODE_PARALLELISM:-2}" "${MERV_NODE_COMPLETION_MAX_SEC:-600}" "$_exec_jobs_root/launched" execute_status_job; then
+        if ! mnj_pool_run "$_exec_jobs_root/status" status "${MERV_NODE_PARALLELISM:-}" "${MERV_NODE_COMPLETION_MAX_SEC:-600}" "$_exec_jobs_root/launched" execute_status_job; then
             overall_success=false
         fi
         execute_nodes_progress_hook "$_exec_jobs_root/status" status

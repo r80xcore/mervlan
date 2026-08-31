@@ -22,6 +22,7 @@ UNINSTALL_CODEX_WORKFLOW.ps1
 dev-tools/safety/observe_wan_native_main.ps1
 # Local audit packaging helper and its generated archive.
 compress-for-audit.ps1
+compress-for-audit.cmd
 mervlan-audit.zip
 functions/sync_nodes.sh.bak
 functions/wireless_backhaul.sh

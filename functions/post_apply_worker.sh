@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# - File: post_apply_worker.sh || version="0.2"
+# - File: post_apply_worker.sh || version="0.4"
 # - Purpose: Serialize and coalesce post-apply MAC snapshots/client collection.
 # ============================================================================
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -334,6 +334,96 @@ obs_complete_generation() {
   return "$_ocg_rc"
 }
 
+# Observation owns the MAC Shield snapshot, which may in turn own the shared
+# node pool.  Reconcile that pool before releasing the observation owner lock;
+# otherwise a TERM/INT during Shield collection could leave node workers alive
+# while a later observation starts.
+obs_abort_active_pool() {
+  _oap_unresolved=0
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _oap_state_rc=$?
+    case "$_oap_state_rc" in
+      0) _oap_unresolved=1 ;;
+      1) ;;
+      *) return 1 ;;
+    esac
+  else
+    case "${MNJ_POOL_ACTIVE:-0}" in ''|0) ;; *) _oap_unresolved=1 ;; esac
+    [ -n "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] && _oap_unresolved=1
+  fi
+  [ "$_oap_unresolved" -eq 1 ] || return 0
+  type mnj_pool_abort_active >/dev/null 2>&1 || return 1
+  mnj_pool_abort_active failed observation-signal || return 1
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _oap_state_rc=$?
+    [ "$_oap_state_rc" -eq 1 ] && return 0
+    return 1
+  else
+    case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 0 ;; *) return 1 ;; esac
+  fi
+}
+
+obs_pool_state_clean() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _opsc_rc=$?
+    [ "$_opsc_rc" -eq 1 ] && return 0
+    return 1
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) ;; *) return 1 ;; esac
+  [ -z "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] || return 1
+  [ -z "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] || return 1
+  return 0
+}
+
+obs_worker_cleanup() {
+  _ow_cleanup_rc=$?
+  _ow_pool_abort_failed=0
+  if ! obs_abort_active_pool; then
+    _ow_pool_abort_failed=1
+    _ow_cleanup_rc=1
+    obs_log error "observation worker cleanup retained ownership because node workers could not be reconciled"
+  fi
+  if [ "$_ow_pool_abort_failed" -eq 0 ] && obs_pool_state_clean &&
+     [ -n "${MNJ_POOL_ROOT:-}" ] && type mnj_root_valid >/dev/null 2>&1 &&
+     mnj_root_valid "$MNJ_POOL_ROOT"; then
+    if ! rm -rf "$MNJ_POOL_ROOT" 2>/dev/null; then
+      _ow_cleanup_rc=1
+      obs_log error "observation worker cleanup could not remove its private node-job workspace"
+    fi
+  fi
+  if [ "$_ow_pool_abort_failed" -eq 0 ]; then
+    if ! obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" 2>/dev/null; then
+      _ow_cleanup_rc=1
+      obs_log error "observation worker lock cleanup failed"
+    fi
+  fi
+  return "$_ow_cleanup_rc"
+}
+
+OBS_SIGNAL_HANDLING=0
+obs_handle_signal() {
+  _obs_signal_status="$1"
+  [ "${OBS_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_obs_signal_status"
+  OBS_SIGNAL_HANDLING=1
+  trap - INT TERM
+  obs_log error "observation interrupted (rc=$_obs_signal_status); reconciling Shield/node workers"
+  obs_abort_active_pool ||
+    obs_log error "observation interruption could not reconcile every node worker"
+  exit "$_obs_signal_status"
+}
+
 obs_collection_trust_gate() {
   # A progress-backed collection is an SSH action. Check host-key trust before
   # publishing a coordinator generation so the browser receives a correlated
@@ -440,9 +530,9 @@ obs_run() {
     return 0
   }
   _ow_nonce="$OBS_LOCK_NONCE"
-  trap 'if ! obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" 2>/dev/null; then obs_log error "observation worker lock cleanup failed"; fi' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'obs_worker_cleanup' EXIT
+  trap 'obs_handle_signal 130' INT
+  trap 'obs_handle_signal 143' TERM
   while :; do
     obs_state_load
     [ "$OBS_SC" -lt "$OBS_SR" ] || [ "$OBS_CC" -lt "$OBS_CR" ] || break

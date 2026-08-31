@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#                - File: mervlan_backup.sh || version="0.3"                   #
+#                - File: mervlan_backup.sh || version="0.4"                   #
 # ============================================================================ #
 # Backup inventory, manual backup, deletion, and transactional restore engine. #
 # Public CLI entry remains functions/update_mervlan.sh.                        #
@@ -67,6 +67,32 @@ MB_PRESERVE_WORK=0
 MB_PRESERVE_JFFS=0
 MB_RESTORE_ORIGINAL=""
 MB_RESTORE_ORIGINAL_BOOT=0
+MB_POOL_ABORT_FAILED=0
+mb_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    return $?
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 1 ;; *) return 0 ;; esac
+}
+
+mb_abort_node_pool() {
+  mb_pool_state_unresolved || return 0
+  if ! type mnj_pool_abort_active >/dev/null 2>&1; then
+    MB_POOL_ABORT_FAILED=1
+    error -c cli,vlan "Maintenance cleanup could not reconcile active node workers; retaining locks and recovery state"
+    return 1
+  fi
+  if ! mnj_pool_abort_active failed backup-exit; then
+    MB_POOL_ABORT_FAILED=1
+    error -c cli,vlan "Maintenance cleanup could not stop and reconcile active node workers; retaining locks and recovery state"
+    return 1
+  fi
+  if ! mb_pool_state_unresolved; then MB_POOL_ABORT_FAILED=0; return 0; fi
+  MB_POOL_ABORT_FAILED=1
+  error -c cli,vlan "Maintenance cleanup left active node workers unresolved; retaining locks and recovery state"
+  return 1
+}
 
 mb_remove_jffs_stage() {
   _mb_stage_path="$1"
@@ -111,27 +137,38 @@ mb_reconcile_stale_stages() {
 mb_cleanup() {
   _mb_cleanup_rc=$?
   _mb_cleanup_failed=0
-  if [ "$MB_PRESERVE_JFFS" != "1" ]; then
-    mb_remove_jffs_stage "$MB_JFFS_STAGE" || _mb_cleanup_failed=1
+  _mb_pool_cleanup_ready=1
+  if ! mb_abort_node_pool; then
+    _mb_pool_cleanup_ready=0
+    _mb_cleanup_failed=1
+    MB_PRESERVE_WORK=1
+    MB_PRESERVE_JFFS=1
   fi
-  if [ "$MB_PRESERVE_JFFS" != "1" ] && [ "$MB_ACTIVATION_STARTED" != "1" ]; then
-    mb_remove_jffs_stage "$MB_JFFS_OLD" || _mb_cleanup_failed=1
-  fi
-  if [ "$MB_PRESERVE_WORK" != "1" ] && [ -d "$MB_WORK_ROOT" ]; then
-    rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
-  fi
-  if [ "$MB_LOCK_OWNED" = "1" ]; then
-    if type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
-      MB_LOCK_OWNED=0
-    else
-      _mb_cleanup_failed=1
-      error -c cli,vlan "Maintenance cleanup could not release its owner lock; recovery is required"
+  if [ "$_mb_pool_cleanup_ready" = "1" ]; then
+    if [ "$MB_PRESERVE_JFFS" != "1" ]; then
+      mb_remove_jffs_stage "$MB_JFFS_STAGE" || _mb_cleanup_failed=1
     fi
+    if [ "$MB_PRESERVE_JFFS" != "1" ] && [ "$MB_ACTIVATION_STARTED" != "1" ]; then
+      mb_remove_jffs_stage "$MB_JFFS_OLD" || _mb_cleanup_failed=1
+    fi
+    if [ "$MB_PRESERVE_WORK" != "1" ] && [ -d "$MB_WORK_ROOT" ]; then
+      rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
+    fi
+    if [ "$MB_LOCK_OWNED" = "1" ]; then
+      if type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
+        MB_LOCK_OWNED=0
+      else
+        _mb_cleanup_failed=1
+        error -c cli,vlan "Maintenance cleanup could not release its owner lock; recovery is required"
+      fi
+    fi
+    case "${MB_OPERATION:-}" in
+      ""|backup_inventory) ;;
+      *) if type log_maintain_all >/dev/null 2>&1; then log_maintain_all || _mb_cleanup_failed=1; fi ;;
+    esac
+  else
+    error -c cli,vlan "Maintenance cleanup preserved recovery data and owner lock because active node workers remain unresolved"
   fi
-  case "${MB_OPERATION:-}" in
-    ""|backup_inventory) ;;
-    *) if type log_maintain_all >/dev/null 2>&1; then log_maintain_all || _mb_cleanup_failed=1; fi ;;
-  esac
   [ "$_mb_cleanup_failed" -eq 0 ] || _mb_cleanup_rc=1
   return "$_mb_cleanup_rc"
 }
@@ -142,14 +179,24 @@ mb_handle_signal() {
   MB_SIGNAL_HANDLING=1
   trap - INT TERM
   warn -c cli,vlan "Maintenance operation interrupted; stopping safely"
-  if [ "$MB_ACTIVATION_STARTED" = "1" ] && [ "$MB_ROLLBACK_DONE" != "1" ] && \
+  _mb_signal_pool_ready=1
+  if ! mb_abort_node_pool; then
+    _mb_signal_pool_ready=0
+    MB_PRESERVE_WORK=1
+    MB_PRESERVE_JFFS=1
+  fi
+  if [ "$_mb_signal_pool_ready" = "1" ] && [ "$MB_ACTIVATION_STARTED" = "1" ] && [ "$MB_ROLLBACK_DONE" != "1" ] && \
      [ -n "$MB_RESTORE_ORIGINAL" ] && [ -d "$MB_RESTORE_ORIGINAL" ]; then
     if ! mb_rollback_restore "$MB_RESTORE_ORIGINAL" "$MB_RESTORE_ORIGINAL_BOOT"; then
       MB_PRESERVE_WORK=1
       error -c cli,vlan "Automatic rollback failed; temporary recovery data remains at $MB_WORK_ROOT"
     fi
   fi
-  mb_write_result interrupted signal "Operation interrupted. Automatic rollback was attempted when required."
+  if [ "$_mb_signal_pool_ready" = "1" ]; then
+    mb_write_result interrupted signal "Operation interrupted. Automatic rollback was attempted when required."
+  else
+    mb_write_result interrupted signal "Operation interrupted. Active node workers could not be reconciled; recovery data and the owner lock were preserved."
+  fi
   exit "$_mb_signal_status"
 }
 

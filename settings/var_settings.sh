@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: var_settings.sh || version="0.72.1"                  #
+#              - File: var_settings.sh || version="0.72.2"                  #
 # ============================================================================ #
 # - Purpose:    Define folder paths and environment variables used             #
 #               throughout the MerVLAN addon.                                  #
@@ -156,9 +156,12 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 : "${MERV_SYNC_LOCK_STALE_SEC:=60}"
 : "${MERV_MAC_REFRESH_LOCK_STALE_SEC:=60}"
 
-# Bounded node-operation controls.  Node workers accept only one or two SSH
-# operations at once; malformed settings are normalized by lib_node_jobs.sh.
-: "${MERV_NODE_PARALLELISM:=2}"
+# Bounded node-operation controls.  The persisted General.NODE_PARALLELISM
+# setting is resolved by lib_node_jobs.sh at each pool invocation.  Keep this
+# optional environment value as an explicit runtime override seam; an absent
+# legacy setting resolves to two and malformed runtime input fails closed to
+# one.  Do not materialize the default here, or it would mask settings.json.
+: "${MERV_NODE_PARALLELISM:=}"
 : "${MERV_NODE_PREPARE_MAX_SEC:=180}"
 : "${MERV_NODE_LAUNCH_MAX_SEC:=180}"
 : "${MERV_NODE_SYNC_MAX_SEC:=720}"

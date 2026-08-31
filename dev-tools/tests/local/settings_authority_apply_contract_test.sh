@@ -45,6 +45,9 @@ require "Apply blocked: authoritative settings or node state is unknown" 'unknow
 require "getSettingsNodeState() !== 'configured'" 'node-aware Apply lacks configured guard'
 require "function runConfirmedVlanManagerRoute" 'confirmed VLAN route helper missing'
 require "showMaintenanceConfirmation(confirmationOptions)" 'VLAN route confirmation is not using the shared confirmation dialog'
+require 'function confirmRecentMainApply()' 'MAIN Apply recent-run advisory is missing'
+require 'MAIN_APPLY_ADVISORY: "tmp/results/main_apply_advisory.json"' 'MAIN Apply advisory path is missing'
+require "confirmLabel: 'Apply Anyway'" 'recent MAIN Apply advisory is not an explicit override'
 require "function classifyConfiguredNodes(settings)" 'tri-state node classifier missing'
 require "return configured ? 'configured' : 'none';" 'empty/none node case does not remain explicit none'
 require "A nonempty malformed node value is not equivalent to no nodes" 'malformed node case is not fail-closed'
@@ -65,6 +68,10 @@ printf '%s\n' "$apply_block" | grep -Fq "nodeState === 'configured'" || fail 'Ap
 local_apply=$(sed -n '/^async function runVlanManagerLocal(button)/,/^\/\/ Run VLAN Manager with nodes/p' "$UI_FILE")
 printf '%s\n' "$local_apply" | grep -Fq "getSettingsNodeState() !== 'configured'" || fail 'Local Router Only does not require configured nodes'
 printf '%s\n' "$local_apply" | grep -Fq 'runConfirmedVlanManagerRoute' || fail 'Local Router Only bypasses confirmation'
+printf '%s\n' "$local_apply" | grep -Fq '}), true);' || fail 'Local Router Only does not request MAIN Apply advisory'
+
+with_nodes_apply=$(sed -n '/^async function runVlanManagerWithNodes(button)/,/^\/\/ Run VLAN Manager with nodes/p' "$UI_FILE")
+printf '%s\n' "$with_nodes_apply" | grep -Fq 'confirmRecentMainApply()' || fail 'Router + Nodes does not request MAIN Apply advisory'
 
 nodes_only_apply=$(sed -n '/^async function runVlanManagerOnlyNodes(button)/,/^async function runMacRefresh/p' "$UI_FILE")
 printf '%s\n' "$nodes_only_apply" | grep -Fq "getSettingsNodeState() !== 'configured'" || fail 'Nodes Only does not require configured nodes'

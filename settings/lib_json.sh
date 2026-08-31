@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_json.sh || version="0.57"                         #
+#                - File: lib_json.sh || version="0.58"                         #
 # ============================================================================ #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -1156,7 +1156,8 @@ merv_settings_node_sync_digest() {
         _msnsd_hash=$(awk '
             $0 !~ /"AUTO_SYNC_SETTINGS"[[:space:]]*:/ &&
             $0 !~ /"HTML_CLIENT_REFRESH_MINUTES"[[:space:]]*:/ &&
-            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ { print }
+            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ &&
+            $0 !~ /"NODE_PARALLELISM"[[:space:]]*:/ { print }
         ' "$_msnsd_file" | md5sum 2>/dev/null | awk '{print $1}')
         case "$_msnsd_hash" in
             [0-9A-Fa-f][0-9A-Fa-f]*) printf 'md5:%s\n' "$_msnsd_hash"; return 0 ;;
@@ -1167,7 +1168,8 @@ merv_settings_node_sync_digest() {
         _msnsd_hash=$(awk '
             $0 !~ /"AUTO_SYNC_SETTINGS"[[:space:]]*:/ &&
             $0 !~ /"HTML_CLIENT_REFRESH_MINUTES"[[:space:]]*:/ &&
-            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ { print }
+            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ &&
+            $0 !~ /"NODE_PARALLELISM"[[:space:]]*:/ { print }
         ' "$_msnsd_file" | cksum 2>/dev/null | awk '{print $1 ":" $2}')
         case "$_msnsd_hash" in
             [0-9]*:[0-9]*) printf 'cksum:%s\n' "$_msnsd_hash"; return 0 ;;

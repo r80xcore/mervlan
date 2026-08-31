@@ -55,6 +55,7 @@ cat > "$FAKE_BASE/settings/lib_json.sh" <<'EOF'
 LIB_JSON_LOADED=1
 json_validate_file() { grep -q '"router"[[:space:]]*:' "$1"; }
 json_get_flag() { :; }
+merv_is_valid_node_id() { [ "$1" = 1 ]; }
 EOF
 
 cat > "$FAKE_BASE/settings/lib_ssh.sh" <<'EOF'
@@ -88,6 +89,8 @@ EOF
 
 cat > "$FAKE_BASE/settings/lib_mervqt.sh" <<'EOF'
 LIB_MERVQT_LOADED=1
+merv_proc_start_time() { merv_identity_proc_start "$1" "${2:-/proc}"; }
+merv_process_identity_matches() { merv_identity_matches "$1" "$2" "${3:-/proc}"; }
 merv_lock_state() { printf '%s\n' inactive; }
 merv_lock_acquire() { MERV_LOCK_NONCE=node02-fixture; return 0; }
 merv_lock_release() { return 0; }
@@ -104,6 +107,11 @@ cat > "$FAKE_BASE/functions/collect_local_clients.sh" <<'EOF'
 printf '%s' '{"router":"Main Router","vlans":[]}' > "$1"
 EOF
 chmod 700 "$FAKE_BASE/functions/collect_local_clients.sh" || exit 1
+
+# The production collector now uses the shared bounded node-job pool. Keep the
+# fixture isolated while supplying the real pool and identity implementations.
+cp "$ROOT/settings/lib_node_jobs.sh" "$FAKE_BASE/settings/lib_node_jobs.sh" || exit 1
+cp "$ROOT/settings/lib_identity.sh" "$FAKE_BASE/settings/lib_identity.sh" || exit 1
 
 export TEST_RUNTIME TEST_TRACE
 MERV_BASE="$FAKE_BASE"
@@ -138,6 +146,9 @@ assert_contains "$TEST_RUNTIME/results/client_collection_fault" 'phase=worker' \
 assert_contains "$TEST_RUNTIME/results/client_collection_fault" 'reason=worker-nonzero' \
     'failure diagnostic did not record the worker failure reason'
 [ ! -d "$TEST_RUNTIME/client_collection" ] || fail 'collector left temporary collection state behind'
+if find "$TEST_RUNTIME/tmp/node_jobs" -mindepth 1 -maxdepth 1 -print 2>/dev/null | grep -q .; then
+    fail 'failed collection left a private bounded-pool workspace behind'
+fi
 
 printf 'FIXTURE: NODE1 session-timeout classified by merv_ssh_exec as rc=5\n'
 printf 'RESULT: parent collect_clients.sh rc=%s and preserved the prior aggregate\n' "$COLLECT_RC"

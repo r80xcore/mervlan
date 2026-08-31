@@ -9,6 +9,7 @@
     "EXPERIMENTAL": "0",
     "AUTO_SYNC_SETTINGS": "1",
     "HTML_CLIENT_REFRESH_MINUTES": "30",
+    "NODE_PARALLELISM": "2",
     "IS_NODE": "0",
     "NODE_ID": "none",
     "BACKUP_1": ["none", "none", "none"],

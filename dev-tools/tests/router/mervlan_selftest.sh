@@ -2295,8 +2295,57 @@ test_observation_lock() {
   [ "$(observation_number snapshot_completed_generation)" = 0 ] &&
     pass "interrupted observation does not advance completion" || {
       fail "interrupted observation does not advance completion"; _tol_ok=0;
-    }
+  }
   rm -f "$SELFTEST_ROOT/obs-snapshot-kill-worker" || return 1
+
+  # Shield observation owns the node pool while this worker holds the
+  # observation lock.  Keep the interruption ordering executable as a
+  # contract test: abort must be attempted in cleanup before that lock can be
+  # released, and the signal path must invoke the same abort hook.
+  _tol_obs_source="$MERV_BASE/functions/post_apply_worker.sh"
+  _tol_obs_cleanup=$(sed -n '/^obs_worker_cleanup() {/,/^}/p' "$_tol_obs_source" 2>/dev/null)
+  _tol_obs_abort_line=$(printf '%s\n' "$_tol_obs_cleanup" | grep -n 'obs_abort_active_pool' | head -1 | cut -d: -f1)
+  _tol_obs_release_line=$(printf '%s\n' "$_tol_obs_cleanup" | grep -n 'obs_lock_release.*OBS_WORKER_LOCK' | head -1 | cut -d: -f1)
+  if [ -n "$_tol_obs_abort_line" ] && [ -n "$_tol_obs_release_line" ] &&
+     [ "$_tol_obs_abort_line" -lt "$_tol_obs_release_line" ] 2>/dev/null; then
+    pass "Shield cleanup aborts node pool before observation lock release"
+  else
+    fail "Shield cleanup aborts node pool before observation lock release"; _tol_ok=0
+  fi
+  _tol_obs_signal=$(sed -n '/^obs_handle_signal() {/,/^}/p' "$_tol_obs_source" 2>/dev/null)
+  printf '%s\n' "$_tol_obs_signal" | grep -Fq 'obs_abort_active_pool' &&
+    pass "Shield interruption signal path invokes node-pool abort" || {
+      fail "Shield interruption signal path invokes node-pool abort"; _tol_ok=0;
+    }
+
+  # Every parent that can own the shared pool must reconcile it from its
+  # interruption/EXIT cleanup before releasing its own action/observation
+  # lock.  Keep this as a source contract for the four production paths so a
+  # future cleanup edit cannot silently reintroduce early lock release.
+  for _tol_route in \
+    'collect_clients.sh|cleanup_collect|merv_lock_release.*COLLECT_LOCK|client collection' \
+    'execute_nodes.sh|execute_nodes_progress_cleanup|merv_owner_lock_release.*EXEC_NODES_LOCK|execute' \
+    'sync_nodes.sh|_cleanup_sync_tmp|merv_owner_lock_release.*SYNC_LOCK|sync' \
+    'post_apply_worker.sh|obs_worker_cleanup|obs_lock_release.*OBS_WORKER_LOCK|Shield observation'; do
+    _tol_route_file=${_tol_route%%|*}
+    _tol_route_rest=${_tol_route#*|}
+    _tol_route_fn=${_tol_route_rest%%|*}
+    _tol_route_rest=${_tol_route_rest#*|}
+    _tol_route_release=${_tol_route_rest%%|*}
+    _tol_route_label=${_tol_route_rest#*|}
+    _tol_route_body=$(sed -n "/^${_tol_route_fn}() {/,/^}/p" "$MERV_BASE/functions/$_tol_route_file" 2>/dev/null)
+    case "$_tol_route_file:$_tol_route_fn" in
+      post_apply_worker.sh:obs_worker_cleanup) _tol_route_abort=$(printf '%s\n' "$_tol_route_body" | grep -n 'obs_abort_active_pool' | head -1 | cut -d: -f1) ;;
+      *) _tol_route_abort=$(printf '%s\n' "$_tol_route_body" | grep -n 'mnj_pool_abort_active' | head -1 | cut -d: -f1) ;;
+    esac
+    _tol_route_release_line=$(printf '%s\n' "$_tol_route_body" | grep -E -n "$_tol_route_release" | head -1 | cut -d: -f1)
+    if [ -n "$_tol_route_abort" ] && [ -n "$_tol_route_release_line" ] &&
+       [ "$_tol_route_abort" -lt "$_tol_route_release_line" ] 2>/dev/null; then
+      pass "$_tol_route_label cleanup aborts pool before lock release"
+    else
+      fail "$_tol_route_label cleanup aborts pool before lock release"; _tol_ok=0
+    fi
+  done
 
   MERV_UPDATE_MAINTENANCE_LOCK="$SELFTEST_ROOT/observation-maintenance.lock"
   export MERV_UPDATE_MAINTENANCE_LOCK
@@ -2549,6 +2598,21 @@ test_client_refresh_contract() {
     pass "node collection preserves configured IP identity through worker" ||
     fail "node collection preserves configured IP identity through worker"
 
+  if grep -Fq 'settings/lib_node_jobs.sh' "$_tcr_collect" &&
+     grep -Fq 'mnj_pool_run' "$_tcr_collect" &&
+     grep -Fq 'mnj_pool_run "$COLLECT_POOL_ROOT" collect' "$_tcr_collect" &&
+     grep -Fq '"${MERV_NODE_PARALLELISM:-}"' "$_tcr_collect" &&
+     grep -Fq 'mnj_result_validate' "$_tcr_collect" &&
+     grep -Fq 'MERV_NODE_JOB_DIR/client.json' "$_tcr_collect" &&
+     grep -Fq 'COLLECT_POOL_ROOT/node_' "$_tcr_collect" &&
+     grep -Fq 'collect_main_bounded()' "$_tcr_collect" &&
+     grep -Fq 'if ! collect_main_bounded; then' "$_tcr_collect" &&
+     ! grep -Fq 'collect_from_node "$node_id" "$node_ip" "$COLLECTDIR' "$_tcr_collect"; then
+    pass "client collection uses bounded remote pool with MAIN outside pool"
+  else
+    fail "client collection uses bounded remote pool with MAIN outside pool"
+  fi
+
   grep -q "PRODUCTID_NODE' + i" "$_tcr_html" &&
     grep -q "formatName(alias" "$_tcr_html" &&
     grep -q "formatName('Main Router'" "$_tcr_html" &&
@@ -2799,18 +2863,52 @@ test_node_runner_status() {
 node_job_test_handler() {
   _tnjh_node="$1" _tnjh_ip="$2"
   mkdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node" || exit 1
+  trap 'rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node" 2>/dev/null || :; exit 143' TERM INT
+  printf 'start %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events"
   while ! mkdir "$NODE_JOB_TEST_ROOT/count.lock" 2>/dev/null; do sleep 1; done
   _tnjh_count=$(find "$NODE_JOB_TEST_ROOT/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
   _tnjh_max=$(cat "$NODE_JOB_TEST_ROOT/max" 2>/dev/null || printf '0')
   [ "$_tnjh_count" -gt "$_tnjh_max" ] 2>/dev/null && printf '%s\n' "$_tnjh_count" > "$NODE_JOB_TEST_ROOT/max"
   rmdir "$NODE_JOB_TEST_ROOT/count.lock" 2>/dev/null || :
   case "${NODE_JOB_TEST_SCENARIO:-pool}:$_tnjh_node" in
-    pool:2) sleep 3 ;;
-    pool:3) sleep 1; rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"; return 7 ;;
+    pool:2) sleep 3; printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events" ;;
+    pool:3) sleep 1; rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"; printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events"; return 7 ;;
+    setup-failure:1) sleep 10 ;;
     timeout:1) sleep 10 ;;
-    *) sleep 1 ;;
+    # Hold the first batch behind a filesystem barrier.  A fixed sleep is not
+    # deterministic on a busy BusyBox/Git shell: at widths 3--5 the parent can
+    # take long enough to publish the final slot that an early worker exits
+    # before the occupancy sample.  The barrier is released only after every
+    # first-batch active marker and wrapper identity has been published.
+    matrix:*)
+      _tnjh_width="${NODE_JOB_TEST_WIDTH:-0}"
+      case "$_tnjh_width" in ''|*[!0-9]*|0) _tnjh_width=1 ;; esac
+      while :; do
+        _tnjh_active=$(find "$NODE_JOB_TEST_ROOT/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+        _tnjh_wrappers=0
+        for _tnjh_wrapper in "$NODE_JOB_TEST_ROOT"/jobs/node_*/wrapper.pid; do
+          [ -f "$_tnjh_wrapper" ] && _tnjh_wrappers=$((_tnjh_wrappers + 1))
+        done
+        if [ "${_tnjh_active:-0}" -ge "$_tnjh_width" ] 2>/dev/null &&
+           [ "$_tnjh_wrappers" -ge "$_tnjh_width" ] 2>/dev/null; then
+          : > "$NODE_JOB_TEST_ROOT/matrix.ready"
+          break
+        fi
+        sleep 1
+      done
+      while [ ! -f "$NODE_JOB_TEST_ROOT/matrix.ready" ]; do sleep 1; done
+      # Allow the launcher to finish publishing the last slot before any
+      # worker can publish a terminal result and be reaped/reused.
+      sleep 2
+      printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events"
+      ;;
+    *) sleep 1; printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events" ;;
   esac
   rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"
+}
+
+node_job_abort_test_handler() {
+  sleep 30
 }
 
 node_job_progress_hook() {
@@ -2850,6 +2948,180 @@ test_node_worker_pool() {
     pass "worker pool progress hook runs only in parent" ||
     fail "worker pool progress hook runs only in parent"
   MNJ_POOL_PROGRESS_HOOK=""
+
+  # Verify the generic abort arguments are carried into a terminal result even
+  # when a pending publication has no signalable identity.  This is a pure
+  # metadata case; no PID-only signal is permitted.
+  _tnwp_abort_exact="$_tnwp_root/abort-exact"
+  rm -rf "$_tnwp_abort_exact" 2>/dev/null || :
+  mkdir -p "$_tnwp_abort_exact/node_1" || return 1
+  MNJ_POOL_ROOT="$_tnwp_abort_exact"; MNJ_POOL_PHASE=abortphase; MNJ_POOL_ACTIVE=1
+  MNJ_POOL_PENDING_PID=999999; MNJ_POOL_PENDING_START=''
+  MNJ_POOL_PENDING_DIR="$_tnwp_abort_exact/node_1"; MNJ_POOL_PENDING_NODE=1
+  if mnj_pool_abort_active failed exact-reason &&
+     mnj_result_validate "$_tnwp_abort_exact/node_1/result" 1 abortphase &&
+     [ "$MNJ_RESULT_STATE" = failed ] && [ "$MNJ_RESULT_REASON" = exact-reason ]; then
+    pass "node pool abort accepts generic state and reason"
+  else
+    fail "node pool abort accepts generic state and reason"
+  fi
+  rm -rf "$_tnwp_abort_exact" 2>/dev/null || :
+
+  # Exercise every supported width with one more job than available slots.
+  # The handler records active occupancy and start/end ordering.  N+1 can only
+  # start after an earlier end, proving a completed slot is reaped and reused;
+  # the active maximum proves the pool never exceeds its configured width.
+  _tnwp_matrix_ok=1
+  for _tnwp_parallel in 1 2 3 4 5; do
+    _tnwp_matrix="$SELFTEST_ROOT/node-jobs/matrix-$_tnwp_parallel"
+    rm -rf "$_tnwp_matrix" 2>/dev/null || :
+    mkdir -p "$_tnwp_matrix/active" || { fail "worker pool matrix N=$_tnwp_parallel fixture setup"; _tnwp_matrix_ok=0; continue; }
+    NODE_JOB_TEST_ROOT="$_tnwp_matrix"; export NODE_JOB_TEST_ROOT
+    NODE_JOB_TEST_SCENARIO=matrix; export NODE_JOB_TEST_SCENARIO
+    NODE_JOB_TEST_WIDTH="$_tnwp_parallel"; export NODE_JOB_TEST_WIDTH
+    printf '0\n' > "$_tnwp_matrix/max"
+    : > "$_tnwp_matrix/events"
+    : > "$_tnwp_matrix/nodes"
+    _tnwp_node=1
+    while [ "$_tnwp_node" -le $((_tnwp_parallel + 1)) ]; do
+      printf '%s 192.0.2.%s\n' "$_tnwp_node" "$_tnwp_node" >> "$_tnwp_matrix/nodes"
+      _tnwp_node=$((_tnwp_node + 1))
+    done
+    if mnj_pool_run "$_tnwp_matrix/jobs" "matrix$_tnwp_parallel" "$_tnwp_parallel" 15 "$_tnwp_matrix/nodes" node_job_test_handler; then
+      :
+    else
+      fail "worker pool N=$_tnwp_parallel reports failure"; _tnwp_matrix_ok=0
+    fi
+    _tnwp_observed_max=$(cat "$_tnwp_matrix/max" 2>/dev/null || printf 0)
+    if [ "$_tnwp_observed_max" -eq "$_tnwp_parallel" ] 2>/dev/null; then
+      pass "worker pool N=$_tnwp_parallel never exceeds configured width"
+    else
+      fail "worker pool N=$_tnwp_parallel never exceeds configured width (max=$_tnwp_observed_max)"; _tnwp_matrix_ok=0
+    fi
+    _tnwp_starts=$(grep -c '^start ' "$_tnwp_matrix/events" 2>/dev/null || :)
+    _tnwp_ends=$(grep -c '^end ' "$_tnwp_matrix/events" 2>/dev/null || :)
+    [ "$_tnwp_starts" -eq $((_tnwp_parallel + 1)) ] && [ "$_tnwp_ends" -eq $((_tnwp_parallel + 1)) ] &&
+      pass "worker pool N=$_tnwp_parallel starts and reaps N+1 jobs" || {
+        fail "worker pool N=$_tnwp_parallel starts/reaps N+1 jobs (starts=$_tnwp_starts ends=$_tnwp_ends)"; _tnwp_matrix_ok=0;
+      }
+    _tnwp_first_end=$(awk '$1 == "end" { print NR; exit }' "$_tnwp_matrix/events" 2>/dev/null || printf 0)
+    _tnwp_extra_start=$(awk -v node=$((_tnwp_parallel + 1)) '$1 == "start" && $2 == node { print NR; exit }' "$_tnwp_matrix/events" 2>/dev/null || printf 0)
+    [ "$_tnwp_first_end" -gt 0 ] 2>/dev/null && [ "$_tnwp_extra_start" -gt "$_tnwp_first_end" ] 2>/dev/null &&
+      pass "worker pool N=$_tnwp_parallel reuses a reaped slot for job N+1" || {
+        fail "worker pool N=$_tnwp_parallel reuses a reaped slot for job N+1"; _tnwp_matrix_ok=0;
+      }
+    _tnwp_active_left=$(find "$_tnwp_matrix/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    [ "$_tnwp_active_left" -eq 0 ] 2>/dev/null &&
+      pass "worker pool N=$_tnwp_parallel leaves no active slots" || {
+        fail "worker pool N=$_tnwp_parallel leaves no active slots"; _tnwp_matrix_ok=0;
+      }
+    _tnwp_node=1
+    while [ "$_tnwp_node" -le $((_tnwp_parallel + 1)) ]; do
+      if mnj_result_validate "$_tnwp_matrix/jobs/node_$_tnwp_node/result" "$_tnwp_node" "matrix$_tnwp_parallel" &&
+         [ "$MNJ_RESULT_STATE" = ok ]; then
+        :
+      else
+        fail "worker pool N=$_tnwp_parallel publishes node $_tnwp_node result"; _tnwp_matrix_ok=0
+      fi
+      _tnwp_node=$((_tnwp_node + 1))
+    done
+  done
+  [ "$_tnwp_matrix_ok" -eq 1 ] || return 1
+
+  # Force a post-launch setup failure on the second node.  The first worker
+  # must be reconciled even though its slot was already published, and the
+  # pool must leave a terminal result with no handler activity behind.
+  _tnwp_setup="$SELFTEST_ROOT/node-jobs/setup-failure"
+  rm -rf "$_tnwp_setup" 2>/dev/null || :
+  mkdir -p "$_tnwp_setup/active" "$_tnwp_setup/jobs/node_2" || return 1
+  NODE_JOB_TEST_ROOT="$_tnwp_setup"; export NODE_JOB_TEST_ROOT
+  NODE_JOB_TEST_SCENARIO=setup-failure; export NODE_JOB_TEST_SCENARIO
+  printf '0\n' > "$_tnwp_setup/max"
+  printf '1 192.0.2.1\n2 192.0.2.2\n' > "$_tnwp_setup/nodes"
+  if mnj_pool_run "$_tnwp_setup/jobs" setupfailure 2 10 "$_tnwp_setup/nodes" node_job_test_handler; then
+    fail "worker pool setup failure is reported"
+  else
+    pass "worker pool setup failure is reported"
+  fi
+  mnj_result_validate "$_tnwp_setup/jobs/node_1/result" 1 setupfailure && [ "$MNJ_RESULT_STATE" != ok ] &&
+    pass "worker pool reconciles published slot after setup failure" ||
+    fail "worker pool reconciles published slot after setup failure"
+  ! mnj_child_identity_live "$_tnwp_setup/jobs/node_1" &&
+    [ -z "$MNJ_S1_PID$MNJ_S2_PID$MNJ_S3_PID$MNJ_S4_PID$MNJ_S5_PID" ] &&
+    pass "worker pool setup failure leaves no live workers or slots" ||
+    fail "worker pool setup failure leaves no live workers or slots"
+
+  # Exercise the parent-abort contract with one pending wrapper plus each
+  # supported total slot count (1 through 5).  The test uses real worker
+  # wrappers and process start identities, so each case covers TERM/KILL,
+  # pending publication, reaping, terminal-result publication, and metadata
+  # clearing without relying on a synthetic PID fixture.  Alternate terminal
+  # states prove the generic <state> <reason> API rather than one hard-coded
+  # setup-failure result.
+  _tnwp_abort_matrix_ok=1
+  for _tnwp_abort_total in 1 2 3 4 5; do
+    _tnwp_abort="$_tnwp_root/abort-$_tnwp_abort_total"
+    rm -rf "$_tnwp_abort" 2>/dev/null || :
+    mkdir -p "$_tnwp_abort" || { fail "node pool abort N=$_tnwp_abort_total fixture setup"; _tnwp_abort_matrix_ok=0; continue; }
+    case "$_tnwp_abort_total" in 1|3|5) _tnwp_abort_state=failed ;; *) _tnwp_abort_state=timeout ;; esac
+    MNJ_POOL_ROOT="$_tnwp_abort"; MNJ_POOL_PHASE=abortphase; MNJ_POOL_ACTIVE=1
+    MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+    MNJ_S1_PID=''; MNJ_S2_PID=''; MNJ_S3_PID=''; MNJ_S4_PID=''; MNJ_S5_PID=''
+    MNJ_S1_START=''; MNJ_S2_START=''; MNJ_S3_START=''; MNJ_S4_START=''; MNJ_S5_START=''
+    MNJ_S1_DIR=''; MNJ_S2_DIR=''; MNJ_S3_DIR=''; MNJ_S4_DIR=''; MNJ_S5_DIR=''
+    MNJ_S1_NODE=''; MNJ_S2_NODE=''; MNJ_S3_NODE=''; MNJ_S4_NODE=''; MNJ_S5_NODE=''
+    MNJ_S1_DEADLINE=''; MNJ_S2_DEADLINE=''; MNJ_S3_DEADLINE=''; MNJ_S4_DEADLINE=''; MNJ_S5_DEADLINE=''
+
+    # Publish total-1 workers into slots 1..N-1; leave node N pending.
+    _tnwp_abort_slot=1
+    while [ "$_tnwp_abort_slot" -lt "$_tnwp_abort_total" ]; do
+      _tnwp_abort_dir="$_tnwp_abort/node_$_tnwp_abort_slot"
+      mkdir -p "$_tnwp_abort_dir" || { fail "node pool abort N=$_tnwp_abort_total slot setup"; _tnwp_abort_matrix_ok=0; break; }
+      ( mnj_worker "$_tnwp_abort_dir" "$_tnwp_abort_slot" abortphase node_job_abort_test_handler "$_tnwp_abort_slot" "192.0.2.$_tnwp_abort_slot" ) </dev/null &
+      _tnwp_abort_pid=$!
+      _tnwp_abort_start=$(merv_proc_start_time "$_tnwp_abort_pid" 2>/dev/null || printf '')
+      MNJ_POOL_PENDING_PID="$_tnwp_abort_pid"; MNJ_POOL_PENDING_START="$_tnwp_abort_start"
+      MNJ_POOL_PENDING_DIR="$_tnwp_abort_dir"; MNJ_POOL_PENDING_NODE="$_tnwp_abort_slot"
+      printf '%s\n' "$_tnwp_abort_pid" > "$_tnwp_abort_dir/wrapper.pid" || { fail "node pool abort N=$_tnwp_abort_total wrapper PID"; _tnwp_abort_matrix_ok=0; break; }
+      printf '%s\n' "$_tnwp_abort_start" > "$_tnwp_abort_dir/wrapper.proc_start_time" || { fail "node pool abort N=$_tnwp_abort_total wrapper identity"; _tnwp_abort_matrix_ok=0; break; }
+      mnj_slot_set "$_tnwp_abort_slot" "$_tnwp_abort_pid" "$_tnwp_abort_start" "$_tnwp_abort_dir" "$_tnwp_abort_slot" 999999999
+      MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+      _tnwp_abort_slot=$((_tnwp_abort_slot + 1))
+    done
+    _tnwp_abort_dir="$_tnwp_abort/node_$_tnwp_abort_total"
+    mkdir -p "$_tnwp_abort_dir" || { fail "node pool abort N=$_tnwp_abort_total pending setup"; _tnwp_abort_matrix_ok=0; continue; }
+    ( mnj_worker "$_tnwp_abort_dir" "$_tnwp_abort_total" abortphase node_job_abort_test_handler "$_tnwp_abort_total" "192.0.2.$_tnwp_abort_total" ) </dev/null &
+    MNJ_POOL_PENDING_PID=$!; MNJ_POOL_PENDING_START=$(merv_proc_start_time "$MNJ_POOL_PENDING_PID" 2>/dev/null || printf '')
+    MNJ_POOL_PENDING_DIR="$_tnwp_abort_dir"; MNJ_POOL_PENDING_NODE="$_tnwp_abort_total"
+
+    if mnj_pool_abort_active "$_tnwp_abort_state" parent-term; then
+      pass "node pool abort N=$_tnwp_abort_total accepts state=$_tnwp_abort_state reason=parent-term"
+    else
+      fail "node pool abort N=$_tnwp_abort_total accepts state=$_tnwp_abort_state reason=parent-term"; _tnwp_abort_matrix_ok=0
+    fi
+    [ "${MNJ_POOL_ACTIVE:-1}" -eq 0 ] &&
+      [ -z "$MNJ_POOL_PENDING_PID$MNJ_POOL_PENDING_START$MNJ_POOL_PENDING_DIR$MNJ_POOL_PENDING_NODE" ] &&
+      [ -z "$MNJ_S1_PID$MNJ_S2_PID$MNJ_S3_PID$MNJ_S4_PID$MNJ_S5_PID" ] &&
+      pass "node pool abort N=$_tnwp_abort_total clears metadata after identity-safe reap" || {
+        fail "node pool abort N=$_tnwp_abort_total clears metadata after identity-safe reap"; _tnwp_abort_matrix_ok=0;
+      }
+    _tnwp_abort_ok=1
+    _tnwp_abort_node=1
+    while [ "$_tnwp_abort_node" -le "$_tnwp_abort_total" ]; do
+      if mnj_result_validate "$_tnwp_abort/node_$_tnwp_abort_node/result" "$_tnwp_abort_node" abortphase &&
+         case "$MNJ_RESULT_STATE" in failed|timeout) true ;; *) false ;; esac &&
+         case "$MNJ_RESULT_REASON" in parent-term|worker-term-timeout) true ;; *) false ;; esac &&
+         ! mnj_child_identity_live "$_tnwp_abort/node_$_tnwp_abort_node"; then
+        :
+      else
+        fail "node pool abort N=$_tnwp_abort_total publishes/reaps node $_tnwp_abort_node"; _tnwp_abort_ok=0
+      fi
+      _tnwp_abort_node=$((_tnwp_abort_node + 1))
+    done
+    [ "$_tnwp_abort_ok" -eq 1 ] && pass "node pool abort N=$_tnwp_abort_total publishes state=$_tnwp_abort_state for pending+slots" || _tnwp_abort_matrix_ok=0
+    rm -rf "$_tnwp_abort" 2>/dev/null || :
+  done
+  [ "$_tnwp_abort_matrix_ok" -eq 1 ] || return 1
 
   _tnwp_timeout="$SELFTEST_ROOT/node-jobs/timeout"
   mkdir -p "$_tnwp_timeout/active" || return 1

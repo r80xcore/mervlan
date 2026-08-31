@@ -14,12 +14,13 @@ assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 
 cat > "$FAKE_BASE/settings/var_settings.sh" <<'EOF'
 VAR_SETTINGS_LOADED=1
+TMPDIR="$TEST_RUNTIME/tmp"
 LOCKDIR="$TEST_RUNTIME/locks"
 COLLECTDIR="$TEST_RUNTIME/client_collection"
 RESULTDIR="$TEST_RUNTIME/results"
 OUT_FINAL="$RESULTDIR/vlan_clients.json"
 FUNCDIR="$MERV_BASE/functions"
-export LOCKDIR COLLECTDIR RESULTDIR OUT_FINAL FUNCDIR
+export TMPDIR LOCKDIR COLLECTDIR RESULTDIR OUT_FINAL FUNCDIR
 merv_proc_start_time() { printf '%s\n' 1; }
 merv_process_identity_matches() { return 1; }
 EOF
@@ -37,6 +38,7 @@ EOF
 cat > "$FAKE_BASE/settings/lib_json.sh" <<'EOF'
 LIB_JSON_LOADED=1
 json_validate_file() { grep -q '"router"' "$1"; }
+merv_is_valid_node_id() { [ "$1" = 1 ]; }
 EOF
 
 cat > "$FAKE_BASE/settings/lib_ssh.sh" <<'EOF'
@@ -63,6 +65,8 @@ EOF
 
 cat > "$FAKE_BASE/settings/lib_mervqt.sh" <<'EOF'
 LIB_MERVQT_LOADED=1
+merv_proc_start_time() { merv_identity_proc_start "$1" "${2:-/proc}"; }
+merv_process_identity_matches() { merv_identity_matches "$1" "$2" "${3:-/proc}"; }
 merv_lock_acquire() { return 0; }
 merv_lock_release() { return 0; }
 merv_lock_state() { printf '%s\n' inactive; }
@@ -79,12 +83,18 @@ printf '%s' '{"router":"Main Router","vlans":[]}' > "$1"
 EOF
 chmod 700 "$FAKE_BASE/functions/collect_local_clients.sh"
 
+# The production collector now uses the shared bounded node-job pool. Keep the
+# fixture isolated while supplying the real pool and identity implementations.
+cp "$ROOT/settings/lib_node_jobs.sh" "$FAKE_BASE/settings/lib_node_jobs.sh"
+cp "$ROOT/settings/lib_identity.sh" "$FAKE_BASE/settings/lib_identity.sh"
+
 TEST_RUNTIME="$TMP_ROOT/runtime"
 TEST_TRACE="$TMP_ROOT/trace"
 MERV_BASE="$FAKE_BASE"
 SSH_KEY="$TMP_ROOT/id"
 SSH_PUBKEY="$TMP_ROOT/id.pub"
 export TEST_RUNTIME TEST_TRACE MERV_BASE SSH_KEY SSH_PUBKEY
+mkdir -p "$TEST_RUNTIME/tmp"
 : > "$SSH_KEY"
 : > "$SSH_PUBKEY"
 
@@ -98,6 +108,9 @@ assert_contains "$TEST_TRACE" "MERV_OBS_CLIENT_ROUTER='192.168.186.201'" 'remote
 assert_contains "$TEST_RUNTIME/results/vlan_clients.json" '"router":"192.168.186.201"' 'published node artifact must retain configured ASUS identity'
 if grep -Fq '"router":"192.168.190.201"' "$TEST_RUNTIME/results/vlan_clients.json"; then
   fail 'WAN-Native transport address leaked into published router identity'
+fi
+if find "$TEST_RUNTIME/tmp/node_jobs" -mindepth 1 -maxdepth 1 -print 2>/dev/null | grep -q .; then
+  fail 'successful collection left a private bounded-pool workspace behind'
 fi
 
 printf 'PASS client collection identity contract\n'

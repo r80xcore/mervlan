@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.56"                     #
+#               - File: save_settings.sh || version="0.57"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -772,7 +772,8 @@ seed_general_section_if_missing() {
             '  "General": {' \
             '    "_description": "Global addon flags and behavior toggles",' \
             '    "AUTO_SYNC_SETTINGS": "1",' \
-            '    "HTML_CLIENT_REFRESH_MINUTES": "30"' \
+            '    "HTML_CLIENT_REFRESH_MINUTES": "30",' \
+            '    "NODE_PARALLELISM": "2"' \
             '  }' \
             '}' > "${_sg_seed_tmp}" 2>/dev/null &&
            mv "${_sg_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
@@ -789,7 +790,8 @@ seed_general_section_if_missing() {
                     print "  \"General\": {"
                     print "    \"_description\": \"Global addon flags and behavior toggles\","
                     print "    \"AUTO_SYNC_SETTINGS\": \"1\","
-                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\""
+                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\","
+                    print "    \"NODE_PARALLELISM\": \"2\""
                     print "  }"
                     print "}"
                     seeded=1
@@ -800,7 +802,8 @@ seed_general_section_if_missing() {
                     print "  \"General\": {"
                     print "    \"_description\": \"Global addon flags and behavior toggles\","
                     print "    \"AUTO_SYNC_SETTINGS\": \"1\","
-                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\""
+                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\","
+                    print "    \"NODE_PARALLELISM\": \"2\""
                     print "  },"
                     seeded=1
                 }
@@ -829,7 +832,7 @@ if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "wan_native
     # helper is a no-op for omitted keys, so this does not overwrite them.
     for _save_general_key in \
         BOOT_ENABLED PAUSE ENABLE_STP DRY_RUN EXPERIMENTAL ENABLE_NATIVE_SSID \
-        AUTO_SYNC_SETTINGS HTML_CLIENT_REFRESH_MINUTES; do
+        AUTO_SYNC_SETTINGS HTML_CLIENT_REFRESH_MINUTES NODE_PARALLELISM; do
         if ! seed_general_setting_from_normal_kv "$_save_general_key"; then
             error -c vlan "save_settings.sh: failed to seed General setting $_save_general_key"
             rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
@@ -837,6 +840,27 @@ if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "wan_native
         fi
     done
 fi
+
+# NODE_PARALLELISM is a bounded MAIN-local scheduler control.  Unlike the
+# runtime resolver, the Save backend must reject an explicitly supplied value
+# outside 1..5 so malformed configuration cannot be persisted or propagated.
+validate_node_parallelism_kv() {
+    _vnpp_key="$1"
+    _vnpp_value="$2"
+    [ "$_vnpp_key" = "NODE_PARALLELISM" ] || return 0
+    case "$_vnpp_value" in
+        1|2|3|4|5) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+while IFS="$(printf '\t')" read -r _vnpp_key _vnpp_value; do
+    if ! validate_node_parallelism_kv "$_vnpp_key" "$_vnpp_value"; then
+        error -c vlan "save_settings.sh: invalid NODE_PARALLELISM='$_vnpp_value' (expected integer 1-5)"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
 
 # WAN Native values are normal-scope settings but live in VLAN.WAN_Native in
 # sectioned settings. Validate them before mutation and seed the subsection on

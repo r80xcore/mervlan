@@ -1618,6 +1618,21 @@
         </label>
       </div>
 
+      <!-- Node operation parallelism -->
+      <div class="svc-settings-row">
+        <div class="svc-settings-label">
+          <span>Node operation parallelism</span>
+          <span class="svc-settings-hint">Maximum number of node operations allowed at once (1–5). Serial trust preflight remains enforced.</span>
+        </div>
+        <select id="svcNodeParallelismSelect" class="input_option" onchange="markSvcSettingsDirty()" title="Choose the maximum number of concurrent node operations">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+        </select>
+      </div>
+
       <!-- Auto-refresh clients on page load -->
       <div class="svc-settings-row">
         <div class="svc-settings-label">
@@ -1929,6 +1944,7 @@
           flat.ENABLE_NATIVE_SSID = stringOrDefault(general.ENABLE_NATIVE_SSID, "0");
           flat.AUTO_SYNC_SETTINGS = stringOrDefault(general.AUTO_SYNC_SETTINGS, "1");
           flat.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(general.HTML_CLIENT_REFRESH_MINUTES, "30");
+          flat.NODE_PARALLELISM = stringOrDefault(general.NODE_PARALLELISM, "2");
 
           const ssh = ensurePlainObject(data.SSH);
           flat.SSH_KEYS_INSTALLED = stringOrDefault(ssh.SSH_KEYS_INSTALLED, "0");
@@ -2129,7 +2145,8 @@
               EXPERIMENTAL: "0",
               ENABLE_NATIVE_SSID: "0",
               AUTO_SYNC_SETTINGS: "1",
-              HTML_CLIENT_REFRESH_MINUTES: "30"
+              HTML_CLIENT_REFRESH_MINUTES: "30",
+              NODE_PARALLELISM: "2"
             },
             SSH: {
               _description: "SSH settings for main router and nodes",
@@ -2185,6 +2202,10 @@
           general.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(
             flat.HTML_CLIENT_REFRESH_MINUTES,
             general.HTML_CLIENT_REFRESH_MINUTES ?? "30"
+          );
+          general.NODE_PARALLELISM = stringOrDefault(
+            flat.NODE_PARALLELISM,
+            general.NODE_PARALLELISM ?? "2"
           );
 
           const nodes = target.Nodes = ensurePlainObject(target.Nodes);
@@ -5264,6 +5285,9 @@ function showTooltip() {
           // correlated completion result for verified backend actions
           ACTION_RESULT: "tmp/results/action_result.json",
           ACTION_RESULTS_DIR: "tmp/results/actions/",
+          // Written only after a verified live MAIN apply. This tmpfs-backed
+          // advisory intentionally disappears when the router restarts.
+          MAIN_APPLY_ADVISORY: "tmp/results/main_apply_advisory.json",
           // read-only projection of backend-owned settings convergence state
           SETTINGS_RECONCILE_STATUS: "tmp/results/settings_reconcile.json",
           // backup inventory and correlated backup/restore operation result
@@ -7161,12 +7185,70 @@ const MerVLANLoading = (() => {
   let lastTerminal = null;
   let terminalStateTimer = null;
   let terminalStateGeneration = 0;
+  const MERV_LOADING_RESUME_STORAGE_KEY = 'mervlan.loading.resume.v1';
+  const MERV_LOADING_RESUME_MAX_AGE_MS = 930000;
 
   const el = id => document.getElementById(id);
   const getConfig = actionName => {
     const configured = MVM_LOADING_CONFIG && MVM_LOADING_CONFIG[actionName];
     return configured || MVM_LOADING_DEFAULT_CONFIG[actionName] || null;
   };
+
+  // A full page reload destroys the in-memory coordinator but not a running
+  // backend action. Persist only ordinary backend-progress actions in the
+  // browser session so a reload can reattach to the router-owned token. Modal-
+  // embedded and browser-owned work deliberately stays local to its UI flow.
+  function persistedActionEligible(task) {
+    return !!(task && task.progressBacked && !task.embedded && !task.frontendOwned);
+  }
+
+  function clearPersistedProgressAction(token) {
+    try {
+      const raw = window.sessionStorage.getItem(MERV_LOADING_RESUME_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (!token || saved && saved.token === token) {
+        window.sessionStorage.removeItem(MERV_LOADING_RESUME_STORAGE_KEY);
+      }
+    } catch (_) {}
+  }
+
+  function persistProgressAction(task) {
+    if (!persistedActionEligible(task)) return;
+    try {
+      window.sessionStorage.setItem(MERV_LOADING_RESUME_STORAGE_KEY, JSON.stringify({
+        version: 1,
+        token: task.token,
+        action: task.action,
+        label: task.label,
+        mode: task.mode,
+        notice: task.notice,
+        started_at: task.startedAt,
+        deadline_at: task.deadlineAt
+      }));
+    } catch (_) {}
+  }
+
+  function readPersistedProgressAction() {
+    try {
+      const raw = window.sessionStorage.getItem(MERV_LOADING_RESUME_STORAGE_KEY);
+      if (!raw) return null;
+      const saved = JSON.parse(raw);
+      const now = Date.now();
+      if (!saved || saved.version !== 1 || typeof saved.token !== 'string' ||
+          !/^[A-Za-z0-9._-]{8,160}$/.test(saved.token) || typeof saved.action !== 'string' ||
+          !getConfig(saved.action) || !Number.isSafeInteger(saved.started_at) ||
+          !Number.isSafeInteger(saved.deadline_at) || saved.deadline_at < saved.started_at ||
+          now - saved.started_at > MERV_LOADING_RESUME_MAX_AGE_MS) {
+        window.sessionStorage.removeItem(MERV_LOADING_RESUME_STORAGE_KEY);
+        return null;
+      }
+      return saved;
+    } catch (_) {
+      try { window.sessionStorage.removeItem(MERV_LOADING_RESUME_STORAGE_KEY); } catch (_) {}
+      return null;
+    }
+  }
 
   function clearTimers() {
     if (pollTimer) clearInterval(pollTimer);
@@ -7401,6 +7483,7 @@ const MerVLANLoading = (() => {
     }
     if (status.label) active.label = String(status.label);
     if (status.notice) active.notice = String(status.notice);
+    persistProgressAction(active);
     const actionEl = el('mervlanLoadingAction');
     if (actionEl) actionEl.textContent = active.label;
     setNotice(active.notice);
@@ -7429,6 +7512,7 @@ const MerVLANLoading = (() => {
     if (!active) return false;
     const paused = active;
     clearTimers();
+    clearPersistedProgressAction(paused.token);
     if (typeof releaseActionLock === 'function') releaseActionLock(paused.action);
     setPanelOpen(false);
     setCompactState('idle', 'Idle');
@@ -7526,7 +7610,10 @@ const MerVLANLoading = (() => {
       if (active !== current || current.sequence !== currentSequence) return;
       if (ack) applyAck(ack);
       if (!current.terminal && Date.now() >= current.deadlineAt) {
-        finalize('transport-unknown', 'Backend completion is not confirmed yet. The action remains protected; wait for the router result.');
+        const noPublishedResult = !current.statusSeen && !current.ackSeen;
+        finalize('transport-unknown', noPublishedResult
+          ? 'Backend completion is not confirmed. The router may still be applying, or it may have restarted and lost its temporary action state. Verify the current VLAN state before retrying.'
+          : 'Backend completion is not confirmed yet. The action remains protected; wait for the router result.');
       }
     } finally {
       if (active === current && current.sequence === currentSequence) current.fetchInFlight = false;
@@ -7543,7 +7630,7 @@ const MerVLANLoading = (() => {
         unknown.textContent = String(message || 'Backend completion is not confirmed yet.');
         unknown.classList.add('is-visible');
       }
-      setMessage('Transport status is unknown; waiting for the router result.');
+      setMessage('Transport status is unknown; checking the router result.');
       setCompactState('running', 'Running — Waiting for router result');
       return true;
     }
@@ -7551,6 +7638,7 @@ const MerVLANLoading = (() => {
     active.terminal = true;
     active.state = kind === 'complete' || kind === 'partial' ? kind : 'failed';
     clearTimers();
+    clearPersistedProgressAction(active.token);
     invalidateTerminalStateTimer();
     lastTerminal = terminalSnapshotFor(active, kind, message);
     if (typeof releaseActionLock === 'function') releaseActionLock(active.action);
@@ -7647,6 +7735,7 @@ const MerVLANLoading = (() => {
     const token = createMerVLANLoadingToken();
     let completionResolve;
     const completion = new Promise(resolve => { completionResolve = resolve; });
+    const startedAt = Date.now();
     active = {
       token,
       action: actionName,
@@ -7660,7 +7749,8 @@ const MerVLANLoading = (() => {
       transportUnknown: false,
       terminal: false,
       sequence: ++sequence,
-      deadlineAt: Date.now() + Math.min(Math.max(Number(options.timeoutMs || config.timeout_ms || 300000), 15000), 900000),
+      startedAt,
+      deadlineAt: startedAt + Math.min(Math.max(Number(options.timeoutMs || config.timeout_ms || 300000), 15000), 900000),
       progressBacked: options.progressBacked !== false,
       frontendOwned: options.frontendOwned === true || config.frontend_owned === true,
       embedded: options.embedded === true,
@@ -7668,6 +7758,7 @@ const MerVLANLoading = (() => {
       progressSubscribers: typeof options.onProgress === 'function' ? [options.onProgress] : [],
       minimized: false
     };
+    persistProgressAction(active);
     renderStart();
     loadMerVLANLoadingConfig();
     if (active.progressBacked) {
@@ -7700,6 +7791,7 @@ const MerVLANLoading = (() => {
   function setTaskLabel(token, label) {
     if (!active || active.token !== token || active.state !== 'running') return false;
     active.label = String(label || active.label);
+    persistProgressAction(active);
     const actionEl = el('mervlanLoadingAction');
     if (actionEl) actionEl.textContent = active.label;
     setCompactState('running', 'Running — ' + active.label);
@@ -7730,12 +7822,73 @@ const MerVLANLoading = (() => {
     pollStatus();
   }
 
+  function resumePollingAfterBrowserResume() {
+    if (!active || active.terminal || !active.progressBacked) return;
+    // Mobile browsers can pause timers while the ASUS transport restarts.
+    // Poll immediately on return, but never turn a missing backend result into
+    // success: it remains protected/unknown until a correlated result arrives.
+    active.transportUnknown = false;
+    const unknown = el('mervlanLoadingError');
+    if (unknown) {
+      unknown.textContent = '';
+      unknown.classList.remove('is-visible');
+    }
+    setMessage('Reconnected; checking the router result...');
+    setCompactState('running', 'Running — Checking router result');
+    pollStatus();
+  }
+
+  function resumePersistedProgressAction() {
+    if (active) return false;
+    const saved = readPersistedProgressAction();
+    if (!saved) return false;
+    const config = getConfig(saved.action);
+    if (!config || config.display !== 'panel') {
+      clearPersistedProgressAction(saved.token);
+      return false;
+    }
+    active = {
+      token: saved.token,
+      action: saved.action,
+      label: String(saved.label || config.label || saved.action),
+      mode: String(saved.mode || config.mode || 'indeterminate'),
+      notice: String(saved.notice || config.notice || ''),
+      state: 'running',
+      statusSeen: false,
+      ackSeen: false,
+      fetchInFlight: false,
+      transportUnknown: false,
+      terminal: false,
+      sequence: ++sequence,
+      startedAt: saved.started_at,
+      deadlineAt: saved.deadline_at,
+      progressBacked: true,
+      frontendOwned: false,
+      embedded: false,
+      completionResolve: null,
+      progressSubscribers: [],
+      minimized: false,
+      resumed: true
+    };
+    renderStart();
+    setMessage('Reconnected after page reload; checking the router action...');
+    loadMerVLANLoadingConfig();
+    pollStatus();
+    pollTimer = window.setInterval(pollStatus, Math.max(500, Number(config.poll_ms) || 1000));
+    return true;
+  }
+
   const mini = el('mervlanLoadingMini');
   if (mini) mini.addEventListener('click', restore);
   const minimizeButton = el('mervlanLoadingMinimizeBtn');
   if (minimizeButton) minimizeButton.addEventListener('click', minimize);
   const closeButton = el('mervlanLoadingCloseBtn');
   if (closeButton) closeButton.addEventListener('click', close);
+  window.addEventListener('pageshow', resumePollingAfterBrowserResume);
+  window.addEventListener('pageshow', resumePersistedProgressAction);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) resumePollingAfterBrowserResume();
+  });
 
   return {
     start,
@@ -7745,6 +7898,8 @@ const MerVLANLoading = (() => {
     fail,
     close,
     transportComplete,
+    resumePollingAfterBrowserResume,
+    resumePersistedProgressAction,
     get active() { return active; }
   };
 })();
@@ -7892,6 +8047,15 @@ function triggerAction(actionScriptName, button, description) {
       {
         key: 'AUTO_SYNC_SETTINGS', controlId: 'svcToggleAutoSync', hiddenControlId: 'autoSyncSettingsToggle', kind: 'setting', defaultValue: '1',
         readControl: el => el.checked ? '1' : '0', writeControl: (el, value) => { el.checked = (value === '1' || value === 'true' || value === 'yes'); }
+      },
+      {
+        key: 'NODE_PARALLELISM', controlId: 'svcNodeParallelismSelect', kind: 'setting', defaultValue: '2',
+        readControl: el => ['1', '2', '3', '4', '5'].includes(String(el.value)) ? String(el.value) : '2',
+        writeControl: (el, value) => { el.value = ['1', '2', '3', '4', '5'].includes(String(value)) ? String(value) : '2'; },
+        validate: value => ({
+          ok: ['1', '2', '3', '4', '5'].includes(String(value)),
+          message: 'Node operation parallelism must be an integer from 1 to 5.'
+        })
       },
       {
         key: 'HTML_CLIENT_REFRESH_MINUTES', controlId: 'svcClientRefreshSelect', kind: 'setting', defaultValue: '30',
@@ -8823,6 +8987,7 @@ async function handleApplyClick(button) {
           showVlanManagerModal();
           return true;
       }
+      if (!await confirmRecentMainApply()) return false;
       return await triggerAction('apply_vlanmgr', button, 'Apply VLAN');
     } finally {
       // queueServiceAction marks a submitted button as action-owned and keeps
@@ -8853,11 +9018,51 @@ async function checkForConfiguredNodes() {
 
 let vlanManagerRouteConfirmationInFlight = false;
 
+function readMainApplyAdvisory(value) {
+  if (!value || typeof value !== 'object' || value.format_version !== 1 || value.scope !== 'main-apply') return null;
+  const completedAt = Number(value.completed_at);
+  const cooldownSec = Number(value.cooldown_sec);
+  const expiresAt = Number(value.expires_at);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(completedAt) || !Number.isSafeInteger(cooldownSec) || !Number.isSafeInteger(expiresAt) ||
+      cooldownSec < 1 || cooldownSec > 900 || expiresAt !== completedAt + cooldownSec ||
+      completedAt > now + 60 || expiresAt <= now) return null;
+  return { completedAt, cooldownSec, expiresAt };
+}
+
+function formatMainApplyCooldown(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (minutes && remainder) return minutes + 'm ' + remainder + 's';
+  if (minutes) return minutes + ' minute' + (minutes === 1 ? '' : 's');
+  return remainder + ' second' + (remainder === 1 ? '' : 's');
+}
+
+async function confirmRecentMainApply() {
+  let advisory = null;
+  try {
+    const response = await fetch(PATHS.MAIN_APPLY_ADVISORY + '?_=' + Date.now(), {
+      cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' }
+    });
+    if (response.ok) advisory = readMainApplyAdvisory(await response.json());
+  } catch (_) {}
+  if (!advisory) return true;
+  const now = Math.floor(Date.now() / 1000);
+  const elapsed = Math.max(0, now - advisory.completedAt);
+  const remaining = Math.max(0, advisory.expiresAt - now);
+  return showMaintenanceConfirmation({
+    title: 'Recent MerVLAN Apply',
+    message: 'MerVLAN configuration was successfully applied ' + formatMainApplyCooldown(elapsed) + ' ago.\n\nFor best ASUS memory stability, wait ' + formatMainApplyCooldown(remaining) + ' before applying MAIN again. Continue now only when another Apply is necessary.',
+    confirmLabel: 'Apply Anyway'
+  });
+}
+
 // Local Router Only and Nodes Only are both destructive choices when the
 // authoritative settings contain configured nodes. Keep their confirmation
 // and action submission in one guarded path so a second click cannot open a
 // competing prompt or submit a duplicate route before the first one settles.
-async function runConfirmedVlanManagerRoute(button, confirmationOptions, action) {
+async function runConfirmedVlanManagerRoute(button, confirmationOptions, action, mainApply) {
   if (button && button.disabled) return false;
   if (vlanManagerRouteConfirmationInFlight) return false;
   vlanManagerRouteConfirmationInFlight = true;
@@ -8866,6 +9071,7 @@ async function runConfirmedVlanManagerRoute(button, confirmationOptions, action)
   try {
     const confirmed = await showMaintenanceConfirmation(confirmationOptions);
     if (!confirmed) return false;
+    if (mainApply && !await confirmRecentMainApply()) return false;
     if (!settingsAuthorityIsReady() || getSettingsNodeState() !== 'configured') {
       appendCliText('Apply blocked: authoritative settings or node state is unknown. Click Load to retry.\n', { scroll: 'force' });
       return false;
@@ -8897,7 +9103,7 @@ async function runVlanManagerLocal(button) {
     button,
     description: 'Run VLAN Manager (Local Only)',
     cooldownMs: 8000
-  }));
+  }), true);
 }
 
 // Run VLAN Manager with nodes
@@ -8907,12 +9113,26 @@ async function runVlanManagerWithNodes(button) {
     appendCliText('Apply with nodes blocked: configured node state is unavailable.\n', { scroll: 'force' });
     return false;
   }
-  closeVlanManagerModal();
-  return queueServiceAction('executenodes_vlanmgr', {
-    button,
-    description: 'Run VLAN Manager + Nodes',
-    cooldownMs: 8000
-  });
+  if (button && button.disabled) return false;
+  if (vlanManagerRouteConfirmationInFlight) return false;
+  vlanManagerRouteConfirmationInFlight = true;
+  const wasDisabled = !!(button && button.disabled);
+  if (button) button.disabled = true;
+  try {
+    if (!await confirmRecentMainApply()) return false;
+    closeVlanManagerModal();
+    return await queueServiceAction('executenodes_vlanmgr', {
+      button,
+      description: 'Run VLAN Manager + Nodes',
+      cooldownMs: 8000
+    });
+  } finally {
+    vlanManagerRouteConfirmationInFlight = false;
+    if (button && button.dataset.mervlanAction !== 'executenodes_vlanmgr') {
+      button.disabled = wasDisabled;
+      button.style.opacity = '';
+    }
+  }
 }
 
 // Run VLAN Manager with nodes
@@ -9202,6 +9422,7 @@ async function runMacRefresh() {
       out["vlanmgr_ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
       out["vlanmgr_AUTO_SYNC_SETTINGS"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["AUTO_SYNC_SETTINGS"]) || "1";
       out["vlanmgr_HTML_CLIENT_REFRESH_MINUTES"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["HTML_CLIENT_REFRESH_MINUTES"]) || "30";
+      out["vlanmgr_NODE_PARALLELISM"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["NODE_PARALLELISM"]) || "2";
       out["vlanmgr_PERSISTENT_DEBUG_LOGGING"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["PERSISTENT_DEBUG_LOGGING"]) || "0";
 
       // Hardware_Override and ClientMeta keys are sent via their own scoped
@@ -9421,6 +9642,7 @@ async function runMacRefresh() {
       flat["ENABLE_NATIVE_SSID"] = document.getElementById("ensToggle")?.value || "0";
       flat["AUTO_SYNC_SETTINGS"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["AUTO_SYNC_SETTINGS"]) || "1";
       flat["HTML_CLIENT_REFRESH_MINUTES"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["HTML_CLIENT_REFRESH_MINUTES"]) || "30";
+      flat["NODE_PARALLELISM"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["NODE_PARALLELISM"]) || "2";
 
       // Pull Hardware_Override flat keys from settings cache into flat object
       if (CURRENT_SETTINGS_CACHE) {
@@ -13215,7 +13437,7 @@ function isManagedNodeKey(k) {
 
 function extractManagedKeys(flat) {
   const out = {};
-  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
+  const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|NODE_PARALLELISM|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
   Object.keys(flat || {}).forEach(k => {
     if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
   });
@@ -13229,7 +13451,7 @@ function extractManagedKeysForScope(flat, scope) {
   if (scope === "service") {
     const serviceKeys = new Set([
       'BOOT_ENABLED', 'PAUSE', 'ENABLE_STP', 'DRY_RUN', 'EXPERIMENTAL',
-      'ENABLE_NATIVE_SSID', 'AUTO_SYNC_SETTINGS', 'HTML_CLIENT_REFRESH_MINUTES',
+      'ENABLE_NATIVE_SSID', 'AUTO_SYNC_SETTINGS', 'HTML_CLIENT_REFRESH_MINUTES', 'NODE_PARALLELISM',
       'PERSISTENT_DEBUG_LOGGING'
     ]);
     Object.keys(all).forEach(k => {
@@ -13254,7 +13476,7 @@ function extractManagedKeysForScope(flat, scope) {
   }
 
   // "normal": all managed keys except OVERRIDE_* and ClientMeta
-  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+  const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|NODE_PARALLELISM|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
   Object.keys(all).forEach(k => {
     if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
     let m;

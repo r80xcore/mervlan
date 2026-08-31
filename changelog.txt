@@ -122,6 +122,31 @@ Improved: Settings synchronization and operation feedback
   saved overrides for the next MAC Shield rebuild when no shield database is
   active.
 
+Improved: Configurable node-operation parallelism and lifecycle hardening
+- Added the MAIN-local `General.NODE_PARALLELISM` setting for bounded 1–5
+  worker concurrency. Missing legacy settings default to 2; malformed runtime
+  or persisted values resolve fail-closed to 1, while Save rejects values
+  outside the supported range and node-sync change detection ignores this
+  MAIN-local setting.
+- Sync Nodes, Execute prepare/launch/status, client collection, and MAC Shield
+  node collection/push now share the bounded node-job pool. Complete-node
+  trust preflight, MAIN-local work, and parent validation/aggregation remain
+  serial, with isolated worker artifacts and terminal results.
+- Unified timeout, missing-result, interruption, and parent-exit cleanup around
+  PID/start identity checks for wrappers and children. A pending launch claim
+  is recorded before identity lookup, closing the launch race without unsafe
+  PID-only signalling.
+- Failure-safe cleanup retains ownership metadata, worker workspaces, locks,
+  and update/backup recovery state whenever worker reconciliation is not
+  proven complete; unresolved pool state blocks replacement work and
+  publication until recovery is safe.
+
+Maintenance: Node-operation regression coverage
+- Added focused local contracts for setting resolution and Save validation,
+  bounded pool width and result lifecycle, pending-worker launch races,
+  collection deadlines and retention, MAC Shield pool isolation, parent-term
+  cleanup ordering, and temporary-workspace cleanup.
+
 mervlan v0.53.27-dev
 
 Fixed: Audit-remediation ownership and recovery contracts

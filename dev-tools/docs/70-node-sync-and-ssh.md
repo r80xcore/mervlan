@@ -65,8 +65,12 @@ rules are never copied to devices.
 
 ## SSH limits
 
-- Keep total simultaneous SSH sessions, including log monitoring, at two or
-  fewer.
+- Node-operation SSH work is bounded by the shared pool width resolved from
+  MAIN-local `General.NODE_PARALLELISM` (1–5, default 2). MAIN-local work does
+  not consume a remote slot; do not create additional unbounded node workers.
+- Complete-node trust preflight runs serially before node operations. Worker
+  payloads and terminal results remain private until the MAIN parent validates
+  and aggregates them serially.
 - Use bounded noninteractive connections and no host-key bypass.
 - Use explicit paths, not wildcards or directory destinations.
 - The router's shell may not provide `command`, `timeout`, or `mktemp`.
@@ -114,5 +118,5 @@ main-router orchestration helper; do not classify that omission as a node
 runtime failure.
 
 The router shell may not provide GNU `timeout`, `mktemp`, `scp`, or Bash. Keep
-SSH calls bounded by existing worker controls, use explicit paths, and preserve
-the maximum two concurrent node sessions.
+SSH calls bounded by the configured worker controls, use explicit paths, and
+preserve the shared pool's 1–5 node-operation bound.
