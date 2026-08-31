@@ -1708,6 +1708,18 @@
         </div>
       </div>
 
+      <!-- Developer Tools is intentionally outside the Settings definitions and
+           normal Save pipeline.  It is exposed only by the exact -dev build
+           marker after the page has initialized. -->
+      <div id="developmentSettingsSection" class="svc-settings-row dev-tools-settings-section" style="display:none;">
+        <div class="svc-settings-label">
+          <span>Development</span>
+          <span class="svc-settings-hint">Runtime diagnostics and one-shot developer testing tools.</span>
+        </div>
+        <button type="button" class="button_gen dev-tools-open-btn" id="developerToolsBtn"
+          onclick="showDeveloperToolsModal()" title="Open development diagnostics and selftests">Developer Tools</button>
+      </div>
+
     </div>
     <div class="modal__actions">
       <button type="button" class="button_gen" id="svcSettingsApplyBtn"
@@ -1715,6 +1727,912 @@
       <button type="button" class="button_gen" id="svcSettingsCancelBtn" onclick="closeServiceSettingsModal()">Cancel</button>
     </div>
   </div>
+
+  <!-- ======== Development-only Developer Tools Modal ======== -->
+  <style>
+    .dev-tools-modal {
+      width: min(620px, calc(100vw - 28px));
+      max-width: 620px;
+      max-height: calc(100vh - 32px);
+      overflow: hidden;
+    }
+    .dev-tools-modal .modal__body {
+      max-height: calc(100vh - 138px);
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .dev-tools-section {
+      margin: 0 0 14px;
+      padding: 10px 0 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+    }
+    .dev-tools-section:last-child { border-bottom: 0; margin-bottom: 0; }
+    .dev-tools-section h4 { margin: 0 0 5px; color: #ddd; }
+    .dev-tools-help { margin: 0 0 8px; color: #999; font-size: 0.84em; line-height: 1.4; }
+    .dev-tools-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .dev-tools-toolbar .button_gen { min-height: 28px; }
+    .dev-tools-status {
+      min-height: 1.4em;
+      margin: 5px 0 8px;
+      color: #aaa;
+      font-size: 0.86em;
+    }
+    .dev-tools-status.is-info { color: #9ccbf0; }
+    .dev-tools-status.is-success { color: #7bd77b; }
+    .dev-tools-status.is-warning { color: #ffaa6b; }
+    .dev-tools-status.is-error { color: #ff8a8a; }
+    .dev-tools-warning {
+      margin: 0 0 8px;
+      padding: 8px 9px;
+      border: 1px solid rgba(255, 170, 107, 0.55);
+      border-radius: 4px;
+      background: rgba(120, 66, 28, 0.28);
+      color: #ffd0a8;
+      font-size: 0.84em;
+      line-height: 1.4;
+    }
+    .dev-tools-snapshot {
+      display: grid;
+      grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.6fr);
+      margin: 8px 0;
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      background: rgba(0,0,0,0.14);
+      overflow: hidden;
+    }
+    .dev-tools-snapshot-row { display: contents; }
+    .dev-tools-snapshot dt,
+    .dev-tools-snapshot dd {
+      margin: 0;
+      padding: 5px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 0.84em;
+      overflow-wrap: anywhere;
+    }
+    .dev-tools-snapshot-row:last-child dt,
+    .dev-tools-snapshot-row:last-child dd { border-bottom: 0; }
+    .dev-tools-snapshot dt { color: #aaa; font-weight: 600; }
+    .dev-tools-snapshot dd { color: #ddd; min-width: 0; }
+    .dev-tools-snapshot dd.is-match { color: #7bd77b; }
+    .dev-tools-snapshot dd.is-warning { color: #ffaa6b; }
+    .dev-tools-selftest-select { min-width: min(360px, 100%); max-width: 100%; text-transform: none; }
+    .dev-tools-command {
+      margin: 7px 0 9px;
+      padding: 5px 7px;
+      color: #b9d8ea;
+      background: rgba(0,0,0,0.2);
+      border-radius: 3px;
+      font: 0.78em/1.35 monospace;
+      overflow-wrap: anywhere;
+      user-select: text;
+    }
+    .dev-tools-selftest-summary { min-height: 1.4em; margin: 7px 0; color: #aaa; font-size: 0.86em; }
+    .dev-tools-selftest-summary.is-success { color: #7bd77b; }
+    .dev-tools-selftest-summary.is-error { color: #ff8a8a; }
+    .dev-tools-output {
+      margin: 8px 0 0;
+      max-height: 210px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #ccc;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 4px;
+      padding: 7px;
+      font: 0.76em/1.35 monospace;
+    }
+    .dev-tools-settings-section { align-items: flex-start; }
+    .dev-tools-open-btn { flex: 0 0 auto; white-space: nowrap; }
+    @media (max-width: 480px) {
+      .dev-tools-snapshot { grid-template-columns: minmax(120px, 0.75fr) minmax(0, 1.25fr); }
+      .dev-tools-toolbar .button_gen { flex: 1 1 auto; }
+    }
+  </style>
+  <div id="developerToolsModal" class="modal dev-tools-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="developerToolsTitle">
+    <div class="modal__header">
+      <h3 class="modal__title" id="developerToolsTitle">Developer Tools</h3>
+      <button type="button" class="modal__close" id="developerToolsCloseBtn" onclick="closeDeveloperToolsModal()" aria-label="Close Developer Tools">&#x2715;</button>
+    </div>
+    <div class="modal__body">
+      <div id="devToolsWarning" class="dev-tools-warning" role="note">
+        Development build only — these controls inspect or change temporary MAIN runtime state. They do not change saved settings; use live controls with care.
+      </div>
+      <section class="dev-tools-section" aria-labelledby="developerToolsSnapshotHeading">
+        <h4 id="developerToolsSnapshotHeading">Runtime Snapshot</h4>
+        <p class="dev-tools-help">Read-only MAIN diagnostics. No settings, boot configuration, or node state is changed.</p>
+        <div id="devToolsSnapshotStatus" class="dev-tools-status" role="status" aria-live="polite">Not loaded.</div>
+        <dl id="devToolsSnapshot" class="dev-tools-snapshot">
+          <div class="dev-tools-snapshot-row"><dt>Build</dt><dd id="devSnapshotBuild">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Hardware</dt><dd id="devSnapshotHardware">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Apply on Boot</dt><dd id="devSnapshotBoot">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Addon loader</dt><dd id="devSnapshotLoader">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Service-event</dt><dd id="devSnapshotServiceEvent">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Periodic recovery cron</dt><dd id="devSnapshotCron">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Expected cron state</dt><dd id="devSnapshotCronExpectation">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>MAC Shield state/rule count</dt><dd id="devSnapshotMac">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Observation worker state</dt><dd id="devSnapshotObservation">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Pending snapshots</dt><dd id="devSnapshotPendingSnapshots">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Pending client collections</dt><dd id="devSnapshotPendingCollections">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Live Test Guard state</dt><dd id="devSnapshotGuard">—</dd></div>
+          <div class="dev-tools-snapshot-row"><dt>Recovery pending</dt><dd id="devSnapshotRecovery">—</dd></div>
+        </dl>
+        <div class="dev-tools-toolbar">
+          <button type="button" class="button_gen dev-tools-action" id="devToolsRefreshBtn" onclick="refreshDeveloperSnapshot()">Refresh</button>
+          <button type="button" class="button_gen" id="devToolsCopySnapshotBtn" onclick="copyDeveloperSnapshot()">Copy Snapshot</button>
+        </div>
+      </section>
+
+      <section class="dev-tools-section" aria-labelledby="developerToolsCronHeading">
+        <h4 id="developerToolsCronHeading">Periodic Recovery Controls</h4>
+        <p class="dev-tools-help">Temporary MAIN runtime controls. They do not change the configured Apply on Boot setting.</p>
+        <div id="devToolsCronStatus" class="dev-tools-status" role="status" aria-live="polite">Configured state is unchanged.</div>
+        <div class="dev-tools-toolbar">
+          <button type="button" class="button_gen dev-tools-action" id="devToolsCronEnableBtn" onclick="runDeveloperCronAction('cronenable')">Enable Now</button>
+          <button type="button" class="button_gen dev-tools-action" id="devToolsCronDisableBtn" onclick="runDeveloperCronAction('crondisable')">Disable Now</button>
+          <button type="button" class="button_gen dev-tools-action" id="devToolsCronRestoreBtn" onclick="restoreDeveloperCronState()">Restore Configured State</button>
+        </div>
+      </section>
+
+      <section class="dev-tools-section" aria-labelledby="developerToolsSelftestHeading">
+        <h4 id="developerToolsSelftestHeading">Developer Selftests</h4>
+        <p class="dev-tools-help">Focused contract tests use isolated temporary state and do not Apply VLAN configuration. Live Audit only inspects the current router state.</p>
+        <div class="dev-tools-toolbar">
+          <button type="button" class="button_gen dev-tools-action" id="devToolsSafeChecksBtn" onclick="runDeveloperSafeChecks()">Run Safe Checks</button>
+        </div>
+        <div id="devToolsSafeChecksSummary" class="dev-tools-selftest-summary" role="status" aria-live="polite">Safe Checks: not run.</div>
+        <label for="devToolsSelftestSelect">Focused test:</label>
+        <select id="devToolsSelftestSelect" class="input_option dev-tools-selftest-select" onchange="updateDeveloperSelftestCommand()">
+          <optgroup label="General / Portability">
+            <option value="process-identity">Process Identity</option>
+            <option value="nonce-uniqueness">Nonce Uniqueness</option>
+            <option value="router-portability">Router Portability</option>
+            <option value="payload-contract">Payload Contract</option>
+            <option value="logging-polling">Logging Polling</option>
+            <option value="shell-syntax">Shell Syntax</option>
+          </optgroup>
+          <optgroup label="DHCP / L2 Protection">
+            <option value="dhcp-api">DHCP API</option>
+            <option value="dhcp-ebtables-failures">DHCP Ebtables Failures</option>
+            <option value="dhcp-rule-exactness">DHCP Rule Exactness</option>
+            <option value="dhcp-continuous-repair">DHCP Continuous Repair</option>
+            <option value="l2-guard-coordinator">L2 Guard Coordinator</option>
+            <option value="l2-guard-dump">L2 Guard Dump</option>
+            <option value="l2-guard-exactness">L2 Guard Exactness</option>
+            <option value="mac-shield-lifecycle">MAC Shield Lifecycle</option>
+          </optgroup>
+          <optgroup label="Ownership / Locks">
+            <option value="owner-lock-contract">Owner Lock Contract</option>
+            <option value="maintenance-lock-interop">Maintenance Lock Interop</option>
+            <option value="lock-publication">Lock Publication</option>
+            <option value="lock-reclaim">Lock Reclaim</option>
+            <option value="dhcp-incomplete-lock">DHCP Incomplete Lock</option>
+            <option value="manager-ownership">Manager Ownership</option>
+            <option value="observation-lock">Observation Lock</option>
+            <option value="action-parent-ownership">Action Parent Ownership</option>
+            <option value="action-lock-failure">Action Lock Failure</option>
+            <option value="direct-manager-save-overlap">Direct Manager Save Overlap</option>
+          </optgroup>
+          <optgroup label="Recovery / Boot">
+            <option value="dhcp-owners">DHCP Owners</option>
+            <option value="dhcp-phases">DHCP Phases</option>
+            <option value="dhcp-crash-points">DHCP Crash Points</option>
+            <option value="heal-handoff">Heal Handoff</option>
+            <option value="boot-handoff">Boot Handoff</option>
+            <option value="duplicate-events">Duplicate Events</option>
+            <option value="settle-watchdog">Settle Watchdog</option>
+            <option value="recovery">Recovery</option>
+            <option value="failsafe-status">Failsafe Status</option>
+            <option value="post-apply">Post-Apply</option>
+            <option value="signal-termination">Signal Termination</option>
+          </optgroup>
+          <optgroup label="Observation / Clients">
+            <option value="observation-timeouts">Observation Timeouts</option>
+            <option value="observation-concurrency">Observation Concurrency</option>
+            <option value="observation-resume-progress">Observation Resume Progress</option>
+            <option value="observation-generations">Observation Generations</option>
+            <option value="atomic-publication">Atomic Publication</option>
+            <option value="json-validation">JSON Validation</option>
+            <option value="client-refresh-contract">Client Refresh Contract</option>
+            <option value="apply-observation">Apply Observation</option>
+          </optgroup>
+          <optgroup label="Node Operations">
+            <option value="node-job-logging">Node Job Logging</option>
+            <option value="node-job-ssh-temp">Node Job SSH Temp</option>
+            <option value="node-runner-status">Node Runner Status</option>
+            <option value="node-worker-pool">Node Worker Pool</option>
+            <option value="node-worker-timeout">Node Worker Timeout</option>
+            <option value="execute-node-runner">Execute Node Runner</option>
+            <option value="sync-node-pool">Sync Node Pool</option>
+            <option value="sync-node-parallel">Sync Node Parallel</option>
+          </optgroup>
+          <optgroup label="Action Lifecycle">
+            <option value="apmo-completion">APMO Completion</option>
+            <option value="action-lifecycle">Action Lifecycle</option>
+            <option value="failure-propagation">Failure Propagation</option>
+          </optgroup>
+          <optgroup label="Update">
+            <option value="update-lock-ownership">Update Lock Ownership</option>
+            <option value="update-exclusivity">Update Exclusivity</option>
+            <option value="update-download-retry">Update Download Retry</option>
+          </optgroup>
+          <optgroup label="SSH">
+            <option value="ssh-outbound">SSH Outbound</option>
+            <option value="ssh-trust">SSH Trust</option>
+          </optgroup>
+          <optgroup label="Feature Contracts">
+            <option value="wan-native-contract">WAN Native Contract</option>
+          </optgroup>
+          <optgroup label="Live Inspection">
+            <option value="live-audit">Live Audit</option>
+          </optgroup>
+        </select>
+        <div id="devToolsSelftestCommand" class="dev-tools-command">sh dev-tools/tests/router/mervlan_selftest.sh process-identity</div>
+        <div class="dev-tools-toolbar">
+          <button type="button" class="button_gen dev-tools-action" id="devToolsRunSelectedBtn" onclick="runDeveloperSelectedSelftest()">Run Selected Test</button>
+          <button type="button" class="button_gen" id="devToolsShowOutputBtn" onclick="toggleDeveloperSelftestOutput()" disabled>Show Output</button>
+        </div>
+        <div id="devToolsSelftestSummary" class="dev-tools-selftest-summary" role="status" aria-live="polite">Last result: not run.</div>
+        <pre id="devToolsSelftestOutput" class="dev-tools-output" style="display:none;"></pre>
+      </section>
+    </div>
+    <div class="modal__actions">
+      <button type="button" class="button_gen" id="devToolsBackBtn" onclick="backToSettingsFromDeveloperTools()">Back to Settings</button>
+    </div>
+  </div>
+
+  <script>
+    /* ===================================================================== */
+    /* Developer Tools — development-build-only, intentionally standalone.   */
+    /* This block must not participate in Settings, loading, or action state. */
+    /* ===================================================================== */
+    const DEV_TOOLS_RESULT_PATH = "tmp/results/dev_tools_result.txt";
+    const DEV_TOOLS_POLL_INTERVAL_MS = 600;
+    const DEV_TOOLS_TIMEOUT_MS = 180000;
+    let _developerToolsOperation = null;
+    let _developerToolsSettingsDraft = null;
+    let _developerToolsLastSnapshot = null;
+    let _developerToolsLastSnapshotText = "";
+    let _developerToolsLastSelftest = null;
+    let _developerToolsLastSafeChecks = null;
+
+    function isDeveloperToolsBuild() {
+      let version = "";
+      try {
+        version = typeof getIndexHtmlVersion === "function" ? getIndexHtmlVersion() : "";
+      } catch (_) {
+        version = "";
+      }
+      return typeof version === "string" && version.endsWith("-dev");
+    }
+
+    function updateDeveloperToolsVisibility() {
+      const section = document.getElementById("developmentSettingsSection");
+      const enabled = isDeveloperToolsBuild();
+      if (section) {
+        section.style.display = enabled ? "" : "none";
+        section.setAttribute("aria-hidden", enabled ? "false" : "true");
+      }
+      if (!enabled) {
+        const modal = document.getElementById("developerToolsModal");
+        if (modal && modal.style.display !== "none") closeDeveloperToolsModal(true);
+      }
+      return enabled;
+    }
+
+    function captureDeveloperSettingsDraft() {
+      const settingsModal = document.getElementById("serviceSettingsModal");
+      if (!settingsModal || settingsModal.style.display === "none" ||
+          typeof readServiceSettingsControls !== "function") return null;
+      let values;
+      try {
+        values = readServiceSettingsControls();
+      } catch (_) {
+        return null;
+      }
+      const baseline = typeof _svcSnapshot !== "undefined" && _svcSnapshot
+        ? Object.assign({}, _svcSnapshot) : null;
+      return { values, baseline };
+    }
+
+    function restoreDeveloperSettingsDraft() {
+      const draft = _developerToolsSettingsDraft;
+      _developerToolsSettingsDraft = null;
+      if (!draft || !draft.values || typeof writeServiceSettingControl !== "function") return;
+      if (typeof SERVICE_SETTINGS_DEFINITIONS === "undefined") return;
+      SERVICE_SETTINGS_DEFINITIONS.forEach(definition => {
+        if (Object.prototype.hasOwnProperty.call(draft.values, definition.key)) {
+          writeServiceSettingControl(definition, draft.values[definition.key]);
+        }
+      });
+      // Do not copy values into hidden controls or CURRENT_SETTINGS_CACHE here.
+      // The private modal controls remain dirty in memory, while normal Save
+      // still sees the last persisted service values until Apply is pressed.
+      if (typeof markSvcSettingsDirty === "function") markSvcSettingsDirty();
+    }
+
+    function setDeveloperToolsModalVisible(visible) {
+      const modal = document.getElementById("developerToolsModal");
+      if (!modal) return;
+      if (visible) {
+        ensureConfigViewForModal();
+        modal.style.display = "block";
+        anchorModalToForm(modal);
+      } else {
+        modal.style.display = "none";
+        releaseModalCentering(modal);
+        releaseAnchoredModal(modal);
+      }
+      const overlay = document.getElementById("leftPanelOverlay");
+      if (overlay) {
+        if (visible) {
+          overlay.classList.add("is-active");
+          overlay.style.display = "block";
+          overlay.style.pointerEvents = "auto";
+        } else {
+          const service = document.getElementById("serviceSettingsModal");
+          const keepForService = service && service.style.display !== "none";
+          const cli = document.getElementById("cliPanel");
+          const keepForCli = cli && cli.classList.contains("expanded");
+          if (!keepForService && !keepForCli) {
+            overlay.classList.remove("is-active");
+            overlay.style.display = "none";
+            overlay.style.pointerEvents = "none";
+          }
+        }
+      }
+      syncInfoLatchVisibility();
+      scheduleHostIframeResize();
+    }
+
+    function showDeveloperToolsModal() {
+      if (!updateDeveloperToolsVisibility()) return false;
+      if (_developerToolsOperation) return false;
+      const settingsModal = document.getElementById("serviceSettingsModal");
+      if (settingsModal && settingsModal.style.display !== "none") {
+        if (typeof _svcTransactionActive !== "undefined" && _svcTransactionActive) {
+          if (typeof setServiceTransactionStatus === "function") {
+            setServiceTransactionStatus("Wait for the current settings transaction to finish.", "warning");
+          }
+          return false;
+        }
+        if (typeof _svcSettingsLoadState !== "undefined" && _svcSettingsLoadState === "loading") {
+          if (typeof setServiceTransactionStatus === "function") {
+            setServiceTransactionStatus("Wait for Settings to finish loading.", "warning");
+          }
+          return false;
+        }
+        _developerToolsSettingsDraft = captureDeveloperSettingsDraft();
+        closeServiceSettingsModal();
+      }
+      setDeveloperToolsModalVisible(true);
+      updateDeveloperSelftestCommand();
+      return true;
+    }
+
+    function closeDeveloperToolsModal(force, preserveDraft) {
+      if (_developerToolsOperation && !force) {
+        setDeveloperToolsStatus("Finish the current Developer Tools operation first.", "warning");
+        return false;
+      }
+      if (!preserveDraft) _developerToolsSettingsDraft = null;
+      setDeveloperToolsModalVisible(false);
+      return true;
+    }
+
+    function backToSettingsFromDeveloperTools() {
+      if (_developerToolsOperation) {
+        setDeveloperToolsStatus("Finish the current Developer Tools operation first.", "warning");
+        return false;
+      }
+      if (!closeDeveloperToolsModal(false, true)) return false;
+      showServiceSettingsModal();
+      return true;
+    }
+
+    function setDeveloperToolsStatus(message, state) {
+      const status = document.getElementById("devToolsSnapshotStatus");
+      if (!status) return;
+      status.textContent = String(message || "");
+      status.classList.remove("is-info", "is-success", "is-warning", "is-error");
+      if (state) status.classList.add("is-" + state);
+    }
+
+    function setDeveloperCronStatus(message, state) {
+      const status = document.getElementById("devToolsCronStatus");
+      if (!status) return;
+      status.textContent = String(message || "");
+      status.classList.remove("is-info", "is-success", "is-warning", "is-error");
+      if (state) status.classList.add("is-" + state);
+    }
+
+    function setDeveloperToolsBusy(busy) {
+      const modal = document.getElementById("developerToolsModal");
+      if (!modal) return;
+      modal.querySelectorAll("button, select").forEach(control => {
+        control.disabled = !!busy;
+      });
+      const outputButton = document.getElementById("devToolsShowOutputBtn");
+      if (outputButton) outputButton.disabled = !!busy || !_developerToolsLastSelftest;
+      if (!busy) {
+        modal.querySelectorAll("button, select").forEach(control => {
+          if (control.id !== "devToolsShowOutputBtn") control.disabled = false;
+        });
+        if (outputButton) outputButton.disabled = !_developerToolsLastSelftest;
+        const close = document.getElementById("developerToolsCloseBtn");
+        if (close) close.disabled = false;
+        const back = document.getElementById("devToolsBackBtn");
+        if (back) back.disabled = false;
+      }
+    }
+
+    function createDeveloperToolsRequestId() {
+      const now = typeof Date.now === "function" ? Date.now() : new Date().getTime();
+      const random = Math.random().toString(36).slice(2, 9);
+      return "dt" + now.toString(36) + "-" + random;
+    }
+
+    function developerToolsAction(kind, requestId, testCase) {
+      const token = String(requestId || "");
+      if (kind === "status") return "devtools_vlanmgr_status_rid_" + token;
+      if (kind === "cronenable" || kind === "crondisable") {
+        return "devtools_vlanmgr_" + kind + "_rid_" + token;
+      }
+      return "devtools_vlanmgr_selftest_" + String(testCase || "") + "_rid_" + token;
+    }
+
+    function parseDeveloperToolsResult(raw) {
+      const lines = String(raw || "").replace(/\r/g, "").split("\n");
+      // The result writer uses `output:` as its delimiter; accept the
+      // documented dashed delimiter too so a compatible backend can be read
+      // without changing the request correlation contract.
+      const marker = lines.findIndex(line => line.trim() === "--- output ---" || /^output:\s*$/.test(line.trim()));
+      const fields = {};
+      const header = marker >= 0 ? lines.slice(0, marker) : lines;
+      header.forEach(line => {
+        const match = /^([A-Za-z0-9_.-]+)=(.*)$/.exec(line);
+        if (match) fields[match[1].toLowerCase()] = match[2];
+      });
+      const output = marker >= 0 ? lines.slice(marker + 1).join("\n") : "";
+      return { fields, output, raw: String(raw || "") };
+    }
+
+    function developerResultField(result, names, fallback) {
+      const fields = result && result.fields ? result.fields : {};
+      for (const name of names) {
+        const key = String(name || "").toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(fields, key)) return String(fields[key]);
+      }
+      return fallback == null ? "" : String(fallback);
+    }
+
+    function developerResultPassed(result) {
+      if (!result) return false;
+      const state = developerResultField(result, ["result", "status"], "").toLowerCase();
+      const exitText = developerResultField(result, ["exit_code", "exit"], "");
+      const exitCode = exitText === "" ? 0 : Number(exitText);
+      return (state === "pass" || state === "ok" || state === "success") &&
+        Number.isFinite(exitCode) && exitCode === 0;
+    }
+
+    function developerSelftestSummary(result) {
+      const output = result && result.output ? result.output : "";
+      const match = /selftest:\s+passes=(\d+)\s+failures=(\d+)/i.exec(output);
+      const fieldsPasses = developerResultField(result, ["passes"], "");
+      const fieldsFailures = developerResultField(result, ["failures"], "");
+      const passes = match ? match[1] : (fieldsPasses || "?");
+      const failures = match ? match[2] : (fieldsFailures || (developerResultPassed(result) ? "0" : "?"));
+      const passed = developerResultPassed(result) && failures === "0";
+      return { passed, passes, failures };
+    }
+
+    function waitDeveloperTools(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function pollDeveloperToolsResult(requestId, timeoutMs) {
+      const deadline = Date.now() + (Number(timeoutMs) || DEV_TOOLS_TIMEOUT_MS);
+      while (Date.now() < deadline) {
+        await waitDeveloperTools(DEV_TOOLS_POLL_INTERVAL_MS);
+        try {
+          const response = await fetch(DEV_TOOLS_RESULT_PATH + "?_=" + Date.now(), {
+            cache: "no-store",
+            headers: { Accept: "text/plain", "Cache-Control": "no-cache", Pragma: "no-cache" }
+          });
+          if (!response.ok) continue;
+          const parsed = parseDeveloperToolsResult(await response.text());
+          if (developerResultField(parsed, ["request_id"], "") === String(requestId)) return parsed;
+        } catch (_) {
+          // A transient public tmpfs read failure is observational; continue
+          // until the bounded deadline and report no matching result.
+        }
+      }
+      return null;
+    }
+
+    async function dispatchDeveloperToolsRequest(spec) {
+      const requestId = createDeveloperToolsRequestId();
+      const action = developerToolsAction(spec.kind, requestId, spec.testCase);
+      const parentWin = window.parent;
+      if (!parentWin || typeof parentWin.MVM_trigger !== "function") {
+        return { ok: false, requestId, action, message: "The parent action transport is unavailable." };
+      }
+      let submitted;
+      try {
+        submitted = parentWin.MVM_trigger(action, { loading: false, skipRefresh: true, waitSec: 0 });
+      } catch (error) {
+        return { ok: false, requestId, action, message: error && error.message ? error.message : "The Developer Tools request failed to submit." };
+      }
+      if (submitted === false) {
+        return { ok: false, requestId, action, message: "The Developer Tools request was rejected or deduplicated." };
+      }
+      const result = await pollDeveloperToolsResult(requestId, spec.timeoutMs || DEV_TOOLS_TIMEOUT_MS);
+      if (!result) {
+        return { ok: false, requestId, action, timeout: true, message: "No matching result received. Backend was not cancelled." };
+      }
+      return { ok: developerResultPassed(result), requestId, action, result,
+        message: developerResultPassed(result) ? "Complete." : "The backend reported failure." };
+    }
+
+    async function runDeveloperToolsRequests(label, specs) {
+      if (!isDeveloperToolsBuild()) return [];
+      if (_developerToolsOperation) {
+        setDeveloperToolsStatus("Finish the current Developer Tools operation first.", "warning");
+        return [];
+      }
+      _developerToolsOperation = { label: String(label || "Developer Tools"), started: Date.now() };
+      setDeveloperToolsBusy(true);
+      setDeveloperToolsStatus(String(label || "Working") + "…", "info");
+      const results = [];
+      try {
+        for (const spec of specs || []) {
+          const outcome = await dispatchDeveloperToolsRequest(spec);
+          results.push(Object.assign({ spec }, outcome));
+        }
+      } finally {
+        _developerToolsOperation = null;
+        setDeveloperToolsBusy(false);
+      }
+      return results;
+    }
+
+    function normalizeDeveloperCronState(value) {
+      const text = String(value || "").trim().toLowerCase();
+      if (/^(?:1|yes|on|enabled|present|active)$/.test(text)) return "present";
+      if (/^(?:0|no|off|disabled|absent|inactive|not installed)$/.test(text)) return "absent";
+      return text;
+    }
+
+    function humanizeDeveloperObservationState(value) {
+      const text = String(value || "").trim();
+      return /^not[-_ ]installed$/i.test(text) ? "Not installed" : (text || "Unknown");
+    }
+
+    function developerStatusAssign(fields, key, value) {
+      const normalized = String(value == null ? "" : value).trim();
+      if (!normalized) return;
+      const current = String(fields[key] == null ? "" : fields[key]).trim();
+      if (!current || /^(?:unknown|null|undefined)$/i.test(current)) fields[key] = normalized;
+    }
+
+    function parseDeveloperStatusBody(result) {
+      if (!result || !result.fields || !result.output) return result;
+      const fields = result.fields;
+      const lines = String(result.output).replace(/\r/g, "").split("\n");
+      const aliases = {
+        version: "build", index_version: "build",
+        hw: "hardware", model: "hardware", productid: "hardware",
+        boot: "boot_enabled", apply_on_boot: "boot_enabled",
+        addon: "addon_loader", loader: "addon_loader", services_start: "addon_loader",
+        event: "service_event", service_event_handler: "service_event",
+        cron: "periodic_recovery_cron", recovery_cron: "periodic_recovery_cron",
+        mac_shield_state: "mac_shield", mac_shield_rules: "mac_rule_count",
+        mac_rules: "mac_rule_count", merv_mac_rule_count: "mac_rule_count",
+        worker: "observation_worker", observation: "observation_worker",
+        observation_state: "observation_worker",
+        snapshots_pending: "pending_snapshots",
+        pending_snapshot: "pending_snapshots",
+        collections_pending: "pending_client_collections",
+        pending_collection: "pending_client_collections",
+        guard_state: "live_test_guard", armed: "live_test_guard",
+        recovery: "recovery_pending", pending_recovery: "recovery_pending"
+      };
+      const tokenPattern = /(?:^|\s)([A-Za-z][A-Za-z0-9_.-]*)=([^\s]+)/g;
+      lines.forEach(line => {
+        // "Not installed" is intentionally retained as the complete guard
+        // value; generic token parsing stops at the first space.
+        const guard = /\blive_test_guard=(.+)$/i.exec(line);
+        if (guard) developerStatusAssign(fields, "live_test_guard", guard[1]);
+        let match;
+        while ((match = tokenPattern.exec(line)) !== null) {
+          const sourceKey = match[1].toLowerCase().replace(/-/g, "_");
+          const targetKey = aliases[sourceKey] || sourceKey;
+          const directStatusKey = /^(?:build|hardware|boot_enabled|service_event|periodic_recovery_cron|mac_shield|observation_worker|live_test_guard|recovery_pending|snapshot_requested_generation|snapshot_completed_generation|collection_requested_generation|collection_completed_generation)$/.test(targetKey);
+          if (Object.prototype.hasOwnProperty.call(aliases, sourceKey) || directStatusKey ||
+              /^(?:snapshot|collection)_(?:requested|completed)(?:_generation)?$/.test(targetKey) ||
+              /^(?:pending_snapshots|pending_client_collections|mac_rule_count)$/.test(targetKey)) {
+            developerStatusAssign(fields, targetKey, sourceKey === "armed" ? "armed=" + match[2] : match[2]);
+          }
+        }
+        // The observation worker uses human-readable lines rather than the
+        // key=value form used by the outer result envelope.
+        let observation = /\bsnapshot\s+requested=([^\s]+)\s+completed=([^\s]+)\s+pending=([^\s]+)/i.exec(line);
+        if (observation) {
+          developerStatusAssign(fields, "snapshot_requested_generation", observation[1]);
+          developerStatusAssign(fields, "snapshot_completed_generation", observation[2]);
+          developerStatusAssign(fields, "pending_snapshots", observation[3]);
+        }
+        observation = /\bcollection\s+requested=([^\s]+)\s+completed=([^\s]+)\s+pending=([^\s]+)/i.exec(line);
+        if (observation) {
+          developerStatusAssign(fields, "collection_requested_generation", observation[1]);
+          developerStatusAssign(fields, "collection_completed_generation", observation[2]);
+          developerStatusAssign(fields, "pending_client_collections", observation[3]);
+        }
+      });
+
+      const statusLine = lines.map(line => line.trim())
+        .find(line => /\bboot=[^\s]+\b/i.test(line) && /\bcron=/i.test(line));
+      if (statusLine && !fields.hardware) {
+        const hardware = statusLine.split(/\s+boot=/i)[0]
+          .replace(/^.*(?:Main Unit|MAIN)\s*[:>-]*\s*/i, "").trim();
+        if (hardware) developerStatusAssign(fields, "hardware", hardware);
+      }
+
+      const snapshotRequestedText = developerResultField(result, ["snapshot_requested_generation"], "");
+      const snapshotCompletedText = developerResultField(result, ["snapshot_completed_generation"], "");
+      const snapshotRequested = Number(snapshotRequestedText);
+      const snapshotCompleted = Number(snapshotCompletedText);
+      if (!developerResultField(result, ["pending_snapshots"], "") && snapshotRequestedText !== "" && snapshotCompletedText !== "" &&
+          Number.isFinite(snapshotRequested) && Number.isFinite(snapshotCompleted)) {
+        developerStatusAssign(fields, "pending_snapshots", String(Math.max(0, snapshotRequested - snapshotCompleted)));
+      }
+      const collectionRequestedText = developerResultField(result, ["collection_requested_generation"], "");
+      const collectionCompletedText = developerResultField(result, ["collection_completed_generation"], "");
+      const collectionRequested = Number(collectionRequestedText);
+      const collectionCompleted = Number(collectionCompletedText);
+      if (!developerResultField(result, ["pending_client_collections"], "") && collectionRequestedText !== "" && collectionCompletedText !== "" &&
+          Number.isFinite(collectionRequested) && Number.isFinite(collectionCompleted)) {
+        developerStatusAssign(fields, "pending_client_collections", String(Math.max(0, collectionRequested - collectionCompleted)));
+      }
+      const snapshotPending = developerResultField(result, ["pending_snapshots"], "");
+      const collectionPending = developerResultField(result, ["pending_client_collections"], "");
+      if (!developerResultField(result, ["observation_worker", "observation_state"], "") && (snapshotPending || collectionPending)) {
+        const pending = [snapshotPending, collectionPending]
+          .some(value => /^(?:[1-9]\d*|yes|pending)$/i.test(String(value).trim()));
+        developerStatusAssign(fields, "observation_worker", pending ? "pending" : "idle");
+      }
+      if (!developerResultField(result, ["live_test_guard", "guard_state"], "")) {
+        const armed = developerResultField(result, ["armed"], "");
+        if (armed) developerStatusAssign(fields, "live_test_guard", "armed=" + armed);
+      }
+      const macCountText = developerResultField(result, ["mac_rule_count", "mac_rules", "merv_mac_rule_count"], "");
+      const macCount = Number(macCountText);
+      if (!developerResultField(result, ["mac_shield", "mac_shield_state"], "") && macCountText !== "" && Number.isFinite(macCount)) {
+        developerStatusAssign(fields, "mac_shield", macCount > 0 ? "on" : "off");
+      }
+      return result;
+    }
+
+    function renderDeveloperSnapshot(result) {
+      parseDeveloperStatusBody(result);
+      const boot = developerResultField(result, ["boot_enabled", "apply_on_boot"], "");
+      const bootState = boot === "1" || /^(?:yes|on|enabled)$/i.test(boot) ? "enabled" :
+        boot === "0" || /^(?:no|off|disabled)$/i.test(boot) ? "disabled" : (boot || "Unknown");
+      const expectedCron = bootState === "enabled" ? "present" : bootState === "disabled" ? "absent" : "unknown";
+      const actualCronRaw = developerResultField(result, ["periodic_recovery_cron", "cron_actual", "actual_cron", "recovery_cron", "cron"], "");
+      const actualCron = normalizeDeveloperCronState(actualCronRaw) || "unknown";
+      const relation = expectedCron !== "unknown" && actualCron === expectedCron ? "MATCH" :
+        expectedCron === "unknown" || actualCron === "unknown" ? "UNKNOWN" : "TEMPORARILY OVERRIDDEN";
+      const hardware = developerResultField(result, ["hardware", "productid", "model"], "Unknown");
+      const macState = developerResultField(result, ["mac_shield", "mac_shield_state"], "Unknown");
+      const macCount = developerResultField(result, ["mac_rule_count", "mac_rules", "merv_mac_rule_count", "mac_shield_rules"], "");
+      const values = {
+        devSnapshotBuild: developerResultField(result, ["build", "version", "index_version"], getIndexHtmlVersion() || "Unknown"),
+        devSnapshotHardware: hardware,
+        devSnapshotBoot: bootState,
+        devSnapshotLoader: developerResultField(result, ["addon_loader", "loader", "services_start"], "Unknown"),
+        devSnapshotServiceEvent: developerResultField(result, ["service_event", "service_event_handler"], "Unknown"),
+        devSnapshotCron: actualCronRaw ? actualCron + " (" + relation + ")" : "Unknown",
+        devSnapshotCronExpectation: expectedCron + " (" + relation + ")",
+        devSnapshotMac: macCount ? macState + " / " + macCount : macState,
+        devSnapshotObservation: humanizeDeveloperObservationState(developerResultField(result, ["observation_worker", "observation_state"], "Unknown")),
+        devSnapshotPendingSnapshots: developerResultField(result, ["pending_snapshots", "snapshots_pending"], "Unknown"),
+        devSnapshotPendingCollections: developerResultField(result, ["pending_client_collections", "pending_collections", "collections_pending"], "Unknown"),
+        devSnapshotGuard: developerResultField(result, ["live_test_guard", "guard_state"], "Unknown"),
+        devSnapshotRecovery: developerResultField(result, ["recovery_pending", "recovery"], "Unknown")
+      };
+      Object.keys(values).forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = values[id] || "Unknown";
+      });
+      const cronElement = document.getElementById("devSnapshotCron");
+      const expectationElement = document.getElementById("devSnapshotCronExpectation");
+      [cronElement, expectationElement].forEach(element => {
+        if (!element) return;
+        element.classList.remove("is-match", "is-warning");
+        if (relation === "MATCH") element.classList.add("is-match");
+        else if (relation === "TEMPORARILY OVERRIDDEN") element.classList.add("is-warning");
+      });
+      _developerToolsLastSnapshot = result;
+      _developerToolsLastSnapshotText = developerSnapshotText();
+      return { relation, expectedCron, actualCron, bootState };
+    }
+
+    function developerSnapshotText() {
+      const rows = [
+        ["Version", "devSnapshotBuild"], ["Hardware", "devSnapshotHardware"],
+        ["Apply on Boot", "devSnapshotBoot"], ["Addon loader", "devSnapshotLoader"],
+        ["Service-event", "devSnapshotServiceEvent"], ["Periodic Recovery", "devSnapshotCron"],
+        ["Expected Recovery", "devSnapshotCronExpectation"], ["MAC Shield", "devSnapshotMac"],
+        ["Observation Worker", "devSnapshotObservation"], ["Pending Snapshots", "devSnapshotPendingSnapshots"],
+        ["Pending Collections", "devSnapshotPendingCollections"], ["Live Test Guard", "devSnapshotGuard"],
+        ["Recovery Pending", "devSnapshotRecovery"]
+      ];
+      const lines = ["MerVLAN Developer Snapshot"];
+      rows.forEach(row => {
+        const element = document.getElementById(row[1]);
+        lines.push(row[0] + ": " + (element ? element.textContent : "Unknown"));
+      });
+      return lines.join("\n");
+    }
+
+    async function refreshDeveloperSnapshot() {
+      if (!isDeveloperToolsBuild()) return false;
+      const outcomes = await runDeveloperToolsRequests("Refreshing runtime snapshot", [{ kind: "status" }]);
+      const outcome = outcomes[0];
+      if (!outcome || !outcome.result) {
+        setDeveloperToolsStatus(outcome && outcome.message ? outcome.message : "No matching result received. Backend was not cancelled.", "error");
+        return false;
+      }
+      if (!outcome.ok) {
+        setDeveloperToolsStatus(outcome.message || "Runtime snapshot failed.", "error");
+        return false;
+      }
+      const rendered = renderDeveloperSnapshot(outcome.result);
+      setDeveloperToolsStatus("Runtime snapshot refreshed.", rendered.relation === "MATCH" ? "success" : "warning");
+      setDeveloperCronStatus(rendered.relation === "MATCH" ? "Configured cron state matches runtime." : "Runtime cron is " + rendered.relation.toLowerCase() + ".", rendered.relation === "MATCH" ? "success" : "warning");
+      return true;
+    }
+
+    async function copyDeveloperSnapshot() {
+      const text = _developerToolsLastSnapshotText || developerSnapshotText();
+      let copied = false;
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        }
+      } catch (_) { copied = false; }
+      if (!copied) {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        try { copied = !!document.execCommand("copy"); } catch (_) { copied = false; }
+        area.remove();
+      }
+      setDeveloperToolsStatus(copied ? "Snapshot copied to clipboard." : "Could not copy snapshot; select the displayed values manually.", copied ? "success" : "warning");
+      return copied;
+    }
+
+    async function runDeveloperCronAction(command, label) {
+      if (!isDeveloperToolsBuild()) return false;
+      const text = label || (command === "cronenable" ? "Enabling recovery cron" : "Disabling recovery cron");
+      const outcomes = await runDeveloperToolsRequests(text, [{ kind: command }]);
+      const outcome = outcomes[0];
+      setDeveloperCronStatus(outcome && outcome.ok ? text + " complete; refreshing runtime state…" :
+        (outcome && outcome.message ? outcome.message : "No matching result received. Backend was not cancelled."), outcome && outcome.ok ? "info" : "error");
+      // Release the first operation before starting the required read-only
+      // post-action status request.  These operations are strictly serial.
+      await refreshDeveloperSnapshot();
+      return !!(outcome && outcome.ok);
+    }
+
+    function configuredDeveloperBootState() {
+      if (typeof CURRENT_SETTINGS_CACHE !== "undefined" && CURRENT_SETTINGS_CACHE &&
+          Object.prototype.hasOwnProperty.call(CURRENT_SETTINGS_CACHE, "BOOT_ENABLED")) {
+        return String(CURRENT_SETTINGS_CACHE.BOOT_ENABLED);
+      }
+      if (_developerToolsLastSnapshot) return developerResultField(_developerToolsLastSnapshot, ["boot_enabled", "apply_on_boot"], "");
+      return "";
+    }
+
+    async function restoreDeveloperCronState() {
+      const boot = configuredDeveloperBootState();
+      if (boot === "1") return runDeveloperCronAction("cronenable", "Restoring configured recovery cron");
+      if (boot === "0") return runDeveloperCronAction("crondisable", "Restoring configured recovery cron");
+      setDeveloperCronStatus("Configured Apply on Boot state is unavailable; restore was not attempted.", "error");
+      return false;
+    }
+
+    function updateDeveloperSelftestCommand() {
+      const select = document.getElementById("devToolsSelftestSelect");
+      const command = document.getElementById("devToolsSelftestCommand");
+      if (!select || !command) return "";
+      const testCase = String(select.value || "");
+      command.textContent = "sh dev-tools/tests/router/mervlan_selftest.sh " + testCase;
+      return testCase;
+    }
+
+    function setDeveloperSelftestSummary(text, passed) {
+      const element = document.getElementById("devToolsSelftestSummary");
+      if (!element) return;
+      element.textContent = String(text || "");
+      element.classList.remove("is-success", "is-error");
+      if (passed === true) element.classList.add("is-success");
+      if (passed === false) element.classList.add("is-error");
+    }
+
+    function renderDeveloperSelftestOutcome(caseName, outcome) {
+      const output = document.getElementById("devToolsSelftestOutput");
+      const showButton = document.getElementById("devToolsShowOutputBtn");
+      if (output) {
+        output.textContent = outcome && outcome.result ? outcome.result.output : (outcome && outcome.message ? outcome.message : "");
+        output.style.display = "none";
+      }
+      _developerToolsLastSelftest = outcome || null;
+      if (showButton) {
+        showButton.disabled = !_developerToolsLastSelftest;
+        showButton.textContent = "Show Output";
+      }
+      if (!outcome || !outcome.result) {
+        setDeveloperSelftestSummary("Last result: FAIL — " + (outcome && outcome.message ? outcome.message : "No matching result received."), false);
+        return false;
+      }
+      const summary = developerSelftestSummary(outcome.result);
+      setDeveloperSelftestSummary("Last result: " + (summary.passed ? "PASS" : "FAIL") + " — " + caseName + "; passes=" + summary.passes + " failures=" + summary.failures, summary.passed);
+      return summary.passed;
+    }
+
+    async function runDeveloperSelectedSelftest() {
+      const testCase = updateDeveloperSelftestCommand();
+      const select = document.getElementById("devToolsSelftestSelect");
+      if (!select || !testCase || !Array.from(select.options).some(option => option.value === testCase)) return false;
+      const outcomes = await runDeveloperToolsRequests("Running " + testCase, [{ kind: "selftest", testCase }]);
+      return renderDeveloperSelftestOutcome(testCase, outcomes[0]);
+    }
+
+    async function runDeveloperSafeChecks() {
+      const cases = ["shell-syntax", "live-audit"];
+      const outcomes = await runDeveloperToolsRequests("Running Safe Checks", cases.map(testCase => ({ kind: "selftest", testCase })));
+      const details = outcomes.map((outcome, index) => {
+        const name = cases[index];
+        if (!outcome || !outcome.result) return name + " FAIL";
+        const summary = developerSelftestSummary(outcome.result);
+        return name + " " + (summary.passed ? "PASS" : "FAIL") + " (passes=" + summary.passes + " failures=" + summary.failures + ")";
+      });
+      const passed = outcomes.length === cases.length && outcomes.every(outcome => outcome && outcome.result && developerSelftestSummary(outcome.result).passed);
+      const safeSummary = document.getElementById("devToolsSafeChecksSummary");
+      if (safeSummary) {
+        safeSummary.textContent = "Safe Checks: " + (passed ? "PASS" : "FAIL") + " — " + details.join(", ");
+        safeSummary.classList.remove("is-success", "is-error");
+        safeSummary.classList.add(passed ? "is-success" : "is-error");
+      }
+      _developerToolsLastSafeChecks = outcomes;
+      const combined = outcomes.map((outcome, index) => "### " + cases[index] + "\n" + (outcome && outcome.result ? outcome.result.output : (outcome && outcome.message ? outcome.message : ""))).join("\n\n");
+      renderDeveloperSelftestOutcome("Safe Checks", outcomes.length ? Object.assign({}, outcomes[outcomes.length - 1], { result: outcomes[outcomes.length - 1] && outcomes[outcomes.length - 1].result ? Object.assign({}, outcomes[outcomes.length - 1].result, { output: combined }) : null }) : null);
+      setDeveloperSelftestSummary("Last result: " + (passed ? "PASS" : "FAIL") + " — Safe Checks; " + details.join(", "), passed);
+      return passed;
+    }
+
+    function toggleDeveloperSelftestOutput() {
+      const output = document.getElementById("devToolsSelftestOutput");
+      const button = document.getElementById("devToolsShowOutputBtn");
+      if (!output || !button || !_developerToolsLastSelftest) return false;
+      const shown = output.style.display !== "none";
+      output.style.display = shown ? "none" : "block";
+      button.textContent = shown ? "Show Output" : "Hide Output";
+      return !shown;
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      updateDeveloperToolsVisibility();
+      updateDeveloperSelftestCommand();
+    });
+  </script>
 
   <!-- ======== Status & validation (SSID/VLAN/NODE ticks) ======== -->
 
@@ -3207,6 +4125,7 @@ function showTooltip() {
       "sshTrustPausedTray",
       "unsupportedModelModal",
       "serviceSettingsModal",
+      "developerToolsModal",
       "advancedOverrideModal",
       "vlanManagerModal",
       "versionModal",
@@ -8671,9 +9590,15 @@ function triggerAction(actionScriptName, button, description) {
       _svcSnapshot = captureServiceSettingsSnapshot(cache);
       setServiceSettingsLoadState('ready', 'Settings loaded.');
 
-      // Reset Apply button
+      // Reset Apply before restoring a Developer Tools round-trip.  Restoring
+      // the draft below must be allowed to mark the editor dirty again.
       const applyBtn = document.getElementById('svcSettingsApplyBtn');
       if (applyBtn) applyBtn.disabled = true;
+
+      // A Developer Tools round-trip closes this modal while retaining the
+      // user's unsaved control values. Restore them only after the fresh
+      // persisted load has established the normal Settings baseline.
+      restoreDeveloperSettingsDraft();
 
       // Status line: only the persisted BOOT_ENABLED value — never stale.
       // Press the ⟳ button in the modal to run a full status check (CLI log).

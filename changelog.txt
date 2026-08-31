@@ -1,5 +1,13 @@
 mervlan v0.53.28-dev
 
+New: Development-only Developer Tools
+- Added a dev-build-only Settings modal for read-only runtime diagnostics,
+  temporary MAIN recovery-cron controls, and selected router selftests with
+  correlated raw output. Stable builds and configured nodes reject this path.
+- The modal preserves an unsaved Settings draft only when returning with
+  Back to Settings; closing it discards that draft. Snapshot probes are
+  observational and report missing developer tools explicitly.
+
 Improved: VLAN safety, node policy, and offline Update
 - Added a verified DSL-AX82U hardware profile: LAN1–3 map to `eth2 eth1 eth0`
   and WAN maps to `eth3`.

@@ -1,7 +1,7 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
-  <!-- mervlan.asp version="0.56" -->
+  <!-- mervlan.asp version="0.57" -->
 <meta http-equiv="X-UA-Compatible" content="IE=Edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <meta http-equiv="Pragma" content="no-cache">
@@ -259,9 +259,15 @@ function _mvmPrepareAction(actionName, settingsObjOrNull, opts) {
   var isProgressAction = !!(progressActionMatch && typeof MVM_ALLOWED_ACTIONS !== "undefined" &&
     MVM_ALLOWED_ACTIONS.has(progressActionMatch[1]) &&
     (!progressActionMatch[3] || progressActionMatch[1] === "sshtrustprobe_vlanmgr"));
+  // Developer Tools is deliberately a closed transport family.  The handler
+  // still authenticates the installed dev marker and MAIN identity; this
+  // client-side check only prevents the generic parent transport from
+  // accepting arbitrary dynamic action names.
+  var isDevToolsAction = /^devtools_vlanmgr_(?:status|cronenable|crondisable)_rid_[a-z0-9-]+$/.test(encodedAction) ||
+    /^devtools_vlanmgr_selftest_(?!all_rid_)[a-z0-9-]+_rid_[a-z0-9-]+$/.test(encodedAction);
   if (encodedAction.length > 120 ||
       (typeof MVM_ALLOWED_ACTIONS !== "undefined" && !MVM_ALLOWED_ACTIONS.has(encodedAction) &&
-       !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction)) {
+       !isEncodedUpdateRef && !isMaintenanceAction && !isVerifiedAction && !isProgressAction && !isDevToolsAction)) {
     return { accepted: false, transportState: "submit-error", error: "disallowed-action" };
   }
   var now = (typeof Date.now === "function") ? Date.now() : new Date().getTime();
