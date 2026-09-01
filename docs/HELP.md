@@ -1132,6 +1132,7 @@ MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merli
 | RT-AX5400 | 4 | |
 | RT-AXE95Q | 3 | |
 | RT-BE88U | 8 | |
+| RT-BE86U | 4 | LAN1 is a 2.5G LAN port, WAN is a 10G port |
 | RT-BE92U* | 1 | LAN1–LAN4 share one VLAN bridge — no per-port isolation |
 | RT-ET8 | 3 | |
 | TUF-AX3000_V2 | 4 | |

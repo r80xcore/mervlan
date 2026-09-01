@@ -8,11 +8,16 @@ New: Development-only Developer Tools
   Back to Settings; closing it discards that draft. Snapshot probes are
   observational and report missing developer tools explicitly.
 
-Improved: VLAN safety, node policy, and offline Update
+New: Hardware Profile
+- Added a verified RT-BE86U hardware profile: LAN1 is a 2.5G LAN port, WAN is a
+  10G port. The ETH_PORTS assignment reflects the verified physical port
+  ordering.
 - Added a verified DSL-AX82U hardware profile: LAN1–3 map to `eth2 eth1 eth0`
   and WAN maps to `eth3`.
 - Added a verified RT-AX68U hardware profile: LAN1–4 map to
   `eth4 eth3 eth2 eth1` and WAN maps to `eth0`.
+  
+Improved: VLAN safety, node policy, and offline Update
 - Managed wired VLAN ports now use one device-aware expected state with exact
   bridge placement and Layer-2 protection checks; unsafe or unknown state
   remains fail-closed.
