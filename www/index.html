@@ -1731,13 +1731,21 @@
   <!-- ======== Development-only Developer Tools Modal ======== -->
   <style>
     .dev-tools-modal {
-      width: min(620px, calc(100vw - 28px));
-      max-width: 620px;
       max-height: calc(100vh - 32px);
       overflow: hidden;
     }
+    .dev-tools-modal.dev-tools-modal--open {
+      display: flex !important;
+      flex-direction: column;
+    }
+    .dev-tools-modal .modal__header,
+    .dev-tools-modal .modal__actions {
+      flex: 0 0 auto;
+    }
+    .dev-tools-modal .modal__actions { flex-wrap: wrap; }
     .dev-tools-modal .modal__body {
-      max-height: calc(100vh - 138px);
+      flex: 1 1 auto;
+      min-height: 0;
       overflow-y: auto;
       overflow-x: hidden;
     }
@@ -1986,7 +1994,7 @@
     /* Developer Tools — development-build-only, intentionally standalone.   */
     /* This block must not participate in Settings, loading, or action state. */
     /* ===================================================================== */
-    const DEV_TOOLS_RESULT_PATH = "tmp/results/dev_tools_result.txt";
+    const DEV_TOOLS_RESULT_PATH = "tmp/results/dev_tools_result.json";
     const DEV_TOOLS_POLL_INTERVAL_MS = 600;
     const DEV_TOOLS_TIMEOUT_MS = 180000;
     let _developerToolsOperation = null;
@@ -2056,9 +2064,13 @@
       if (!modal) return;
       if (visible) {
         ensureConfigViewForModal();
-        modal.style.display = "block";
+        modal.classList.add("dev-tools-modal--open");
+        modal.style.display = "flex";
+        const body = modal.querySelector(".modal__body");
+        if (body) body.scrollTop = 0;
         anchorModalToForm(modal);
       } else {
+        modal.classList.remove("dev-tools-modal--open");
         modal.style.display = "none";
         releaseModalCentering(modal);
         releaseAnchoredModal(modal);
@@ -6025,7 +6037,6 @@ function showTooltip() {
       updateStatusTooltips();
       syncNodeCollapseWithValues();
       startClientsPolling();
-      startVlanApplyStatusPolling();
 
       /* === CLI collapse/expand === */
       const cliPanel = document.getElementById('cliPanel');
@@ -7700,7 +7711,6 @@ const CLIENTS_APPLY_ACTIONS = new Set([
   'executenodesonly_vlanmgr'
 ]);
 let clientsApplyActive = false;
-let clientsApplyStatusTimer = null;
 
 function setRefreshClientsBlocked(blocked){
   const btn = document.getElementById('refreshClientsBtn');
@@ -7734,12 +7744,6 @@ async function refreshVlanApplyGuard(){
   clientsApplyActive = backendActive || isLocalVlanApplyActive();
   setRefreshClientsBlocked(clientsApplyActive);
   return clientsApplyActive;
-}
-
-function startVlanApplyStatusPolling(){
-  if (clientsApplyStatusTimer) clearInterval(clientsApplyStatusTimer);
-  refreshVlanApplyGuard();
-  clientsApplyStatusTimer = setInterval(refreshVlanApplyGuard, 1500);
 }
 
 // Returns true when at least one SSID/VLAN pair has been configured
@@ -10680,7 +10684,7 @@ function anchorModalToForm(modal) {
       ? Math.max(0, Number.parseFloat(window.getComputedStyle(form).getPropertyValue('--ssid-assign-extension')) || 0)
       : 0;
     let anchorOffset = 0;
-    if (modal.id === 'versionModal' || modal.id === 'sshKeyModal' || isSshTrustUi) {
+    if (modal.id === 'versionModal' || modal.id === 'sshKeyModal' || modal.id === 'developerToolsModal' || isSshTrustUi) {
       const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
       const visibleTop = Math.max(0, formRect.top);
       const visibleBottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;

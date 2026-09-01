@@ -486,7 +486,7 @@ devtools_publish_result() {
     logger -t "VLANMgr" "handler: Developer Tools result permission setup failed"
     return 1
   }
-  mv -f "$_dtp_tmp" "$_dtp_result_dir/dev_tools_result.txt" 2>/dev/null || {
+  mv -f "$_dtp_tmp" "$_dtp_result_dir/dev_tools_result.json" 2>/dev/null || {
     rm -f "$_dtp_tmp" 2>/dev/null || :
     logger -t "VLANMgr" "handler: Developer Tools result publication failed"
     return 1

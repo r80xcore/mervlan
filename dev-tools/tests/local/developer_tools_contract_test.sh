@@ -43,6 +43,29 @@ require "$HANDLER" '_dt_version_marker="$(sed -n' 'backend gate marker extractio
 require "$HANDLER" 'Developer Tools refused without -dev index marker' 'backend dev gate missing'
 require "$HANDLER" '  *-dev) ;;' 'backend gate does not require a -dev suffix'
 require "$ASP" 'devtools_vlanmgr_' 'narrow dev transport missing'
+require "$UI" 'const DEV_TOOLS_RESULT_PATH = "tmp/results/dev_tools_result.json";' 'frontend Developer Tools result path is not web-served JSON'
+require "$HANDLER" '"$_dtp_result_dir/dev_tools_result.json"' 'backend Developer Tools result publication is not web-served JSON'
+! grep -Fq 'dev_tools_result.txt' "$UI" "$HANDLER" || fail 'Developer Tools still references the raw .txt result path'
+
+# Developer Tools must inherit the standard addon-pane modal width and use the
+# existing tall-modal anchor flow with a flex-scrolling body.
+! grep -Fq 'width: min(620px, calc(100vw - 28px));' "$UI" || fail 'Developer Tools still overrides the addon modal width'
+! grep -Fq 'max-height: calc(100vh - 138px);' "$UI" || fail 'Developer Tools still uses manual body-height subtraction'
+require "$UI" '.dev-tools-modal.dev-tools-modal--open' 'Developer Tools flex-open selector missing'
+require "$UI" 'flex-direction: column;' 'Developer Tools flex-column layout missing'
+require "$UI" 'min-height: 0;' 'Developer Tools scroll body cannot shrink'
+require "$UI" 'modal.classList.add("dev-tools-modal--open");' 'Developer Tools does not open in flex mode'
+require "$UI" 'if (body) body.scrollTop = 0;' 'Developer Tools does not reset body scroll on open'
+require "$UI" "modal.id === 'developerToolsModal'" 'Developer Tools does not reuse tall-modal positioning'
+
+# The Apply runtime marker is transient.  It is read only immediately before
+# automatic or manual client collection, never from a perpetual timer.
+! grep -Fq 'startVlanApplyStatusPolling' "$UI" || fail 'transient Apply marker still has background polling'
+! grep -Fq 'clientsApplyStatusTimer' "$UI" || fail 'unused Apply marker polling timer remains'
+require "$UI" "if (await refreshVlanApplyGuard()) return;" 'page-load client collection is missing its Apply guard'
+require "$UI" "async function refreshClients(btn){" 'manual client refresh handler missing'
+require "$UI" "async function refreshClients(btn){
+  if (await refreshVlanApplyGuard()){" 'manual client refresh no longer guards before collection'
 
 # The browser receives a text result envelope whose output body contains the
 # read-only status lines emitted by the handler.  Exercise the body parser's
