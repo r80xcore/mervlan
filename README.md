@@ -234,36 +234,31 @@ See the **[`changelog.txt`](changelog.txt)** in this repository for detailed ver
 
 <h2 id="help-wanted">Help wanted: LAN/ETH port mapping (device support) <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
-Accurate LAN-to-interface mappings are needed to add official support for more routers. The interactive mapper guides the test, creates a report, and prepares a GitHub issue for submission.
-
-See [Device Support and the mapper instructions](docs/HELP.md#10-device-support) for the supported-device list and step-by-step procedure.
+Accurate LAN-to-interface mappings are required to add official support for new routers. If your router runs Asuswrt-Merlin and is not yet in our supported device list, we would love your help mapping its ports! MerVLAN already supports 25+ models, and an interactive mapper script is available to guide you through the test, generate a report, and prepare a GitHub issue automatically.
+See [Device Support and mapper instructions](docs/HELP.md#10-device-support) for the full supported-device table and step-by-step procedure.
 
 ### Models requiring testing
+> [!TIP]
+> This list is continuously updated, but unlisted older or newly released models running Asuswrt-Merlin are always welcome for testing!
 
-Wi-Fi 7 / BE Series:
+**Wi-Fi 7 / BE series:**
 
-- RT‑BE58 Go
-- RT‑BE86U
-- RT‑BE96U
-- GT‑BE98 Pro
-- GT‑BE19000AI
+- RT-BE58 Go
+- RT-BE96U
+- GT-BE98 Pro *(Note: base GT-BE98 is supported, but GT-BE98 Pro has a different port layout and is unverified)*
+- GT-BE19000AI
 
-ROG & high‑performance series:
+**ROG & high-performance series:**
+- GT-AXE11000 *(Note: GT-AX11000, GT-AX11000 Pro, and GT-AXE16000 are supported)*
 
-- GT‑AXE11000
+**TUF Gaming series:**
+- TUF-AX3000 v1 *(Note: TUF-AX3000_V2 is supported, but v1 remains unverified)*
+- TUF-AX5400 v1
 
-TUF Gaming series:
+**Standard RT-AX series:**
+- DSL-AX5400 *(Note: standard RT-AX5400 is supported, but DSL-AX5400 remains unverified)*
 
-- TUF‑AX3000 v1
-- TUF‑AX5400 v1
-
-Standard RT‑AX series:
-
-- RT‑AX68U
-- DSL‑AX82U
-- DSL‑AX5400
-
-Models added to the support table are excluded from this list. Any help testing is appreciated.
+Models added to the support table are excluded from this list. Any help with testing is greatly appreciated.
 
 ---
 
