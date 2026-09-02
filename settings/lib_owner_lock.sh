@@ -302,10 +302,9 @@ merv_owner_lock_cleanup_claim() {
 merv_owner_lock_state() {
   _mols_lock="${1:-}"; _mols_proc="${2:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}"
   [ -n "$_mols_lock" ] || { printf 'unknown'; return 1; }
-  # ASUS BusyBox 1.25 does not reliably implement `test -e` for a regular
-  # file. `ls -ld` sees regular files and dangling symlinks without following
-  # them, so it can distinguish an actual absent path from a fail-closed
-  # obstruction on every supported shell.
+  # Probe the lock path itself without following it. Owner-lock state must
+  # distinguish true absence from fail-closed obstructions such as regular
+  # files and dangling symlinks; `ls -ld` preserves that distinction.
   if ! ls -ld "$_mols_lock" >/dev/null 2>&1; then
     _mols_parent=${_mols_lock%/*}
     if [ -d "$_mols_parent" ] && [ -r "$_mols_parent" ] && [ -x "$_mols_parent" ]; then

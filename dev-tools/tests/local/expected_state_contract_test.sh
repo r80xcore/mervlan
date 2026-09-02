@@ -56,14 +56,15 @@ assert_rc 'managed Ethernet resolver error propagates' 1 merv_managed_eth_iface_
 
 MERV_SYS_CLASS_NET_ROOT="$TEST_ROOT/sys/class/net"
 export MERV_SYS_CLASS_NET_ROOT
-mkdir -p "$MERV_SYS_CLASS_NET_ROOT/lan_a" \
+mkdir -p "$MERV_SYS_CLASS_NET_ROOT/lan_a" "$MERV_SYS_CLASS_NET_ROOT/eth0.200" \
+  "$MERV_SYS_CLASS_NET_ROOT/wl0.1" "$MERV_SYS_CLASS_NET_ROOT/eth0" \
   "$MERV_SYS_CLASS_NET_ROOT/br0/brif" \
   "$MERV_SYS_CLASS_NET_ROOT/br100/brif" \
   "$MERV_SYS_CLASS_NET_ROOT/br200/brif" || exit 1
 reset_membership() {
-  rm -f "$MERV_SYS_CLASS_NET_ROOT/br0/brif/lan_a" \
-    "$MERV_SYS_CLASS_NET_ROOT/br100/brif/lan_a" \
-    "$MERV_SYS_CLASS_NET_ROOT/br200/brif/lan_a"
+  for _rms_iface in lan_a eth0.200 wl0.1 eth0; do
+    rm -f "$MERV_SYS_CLASS_NET_ROOT"/br*/brif/"$_rms_iface"
+  done
 }
 reset_membership
 : > "$MERV_SYS_CLASS_NET_ROOT/br200/brif/lan_a"
@@ -80,6 +81,43 @@ reset_membership
 assert_rc 'multi-bridge membership is rejected' 1 merv_exact_bridge_membership lan_a 200
 reset_membership
 assert_rc 'absent bridge membership is rejected' 1 merv_exact_bridge_membership lan_a 200
+
+# Older firmware may expose bridge members on indented continuation rows in
+# `brctl show`; exercise the parser without a sysfs membership proof. The
+# fallback must retain the owning bridge and compare interface names exactly.
+brctl() {
+  case "$1" in
+    show) printf '%s\n' "$FAKE_BRCTL_SHOW" ;;
+  esac
+  return 0
+}
+FAKE_BRCTL_SHOW=$(printf '%s\n' \
+  'bridge name     bridge id               STP enabled     interfaces' \
+  'br200           8000.000000000000       no              eth0.200' \
+  '                                                        lan_a' \
+  '                                                        wl0.1' \
+  'br0             8000.000000000001       no              eth0' \
+  '                                                        lan_ab')
+assert_rc 'brctl continuation membership is exact' 0 merv_exact_bridge_membership lan_a 200
+assert_rc 'brctl tagged first member is exact' 0 merv_exact_bridge_membership eth0.200 200
+assert_rc 'brctl wireless continuation membership is exact' 0 merv_exact_bridge_membership wl0.1 200
+assert_rc 'brctl second bridge first member is exact' 0 merv_exact_bridge_membership eth0 0
+FAKE_BRCTL_SHOW=$(printf '%s\n' \
+  'bridge name     bridge id               STP enabled     interfaces' \
+  'br200           8000.000000000000       no              lan_a' \
+  '                                                        wl0.1' \
+  'br100           8000.000000000002       no              lan_b')
+assert_rc 'brctl first member and tagged wireless continuity are exact' 0 merv_exact_bridge_membership lan_a 200
+FAKE_BRCTL_SHOW=$(printf '%s\n' \
+  'bridge name     bridge id               STP enabled     interfaces' \
+  'br200           8000.000000000000       no              eth0' \
+  '                                                        lan_ab')
+assert_rc 'brctl prefix member is rejected' 1 merv_exact_bridge_membership lan_a 200
+FAKE_BRCTL_SHOW=$(printf '%s\n' \
+  'bridge name     bridge id               STP enabled     interfaces' \
+  'br200           8000.000000000000       no              eth0' \
+  'br100           8000.000000000002       no              lan_a')
+assert_rc 'brctl wrong bridge is rejected' 1 merv_exact_bridge_membership lan_a 200
 
 . "$BASE_DIR/settings/mac_shield_snapshot.sh" || fail 'could not load MAC snapshot helpers'
 CACHE_TRACE="$TEST_ROOT/cache.trace"

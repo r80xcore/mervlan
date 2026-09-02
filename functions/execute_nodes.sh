@@ -80,10 +80,21 @@ fi
 SSH_NODE_USER=$(get_node_ssh_user)
 SSH_NODE_PORT=$(get_node_ssh_port)
 
+execute_nodes_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    return $?
+  fi
+  # Without the canonical helper, the caller cannot prove that all pool
+  # metadata is clean. Retain ownership so a later recovery pass can inspect
+  # the unresolved state instead of racing an unknown worker.
+  return 0
+}
+
 execute_nodes_reconcile_signal_children() {
   # Reconcile pending and published node workers through the pool's single
   # identity-safe abort path.  PID alone is never sufficient after a signal.
-  if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+  if execute_nodes_pool_state_unresolved && type mnj_pool_abort_active >/dev/null 2>&1; then
     mnj_pool_abort_active failed parent-signal ||
       error -c cli,vlan "Execute: node-pool interruption cleanup could not reconcile every worker"
   fi
@@ -146,14 +157,14 @@ execute_nodes_progress_cleanup() {
   _enpc_action_lock_rc=0
   # The pool must be fully reconciled before releasing either owner lock.  A
   # failed identity check deliberately retains slot metadata for recovery.
-  if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+  if execute_nodes_pool_state_unresolved && type mnj_pool_abort_active >/dev/null 2>&1; then
     if ! mnj_pool_abort_active failed parent-exit; then
       _enpc_pool_abort_failed=1
     fi
   fi
   # The shared pool, not the caller's abort flag, is authoritative. Retain
   # every Execute ownership record if reconciliation has not proven idle.
-  if [ "${MNJ_POOL_ACTIVE:-0}" -ne 0 ]; then
+  if execute_nodes_pool_state_unresolved; then
     _enpc_pool_abort_failed=1
     _enpc_cleanup_rc=1
     error -c cli,vlan "Execute cleanup retained ownership because node workers could not be reconciled"

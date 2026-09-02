@@ -896,15 +896,14 @@ member_of_bridge_brctl_fallback() {
   brctl show 2>/dev/null | awk -v BR="$br" -v IF="$iface" '
     NR==1 { next }
     {
-      if ($1 != "") cur=$1
-      for (i=1; i<=NF; i++) {
-        gsub(/\r/, "", $i)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
-      }
-      if (cur==BR) {
-        for (i=1; i<=NF; i++) {
-          if ($i == IF) { found=1; exit }
+      gsub(/\r$/, "", $0)
+      if ($0 !~ /^[[:space:]]/) {
+        cur=($1 == BR ? BR : "")
+        if (cur == BR) {
+          for (i=2; i<=NF; i++) if ($i == IF) { found=1; exit }
         }
+      } else if (cur == BR) {
+        for (i=1; i<=NF; i++) if ($i == IF) { found=1; exit }
       }
     }
     END { exit(found?0:1) }

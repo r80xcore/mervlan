@@ -298,11 +298,21 @@ fi
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$SYNC_PROGRESS_ACTION" \
     "$SYNC_PROGRESS_LABEL" "$SYNC_PROGRESS_PREP"
 
+sync_pool_state_unresolved() {
+    if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+        mnj_pool_state_unresolved
+        return $?
+    fi
+    # Without the canonical helper, the caller cannot prove that all pool
+    # metadata is clean. Retain ownership for a later recovery pass.
+    return 0
+}
+
 sync_reconcile_signal_children() {
     # lib_node_jobs owns pending-wrapper and published-slot identities.  Use
     # its single abort path so an interruption cannot strand either side of a
     # launch or duplicate the five-slot reconciliation logic here.
-    if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+    if sync_pool_state_unresolved && type mnj_pool_abort_active >/dev/null 2>&1; then
         mnj_pool_abort_active failed parent-signal
     fi
 }
@@ -331,15 +341,15 @@ _cleanup_sync_tmp() {
     # Abort any in-flight node pool before releasing the sync/action locks.
     # The library retains identity metadata when reconciliation is unsafe, so
     # preserving ownership here prevents a successor from racing live work.
-    if [ "${MNJ_POOL_ACTIVE:-0}" -eq 1 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+    if sync_pool_state_unresolved && type mnj_pool_abort_active >/dev/null 2>&1; then
         if ! mnj_pool_abort_active failed parent-exit; then
             _sync_pool_abort_failed=1
         fi
     fi
-    # MNJ_POOL_ACTIVE is authoritative even when the helper was unavailable or
-    # returned without proving reconciliation. Do not turn retained pool state
-    # into a clean owner/action unlock through a caller-local flag.
-    if [ "${MNJ_POOL_ACTIVE:-0}" -ne 0 ]; then
+    # The canonical pool state is authoritative. Do not turn retained pending
+    # or slot metadata into a clean owner/action unlock through a caller-local
+    # active flag.
+    if sync_pool_state_unresolved; then
         _sync_pool_abort_failed=1
         _sync_cleanup_failed=1
         error -c cli,vlan "Sync cleanup retained ownership because node workers could not be reconciled"
@@ -2570,7 +2580,7 @@ if [ "$SYNC_PROGRESS_TOTAL" -gt 0 ] 2>/dev/null &&
     if sync_worker_log_archive "$_sync_archive_state" "sync.$SYNC_RUN_ID"; then
         # The public projection is now the retained diagnostic copy. Remove
         # only this validated, terminal private job tree.
-        if [ "${MNJ_POOL_ACTIVE:-0}" -ne 0 ]; then
+        if sync_pool_state_unresolved; then
             overall_success=false
             warn -c vlan "Sync: private worker-job cleanup deferred while node identity reconciliation is pending"
         elif ! rm -rf "$_sync_jobs_root" 2>/dev/null; then

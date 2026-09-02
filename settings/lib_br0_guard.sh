@@ -104,7 +104,17 @@ merv_exact_bridge_membership() {
   type brctl >/dev/null 2>&1 || return 1
   _mebm_seen="$(brctl show 2>/dev/null | awk -v IF="$_mebm_iface" '
     NR == 1 { next }
-    { if ($1 != "") bridge=$1; for (i = 1; i <= NF; i++) if ($i == IF) print bridge }
+    {
+      gsub(/\r$/, "", $0)
+      if ($0 !~ /^[[:space:]]/) {
+        bridge = $1
+        if (bridge != "") {
+          for (i = 2; i <= NF; i++) if ($i == IF) print bridge
+        }
+      } else if (bridge != "") {
+        for (i = 1; i <= NF; i++) if ($i == IF) print bridge
+      }
+    }
   ' | sort -u)"
   [ "$(printf '%s\n' "$_mebm_seen" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] && [ "$_mebm_seen" = "$_mebm_expected" ]
 }
