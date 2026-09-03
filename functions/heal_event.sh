@@ -796,7 +796,7 @@ check_vlan_config() {
 
   check_wan_native_health || return 1
 
-  exp=$(expected_vlans_from_settings)
+  exp=$(expected_vlans_from_settings) || return 1
   if [ -z "$exp" ]; then
     info -c vlan "VLAN check OK: no VLANs configured in settings"
     return 0
@@ -921,7 +921,7 @@ check_vlan_config_fast() {
 
   check_wan_native_health || return 1
 
-  exp=$(expected_vlans_from_settings)
+  exp=$(expected_vlans_from_settings) || return 1
   if [ -z "$exp" ]; then
     return 0
   fi

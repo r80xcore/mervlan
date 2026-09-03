@@ -68,6 +68,7 @@ MB_PRESERVE_JFFS=0
 MB_RESTORE_ORIGINAL=""
 MB_RESTORE_ORIGINAL_BOOT=0
 MB_POOL_ABORT_FAILED=0
+MB_RECOVERY_REQUIRED=0
 mb_pool_state_unresolved() {
   if type mnj_pool_state_unresolved >/dev/null 2>&1; then
     mnj_pool_state_unresolved
@@ -138,7 +139,20 @@ mb_cleanup() {
   _mb_cleanup_rc=$?
   _mb_cleanup_failed=0
   _mb_pool_cleanup_ready=1
-  if ! mb_abort_node_pool; then
+  # A signal-path abort failure means rollback was intentionally skipped.
+  # EXIT cleanup must preserve that decision rather than retrying into a
+  # releasable owner state after the interrupted transaction was left active.
+  if [ "$MB_POOL_ABORT_FAILED" = "1" ]; then
+    _mb_pool_cleanup_ready=0
+    _mb_cleanup_failed=1
+    MB_PRESERVE_WORK=1
+    MB_PRESERVE_JFFS=1
+  elif [ "$MB_RECOVERY_REQUIRED" = "1" ]; then
+    _mb_pool_cleanup_ready=0
+    _mb_cleanup_failed=1
+    MB_PRESERVE_WORK=1
+    MB_PRESERVE_JFFS=1
+  elif ! mb_abort_node_pool; then
     _mb_pool_cleanup_ready=0
     _mb_cleanup_failed=1
     MB_PRESERVE_WORK=1
@@ -167,7 +181,11 @@ mb_cleanup() {
       *) if type log_maintain_all >/dev/null 2>&1; then log_maintain_all || _mb_cleanup_failed=1; fi ;;
     esac
   else
-    error -c cli,vlan "Maintenance cleanup preserved recovery data and owner lock because active node workers remain unresolved"
+    if [ "$MB_RECOVERY_REQUIRED" = "1" ]; then
+      error -c cli,vlan "Maintenance cleanup preserved recovery data and owner lock because rollback recovery remains incomplete"
+    else
+      error -c cli,vlan "Maintenance cleanup preserved recovery data and owner lock because active node workers remain unresolved"
+    fi
   fi
   [ "$_mb_cleanup_failed" -eq 0 ] || _mb_cleanup_rc=1
   return "$_mb_cleanup_rc"
@@ -188,16 +206,38 @@ mb_handle_signal() {
   if [ "$_mb_signal_pool_ready" = "1" ] && [ "$MB_ACTIVATION_STARTED" = "1" ] && [ "$MB_ROLLBACK_DONE" != "1" ] && \
      [ -n "$MB_RESTORE_ORIGINAL" ] && [ -d "$MB_RESTORE_ORIGINAL" ]; then
     if ! mb_rollback_restore "$MB_RESTORE_ORIGINAL" "$MB_RESTORE_ORIGINAL_BOOT"; then
+      MB_RECOVERY_REQUIRED=1
       MB_PRESERVE_WORK=1
-      error -c cli,vlan "Automatic rollback failed; temporary recovery data remains at $MB_WORK_ROOT"
+      MB_PRESERVE_JFFS=1
+      _mb_signal_rollback_failed=1
+      error -c cli,vlan "Automatic rollback failed; recovery data and the owner lock remain preserved"
     fi
   fi
-  if [ "$_mb_signal_pool_ready" = "1" ]; then
+  if [ "$_mb_signal_pool_ready" = "1" ] && [ "${_mb_signal_rollback_failed:-0}" = "1" ]; then
+    mb_write_result interrupted signal "Operation interrupted. Automatic rollback failed; recovery data and the owner lock were preserved."
+  elif [ "$_mb_signal_pool_ready" = "1" ]; then
     mb_write_result interrupted signal "Operation interrupted. Automatic rollback was attempted when required."
   else
     mb_write_result interrupted signal "Operation interrupted. Active node workers could not be reconciled; recovery data and the owner lock were preserved."
   fi
   exit "$_mb_signal_status"
+}
+
+mb_rollback_after_activation() {
+  _mb_rollback_phase="$1"
+  _mb_rollback_success="$2"
+  _mb_rollback_failure="$3"
+  _mb_rollback_old="$4"
+  _mb_rollback_boot="$5"
+  if mb_rollback_restore "$_mb_rollback_old" "$_mb_rollback_boot"; then
+    mb_fail "$_mb_rollback_phase" "$_mb_rollback_success"
+  else
+    MB_RECOVERY_REQUIRED=1
+    MB_PRESERVE_WORK=1
+    MB_PRESERVE_JFFS=1
+    mb_fail "$_mb_rollback_phase" "$_mb_rollback_failure"
+  fi
+  return 1
 }
 
 trap mb_cleanup EXIT
@@ -1508,8 +1548,10 @@ mb_restore() {
     return 1
   fi
   if ! mv "$MB_JFFS_STAGE" "$MERV_BASE" 2>/dev/null; then
-    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
-    mb_fail activating "Could not activate the restored installation; rollback was attempted."
+    mb_rollback_after_activation activating \
+      "Could not activate the restored installation; the original installation was restored." \
+      "Could not activate the restored installation; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
     return 1
   fi
   mb_test_pause target_active
@@ -1533,8 +1575,10 @@ mb_restore() {
   fi
   mb_write_result running refreshing_public "Refreshing the public MerVLAN installation."
   if ! mb_refresh_public_tree "$MERV_BASE"; then
-    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
-    mb_fail refreshing_public "Restore could not refresh the public installation; the original installation was restored."
+    mb_rollback_after_activation refreshing_public \
+      "Restore could not refresh the public installation; the original installation was restored." \
+      "Restore could not refresh the public installation; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
     return 1
   fi
   mkdir -p "$MERV_BASE/tmp" 2>/dev/null || _mb_partial=1
@@ -1554,8 +1598,10 @@ mb_restore() {
   fi
   mb_write_result running hooks "Re-applying restored hooks and boot state."
   if ! mb_apply_boot_state "$MERV_BASE" "$_mb_target_boot" 1; then
-    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
-    mb_fail hooks "Restore could not reapply required hooks; the original installation was restored."
+    mb_rollback_after_activation hooks \
+      "Restore could not reapply required hooks; the original installation was restored." \
+      "Restore could not reapply required hooks; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
     return 1
   fi
   if [ "$MB_TEST_MODE" != "1" ] && [ -x "$MERV_BASE/functions/hw_probe.sh" ]; then
@@ -1563,8 +1609,10 @@ mb_restore() {
   fi
   _mb_restored_nodes=""
   if ! _mb_restored_nodes=$(mb_list_configured_nodes 2>/dev/null); then
-    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
-    mb_fail reconciliation "Restore could not read the restored configured-node set; the original installation was restored."
+    mb_rollback_after_activation reconciliation \
+      "Restore could not read the restored configured-node set; the original installation was restored." \
+      "Restore could not read the restored configured-node set; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
     return 1
   fi
   if [ "$MB_TEST_MODE" != "1" ] && [ -n "$_mb_restored_nodes" ]; then
@@ -1585,8 +1633,10 @@ mb_restore() {
   fi
   mb_write_result running verifying_runtime "Verifying restored hooks and boot state."
   if ! mb_verify_restored_runtime "$_mb_restored_nodes" "$_mb_target_boot"; then
-    mb_rollback_restore "$_mb_old" "$_mb_current_boot"
-    mb_fail reconciliation "Restore could not verify the required runtime state; the original installation was restored."
+    mb_rollback_after_activation reconciliation \
+      "Restore could not verify the required runtime state; the original installation was restored." \
+      "Restore could not verify the required runtime state; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
     return 1
   fi
   [ "${MB_VERIFY_PARTIAL:-0}" = "0" ] || _mb_partial=1

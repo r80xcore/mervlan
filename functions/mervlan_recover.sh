@@ -27,6 +27,7 @@ RECOVERY_OWNER_TMP_SEQ="${RECOVERY_OWNER_TMP_SEQ:-0}"
 RECOVERY_PRESERVE_JFFS=0
 RECOVERY_REPLACED=0
 RECOVERY_ROLLING_BACK=0
+RECOVERY_RECOVERY_REQUIRED=0
 
 recovery_log() { printf '[MerVLAN recovery] %s\n' "$*"; }
 recovery_error() { printf '[MerVLAN recovery] ERROR: %s\n' "$*" >&2; }
@@ -288,13 +289,17 @@ recovery_path_safe() {
 recovery_cleanup() {
   recovery_cleanup_rc=$?
   recovery_cleanup_failed=0
-  if recovery_path_safe "$RECOVERY_WORK" && [ -d "$RECOVERY_WORK" ]; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" = "1" ]; then
+    RECOVERY_PRESERVE_JFFS=1
+    recovery_cleanup_failed=1
+    recovery_error "Recovery cleanup preserved work, recovery trees, and owner lock because rollback recovery remains incomplete"
+  elif recovery_path_safe "$RECOVERY_WORK" && [ -d "$RECOVERY_WORK" ]; then
     if ! rm -rf "$RECOVERY_WORK" 2>/dev/null; then
       recovery_error "Could not remove recovery workspace $RECOVERY_WORK"
       recovery_cleanup_failed=1
     fi
   fi
-  if [ "$RECOVERY_PRESERVE_JFFS" != "1" ]; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" != "1" ] && [ "$RECOVERY_PRESERVE_JFFS" != "1" ]; then
     case "$RECOVERY_JFFS_STAGE" in
       "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.new.*)
         if ! rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
@@ -304,7 +309,7 @@ recovery_cleanup() {
         ;;
     esac
   fi
-  if [ "$RECOVERY_PRESERVE_JFFS" != "1" ] && [ "$RECOVERY_REPLACED" = "0" ]; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" != "1" ] && [ "$RECOVERY_PRESERVE_JFFS" != "1" ] && [ "$RECOVERY_REPLACED" = "0" ]; then
     case "$RECOVERY_JFFS_OLD" in
       "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*)
         if ! rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null; then
@@ -314,12 +319,17 @@ recovery_cleanup() {
         ;;
     esac
   fi
-  if ! recovery_release_lock; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" != "1" ] && ! recovery_release_lock; then
     recovery_error "Recovery cleanup could not release its owner lock"
     recovery_cleanup_failed=1
   fi
   [ "$recovery_cleanup_failed" -eq 0 ] || recovery_cleanup_rc=1
   return "$recovery_cleanup_rc"
+}
+
+recovery_mark_rollback_required() {
+  RECOVERY_RECOVERY_REQUIRED=1
+  RECOVERY_PRESERVE_JFFS=1
 }
 
 recovery_reconcile_stale_stages() {
@@ -483,23 +493,23 @@ recovery_rollback() {
   [ "$RECOVERY_ROLLING_BACK" = "0" ] || return 1
   RECOVERY_ROLLING_BACK=1
   recovery_error "Recovery activation failed; restoring the installation saved in RAM."
-  case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') return 1 ;; esac
-  rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || return 1
+  case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') recovery_mark_rollback_required; return 1 ;; esac
+  rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || { recovery_mark_rollback_required; return 1; }
   if [ -d "$MERVLAN_RECOVERY_ACTIVE_ROOT" ] && ! mv "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
-    RECOVERY_PRESERVE_JFFS=1
+    recovery_mark_rollback_required
     return 1
   fi
   if [ -d "$RECOVERY_JFFS_OLD" ]; then
-    mv "$RECOVERY_JFFS_OLD" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || return 1
+    mv "$RECOVERY_JFFS_OLD" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || { recovery_mark_rollback_required; return 1; }
   else
-    recovery_copy_tree "$RECOVERY_ORIGINAL" "$MERVLAN_RECOVERY_ACTIVE_ROOT" || return 1
+    recovery_copy_tree "$RECOVERY_ORIGINAL" "$MERVLAN_RECOVERY_ACTIVE_ROOT" || { recovery_mark_rollback_required; return 1; }
   fi
   if ! rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
-    RECOVERY_PRESERVE_JFFS=1
+    recovery_mark_rollback_required
     return 1
   fi
   if ! recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT")"; then
-    RECOVERY_PRESERVE_JFFS=1
+    recovery_mark_rollback_required
     return 1
   fi
   RECOVERY_REPLACED=0
@@ -509,8 +519,8 @@ recovery_rollback() {
 recovery_on_signal() {
   recovery_signal="$1"
   trap - INT TERM
-  if ! recovery_rollback; then
-    RECOVERY_PRESERVE_JFFS=1
+  if [ "$RECOVERY_REPLACED" = "1" ] && ! recovery_rollback; then
+    recovery_mark_rollback_required
     recovery_error "Interrupted recovery rollback failed; recovery trees were preserved."
   fi
   recovery_cleanup

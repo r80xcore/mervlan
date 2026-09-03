@@ -31,6 +31,14 @@ Improved: VLAN safety, node policy, and offline Update
 - Update can safely install a local archive after validating its path,
   structure, and link entries before extraction.
 
+Fixed: Fail-closed health and maintenance recovery
+- Heal no longer treats an unresolved expected VLAN configuration as a valid
+  empty configuration.
+- Backup/Restore, Update, and standalone Recovery retain their owner locks and
+  recovery artifacts when worker reconciliation or an activated rollback fails.
+  Update also retains its journal and maintenance-quiesce marker until the
+  failed transaction is fully recovered, including when fallback hooks succeed.
+
 Fixed: Installer, hook ownership, and upgrade-lock recovery
 - Owner-aware locks now distinguish an actually absent path from a legacy or
   malformed non-directory obstruction, preventing the service-hook lock path

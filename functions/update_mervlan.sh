@@ -164,6 +164,7 @@ UPDATE_RUNTIME_RESTORED="0"
 UPDATE_JFFS_STAGE=""
 UPDATE_JFFS_OLD=""
 UPDATE_POOL_ABORT_FAILED="0"
+UPDATE_RECOVERY_REQUIRED="0"
 UPDATE_RUN_ID="update-$(date +%s 2>/dev/null || echo 0)-$$"
 UPDATE_QUIESCE_ACTIVE="0"
 UPDATE_JFFS_RESERVE_KB="${MERV_UPDATE_JFFS_RESERVE_KB:-5120}"
@@ -335,6 +336,12 @@ restore_update_original_tree() {
 # ========================================================================== #
 # CENTRAL FAILURE / ROLLBACK HANDLER                                         #
 # ========================================================================== #
+update_mark_recovery_required() {
+	UPDATE_RECOVERY_REQUIRED="1"
+	UPDATE_PRESERVE_TMP="1"
+	UPDATE_PRESERVE_JFFS="1"
+}
+
 fail_update() {
 	block="$1"
 	shift
@@ -353,6 +360,8 @@ fail_update() {
 		info -c cli,vlan "Restoring the pre-update MerVLAN installation"
 		if restore_update_original_tree; then
 			restored_tree="1"
+		else
+			update_mark_recovery_required
 		fi
 	fi
 
@@ -424,7 +433,8 @@ fail_update() {
 		UPDATE_PRESERVE_TMP="1"
 		error -c cli,vlan "Rollback could not remove the temporary user-data backup at $BACKUP_DIR"
 	fi
-	if [ "$restored_tree" = "1" ] || [ "$TEARDOWN_DONE" != "1" ] || [ "$UPDATE_RUNTIME_RESTORED" = "1" ]; then
+	if [ "$UPDATE_RECOVERY_REQUIRED" != "1" ] && \
+	   { [ "$restored_tree" = "1" ] || [ "$TEARDOWN_DONE" != "1" ] || [ "$UPDATE_RUNTIME_RESTORED" = "1" ]; }; then
 		if merv_update_quiesce_clear; then
 			UPDATE_QUIESCE_ACTIVE="0"
 			# A recovered failure must not depend on another JFFS write. When the
@@ -1154,7 +1164,20 @@ cleanup_tmp() {
 	_update_cleanup_rc=$?
 	_update_cleanup_failed=0
 	_update_pool_cleanup_ready="1"
-	if ! update_abort_node_pool; then
+	# A signal-path abort failure means rollback was intentionally skipped.
+	# EXIT cleanup must preserve that decision rather than retrying into a
+	# releasable maintenance state after the interrupted update was left active.
+	if [ "$UPDATE_POOL_ABORT_FAILED" = "1" ]; then
+		_update_pool_cleanup_ready="0"
+		_update_cleanup_failed=1
+		UPDATE_PRESERVE_TMP="1"
+		UPDATE_PRESERVE_JFFS="1"
+	elif [ "$UPDATE_RECOVERY_REQUIRED" = "1" ]; then
+		_update_pool_cleanup_ready="0"
+		_update_cleanup_failed=1
+		UPDATE_PRESERVE_TMP="1"
+		UPDATE_PRESERVE_JFFS="1"
+	elif ! update_abort_node_pool; then
 		_update_pool_cleanup_ready="0"
 		_update_cleanup_failed=1
 		UPDATE_PRESERVE_TMP="1"
@@ -1183,7 +1206,11 @@ cleanup_tmp() {
 			fi
 		fi
 	else
-		error -c cli,vlan "Update cleanup preserved recovery data and maintenance owner lock because active node workers remain unresolved"
+		if [ "$UPDATE_RECOVERY_REQUIRED" = "1" ]; then
+			error -c cli,vlan "Update cleanup preserved recovery data and maintenance owner lock because rollback recovery remains incomplete"
+		else
+			error -c cli,vlan "Update cleanup preserved recovery data and maintenance owner lock because active node workers remain unresolved"
+		fi
 	fi
 	[ "$_update_cleanup_failed" -eq 0 ] || _update_cleanup_rc=1
 	return "$_update_cleanup_rc"
@@ -1205,8 +1232,8 @@ handle_update_signal() {
 		if restore_update_original_tree; then
 			error -c cli,vlan "Interrupted update rolled back to the original main-router installation"
 		else
-			UPDATE_PRESERVE_TMP="1"
-			error -c cli,vlan "Interrupted update rollback failed; temporary recovery data remains at $TMP_BASE"
+			update_mark_recovery_required
+			error -c cli,vlan "Interrupted update rollback failed; recovery data and the maintenance owner lock remain preserved"
 		fi
 	fi
 	exit "$_update_signal_status"
