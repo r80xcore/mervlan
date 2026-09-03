@@ -1473,7 +1473,7 @@ install_tree_valid() {
     [ -d "$_itv_root" ] || return 1
     for _itv_required in \
         install.sh uninstall.sh mervlan.asp www/index.html \
-        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
         settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
         functions/ssh_trust_action.sh
     do
@@ -2246,7 +2246,7 @@ download_mervlan() {
         echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
             functions/mervlan_boot.sh functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
-            settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
@@ -2936,7 +2936,7 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh functions/settings_reconcile.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh functions/settings_reconcile.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do

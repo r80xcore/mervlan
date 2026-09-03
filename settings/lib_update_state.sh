@@ -113,19 +113,56 @@ merv_update_journal_get() {
 }
 
 merv_update_journal_active() {
-  [ -f "$MERV_UPDATE_JOURNAL" ] || return 1
-  [ "$(merv_update_journal_get format 0)" = "1" ] || return 1
-  case "$(merv_update_journal_get phase unknown)" in
-    completed) return 1 ;;
-    *) return 0 ;;
-  esac
+  merv_update_journal_state
+  [ "${MERV_UPDATE_JOURNAL_STATE:-absent}" = active ]
 }
 
 merv_update_journal_requires_safe_boot() {
-  merv_update_quiesce_active && return 0
-  merv_update_journal_active || return 1
-  [ "$(merv_update_journal_get quiesced 0)" = "1" ] ||
-    [ "$(merv_update_journal_get activation_started 0)" = "1" ]
+  merv_update_quiesce_state
+  case "${MERV_UPDATE_QUIESCE_STATE:-absent}" in active|malformed) return 0 ;; esac
+  merv_update_journal_state
+  case "${MERV_UPDATE_JOURNAL_STATE:-absent}" in
+    malformed) return 0 ;;
+    active)
+      [ "${MERV_UPDATE_JOURNAL_QUIESCED:-0}" = "1" ] ||
+        [ "${MERV_UPDATE_JOURNAL_ACTIVATION:-0}" = "1" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# A completed journal is harmless when its quiesce marker is absent. Every
+# other existing journal must be strictly parseable before it can be classified
+# as pre-activation and therefore safe to leave behind after a dead owner.
+merv_update_journal_state() {
+  MERV_UPDATE_JOURNAL_STATE=absent
+  MERV_UPDATE_JOURNAL_QUIESCED=0
+  MERV_UPDATE_JOURNAL_ACTIVATION=0
+  [ -e "$MERV_UPDATE_JOURNAL" ] || return 1
+  [ -f "$MERV_UPDATE_JOURNAL" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
+  _mujs_lines=$(wc -l < "$MERV_UPDATE_JOURNAL" 2>/dev/null | tr -d '[:space:]')
+  [ "$_mujs_lines" = "19" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
+  _mujs_seen=""
+  _mujs_format="" _mujs_phase="" _mujs_quiesced="" _mujs_activation=""
+  for _mujs_key in format run_id phase ref boot_enabled backup_ready quiesced activation_started nodes_touched detail tmp_base archive_path stage_path original_path jffs_stage_path jffs_old_path old_version new_version updated_epoch; do
+    _mujs_count=$(grep -c "^${_mujs_key}=" "$MERV_UPDATE_JOURNAL" 2>/dev/null)
+    [ "$_mujs_count" = "1" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
+    _mujs_value=$(sed -n "s/^${_mujs_key}=//p" "$MERV_UPDATE_JOURNAL" 2>/dev/null)
+    merv_update_state_value "$_mujs_value" >/dev/null || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
+    case "$_mujs_key" in
+      format) _mujs_format=$_mujs_value ;;
+      phase) _mujs_phase=$_mujs_value ;;
+      quiesced) _mujs_quiesced=$_mujs_value ;;
+      activation_started) _mujs_activation=$_mujs_value ;;
+    esac
+  done
+  [ "$_mujs_format" = "1" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
+  case "$_mujs_phase" in completed|workspace|quiescing|quiesced|preflight|downloading|extracting|staged|durable-backup|backup|activation-started|activated|public-refresh|main-verified|failed-*) ;; *) MERV_UPDATE_JOURNAL_STATE=malformed; return 2 ;; esac
+  case "$_mujs_quiesced:$_mujs_activation" in 0:0|0:1|1:0|1:1) ;; *) MERV_UPDATE_JOURNAL_STATE=malformed; return 2 ;; esac
+  MERV_UPDATE_JOURNAL_QUIESCED=$_mujs_quiesced
+  MERV_UPDATE_JOURNAL_ACTIVATION=$_mujs_activation
+  case "$_mujs_phase" in completed) MERV_UPDATE_JOURNAL_STATE=completed ;; *) MERV_UPDATE_JOURNAL_STATE=active ;; esac
+  return 0
 }
 
 merv_update_maintenance_lock_path() {
@@ -372,9 +409,29 @@ merv_update_quiesce_begin() {
 }
 
 merv_update_quiesce_active() {
-  [ -f "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
-  [ "$(sed -n 's/^format=//p' "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | head -n 1)" = "1" ] || return 1
-  [ -n "$(sed -n 's/^run_id=//p' "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | head -n 1)" ]
+  merv_update_quiesce_state
+  [ "${MERV_UPDATE_QUIESCE_STATE:-absent}" = active ]
+}
+
+merv_update_quiesce_state() {
+  MERV_UPDATE_QUIESCE_STATE=absent
+  [ -e "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
+  [ -f "$MERV_UPDATE_QUIESCE_FILE" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
+  _muqs_lines=$(wc -l < "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | tr -d '[:space:]')
+  [ "$_muqs_lines" = "3" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
+  for _muqs_key in format run_id created_epoch; do
+    _muqs_count=$(grep -c "^${_muqs_key}=" "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null)
+    [ "$_muqs_count" = "1" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
+    _muqs_value=$(sed -n "s/^${_muqs_key}=//p" "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null)
+    merv_update_state_value "$_muqs_value" >/dev/null || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
+    case "$_muqs_key" in
+      format) [ "$_muqs_value" = "1" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; } ;;
+      run_id) [ -n "$_muqs_value" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; } ;;
+      created_epoch) case "$_muqs_value" in ''|*[!0-9]*) MERV_UPDATE_QUIESCE_STATE=malformed; return 2 ;; esac ;;
+    esac
+  done
+  MERV_UPDATE_QUIESCE_STATE=active
+  return 0
 }
 
 merv_update_quiesce_clear() {

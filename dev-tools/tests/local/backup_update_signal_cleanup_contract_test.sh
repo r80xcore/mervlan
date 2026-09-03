@@ -48,6 +48,8 @@ extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_pool_state_unresolve
   "$TEST_ROOT/extracted/mb_state.sh" || fail 'backup state extraction'
 extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_abort_node_pool \
   "$TEST_ROOT/extracted/mb_abort.sh" || fail 'backup abort extraction'
+extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_mark_recovery_required \
+  "$TEST_ROOT/extracted/mb_recovery.sh" || fail 'backup recovery-state extraction'
 extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_cleanup \
   "$TEST_ROOT/extracted/mb_cleanup.sh" || fail 'backup cleanup extraction'
 extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_handle_signal \
@@ -58,6 +60,8 @@ extract_function "$BASE_DIR/functions/update_mervlan.sh" update_pool_state_unres
   "$TEST_ROOT/extracted/update_state.sh" || fail 'update state extraction'
 extract_function "$BASE_DIR/functions/update_mervlan.sh" update_abort_node_pool \
   "$TEST_ROOT/extracted/update_abort.sh" || fail 'update abort extraction'
+extract_function "$BASE_DIR/functions/update_mervlan.sh" update_activation_started \
+  "$TEST_ROOT/extracted/update_activation.sh" || fail 'update activation-state extraction'
 extract_function "$BASE_DIR/functions/update_mervlan.sh" update_mark_recovery_required \
   "$TEST_ROOT/extracted/update_recovery.sh" || fail 'update recovery extraction'
 extract_function "$BASE_DIR/functions/update_mervlan.sh" cleanup_tmp \
@@ -132,8 +136,13 @@ mb_rollback_restore() {
   printf 'rollback-call=backup\n' >> "$TRACE"
   [ "${ROLLBACK_RESULT:-success}" = success ]
 }
+mb_clear_durable_recovery() { return 0; }
 restore_update_original_tree() {
   printf 'rollback-call=update\n' >> "$TRACE"
+  if [ "$CASE_MODE" = signal-rename-window ]; then
+    mv "$UPDATE_JFFS_OLD" "$MERV_BASE" || return 1
+    rm -rf "$UPDATE_JFFS_STAGE" || return 1
+  fi
   [ "${ROLLBACK_RESULT:-success}" = success ]
 }
 mb_write_result() { printf 'result-write=%s\n' "${1:-}" >> "$TRACE"; return 0; }
@@ -156,11 +165,13 @@ case "$CASE_KIND" in
   backup)
     . "$EXTRACT_ROOT/mb_state.sh" || exit 2
     . "$EXTRACT_ROOT/mb_abort.sh" || exit 2
+    . "$EXTRACT_ROOT/mb_recovery.sh" || exit 2
     . "$EXTRACT_ROOT/mb_cleanup.sh" || exit 2
     . "$EXTRACT_ROOT/mb_signal.sh" || exit 2
     . "$EXTRACT_ROOT/mb_rollback_after_activation.sh" || exit 2
     MB_POOL_ABORT_FAILED=0
     MB_RECOVERY_REQUIRED=0
+    MB_DURABLE_RECOVERY_OWNED=0
     MB_SIGNAL_HANDLING=0
     MB_LOCK_OWNED=1
     MB_LOCK="$CASE_ROOT/maintenance.lock"
@@ -183,6 +194,7 @@ case "$CASE_KIND" in
   update)
     . "$EXTRACT_ROOT/update_state.sh" || exit 2
     . "$EXTRACT_ROOT/update_abort.sh" || exit 2
+    . "$EXTRACT_ROOT/update_activation.sh" || exit 2
     . "$EXTRACT_ROOT/update_recovery.sh" || exit 2
     . "$EXTRACT_ROOT/update_cleanup.sh" || exit 2
     . "$EXTRACT_ROOT/update_signal.sh" || exit 2
@@ -196,8 +208,10 @@ case "$CASE_KIND" in
     UPDATE_PRESERVE_TMP=0
     UPDATE_PRESERVE_JFFS=0
     UPDATE_ACTIVATION_STARTED=0
-    UPDATE_JFFS_STAGE="$CASE_ROOT/stage"
-    UPDATE_JFFS_OLD="$CASE_ROOT/old"
+    MERVLAN_BACKUP_DIR="$CASE_ROOT"
+    UPDATE_JFFS_STAGE="$CASE_ROOT/.mervlan.new.1"
+    UPDATE_JFFS_OLD="$CASE_ROOT/.mervlan.old.1"
+    MERV_BASE="$CASE_ROOT/active"
     UPDATE_ORIGINAL_DIR="$CASE_ROOT/original"
     UPDATE_QUIESCE_ACTIVE=1
     MERV_UPDATE_JOURNAL="$CASE_ROOT/update.journal"
@@ -214,7 +228,7 @@ case "$CASE_KIND" in
 esac
 
 case "$CASE_MODE" in
-  normal-success|normal-failure|signal-before-activation|signal-success|signal-critical-failure|signal-rollback-failure)
+  normal-success|normal-failure|signal-before-activation|signal-success|signal-critical-failure|signal-rollback-failure|signal-rename-window)
     POOL_UNRESOLVED=1
     MNJ_POOL_ACTIVE=1
     ;;
@@ -238,6 +252,10 @@ else
     UPDATE_ACTIVATION_STARTED=1
     [ "$CASE_MODE" != signal-rollback-failure ] || ROLLBACK_RESULT=fail
   fi
+fi
+
+if [ "$CASE_KIND" = update ] && [ "$CASE_MODE" = signal-before-activation ]; then
+  rm -rf "$UPDATE_JFFS_OLD"
 fi
 
 cleanup_on_exit() {
@@ -296,7 +314,7 @@ case "$CASE_MODE" in
     fail_update post_activation 'forced post-activation failure'
     exit 2
     ;;
-  signal-before-activation|signal-success|signal-critical-failure|signal-rollback-failure)
+  signal-before-activation|signal-success|signal-critical-failure|signal-rollback-failure|signal-rename-window)
     trap '"$_signal" 143' TERM
     : > "$READY"
     while :; do sleep 1; done
@@ -350,6 +368,13 @@ run_case() {
   _rollback_count=$(grep -c '^rollback-call=' "$_rc_root/trace" 2>/dev/null || :)
   _rollback_count=${_rollback_count:-0}
   _work_marker="$_rc_root/work/marker"
+  if [ "$_rc_kind" = update ]; then
+    _stage_path="$_rc_root/.mervlan.new.1"
+    _old_path="$_rc_root/.mervlan.old.1"
+  else
+    _stage_path="$_rc_root/stage"
+    _old_path="$_rc_root/old"
+  fi
 
   case "$_rc_mode" in
     normal-clean)
@@ -394,8 +419,8 @@ run_case() {
         fail 'backup normal rollback failure falsely reported restoration'
       fi
       [ -e "$_work_marker" ] || fail 'backup normal rollback failure discarded work'
-      [ -d "$_rc_root/stage" ] || fail 'backup normal rollback failure discarded staged recovery tree'
-      [ -d "$_rc_root/old" ] || fail 'backup normal rollback failure discarded rollback source'
+      [ -d "$_stage_path" ] || fail 'backup normal rollback failure discarded staged recovery tree'
+      [ -d "$_old_path" ] || fail 'backup normal rollback failure discarded rollback source'
       ;;
     normal-update-rollback-success)
       [ "$_rc_kind" = update ] || fail "$_rc_kind unsupported update rollback success"
@@ -416,8 +441,8 @@ run_case() {
       [ "$_rollback_count" -eq 1 ] || fail "update normal-rollback-failure rollback=$_rollback_count"
       grep -q 'backup restore failed' "$_rc_root/trace" || fail 'update normal rollback failure result'
       [ -e "$_work_marker" ] || fail 'update normal rollback failure discarded temporary work'
-      [ -d "$_rc_root/stage" ] || fail 'update normal rollback failure discarded staged recovery tree'
-      [ -d "$_rc_root/old" ] || fail 'update normal rollback failure discarded rollback source'
+      [ -d "$_stage_path" ] || fail 'update normal rollback failure discarded staged recovery tree'
+      [ -d "$_old_path" ] || fail 'update normal rollback failure discarded rollback source'
       [ -e "$_rc_root/update.journal" ] || fail 'update normal rollback failure cleared journal'
       [ -e "$_rc_root/update.quiesce" ] || fail 'update normal rollback failure cleared quiesce marker'
       ;;
@@ -434,7 +459,7 @@ run_case() {
       fi
       [ -e "$_rc_root/update.journal" ] || fail 'update rollback fallback cleared journal'
       [ -e "$_rc_root/update.quiesce" ] || fail 'update rollback fallback cleared quiesce marker'
-      [ -d "$_rc_root/old" ] || fail 'update rollback fallback discarded rollback source'
+      [ -d "$_old_path" ] || fail 'update rollback fallback discarded rollback source'
       ;;
     signal-before-activation)
       [ "$_rc" -eq 143 ] || fail "$_rc_kind signal-before-activation rc=$_rc"
@@ -469,8 +494,8 @@ run_case() {
       fi
       [ -e "$_work_marker" ] || fail "$_rc_kind discarded recovery work"
       [ "$_rollback_count" -eq 0 ] || fail "$_rc_kind rolled back after unresolved workers"
-      [ -d "$_rc_root/stage" ] || fail "$_rc_kind discarded staged recovery tree"
-      [ -d "$_rc_root/old" ] || fail "$_rc_kind discarded rollback source"
+      [ -d "$_stage_path" ] || fail "$_rc_kind discarded staged recovery tree"
+      [ -d "$_old_path" ] || fail "$_rc_kind discarded rollback source"
       if [ "$_rc_kind" = backup ]; then
         grep -q '^result-write=interrupted$' "$_rc_root/trace" || fail "$_rc_kind result"
       else
@@ -488,14 +513,23 @@ run_case() {
         fail "$_rc_kind released lock after failed rollback"
       fi
       [ -e "$_work_marker" ] || fail "$_rc_kind discarded temporary recovery work after failed rollback"
-      [ -d "$_rc_root/stage" ] || fail "$_rc_kind discarded staged recovery tree after failed rollback"
-      [ -d "$_rc_root/old" ] || fail "$_rc_kind discarded rollback source after failed rollback"
+      [ -d "$_stage_path" ] || fail "$_rc_kind discarded staged recovery tree after failed rollback"
+      [ -d "$_old_path" ] || fail "$_rc_kind discarded rollback source after failed rollback"
       if [ "$_rc_kind" = backup ]; then
         grep -q '^result-write=interrupted$' "$_rc_root/trace" || fail "$_rc_kind failed rollback result"
       else
         [ -e "$_rc_root/update.journal" ] || fail 'update cleared recovery journal after failed rollback'
         [ -e "$_rc_root/update.quiesce" ] || fail 'update cleared quiesce marker after failed rollback'
       fi
+      ;;
+    signal-rename-window)
+      [ "$_rc_kind" = update ] || fail "$_rc_kind unsupported rename window"
+      [ "$_rc" -eq 143 ] || fail "update signal rename-window rc=$_rc"
+      [ "$_release_count" -eq 1 ] || fail "update signal rename-window release=$_release_count"
+      [ "$_rollback_count" -eq 1 ] || fail "update signal rename-window rollback=$_rollback_count"
+      [ -d "$_rc_root/active" ] || fail 'update signal rename-window did not restore active tree'
+      [ ! -e "$_stage_path" ] || fail 'update signal rename-window retained activation stage'
+      [ ! -e "$_old_path" ] || fail 'update signal rename-window retained rollback tree'
       ;;
   esac
   pass "$_rc_kind $_rc_mode"
@@ -517,6 +551,7 @@ for _kind in ${C2_ONLY:-backup update}; do
   run_case "$_kind" signal-success
   run_case "$_kind" signal-rollback-failure
   run_case "$_kind" signal-critical-failure
+  [ "$_kind" != update ] || run_case "$_kind" signal-rename-window
 done
 
 printf 'BACKUP_UPDATE_SIGNAL_CLEANUP_CONTRACT_OK\n'

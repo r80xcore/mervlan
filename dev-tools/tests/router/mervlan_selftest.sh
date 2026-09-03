@@ -3733,10 +3733,15 @@ test_payload_contract() {
      grep -Fq 'settings/lib_owner_lock.sh' "$SELFTEST_SCRIPT" &&
      grep -A25 'FILES_TO_COPY_CHMOD_644=' "$_tpc_sync" | grep -Fq 'settings/lib_owner_lock.sh' &&
      sed -n '/^CORE_STAGE_FILES="/,/^OPTIONAL_STAGE_FILES="/p' "$_tpc_update" | grep -Fq 'settings/lib_owner_lock.sh' &&
+     grep -Fq 'settings/lib_maintenance_recovery.sh' "$_tpc_sync" &&
+     grep -Fq 'settings/lib_maintenance_recovery.sh' "$_tpc_update" &&
+     grep -Fq 'settings/lib_maintenance_recovery.sh' "$_tpc_install" &&
+     grep -A25 'FILES_TO_COPY_CHMOD_644=' "$_tpc_sync" | grep -Fq 'settings/lib_maintenance_recovery.sh' &&
+     sed -n '/^CORE_STAGE_FILES="/,/^OPTIONAL_STAGE_FILES="/p' "$_tpc_update" | grep -Fq 'settings/lib_maintenance_recovery.sh' &&
      sed -n '/^update_stage_core_valid() {/,/^}/p' "$_tpc_update" | grep -Fq 'for _update_stage_required in $CORE_STAGE_FILES'; then
-    pass "Full runtime manifests include lib_owner_lock.sh"
+    pass "Full runtime manifests include maintenance recovery libraries"
   else
-    fail "Full runtime manifests include lib_owner_lock.sh"
+    fail "Full runtime manifests include maintenance recovery libraries"
     _tpc_ok=0
   fi
   if grep -Fq 'FILES_TO_COPY="settings/settings.json"' "$_tpc_sync" &&
@@ -5350,6 +5355,8 @@ test_shell_syntax() {
   for _tss_file in \
     "$MERV_BASE/settings/lib_mervqt.sh" \
     "$MERV_BASE/settings/lib_owner_lock.sh" \
+    "$MERV_BASE/settings/lib_maintenance_recovery.sh" \
+    "$MERV_BASE/settings/lib_update_state.sh" \
     "$MERV_BASE/settings/lib_action_lock.sh" \
     "$MERV_BASE/settings/lib_node_jobs.sh" \
     "$MERV_BASE/settings/var_settings.sh" \
@@ -5361,6 +5368,9 @@ test_shell_syntax() {
     "$MERV_BASE/functions/mervlan_manager.sh" \
     "$MERV_BASE/functions/mervlan_wan.sh" \
     "$MERV_BASE/functions/heal_event.sh" \
+    "$MERV_BASE/functions/mervlan_backup.sh" \
+    "$MERV_BASE/functions/mervlan_recover.sh" \
+    "$MERV_BASE/functions/update_mervlan.sh" \
     "$MERV_BASE/functions/mervlan_boot.sh" \
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
     "$MERV_BASE/settings/mac_shield_snapshot.sh" \

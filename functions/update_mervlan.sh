@@ -606,6 +606,10 @@ update_stage_core_valid() {
 # CORE STAGE VALIDATOR END
 
 update_reconcile_stale_stages() {
+	if merv_update_journal_requires_safe_boot; then
+		warn -c cli,vlan "An incomplete or malformed Update recovery record protects staged trees; recovery is required before another Update"
+		return 1
+	fi
 	if ! update_tree_valid "$MERV_BASE"; then
 		warn -c cli,vlan "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees"
 		return 1
@@ -626,6 +630,17 @@ update_reconcile_stale_stages() {
 		fi
 	done
 	[ "$_update_stale_failed" -eq 0 ]
+}
+
+update_activation_started() {
+	[ "$UPDATE_ACTIVATION_STARTED" = "1" ] && return 0
+	case "$UPDATE_JFFS_OLD" in
+		"$MERVLAN_BACKUP_DIR"/.mervlan.old.*) [ -d "$UPDATE_JFFS_OLD" ] || return 1 ;;
+		*) return 1 ;;
+	esac
+	UPDATE_ACTIVATION_STARTED="1"
+	DESTRUCTIVE_TOUCHED="1"
+	return 0
 }
 
 update_path_size_kb() {
@@ -839,6 +854,7 @@ settings/lib_json.sh
 settings/lib_owner_lock.sh
 settings/lib_ssh.sh
 settings/lib_update_state.sh
+settings/lib_maintenance_recovery.sh
 settings/lib_node_reconcile.sh
 settings/lib_settings_reconcile.sh
 templates/mervlan_templates.sh
@@ -1228,7 +1244,7 @@ handle_update_signal() {
 		UPDATE_PRESERVE_TMP="1"
 		UPDATE_PRESERVE_JFFS="1"
 	fi
-	if [ "$_update_signal_pool_ready" = "1" ] && [ "$UPDATE_ACTIVATION_STARTED" = "1" ]; then
+	if [ "$_update_signal_pool_ready" = "1" ] && update_activation_started; then
 		if restore_update_original_tree; then
 			error -c cli,vlan "Interrupted update rolled back to the original main-router installation"
 		else
@@ -1410,6 +1426,11 @@ if merv_owner_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenanc
 	fi
 else
 	fail_update busy "Another MerVLAN update, backup, restore, or deletion is already running"
+fi
+
+if merv_update_journal_requires_safe_boot; then
+	error -c cli,vlan "An incomplete or malformed Update recovery record is active; use the recovery path before starting another Update"
+	exit 1
 fi
 
 # Read the external GUI ref only after the maintenance lock is owned.  The

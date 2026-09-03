@@ -26,7 +26,7 @@ extract_function() {
   [ -s "$_rrc_out" ]
 }
 
-for _rrc_fn in recovery_cleanup recovery_mark_rollback_required recovery_rollback recovery_on_signal; do
+for _rrc_fn in recovery_cleanup recovery_mark_durable_recovery_displaced recovery_mark_rollback_required recovery_rollback recovery_activation_started recovery_on_signal; do
   extract_function "$BASE_DIR/functions/mervlan_recover.sh" "$_rrc_fn" \
     "$TEST_ROOT/extracted/$_rrc_fn.sh" || fail "$_rrc_fn extraction"
 done
@@ -49,6 +49,8 @@ RECOVERY_PRESERVE_JFFS=0
 RECOVERY_REPLACED=0
 RECOVERY_ROLLING_BACK=0
 RECOVERY_RECOVERY_REQUIRED=0
+RECOVERY_DURABLE_RECOVERY_OWNED=0
+RECOVERY_EXISTING_DURABLE_RECOVERY=0
 RECOVERY_LOCK_OWNED=1
 
 recovery_error() { printf 'error=%s\n' "$*" >> "$TRACE"; }
@@ -60,11 +62,15 @@ recovery_release_lock() {
   return 0
 }
 recovery_copy_tree() { return 1; }
-recovery_reconcile() { return 1; }
+recovery_reconcile() {
+  [ "$CASE_MODE" = rename-window-success ]
+}
 recovery_boot_state() { printf '0\n'; }
+recovery_clear_durable_recovery() { return 0; }
 rm() {
   for _rrc_arg in "$@"; do
-    if [ "$CASE_MODE" = activated-rollback-failure ] && [ "$_rrc_arg" = "$RECOVERY_JFFS_STAGE" ]; then
+    if { [ "$CASE_MODE" = activated-rollback-failure ] || [ "$CASE_MODE" = rename-window-failure ] || [ "$CASE_MODE" = rename-window-durable-failure ]; } && \
+       [ "$_rrc_arg" = "$RECOVERY_JFFS_STAGE" ]; then
       printf 'stage-remove=fail\n' >> "$TRACE"
       return 1
     fi
@@ -72,7 +78,13 @@ rm() {
   command rm "$@"
 }
 
-for _rrc_fn in recovery_cleanup recovery_mark_rollback_required recovery_rollback recovery_on_signal; do
+if [ "$CASE_MODE" = rename-window-durable-failure ]; then
+  MERV_MAINTENANCE_RECOVERY_ROOT="$MERVLAN_RECOVERY_BACKUP_ROOT"
+  MERV_MAINTENANCE_RECOVERY_MARKER="$MERVLAN_RECOVERY_BACKUP_ROOT/.mervlan.recovery"
+  . "$STATE_HELPER" || exit 2
+fi
+
+for _rrc_fn in recovery_cleanup recovery_mark_durable_recovery_displaced recovery_mark_rollback_required recovery_rollback recovery_activation_started recovery_on_signal; do
   . "$EXTRACT_ROOT/$_rrc_fn.sh" || exit 2
 done
 
@@ -85,10 +97,21 @@ case "$CASE_MODE" in
     exit 0
     ;;
   signal-before-activation)
+    rm -rf "$RECOVERY_JFFS_OLD"
     recovery_on_signal 143
     ;;
   activated-rollback-failure)
     RECOVERY_REPLACED=1
+    recovery_on_signal 143
+    ;;
+  rename-window-success|rename-window-failure)
+    rm -rf "$MERVLAN_RECOVERY_ACTIVE_ROOT"
+    recovery_on_signal 143
+    ;;
+  rename-window-durable-failure)
+    merv_maintenance_recovery_write recovery prepared "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE" || exit 2
+    RECOVERY_DURABLE_RECOVERY_OWNED=1
+    rm -rf "$MERVLAN_RECOVERY_ACTIVE_ROOT"
     recovery_on_signal 143
     ;;
   *) exit 2 ;;
@@ -100,7 +123,7 @@ run_case() {
   _rrc_mode="$1"
   _rrc_root="$TEST_ROOT/$_rrc_mode"
   mkdir -p "$_rrc_root" || fail "$_rrc_mode fixture"
-  ( CASE_ROOT="$_rrc_root" CASE_MODE="$_rrc_mode" EXTRACT_ROOT="$TEST_ROOT/extracted" \
+  ( CASE_ROOT="$_rrc_root" CASE_MODE="$_rrc_mode" EXTRACT_ROOT="$TEST_ROOT/extracted" STATE_HELPER="$BASE_DIR/settings/lib_maintenance_recovery.sh" \
     sh "$TEST_ROOT/driver.sh" ) > "$_rrc_root/stdout" 2>&1
   _rrc_rc=$?
   [ "$_rrc_rc" -ne 2 ] || { cat "$_rrc_root/stdout" >&2; fail "$_rrc_mode setup"; }
@@ -127,6 +150,26 @@ run_case() {
       [ -d "$_rrc_root/backups/.mervlan.old.1" ] || fail 'failed rollback discarded rollback tree'
       grep -q 'rollback recovery remains incomplete' "$_rrc_root/trace" || fail 'failed rollback preservation result'
       ;;
+    rename-window-success)
+      [ "$_rrc_rc" -eq 143 ] || fail "rename-window success rc=$_rrc_rc"
+      [ "$_rrc_release" -eq 1 ] || fail "rename-window success release=$_rrc_release"
+      [ -d "$_rrc_root/active" ] || fail 'rename-window success did not restore active tree'
+      [ ! -e "$_rrc_root/backups/.mervlan.new.1" ] || fail 'rename-window success retained activation stage'
+      [ ! -e "$_rrc_root/backups/.mervlan.old.1" ] || fail 'rename-window success retained rollback tree'
+      ;;
+    rename-window-failure|rename-window-durable-failure)
+      [ "$_rrc_rc" -eq 143 ] || fail "rename-window failure rc=$_rrc_rc"
+      grep -q '^stage-remove=fail$' "$_rrc_root/trace" || fail 'rename-window failure did not attempt rollback'
+      [ "$_rrc_release" -eq 0 ] || fail 'rename-window failure released owner lock'
+      [ ! -e "$_rrc_root/active" ] || fail 'rename-window failure invented active tree'
+      [ -d "$_rrc_root/backups/.mervlan.new.1" ] || fail 'rename-window failure discarded activation stage'
+      [ -d "$_rrc_root/backups/.mervlan.old.1" ] || fail 'rename-window failure discarded rollback tree'
+      if [ "$_rrc_mode" = rename-window-durable-failure ]; then
+        grep -qx 'old=.mervlan.old.1' "$_rrc_root/backups/.mervlan.recovery" && \
+          grep -qx 'stage=.mervlan.new.1' "$_rrc_root/backups/.mervlan.recovery" ||
+          fail 'rename-window failure did not retain durable recovery binding'
+      fi
+      ;;
   esac
   pass "recovery $_rrc_mode"
 }
@@ -134,4 +177,7 @@ run_case() {
 run_case normal-clean
 run_case signal-before-activation
 run_case activated-rollback-failure
+run_case rename-window-success
+run_case rename-window-failure
+run_case rename-window-durable-failure
 printf 'RECOVERY_ROLLBACK_CLEANUP_CONTRACT_OK\n'

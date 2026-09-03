@@ -478,6 +478,7 @@ settings/lib_node_jobs.sh
 settings/lib_action_ack.sh
 settings/lib_radio.sh
 settings/lib_update_state.sh
+settings/lib_maintenance_recovery.sh
 settings/lib_node_reconcile.sh
 settings/lib_settings_reconcile.sh
 settings/lib_progress.sh
@@ -554,6 +555,7 @@ settings/lib_node_jobs.sh
 settings/lib_action_ack.sh
 settings/lib_radio.sh
 settings/lib_update_state.sh
+settings/lib_maintenance_recovery.sh
 settings/lib_node_reconcile.sh
 settings/lib_settings_reconcile.sh
 settings/lib_progress.sh

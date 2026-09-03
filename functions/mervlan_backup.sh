@@ -16,6 +16,10 @@
   error -c cli,vlan "Unable to load the owner-lock library; refusing maintenance operation"
   exit 1
 }
+[ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the Update lifecycle state library; refusing maintenance operation"
+  exit 1
+}
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the DHCP/L2 safety library; refusing maintenance operation"
   exit 1
@@ -42,6 +46,10 @@ readonly MB_UNDO_RESTORE_META="$MB_UNDO_ROOT/restore.meta"
 readonly MB_UNDO_UPDATE_MARKER="$MB_UNDO_ROOT/update.meta"
 readonly MB_RECOVERY_SOURCE="$MERV_BASE/functions/mervlan_recover.sh"
 readonly MB_RECOVERY_SCRIPT="$MB_BACKUP_ROOT/recover.sh"
+readonly MB_RECOVERY_STATE_SOURCE="$MERV_BASE/settings/lib_maintenance_recovery.sh"
+readonly MB_RECOVERY_STATE_SCRIPT="$MB_BACKUP_ROOT/recovery_state.sh"
+readonly MB_UPDATE_STATE_SOURCE="$MERV_BASE/settings/lib_update_state.sh"
+readonly MB_UPDATE_STATE_SCRIPT="$MB_BACKUP_ROOT/update_state.sh"
 readonly MB_JFFS_STAGE="$MB_BACKUP_ROOT/.mervlan.new.$$"
 readonly MB_JFFS_OLD="$MB_BACKUP_ROOT/.mervlan.old.$$"
 readonly MB_MANUAL_LIMIT=3
@@ -54,6 +62,13 @@ esac
 readonly MB_TEST_FAIL_PHASE="${MERVLAN_BACKUP_TEST_FAIL_PHASE:-}"
 readonly MB_TEST_PAUSE_PHASE="${MERVLAN_BACKUP_TEST_PAUSE_PHASE:-}"
 readonly MB_TEST_PAUSE_SECONDS="${MERVLAN_BACKUP_TEST_PAUSE_SECONDS:-5}"
+
+MERV_MAINTENANCE_RECOVERY_ROOT="$MB_BACKUP_ROOT"
+MERV_MAINTENANCE_RECOVERY_MARKER="$MB_BACKUP_ROOT/.mervlan.recovery"
+[ -n "${LIB_MAINTENANCE_RECOVERY_LOADED:-}" ] || . "$MB_RECOVERY_STATE_SOURCE" 2>/dev/null || {
+  error -c cli,vlan "Unable to load durable maintenance-recovery state; refusing maintenance operation"
+  exit 1
+}
 
 MB_LOCK_OWNED=0
 MB_REQUEST_TOKEN=""
@@ -69,6 +84,36 @@ MB_RESTORE_ORIGINAL=""
 MB_RESTORE_ORIGINAL_BOOT=0
 MB_POOL_ABORT_FAILED=0
 MB_RECOVERY_REQUIRED=0
+MB_DURABLE_RECOVERY_OWNED=0
+
+mb_begin_durable_recovery() {
+  merv_maintenance_recovery_write restore prepared "$MB_JFFS_OLD" "$MB_JFFS_STAGE" || return 1
+  MB_DURABLE_RECOVERY_OWNED=1
+  return 0
+}
+
+mb_mark_durable_recovery_displaced() {
+  [ "$MB_DURABLE_RECOVERY_OWNED" = "1" ] || return 1
+  merv_maintenance_recovery_matches restore "$MB_JFFS_OLD" "$MB_JFFS_STAGE" || return 1
+  merv_maintenance_recovery_write restore displaced "$MB_JFFS_OLD" "$MB_JFFS_STAGE"
+}
+
+mb_clear_durable_recovery() {
+  [ "$MB_DURABLE_RECOVERY_OWNED" = "1" ] || return 0
+  merv_maintenance_recovery_matches restore "$MB_JFFS_OLD" "$MB_JFFS_STAGE" || return 1
+  merv_maintenance_recovery_clear || return 1
+  MB_DURABLE_RECOVERY_OWNED=0
+}
+
+mb_mark_recovery_required() {
+  MB_RECOVERY_REQUIRED=1
+  MB_PRESERVE_WORK=1
+  MB_PRESERVE_JFFS=1
+  if [ "$MB_DURABLE_RECOVERY_OWNED" = "1" ] && \
+     ! mb_mark_durable_recovery_displaced; then
+    error -c cli,vlan "CRITICAL: durable restore recovery metadata could not record the interrupted activation"
+  fi
+}
 mb_pool_state_unresolved() {
   if type mnj_pool_state_unresolved >/dev/null 2>&1; then
     mnj_pool_state_unresolved
@@ -107,6 +152,29 @@ mb_remove_jffs_stage() {
 }
 
 mb_reconcile_stale_stages() {
+  if merv_update_journal_requires_safe_boot; then
+    error -c cli,vlan "An incomplete or malformed Update recovery record protects staged trees; maintenance is blocked"
+    return 1
+  fi
+  merv_maintenance_recovery_read
+  _mb_recovery_state_rc=$?
+  case "$_mb_recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
+    0:active)
+      if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+         [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+         [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
+        _mb_prepared_recovery=1
+      else
+        error -c cli,vlan "An unresolved ${MERV_MAINTENANCE_RECOVERY_KIND} transaction protects recovery trees; use $MB_RECOVERY_SCRIPT after inspection"
+        return 1
+      fi
+      ;;
+    1:absent) _mb_prepared_recovery=0 ;;
+    *)
+      error -c cli,vlan "Durable maintenance-recovery metadata is malformed or unreadable; preserving recovery trees"
+      return 1
+      ;;
+  esac
   _mb_active_valid=1
   _mb_stale_cleanup_failed=0
   for _mb_required in install.sh uninstall.sh changelog.txt mervlan.asp \
@@ -115,8 +183,20 @@ mb_reconcile_stale_stages() {
     [ -f "$MERV_BASE/$_mb_required" ] || _mb_active_valid=0
   done
   if [ "$_mb_active_valid" != "1" ]; then
+    [ "${_mb_prepared_recovery:-0}" = "0" ] || {
+      error -c cli,vlan "Prepared durable recovery state cannot be reconciled because the active installation is incomplete"
+      return 1
+    }
     warn -c cli,vlan "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees"
     return 0
+  fi
+  if [ "${_mb_prepared_recovery:-0}" = "1" ]; then
+    if ! mb_remove_jffs_stage "$MERV_MAINTENANCE_RECOVERY_STAGE" || \
+       ! merv_maintenance_recovery_clear; then
+      error -c cli,vlan "Could not retire an abandoned pre-activation restore stage; maintenance is blocked"
+      return 1
+    fi
+    MB_DURABLE_RECOVERY_OWNED=0
   fi
   for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.new.*; do
     [ -d "$_mb_stale" ] || continue
@@ -165,6 +245,13 @@ mb_cleanup() {
     if [ "$MB_PRESERVE_JFFS" != "1" ] && [ "$MB_ACTIVATION_STARTED" != "1" ]; then
       mb_remove_jffs_stage "$MB_JFFS_OLD" || _mb_cleanup_failed=1
     fi
+    if [ "$MB_DURABLE_RECOVERY_OWNED" = "1" ] && \
+       merv_maintenance_recovery_read && \
+       [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+       [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+       [ ! -e "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
+      mb_clear_durable_recovery || _mb_cleanup_failed=1
+    fi
     if [ "$MB_PRESERVE_WORK" != "1" ] && [ -d "$MB_WORK_ROOT" ]; then
       rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
     fi
@@ -205,10 +292,9 @@ mb_handle_signal() {
   fi
   if [ "$_mb_signal_pool_ready" = "1" ] && [ "$MB_ACTIVATION_STARTED" = "1" ] && [ "$MB_ROLLBACK_DONE" != "1" ] && \
      [ -n "$MB_RESTORE_ORIGINAL" ] && [ -d "$MB_RESTORE_ORIGINAL" ]; then
-    if ! mb_rollback_restore "$MB_RESTORE_ORIGINAL" "$MB_RESTORE_ORIGINAL_BOOT"; then
-      MB_RECOVERY_REQUIRED=1
-      MB_PRESERVE_WORK=1
-      MB_PRESERVE_JFFS=1
+    if ! mb_rollback_restore "$MB_RESTORE_ORIGINAL" "$MB_RESTORE_ORIGINAL_BOOT" || \
+       ! mb_clear_durable_recovery; then
+      mb_mark_recovery_required
       _mb_signal_rollback_failed=1
       error -c cli,vlan "Automatic rollback failed; recovery data and the owner lock remain preserved"
     fi
@@ -229,12 +315,11 @@ mb_rollback_after_activation() {
   _mb_rollback_failure="$3"
   _mb_rollback_old="$4"
   _mb_rollback_boot="$5"
-  if mb_rollback_restore "$_mb_rollback_old" "$_mb_rollback_boot"; then
+  if mb_rollback_restore "$_mb_rollback_old" "$_mb_rollback_boot" && \
+     mb_clear_durable_recovery; then
     mb_fail "$_mb_rollback_phase" "$_mb_rollback_success"
   else
-    MB_RECOVERY_REQUIRED=1
-    MB_PRESERVE_WORK=1
-    MB_PRESERVE_JFFS=1
+    mb_mark_recovery_required
     mb_fail "$_mb_rollback_phase" "$_mb_rollback_failure"
   fi
   return 1
@@ -351,9 +436,32 @@ mb_verify_archive_integrity() {
 }
 
 mb_install_recovery_helper() {
-  [ -f "$MB_RECOVERY_SOURCE" ] || return 1
+  [ -f "$MB_RECOVERY_SOURCE" ] && [ -f "$MB_RECOVERY_STATE_SOURCE" ] && \
+    [ -f "$MB_UPDATE_STATE_SOURCE" ] || return 1
   mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || return 1
   chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || return 1
+  _mb_recovery_state_tmp="$MB_BACKUP_ROOT/.recovery_state.sh.partial.$$"
+  rm -f "$_mb_recovery_state_tmp" 2>/dev/null || return 1
+  cp -p "$MB_RECOVERY_STATE_SOURCE" "$_mb_recovery_state_tmp" 2>/dev/null || return 1
+  chmod 600 "$_mb_recovery_state_tmp" 2>/dev/null || {
+    rm -f "$_mb_recovery_state_tmp" 2>/dev/null || :
+    return 1
+  }
+  mv -f "$_mb_recovery_state_tmp" "$MB_RECOVERY_STATE_SCRIPT" 2>/dev/null || {
+    rm -f "$_mb_recovery_state_tmp" 2>/dev/null || :
+    return 1
+  }
+  _mb_update_state_tmp="$MB_BACKUP_ROOT/.update_state.sh.partial.$$"
+  rm -f "$_mb_update_state_tmp" 2>/dev/null || return 1
+  cp -p "$MB_UPDATE_STATE_SOURCE" "$_mb_update_state_tmp" 2>/dev/null || return 1
+  chmod 600 "$_mb_update_state_tmp" 2>/dev/null || {
+    rm -f "$_mb_update_state_tmp" 2>/dev/null || :
+    return 1
+  }
+  mv -f "$_mb_update_state_tmp" "$MB_UPDATE_STATE_SCRIPT" 2>/dev/null || {
+    rm -f "$_mb_update_state_tmp" 2>/dev/null || :
+    return 1
+  }
   _mb_recovery_tmp="$MB_BACKUP_ROOT/.recover.sh.partial.$$"
   rm -f "$_mb_recovery_tmp" 2>/dev/null || return 1
   cp -p "$MB_RECOVERY_SOURCE" "$_mb_recovery_tmp" 2>/dev/null || return 1
@@ -1425,6 +1533,10 @@ mb_restore() {
     return 2
   fi
   mb_require_lock || return 1
+  mb_install_recovery_helper || {
+    mb_fail recovery "Could not publish the standalone recovery helper and durable-state parser. Restore was not started."
+    return 1
+  }
   case "$_mb_mode" in
     restore) _mb_archive=$(mb_resolve_selection "$_mb_id") || { mb_fail selection "Selected backup no longer exists."; return 1; } ;;
     undo_restore) [ -f "$MB_UNDO_RESTORE_ARCHIVE" ] || { mb_fail selection "The temporary Undo Restore file is no longer available."; return 1; } ;;
@@ -1541,10 +1653,22 @@ mb_restore() {
     fi
   fi
   mb_write_result running activating "Activating the selected backup."
+  if ! mb_begin_durable_recovery; then
+    MB_PRESERVE_JFFS=1
+    mb_fail recovery "Could not publish durable restore recovery metadata before activation. No installation files were replaced."
+    return 1
+  fi
   MB_ACTIVATION_STARTED=1
   case "$MERV_BASE" in /|/jffs|/jffs/addons|/tmp|'') mb_fail safety "Refusing unsafe active path: $MERV_BASE"; return 1 ;; esac
   if ! mv "$MERV_BASE" "$MB_JFFS_OLD" 2>/dev/null; then
     mb_fail activating "Could not preserve the active installation for rollback."
+    return 1
+  fi
+  if ! mb_mark_durable_recovery_displaced; then
+    mb_rollback_after_activation activating \
+      "Could not record the displaced installation; the original installation was restored." \
+      "Could not record the displaced installation; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
     return 1
   fi
   if ! mv "$MB_JFFS_STAGE" "$MERV_BASE" 2>/dev/null; then
@@ -1679,6 +1803,11 @@ mb_restore() {
     esac
   fi
   mb_refresh_inventory
+  if ! mb_clear_durable_recovery; then
+    mb_mark_recovery_required
+    mb_fail recovery "Restore completed but durable recovery metadata could not be cleared; recovery data and the owner lock were preserved."
+    return 1
+  fi
   case "$_mb_mode" in
     restore)
       if [ "$_mb_undo_created" = "1" ]; then
