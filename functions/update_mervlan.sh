@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.71"                   #
+#                - File: update_mervlan.sh || version="0.72"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -489,6 +489,12 @@ readonly NODE_DB_STAGE="$TMP_DIR/node_db_stage"
 MERVLAN_BACKUP_DIR="${MERV_BASE%/*}/mervlan_backups"
 UPDATE_JFFS_STAGE="$MERVLAN_BACKUP_DIR/.mervlan.new.$$"
 UPDATE_JFFS_OLD="$MERVLAN_BACKUP_DIR/.mervlan.old.$$"
+MERV_MAINTENANCE_RECOVERY_ROOT="$MERVLAN_BACKUP_DIR"
+MERV_MAINTENANCE_RECOVERY_MARKER="$MERVLAN_BACKUP_DIR/.mervlan.recovery"
+[ -n "${LIB_MAINTENANCE_RECOVERY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_maintenance_recovery.sh" 2>/dev/null || {
+	error -c cli,vlan "Unable to load durable maintenance-recovery state; refusing update"
+	exit 1
+}
 readonly UPDATE_UNDO_ROOT="${MERVLAN_UNDO_DIR_OVERRIDE:-$TMP_DIR/undo}"
 readonly UPDATE_UNDO_MARKER="$UPDATE_UNDO_ROOT/update.meta"
 
@@ -610,6 +616,32 @@ update_reconcile_stale_stages() {
 		warn -c cli,vlan "An incomplete or malformed Update recovery record protects staged trees; recovery is required before another Update"
 		return 1
 	fi
+	merv_maintenance_recovery_read
+	_update_recovery_state_rc=$?
+	case "$_update_recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
+		0:active)
+			# A prepared marker with no displaced old tree is the one known
+			# abandoned pre-activation state shared with Backup/Recovery.
+			if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+			   [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+			   [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
+			   update_tree_valid "$MERV_BASE"; then
+				if ! update_remove_jffs_stage "$MERV_MAINTENANCE_RECOVERY_STAGE" || \
+				   ! merv_maintenance_recovery_clear; then
+					warn -c cli,vlan "Could not retire an abandoned pre-activation maintenance stage; Update is blocked"
+					return 1
+				fi
+			else
+				warn -c cli,vlan "An unresolved ${MERV_MAINTENANCE_RECOVERY_KIND} recovery transaction protects staged trees; use $MERVLAN_BACKUP_DIR/recover.sh before updating"
+				return 1
+			fi
+			;;
+		1:absent) ;;
+		*)
+			warn -c cli,vlan "Durable maintenance-recovery metadata is malformed or unreadable; preserving recovery trees"
+			return 1
+			;;
+	esac
 	if ! update_tree_valid "$MERV_BASE"; then
 		warn -c cli,vlan "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees"
 		return 1

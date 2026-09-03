@@ -157,7 +157,7 @@ merv_update_journal_state() {
     esac
   done
   [ "$_mujs_format" = "1" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
-  case "$_mujs_phase" in completed|workspace|quiescing|quiesced|preflight|downloading|extracting|staged|durable-backup|backup|activation-started|activated|public-refresh|main-verified|failed-*) ;; *) MERV_UPDATE_JOURNAL_STATE=malformed; return 2 ;; esac
+  case "$_mujs_phase" in completed|workspace|quiescing|quiesced|preflight|downloading|extracting|staged|durable-backup|backup|quiesced-guards-released|activation-started|activated|public-refresh|main-verified|node-sync|finalization-failed|failed-*) ;; *) MERV_UPDATE_JOURNAL_STATE=malformed; return 2 ;; esac
   case "$_mujs_quiesced:$_mujs_activation" in 0:0|0:1|1:0|1:1) ;; *) MERV_UPDATE_JOURNAL_STATE=malformed; return 2 ;; esac
   MERV_UPDATE_JOURNAL_QUIESCED=$_mujs_quiesced
   MERV_UPDATE_JOURNAL_ACTIVATION=$_mujs_activation

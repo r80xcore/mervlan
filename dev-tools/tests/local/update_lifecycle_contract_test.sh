@@ -104,6 +104,25 @@ merv_update_journal_write 'bad=value' extracting ref 0 0 0 0 0 detail >/dev/null
 merv_node_reconcile_write '../bad' unreachable detail 0 1 digest >/dev/null 2>&1 && fail unsafe-node-action
 pass malformed-values-rejected
 
+# Keep the strict parser's allowlist synchronized with real production Update
+# phase writers. Literal phases are derived from the current source; the one
+# dynamic failure family is deliberately checked with a bounded representative.
+UPDATE_PHASES=$(sed -n 's/^[[:space:]]*update_record_phase[[:space:]]\{1,\}"\{0,1\}\([A-Za-z0-9-][A-Za-z0-9-]*\).*/\1/p' \
+  "$BASE_DIR/functions/update_mervlan.sh" | sort -u)
+[ -n "$UPDATE_PHASES" ] || fail production-phase-discovery
+for update_required_phase in workspace quiescing quiesced preflight downloading extracting staged durable-backup backup quiesced-guards-released activation-started activated public-refresh main-verified node-sync finalization-failed completed; do
+  printf '%s\n' "$UPDATE_PHASES" | grep -qx "$update_required_phase" || fail "production-phase-missing-$update_required_phase"
+done
+grep -Fq 'update_record_phase "failed-$block"' "$BASE_DIR/functions/update_mervlan.sh" || fail production-failed-phase-discovery
+for update_phase in $UPDATE_PHASES failed-synthetic; do
+  merv_update_journal_write phase-test "$update_phase" ref 0 0 0 0 0 detail none none none none none none old new || fail "phase-write-$update_phase"
+  merv_update_journal_state || fail "phase-parse-$update_phase"
+done
+merv_update_journal_write phase-test unknown-phase ref 0 0 0 0 0 detail none none none none none none old new || fail unknown-phase-write
+if merv_update_journal_state; then fail unknown-phase-accepted; fi
+merv_update_journal_clear || fail phase-journal-clear
+pass production-phase-allowlist
+
 # The GUI transport is Merlin-owned, so the updater records a content
 # fingerprint instead of changing the transport file. Extract the two helpers
 # from the production source to exercise the exact implementation without

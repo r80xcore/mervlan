@@ -121,6 +121,18 @@ if ! recovery_reconcile_stale_stages; then fail 'explicit Recovery rejected vali
 [ -e "$old/sentinel" ] && [ -e "$stage/sentinel" ] || fail 'Recovery admission deleted protected durable stages before archive validation'
 pass 'explicit Recovery admission preserves protected prior transaction'
 
+# A successor Update has no authority to consume an interrupted Restore or
+# standalone Recovery. These cases intentionally have no Update journal or
+# quiesce marker, so only the foreign durable marker can protect the trees.
+if update_reconcile_stale_stages; then fail 'Update admitted unresolved Restore durable transaction'; fi
+[ -e "$old/sentinel" ] && [ -e "$stage/sentinel" ] && [ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Update deleted Restore-protected stages'
+pass 'successor Update preserves Restore-protected stages without Update state'
+
+merv_maintenance_recovery_write recovery displaced "$old" "$stage" || fail 'Recovery durable marker write'
+if update_reconcile_stale_stages; then fail 'Update admitted unresolved standalone Recovery transaction'; fi
+[ -e "$old/sentinel" ] && [ -e "$stage/sentinel" ] && [ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Update deleted Recovery-protected stages'
+pass 'successor Update preserves Recovery-protected stages without Update state'
+
 merv_update_journal_write previous activated refs/heads/dev 0 1 1 1 0 interrupted \
   "$TEST_ROOT/work" none none none "$stage" "$old" old new || fail 'previous Update journal write'
 merv_update_quiesce_begin previous || fail 'previous Update quiesce write'
@@ -179,8 +191,27 @@ mkdir -p "$old" "$stage" || exit 1
 printf 'format=1\nkind=restore\nphase=displaced\nold=../../outside\nstage=.mervlan.new.4242\n' > "$MERV_MAINTENANCE_RECOVERY_MARKER"
 if mb_reconcile_stale_stages; then fail 'malformed durable marker admitted Backup'; fi
 if recovery_reconcile_stale_stages; then fail 'malformed durable marker admitted Recovery cleanup'; fi
+if update_reconcile_stale_stages; then fail 'malformed durable marker admitted Update cleanup'; fi
 [ -e "$old/sentinel" ] && [ -e "$stage/sentinel" ] || fail 'malformed marker deleted ambiguous stage'
 pass 'malformed durable metadata fails closed without arbitrary deletion'
+
+rm -f "$MERV_MAINTENANCE_RECOVERY_MARKER"
+update_reconcile_stale_stages || fail 'Update did not clean normal stale stages without durable state'
+[ ! -e "$old" ] && [ ! -e "$stage" ] || fail 'Update retained normal stale stages without durable state'
+pass 'Update normal stale-stage cleanup remains available without durable state'
+
+mkdir -p "$old" "$stage" || exit 1
+: > "$old/sentinel"
+: > "$stage/sentinel"
+merv_maintenance_recovery_write restore prepared "$old" "$stage" || fail 'Update prepared marker write'
+rm -rf "$old"
+update_reconcile_stale_stages || fail 'Update did not reconcile known abandoned pre-activation stage'
+[ ! -e "$stage" ] && [ ! -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Update prepared-stage reconciliation retained marker or stage'
+pass 'Update preserves the known abandoned pre-activation reclaim rule'
+
+mkdir -p "$old" "$stage" || exit 1
+: > "$old/sentinel"
+: > "$stage/sentinel"
 
 printf 'format=1\nrun_id=bad\n' > "$MERV_UPDATE_JOURNAL"
 if ! merv_update_journal_requires_safe_boot; then fail 'malformed Update journal did not block'; fi

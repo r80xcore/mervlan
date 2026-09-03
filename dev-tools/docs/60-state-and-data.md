@@ -76,6 +76,10 @@ file or ebtables deletion is not a supported recovery action.
   blocked until terminal cleanup. Observation ownership uses the generic
   identity/owner primitives but keeps generation and coalescing state local to
   the observation worker.
+- Restore and standalone Recovery publish a strict `.mervlan.recovery` marker
+  beside persistent backups. A successor Update preserves any unresolved or
+  malformed marker; only the known pre-activation `prepared` marker with no
+  displaced old tree may be retired as abandoned staging.
 
 ## Useful diagnostics
 
