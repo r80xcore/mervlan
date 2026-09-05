@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.72"                   #
+#                - File: update_mervlan.sh || version="0.73"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -544,9 +544,27 @@ update_filter_source_tree() {
 	_update_payload_keep="$TMP_BASE/.dev-tools-keep.$$"
 	[ -d "$_update_payload_root" ] || return 1
 	UPDATE_PAYLOAD_DEV_TOOLS="0"
+	_update_keep_dev_tools="0"
+	# Remote refs retain the historical branch policy: development/custom
+	# branches may carry the two router-side tools, while main and every tag
+	# remain runtime-only payloads. Local archives have no trustworthy ref
+	# variable (and codeload root names are not stable), so qualify them from
+	# the staged target's validated development changelog version. An arbitrary
+	# local tarball therefore cannot opt into developer tooling merely by being
+	# supplied through the local CLI.
 	if [ "${UPDATE_SOURCE:-remote}" = "remote" ] &&
 	   [ "${GITHUB_REF:-}" != "refs/heads/main" ] &&
 	   [ "${GITHUB_REF#refs/tags/}" = "${GITHUB_REF}" ]; then
+		_update_keep_dev_tools="1"
+	elif [ "${UPDATE_SOURCE:-remote}" = "local" ]; then
+		_update_local_version=$(update_changelog_version "$_update_payload_root/changelog.txt" 2>/dev/null || printf '')
+		case "$_update_local_version" in
+			v*-dev|v*-dev.*|v*-dev-*)
+				_update_keep_dev_tools="1"
+				;;
+		esac
+	fi
+	if [ "$_update_keep_dev_tools" = "1" ]; then
 		mkdir -p "$_update_payload_keep/dev-tools/tests/router" \
 			"$_update_payload_keep/dev-tools/safety" 2>/dev/null || return 1
 		if [ -f "$_update_payload_root/dev-tools/tests/router/mervlan_selftest.sh" ]; then

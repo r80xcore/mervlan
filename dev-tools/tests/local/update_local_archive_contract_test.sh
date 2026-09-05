@@ -22,6 +22,8 @@ sed -n '/^# LOCAL ARCHIVE HELPERS BEGIN$/,/^# LOCAL ARCHIVE HELPERS END$/p' "$UP
   sed '/^# LOCAL ARCHIVE HELPERS /d' >"$HELPERS"
 sed -n '/^# CORE STAGE VALIDATOR BEGIN$/,/^# CORE STAGE VALIDATOR END$/p' "$UPDATER" |
   sed '/^# CORE STAGE VALIDATOR /d' >>"$HELPERS"
+sed -n '/^update_changelog_version() {/,/^}$/p' "$UPDATER" >>"$HELPERS"
+sed -n '/^update_filter_source_tree() {/,/^}$/p' "$UPDATER" >>"$HELPERS"
 [ -s "$HELPERS" ] || fail 'helper extraction failed'
 
 TMP_BASE="$WORK/owned"
@@ -144,5 +146,61 @@ grep -Fq 'acquire_local_update_archive "$UPDATE_LOCAL_ARCHIVE" "$ARCHIVE"' "$UPD
 grep -Fq 'set_update_log_policy "${3:-}"' "$UPDATER" || fail 'local log policy parsing missing'
 grep -Fq 'UPDATE_SOURCE="local"' "$UPDATER" || fail 'local source state missing'
 pass local-mode-avoids-curl-and-keeps-log-policy-contract
+
+# Developer tooling is retained for a positively identified local development
+# payload only. The archive root is deliberately opaque (`m`) to match the
+# observed codeload representation; the validated target changelog is the
+# qualification signal. Every other dev-tools path is stripped.
+make_filter_tree() {
+  _mlf_root="$WORK/filter-$1"
+  rm -rf "$_mlf_root"
+  mkdir -p "$_mlf_root/dev-tools/tests/router" \
+    "$_mlf_root/dev-tools/safety" "$_mlf_root/dev-tools/tests/local" \
+    "$_mlf_root/dev-tools/docs"
+  printf '%s\n' "$2" >"$_mlf_root/changelog.txt"
+  printf router >"$_mlf_root/dev-tools/tests/router/mervlan_selftest.sh"
+  printf guard >"$_mlf_root/dev-tools/safety/mervlan_live_test_guard.sh"
+  printf local >"$_mlf_root/dev-tools/tests/local/should-strip.sh"
+  printf docs >"$_mlf_root/dev-tools/docs/should-strip.md"
+  printf '%s\n' "$_mlf_root"
+}
+
+dev_tree=$(make_filter_tree local-dev 'mervlan v0.53.28-dev')
+UPDATE_SOURCE=local GITHUB_REF=local UPDATE_ARCHIVE_TOPDIR=m \
+  update_filter_source_tree "$dev_tree" || fail 'local development payload filtering'
+[ "$UPDATE_PAYLOAD_DEV_TOOLS" = 1 ] || fail 'local development payload was not qualified'
+[ -f "$dev_tree/dev-tools/tests/router/mervlan_selftest.sh" ] &&
+  [ -f "$dev_tree/dev-tools/safety/mervlan_live_test_guard.sh" ] ||
+  fail 'local development allowlist was not retained'
+[ ! -e "$dev_tree/dev-tools/tests/local/should-strip.sh" ] &&
+  [ ! -e "$dev_tree/dev-tools/docs/should-strip.md" ] ||
+  fail 'local development non-router tools survived'
+pass local-development-allowlist
+
+arbitrary_tree=$(make_filter_tree arbitrary 'mervlan v0.53.28')
+UPDATE_SOURCE=local GITHUB_REF=local UPDATE_ARCHIVE_TOPDIR=m \
+  update_filter_source_tree "$arbitrary_tree" || fail 'arbitrary local filtering'
+[ "$UPDATE_PAYLOAD_DEV_TOOLS" = 0 ] || fail 'arbitrary local payload opted into dev-tools'
+[ ! -e "$arbitrary_tree/dev-tools" ] || fail 'arbitrary local dev-tools survived'
+pass arbitrary-local-payload-stripped
+
+for ref in refs/heads/main refs/tags/v0.53.28; do
+  release_tree=$(make_filter_tree "release-${ref##*/}" 'mervlan v0.53.28-dev')
+  UPDATE_SOURCE=remote GITHUB_REF="$ref" UPDATE_ARCHIVE_TOPDIR=m \
+    update_filter_source_tree "$release_tree" || fail "release filtering $ref"
+  [ ! -e "$release_tree/dev-tools" ] || fail "release/tag dev-tools survived: $ref"
+done
+pass main-and-tag-payloads-stripped
+
+branch_tree=$(make_filter_tree branch 'mervlan v0.53.28')
+UPDATE_SOURCE=remote GITHUB_REF=refs/heads/dev UPDATE_ARCHIVE_TOPDIR=m \
+  update_filter_source_tree "$branch_tree" || fail 'development ref filtering'
+[ -f "$branch_tree/dev-tools/tests/router/mervlan_selftest.sh" ] &&
+  [ -f "$branch_tree/dev-tools/safety/mervlan_live_test_guard.sh" ] ||
+  fail 'development ref allowlist was not retained'
+[ ! -e "$branch_tree/dev-tools/tests/local/should-strip.sh" ] &&
+  [ ! -e "$branch_tree/dev-tools/docs/should-strip.md" ] ||
+  fail 'development ref non-router tools survived'
+pass development-ref-allowlist
 
 printf 'UPDATE_LOCAL_ARCHIVE_CONTRACT_OK\n'
