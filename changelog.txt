@@ -1,5 +1,22 @@
 mervlan v0.53.28-dev
 
+Fixed: Boot and startup reliability
+- Resolved boot watchdog and manager-handoff races that could delay VLAN
+  configuration during startup until a later automatic Heal recovered it.
+- Bounded ASUS NVRAM discovery so a stalled `nvram show` cannot leave the
+  manager waiting indefinitely; inventory failure now aborts safely before
+  topology changes.
+- Strengthened watchdog publication and cleanup so interrupted or partially
+  published boot state can be recovered without deleting live or replacement
+  process state.
+- Corrected RC quiet-wait accounting so long protection or guard work cannot
+  stretch the watcher far beyond its intended observation window.
+- Rechecks disappearing DHCP state-lock paths authoritatively before treating
+  them as ambiguous, reducing false stale-lock warnings while preserving
+  fail-closed behavior.
+- Manager preflight now selects only the wireless NVRAM records MerVLAN uses
+  and tolerates normal ASUS/Broadcom key syntax and large inventories.
+
 New: Development-only Developer Tools
 - Added a dev-build-only Settings modal for read-only runtime diagnostics,
   temporary MAIN recovery-cron controls, and selected router selftests with

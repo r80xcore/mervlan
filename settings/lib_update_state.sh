@@ -50,6 +50,7 @@ merv_update_journal_write() {
   local _muj_tmp
 
   merv_update_state_path_valid "$MERV_UPDATE_JOURNAL" || return 1
+  [ ! -L "$MERV_UPDATE_JOURNAL" ] || return 1
   [ -n "$_muj_run" ] && [ -n "$_muj_phase" ] || return 1
   _muj_run=$(merv_update_state_value "$_muj_run") || return 1
   _muj_phase=$(merv_update_state_value "$_muj_phase") || return 1
@@ -106,6 +107,7 @@ merv_update_journal_write() {
 
 merv_update_journal_get() {
   local _muj_key="$1" _muj_default="${2:-}"
+  [ ! -L "$MERV_UPDATE_JOURNAL" ] || { printf '%s' "$_muj_default"; return 1; }
   [ -f "$MERV_UPDATE_JOURNAL" ] || { printf '%s' "$_muj_default"; return 1; }
   _muj_value=$(sed -n "s/^${_muj_key}=//p" "$MERV_UPDATE_JOURNAL" 2>/dev/null | tail -n 1)
   [ -n "$_muj_value" ] || _muj_value="$_muj_default"
@@ -138,6 +140,10 @@ merv_update_journal_state() {
   MERV_UPDATE_JOURNAL_STATE=absent
   MERV_UPDATE_JOURNAL_QUIESCED=0
   MERV_UPDATE_JOURNAL_ACTIVATION=0
+  [ ! -L "$MERV_UPDATE_JOURNAL" ] || {
+    MERV_UPDATE_JOURNAL_STATE=malformed
+    return 2
+  }
   [ -e "$MERV_UPDATE_JOURNAL" ] || return 1
   [ -f "$MERV_UPDATE_JOURNAL" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
   _mujs_lines=$(wc -l < "$MERV_UPDATE_JOURNAL" 2>/dev/null | tr -d '[:space:]')
@@ -174,10 +180,70 @@ merv_update_maintenance_lock_path() {
   fi
 }
 
+# Return the maintenance lock's non-following lifecycle classification.  A
+# dangling symlink or regular-file obstruction must not disappear behind
+# `[ -e ]` (which follows links); only a verified absent path, or a complete
+# owner proven dead/reused by the canonical owner classifier, is safe to treat
+# as idle.  Output is intentionally a small enum so callers never log owner
+# metadata or paths.
+merv_update_maintenance_lock_state() {
+  local _muls_lock _muls_parent _muls_state
+  _muls_lock=$(merv_update_maintenance_lock_path 2>/dev/null) || {
+    printf 'unknown'
+    return 1
+  }
+  [ -n "$_muls_lock" ] || { printf 'unknown'; return 1; }
+
+  # Probe the object itself without following it.  A failed probe is absent
+  # only when its parent is readable/searchable; otherwise the state is
+  # unverifiable and remains blocking.
+  if ! ls -ld "$_muls_lock" >/dev/null 2>&1; then
+    _muls_parent=${_muls_lock%/*}
+    if [ -d "$_muls_parent" ] && [ -r "$_muls_parent" ] &&
+       [ -x "$_muls_parent" ]; then
+      printf 'absent'
+    else
+      printf 'unknown'
+      return 1
+    fi
+    return 0
+  fi
+  if [ -L "$_muls_lock" ] || [ ! -d "$_muls_lock" ]; then
+    printf 'unknown'
+    return 0
+  fi
+
+  if type merv_owner_lock_state >/dev/null 2>&1; then
+    _muls_state=$(merv_owner_lock_state "$_muls_lock" 2>/dev/null || printf 'unknown')
+    case "$_muls_state" in
+      absent|dead|reused|live|unknown|malformed|incomplete-grace|incomplete-expired|incomplete-unknown)
+        printf '%s' "$_muls_state"
+        ;;
+      *)
+        printf 'unknown'
+        ;;
+    esac
+    return 0
+  fi
+  if type merv_lock_state >/dev/null 2>&1; then
+    _muls_state=$(merv_lock_state "$_muls_lock" 2>/dev/null || printf 'unknown')
+    case "$_muls_state" in
+      absent) printf 'absent' ;;
+      stale) printf 'dead' ;;
+      active) printf 'live' ;;
+      *) printf 'unknown' ;;
+    esac
+    return 0
+  fi
+  printf 'unknown'
+  return 1
+}
+
 # A live Update child must present the exact canonical owner tuple.  In
 # particular, MERV_UPDATE_OWNER alone is only an unauthenticated hint and
 # never permits a mutating entry point to bypass maintenance quiescence.
 merv_update_owner_context_valid() {
+  local _muoc_lock _muoc_state
   [ "${MERV_UPDATE_OWNER:-0}" = "1" ] || return 1
   type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
   type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
@@ -186,6 +252,8 @@ merv_update_owner_context_valid() {
   merv_owner_v2_positive_uint "${MERV_UPDATE_OWNER_START:-}" || return 1
   merv_owner_v2_nonce_valid "${MERV_UPDATE_OWNER_NONCE:-}" || return 1
   _muoc_lock=$(merv_update_maintenance_lock_path) || return 1
+  _muoc_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
+  [ "$_muoc_state" = live ] || return 1
   merv_owner_v2_matches "$_muoc_lock" "$MERV_UPDATE_OWNER_PID" \
     "$MERV_UPDATE_OWNER_START" "$MERV_UPDATE_OWNER_NONCE"
 }
@@ -230,15 +298,11 @@ merv_update_recovery_context_valid() {
   merv_identity_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_START:-}" || return 1
   merv_identity_matches "$MERV_UPDATE_RECOVERY_PARENT_PID" \
     "$MERV_UPDATE_RECOVERY_PARENT_START" || return 1
-  _murc_lock=$(merv_update_maintenance_lock_path) || return 1
-  if type merv_owner_lock_state >/dev/null 2>&1; then
-    case "$(merv_owner_lock_state "$_murc_lock" 2>/dev/null)" in
-      live|unknown|malformed|incomplete-*) return 1 ;;
-    esac
-  elif [ -e "$_murc_lock" ]; then
-    return 1
-  fi
-  return 0
+  _murc_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
+  case "$_murc_state" in
+    absent|dead|reused) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 merv_update_maintenance_sync_context_valid() {
@@ -257,9 +321,11 @@ merv_update_maintenance_sync_context_valid() {
 # the installer's hardware-profile worker; it must not mistake its own parent
 # owner for an unrelated active Update.
 merv_maintenance_delegation_valid() {
-  local _mmd_kind _mmd_lock
+  local _mmd_kind _mmd_lock _mmd_state
   _mmd_kind="${MERV_MAINTENANCE_DELEGATION_KIND:-}"
   _mmd_lock=$(merv_update_maintenance_lock_path) || return 1
+  _mmd_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
+  [ "$_mmd_state" = live ] || return 1
   case "$_mmd_kind" in
     update)
       merv_update_owner_context_valid || return 1
@@ -379,12 +445,9 @@ merv_update_mutation_blocked() {
   # verification; ordinary processes still fail closed below.
   merv_maintenance_delegation_valid && return 1
   merv_update_journal_requires_safe_boot && return 0
-  _mumb_lock=$(merv_update_maintenance_lock_path) || return 0
-  [ -e "$_mumb_lock" ] || return 1
-  type merv_lock_state >/dev/null 2>&1 || return 0
-  case "$(merv_lock_state "$_mumb_lock" 2>/dev/null)" in
-    active|unknown) return 0 ;;
-    stale|absent) return 1 ;;
+  _mumb_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
+  case "$_mumb_state" in
+    absent|dead|reused) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -392,6 +455,7 @@ merv_update_mutation_blocked() {
 merv_update_quiesce_begin() {
   local _muq_run="${1:-}" _muq_tmp
   merv_update_state_path_valid "$MERV_UPDATE_QUIESCE_FILE" || return 1
+  [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
   [ -n "$_muq_run" ] || return 1
   _muq_run=$(merv_update_state_value "$_muq_run") || return 1
   mkdir -p "$MERV_STATE_ROOT" 2>/dev/null || return 1
@@ -415,6 +479,10 @@ merv_update_quiesce_active() {
 
 merv_update_quiesce_state() {
   MERV_UPDATE_QUIESCE_STATE=absent
+  [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || {
+    MERV_UPDATE_QUIESCE_STATE=malformed
+    return 2
+  }
   [ -e "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
   [ -f "$MERV_UPDATE_QUIESCE_FILE" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
   _muqs_lines=$(wc -l < "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | tr -d '[:space:]')
@@ -435,12 +503,14 @@ merv_update_quiesce_state() {
 }
 
 merv_update_quiesce_clear() {
+  [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
   [ -e "$MERV_UPDATE_QUIESCE_FILE" ] || return 0
   merv_update_state_path_valid "$MERV_UPDATE_QUIESCE_FILE" || return 1
   rm -f "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null
 }
 
 merv_update_journal_clear() {
+  [ ! -L "$MERV_UPDATE_JOURNAL" ] || return 1
   [ -e "$MERV_UPDATE_JOURNAL" ] || return 0
   merv_update_state_path_valid "$MERV_UPDATE_JOURNAL" || return 1
   rm -f "$MERV_UPDATE_JOURNAL" 2>/dev/null

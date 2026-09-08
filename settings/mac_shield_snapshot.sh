@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.34"                #
+#               - File: mac_shield_snapshot.sh || version="0.36"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -65,6 +65,687 @@ fi
 : "${MERV_MAC_SNAPSHOT_FORCE_RELOAD:=0}"
 : "${MERV_MAC_SNAPSHOT_ALLOW_EMPTY:=0}"
 : "${MERV_NVRAM_READ_TIMEOUT:=10}"
+
+# ============================================================================
+# Bounded NVRAM inventory
+# ----------------------------------------------------------------------------
+# A number of manager and Shield paths need the same small subset of NVRAM
+# state.  Reading that subset through separate `nvram get`/`nvram show`
+# invocations makes a firmware-side NVRAM stall multiply across every guard
+# tick.  Keep one validated inventory per process scope instead.  The cache is
+# deliberately file-backed: POSIX command substitutions run functions in a
+# child shell, so an in-memory cache assignment made there cannot be observed
+# by the parent or by the next guard tick.
+#
+# The cache contains only validated wl*_ssid/wl*_ifname records and an
+# explicit valid/error state.  A successful empty inventory is therefore
+# distinguishable from a failed read, and a failed read is memoized for the
+# current process so a guard loop never retries a hanging NVRAM command.
+# ============================================================================
+
+# Clear process-visible inventory state before an identity or cache-path
+# validation failure can leave a previous successful snapshot looking current.
+# This only resets shell variables; cache artifacts are removed only by the
+# explicit invalidate/disable paths after their root has passed validation.
+merv_nvram_inventory_clear_state() {
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+}
+
+merv_nvram_inventory_set_error() {
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=error
+  MERV_NVRAM_INVENTORY_REASON="${1:-read-failed}"
+  MERV_NVRAM_INVENTORY_RC="${2:-65}"
+  return 2
+}
+
+# The inventory file is intentionally narrower than the complete NVRAM key
+# grammar.  Keep this check exact; a shell glob such as wl[0-9]* also accepts
+# wl0garbage_ssid and would let an unrelated key reach manager callers.
+merv_nvram_inventory_target_key_valid() {
+  local _mnitk_key="${1:-}" _mnitk_base _mnitk_digits
+  local _mnitk_radio _mnitk_slot
+  case "$_mnitk_key" in
+    wl*_ssid) _mnitk_base=${_mnitk_key%_ssid} ;;
+    wl*_ifname) _mnitk_base=${_mnitk_key%_ifname} ;;
+    *) return 1 ;;
+  esac
+  case "$_mnitk_base" in
+    wl[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  _mnitk_digits=${_mnitk_base#wl}
+  case "$_mnitk_digits" in
+    *.*)
+      _mnitk_radio=${_mnitk_digits%%.*}
+      _mnitk_slot=${_mnitk_digits#*.}
+      case "$_mnitk_radio" in ''|*[!0-9]*) return 1 ;; esac
+      case "$_mnitk_slot" in ''|*[!0-9]*|*.*) return 1 ;; esac
+      ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+merv_nvram_inventory_artifacts_safe() {
+  local _mnias_path="$1" _mnias_file
+  for _mnias_file in "$_mnias_path.state" "$_mnias_path.data" \
+    "$_mnias_path.raw" "$_mnias_path.filtered.tmp" "$_mnias_path.state.tmp"; do
+    [ ! -L "$_mnias_file" ] || return 1
+  done
+  return 0
+}
+
+# Validate an already-filtered cache before accepting a cached success marker.
+# This keeps a replacement/edited regular cache file from bypassing the same
+# key, value, duplicate, record, byte, and control-character checks used for
+# fresh nvram output.
+merv_nvram_inventory_validate_records() {
+  local _mnivr_file="$1" _mnivr_max_bytes _mnivr_max_records _mnivr_bytes
+  local _mnivr_max_line _mnivr_max_value
+  [ -n "$_mnivr_file" ] || return 1
+  [ -f "$_mnivr_file" ] && [ ! -L "$_mnivr_file" ] || return 1
+  merv_nvram_inventory_process_start "${_mnivr_file%/*}" >/dev/null 2>&1 || return 1
+  _mnivr_max_bytes="${MERV_NVRAM_INVENTORY_MAX_SELECTED_BYTES:-32768}"
+  case "$_mnivr_max_bytes" in ''|*[!0-9]*) _mnivr_max_bytes=32768 ;; esac
+  [ "$_mnivr_max_bytes" -gt 0 ] 2>/dev/null || _mnivr_max_bytes=32768
+  _mnivr_bytes=$(
+    exec 3< "$_mnivr_file" 2>/dev/null || exit 1
+    [ ! -L "$_mnivr_file" ] || { exec 3<&-; exit 1; }
+    wc -c <&3
+    exec 3<&-
+  ) || return 1
+  case "$_mnivr_bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_mnivr_bytes" -le "$_mnivr_max_bytes" ] 2>/dev/null || return 1
+  _mnivr_max_records="${MERV_NVRAM_INVENTORY_MAX_SELECTED_RECORDS:-128}"
+  case "$_mnivr_max_records" in ''|*[!0-9]*) _mnivr_max_records=128 ;; esac
+  [ "$_mnivr_max_records" -gt 0 ] 2>/dev/null || _mnivr_max_records=128
+  _mnivr_max_line="${MERV_NVRAM_INVENTORY_MAX_SELECTED_LINE_BYTES:-256}"
+  case "$_mnivr_max_line" in ''|*[!0-9]*) _mnivr_max_line=256 ;; esac
+  [ "$_mnivr_max_line" -gt 0 ] 2>/dev/null || _mnivr_max_line=256
+  _mnivr_max_value="${MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES:-128}"
+  case "$_mnivr_max_value" in ''|*[!0-9]*) _mnivr_max_value=128 ;; esac
+  [ "$_mnivr_max_value" -gt 0 ] 2>/dev/null || _mnivr_max_value=128
+  (
+    exec 3< "$_mnivr_file" 2>/dev/null || exit 1
+    [ ! -L "$_mnivr_file" ] || { exec 3<&-; exit 1; }
+    awk -v max_records="$_mnivr_max_records" \
+      -v max_line="$_mnivr_max_line" -v max_value="$_mnivr_max_value" '
+      {
+        if (length($0) > max_line || length($0) > 1024 ||
+            $0 ~ /^[[:space:]]*$/ || index($0, "=") == 0) {
+          bad=1; next
+        }
+        eq=index($0, "=")
+        key=substr($0, 1, eq-1)
+        val=substr($0, eq+1)
+        if (length(val) > max_value ||
+            key !~ /^wl[0-9]+(\.[0-9]+)?_(ssid|ifname)$/ ||
+            val ~ /[[:cntrl:]]/ || seen[key]++ || ++records > max_records) {
+          bad=1; next
+        }
+        if (key ~ /_ifname$/) {
+          clean=val
+          sub(/^[[:space:]]+/, "", clean)
+          sub(/[[:space:]]+$/, "", clean)
+          if (clean ~ /^\".*\"$/)
+            clean=substr(clean, 2, length(clean)-2)
+          if (clean != "" && clean !~ /^[A-Za-z0-9_.:-]+$/)
+            bad=1
+        }
+      }
+      END { exit bad ? 65 : 0 }
+    ' <&3
+    _mnivr_rc=$?
+    exec 3<&-
+    exit "$_mnivr_rc"
+  )
+}
+
+merv_nvram_inventory_process_start() {
+  local _mnips_start _mnips_root _mnips_path _mnips_rest _mnips_part _mnips_stat
+  if [ -n "${1:-}" ]; then
+    _mnips_root="$1"
+    case "$_mnips_root" in
+      /tmp|/tmp/*) ;;
+      *)
+        MERV_NVRAM_INVENTORY_FILE=""
+        MERV_NVRAM_INVENTORY_STATUS=""
+        MERV_NVRAM_INVENTORY_REASON=""
+        MERV_NVRAM_INVENTORY_RC=""
+        return 1
+        ;;
+    esac
+    [ -d /tmp ] && [ ! -L /tmp ] || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+    [ "$_mnips_root" = /tmp ] || {
+      _mnips_path=/tmp
+      _mnips_rest=${_mnips_root#/tmp/}
+      while [ -n "$_mnips_rest" ]; do
+        case "$_mnips_rest" in
+          */*)
+            _mnips_part=${_mnips_rest%%/*}
+            _mnips_rest=${_mnips_rest#*/}
+            ;;
+          *)
+            _mnips_part=$_mnips_rest
+            _mnips_rest=
+            ;;
+        esac
+        [ -n "$_mnips_part" ] || continue
+        case "$_mnips_part" in
+          .|..|*[!A-Za-z0-9._-]*)
+            MERV_NVRAM_INVENTORY_FILE=""
+            MERV_NVRAM_INVENTORY_STATUS=""
+            MERV_NVRAM_INVENTORY_REASON=""
+            MERV_NVRAM_INVENTORY_RC=""
+            return 1
+            ;;
+        esac
+        _mnips_path="$_mnips_path/$_mnips_part"
+        [ ! -L "$_mnips_path" ] || {
+          MERV_NVRAM_INVENTORY_FILE=""
+          MERV_NVRAM_INVENTORY_STATUS=""
+          MERV_NVRAM_INVENTORY_REASON=""
+          MERV_NVRAM_INVENTORY_RC=""
+          return 1
+        }
+        if [ -e "$_mnips_path" ] && [ ! -d "$_mnips_path" ]; then
+          MERV_NVRAM_INVENTORY_FILE=""
+          MERV_NVRAM_INVENTORY_STATUS=""
+          MERV_NVRAM_INVENTORY_REASON=""
+          MERV_NVRAM_INVENTORY_RC=""
+          return 1
+        fi
+      done
+    }
+  fi
+
+  if type merv_identity_current_start >/dev/null 2>&1; then
+    _mnips_start=$(merv_identity_current_start 2>/dev/null) || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+  else
+    # Keep the standalone inventory contract usable by lightweight callers
+    # that do not load lib_identity, while retaining the same strict /proc
+    # start-time proof.  Missing/malformed identity remains a hard failure.
+    _mnips_stat=$(cat "/proc/$$/stat" 2>/dev/null) || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+    case "$_mnips_stat" in
+      *") "*) _mnips_stat=${_mnips_stat##*) } ;;
+      *)
+        MERV_NVRAM_INVENTORY_FILE=""
+        MERV_NVRAM_INVENTORY_STATUS=""
+        MERV_NVRAM_INVENTORY_REASON=""
+        MERV_NVRAM_INVENTORY_RC=""
+        return 1
+        ;;
+    esac
+    _mnips_start=$(printf '%s\n' "$_mnips_stat" | awk '{print $20}') || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+  fi
+  case "$_mnips_start" in
+    ''|*[!0-9]*|0)
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$_mnips_start"
+}
+
+merv_nvram_inventory_path() {
+  local _mnip_root _mnip_scope _mnip_start
+  _mnip_root="${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}"
+  # Inventory state is volatile.  Permit /tmp descendants only; invalid or
+  # inherited paths fall back to the normal MerVLAN temporary root.
+  case "$_mnip_root" in
+    /tmp|/tmp/*) ;;
+    *) _mnip_root="/tmp/mervlan_tmp" ;;
+  esac
+  case "$_mnip_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mnip_root="/tmp/mervlan_tmp" ;;
+  esac
+  _mnip_scope="${MERV_NVRAM_INVENTORY_SCOPE:-pid}"
+  case "$_mnip_scope" in
+    ''|*[!A-Za-z0-9._-]*) _mnip_scope=pid ;;
+  esac
+  [ "${#_mnip_scope}" -le 64 ] || _mnip_scope=pid
+  _mnip_start=$(merv_nvram_inventory_process_start "$_mnip_root") || {
+    MERV_NVRAM_INVENTORY_FILE=""
+    MERV_NVRAM_INVENTORY_STATUS=""
+    MERV_NVRAM_INVENTORY_REASON=""
+    MERV_NVRAM_INVENTORY_RC=""
+    return 1
+  }
+  printf '%s/nvram_inventory.%s.%s.%s\n' \
+    "$_mnip_root" "$_mnip_scope" "$$" "$_mnip_start"
+}
+
+merv_nvram_inventory_publish_state() {
+  local _mnips_path="$1" _mnips_state="$2" _mnips_tmp _mnips_root
+  _mnips_root=${_mnips_path%/*}
+  merv_nvram_inventory_process_start "$_mnips_root" >/dev/null 2>&1 || return 1
+  _mnips_tmp="${_mnips_path}.state.tmp"
+  [ ! -L "$_mnips_tmp" ] || return 1
+  [ ! -L "${_mnips_path}.state" ] || return 1
+  [ ! -e "$_mnips_tmp" ] || rm -f "$_mnips_tmp" 2>/dev/null || return 1
+  (
+    set -C
+    printf '%s\n' "$_mnips_state" > "$_mnips_tmp" 2>/dev/null
+  ) || return 1
+  chmod 600 "$_mnips_tmp" 2>/dev/null || {
+    rm -f "$_mnips_tmp" 2>/dev/null
+    return 1
+  }
+  [ ! -L "${_mnips_path}.state" ] || {
+    rm -f "$_mnips_tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$_mnips_tmp" "${_mnips_path}.state" 2>/dev/null || {
+    rm -f "$_mnips_tmp" 2>/dev/null
+    return 1
+  }
+}
+
+merv_nvram_inventory_mark_error() {
+  local _mnie_path="$1" _mnie_rc="$2" _mnie_reason="$3"
+  local _mnie_start _mnie_pid _mnie_state
+  _mnie_start=$(merv_nvram_inventory_process_start "${_mnie_path%/*}") || {
+    MERV_NVRAM_INVENTORY_FILE=""
+    MERV_NVRAM_INVENTORY_STATUS=error
+    MERV_NVRAM_INVENTORY_REASON=identity-unavailable
+    MERV_NVRAM_INVENTORY_RC=65
+    return 2
+  }
+  _mnie_pid="$$"
+  case "$_mnie_rc" in ''|*[!0-9]*) _mnie_rc=1 ;; esac
+  case "$_mnie_reason" in
+    ''|*[!A-Za-z0-9._-]*) _mnie_reason=read-failed ;;
+  esac
+  _mnie_state="error|$_mnie_pid|$_mnie_start|$_mnie_rc|$_mnie_reason"
+  rm -f "${_mnie_path}.data" "${_mnie_path}.raw" \
+    "${_mnie_path}.filtered.tmp" 2>/dev/null
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=error
+  MERV_NVRAM_INVENTORY_REASON="$_mnie_reason"
+  MERV_NVRAM_INVENTORY_RC="$_mnie_rc"
+  if ! merv_nvram_inventory_publish_state "$_mnie_path" "$_mnie_state"; then
+    MERV_NVRAM_INVENTORY_REASON=cache-state-publish-failed
+  fi
+  return 2
+}
+
+merv_nvram_inventory_invalidate() {
+  local _mnii_path _mnii_root _mnii_file _mnii_failed=0
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+  _mnii_root="${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}"
+  case "$_mnii_root" in
+    /tmp|/tmp/*) ;;
+    *) _mnii_root=/tmp/mervlan_tmp ;;
+  esac
+  case "$_mnii_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mnii_root=/tmp/mervlan_tmp ;;
+  esac
+  merv_nvram_inventory_process_start "$_mnii_root" >/dev/null 2>&1 || return 1
+  if [ ! -e "$_mnii_root" ] && [ ! -L "$_mnii_root" ]; then
+    MERV_NVRAM_INVENTORY_FILE=""
+    MERV_NVRAM_INVENTORY_STATUS=""
+    MERV_NVRAM_INVENTORY_REASON=""
+    MERV_NVRAM_INVENTORY_RC=""
+    return 0
+  fi
+  _mnii_path=$(merv_nvram_inventory_path 2>/dev/null) || return 1
+  merv_nvram_inventory_process_start "${_mnii_path%/*}" >/dev/null 2>&1 || return 1
+  for _mnii_file in "$_mnii_path" "${_mnii_path}.state" "${_mnii_path}.data" \
+    "${_mnii_path}.raw" "${_mnii_path}.filtered.tmp" "${_mnii_path}.state.tmp"; do
+    rm -f "$_mnii_file" 2>/dev/null || _mnii_failed=1
+  done
+  for _mnii_file in "$_mnii_path" "${_mnii_path}.state" "${_mnii_path}.data" \
+    "${_mnii_path}.raw" "${_mnii_path}.filtered.tmp" "${_mnii_path}.state.tmp"; do
+    if [ -e "$_mnii_file" ] || [ -L "$_mnii_file" ]; then
+      _mnii_failed=1
+    fi
+  done
+  [ "$_mnii_failed" -eq 0 ] || return 1
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+  return 0
+}
+
+# merv_nvram_inventory_read
+#   Return 0 for a valid inventory (including an empty valid inventory).
+#   Return 2 for an unavailable, malformed, or otherwise untrusted read.
+#   MERV_NVRAM_INVENTORY_FILE points at the validated record file on success.
+merv_nvram_inventory_read() {
+  local _mnir_path _mnir_state _mnir_data _mnir_raw _mnir_filtered
+  local _mnir_kind _mnir_pid _mnir_start _mnir_rc _mnir_reason
+  local _mnir_current_start _mnir_timeout _mnir_bytes _mnir_max_bytes
+  local _mnir_max_records _mnir_max_lines _mnir_max_line _mnir_max_selected_bytes
+  local _mnir_max_selected_records _mnir_max_selected_line _mnir_max_selected_value
+  local _mnir_selected_bytes _mnir_root
+
+  # Start each read from a neutral state so a path/identity failure cannot
+  # expose a previous valid file to manager or Shield callers.
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+  _mnir_path=$(merv_nvram_inventory_path 2>/dev/null) || {
+    merv_nvram_inventory_set_error cache-path-untrusted 65
+    return $?
+  }
+  _mnir_state="${_mnir_path}.state"
+  _mnir_data="${_mnir_path}.data"
+  merv_nvram_inventory_artifacts_safe "$_mnir_path" || {
+    merv_nvram_inventory_set_error cache-path-untrusted 65
+    return $?
+  }
+  _mnir_current_start=$(merv_nvram_inventory_process_start) || {
+    merv_nvram_inventory_set_error identity-unavailable 65
+    return $?
+  }
+
+  # State is published atomically, but still parse every field as untrusted
+  # text before accepting it.  A matching cached error is intentionally
+  # returned without retrying the underlying NVRAM command.
+  if [ -f "$_mnir_state" ] && [ ! -L "$_mnir_state" ]; then
+    _mnir_kind=""; _mnir_pid=""; _mnir_start=""; _mnir_rc=""; _mnir_reason=""
+    [ ! -L "$_mnir_state" ] || {
+      merv_nvram_inventory_set_error cache-path-untrusted 65
+      return $?
+    }
+    IFS='|' read -r _mnir_kind _mnir_pid _mnir_start _mnir_rc _mnir_reason < "$_mnir_state" || :
+    case "$_mnir_kind" in
+      valid)
+        if [ "$_mnir_pid" = "$$" ] && [ "$_mnir_start" = "$_mnir_current_start" ] &&
+           [ "$_mnir_rc" = 0 ] && [ "$_mnir_reason" = ok ] &&
+           [ -f "$_mnir_data" ] && [ ! -L "$_mnir_data" ] &&
+           merv_nvram_inventory_validate_records "$_mnir_data"; then
+          MERV_NVRAM_INVENTORY_FILE="$_mnir_data"
+          MERV_NVRAM_INVENTORY_STATUS=valid
+          MERV_NVRAM_INVENTORY_REASON=ok
+          MERV_NVRAM_INVENTORY_RC=0
+          return 0
+        fi
+        ;;
+      error)
+        if [ "$_mnir_pid" = "$$" ] && [ "$_mnir_start" = "$_mnir_current_start" ]; then
+          case "$_mnir_rc" in ''|*[!0-9]*) _mnir_rc=1 ;; esac
+          case "$_mnir_reason" in ''|*[!A-Za-z0-9._-]*) _mnir_reason=read-failed ;; esac
+          MERV_NVRAM_INVENTORY_FILE=""
+          MERV_NVRAM_INVENTORY_STATUS=error
+          MERV_NVRAM_INVENTORY_REASON="$_mnir_reason"
+          MERV_NVRAM_INVENTORY_RC="$_mnir_rc"
+          return 2
+        fi
+        ;;
+    esac
+    # The path is process-scoped.  A stale or malformed marker can be
+    # discarded and rebuilt, but never treated as a successful empty result.
+    rm -f "$_mnir_state" "$_mnir_data" 2>/dev/null || return 2
+  fi
+
+  _mnir_root=${_mnir_path%/*}
+  mkdir -p "$_mnir_root" 2>/dev/null || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 cache-root-unavailable
+    return $?
+  }
+  merv_nvram_inventory_process_start "$_mnir_root" >/dev/null 2>&1 || {
+    merv_nvram_inventory_set_error cache-root-untrusted 65
+    return $?
+  }
+  _mnir_raw="${_mnir_path}.raw"
+  _mnir_filtered="${_mnir_path}.filtered.tmp"
+  merv_nvram_inventory_artifacts_safe "$_mnir_path" || {
+    merv_nvram_inventory_set_error cache-path-untrusted 65
+    return $?
+  }
+  rm -f "$_mnir_raw" "$_mnir_filtered" "$_mnir_data" 2>/dev/null || {
+    merv_nvram_inventory_set_error cache-artifact-remove-failed 1
+    return $?
+  }
+
+  _mnir_timeout="${MERV_NVRAM_READ_TIMEOUT:-10}"
+  case "$_mnir_timeout" in ''|*[!0-9]*) _mnir_timeout=10 ;; esac
+  [ "$_mnir_timeout" -gt 0 ] 2>/dev/null || _mnir_timeout=10
+  MERV_NVRAM_READ_TIMEOUT="$_mnir_timeout"
+  if ! type _merv_timeout_run >/dev/null 2>&1; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 127 timeout-helper-unavailable
+    return $?
+  fi
+  (
+    set -C
+    exec 3> "$_mnir_raw" 2>/dev/null || exit 126
+    [ ! -L "$_mnir_raw" ] || { exec 3>&-; exit 127; }
+    _merv_timeout_run "$MERV_NVRAM_READ_TIMEOUT" nvram show >&3 2>/dev/null
+    _mnir_rc=$?
+    exec 3>&-
+    exit "$_mnir_rc"
+  )
+  _mnir_rc=$?
+  if [ "$_mnir_rc" -ne 0 ]; then
+    case "$_mnir_rc" in
+      124) _mnir_reason=timeout ;;
+      125) _mnir_reason=timeout-cleanup-failed ;;
+      *) _mnir_reason=read-failed ;;
+    esac
+    merv_nvram_inventory_mark_error "$_mnir_path" "$_mnir_rc" "$_mnir_reason"
+    return $?
+  fi
+
+  _mnir_max_bytes="${MERV_NVRAM_INVENTORY_MAX_RAW_BYTES:-${MERV_NVRAM_INVENTORY_MAX_BYTES:-1048576}}"
+  case "$_mnir_max_bytes" in ''|*[!0-9]*) _mnir_max_bytes=1048576 ;; esac
+  [ "$_mnir_max_bytes" -gt 0 ] 2>/dev/null || _mnir_max_bytes=1048576
+  [ -f "$_mnir_raw" ] && [ ! -L "$_mnir_raw" ] || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 cache-input-untrusted
+    return $?
+  }
+  _mnir_bytes=$(
+    exec 3< "$_mnir_raw" 2>/dev/null || exit 1
+    [ ! -L "$_mnir_raw" ] || { exec 3<&-; exit 1; }
+    wc -c <&3
+    exec 3<&-
+  ) || _mnir_bytes=""
+  case "$_mnir_bytes" in ''|*[!0-9]*)
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-size-unreadable
+    return $? ;;
+  esac
+  if ! [ "$_mnir_bytes" -le "$_mnir_max_bytes" ] 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-too-large
+    return $?
+  fi
+
+  _mnir_max_records="${MERV_NVRAM_INVENTORY_MAX_RAW_RECORDS:-${MERV_NVRAM_INVENTORY_MAX_RECORDS:-32768}}"
+  case "$_mnir_max_records" in ''|*[!0-9]*) _mnir_max_records=32768 ;; esac
+  [ "$_mnir_max_records" -gt 0 ] 2>/dev/null || _mnir_max_records=32768
+  _mnir_max_lines="${MERV_NVRAM_INVENTORY_MAX_RAW_LINES:-32768}"
+  case "$_mnir_max_lines" in ''|*[!0-9]*) _mnir_max_lines=32768 ;; esac
+  [ "$_mnir_max_lines" -gt 0 ] 2>/dev/null || _mnir_max_lines=32768
+  _mnir_max_line="${MERV_NVRAM_INVENTORY_MAX_RAW_LINE_BYTES:-8192}"
+  case "$_mnir_max_line" in ''|*[!0-9]*) _mnir_max_line=8192 ;; esac
+  [ "$_mnir_max_line" -gt 0 ] 2>/dev/null || _mnir_max_line=8192
+  _mnir_max_selected_bytes="${MERV_NVRAM_INVENTORY_MAX_SELECTED_BYTES:-32768}"
+  case "$_mnir_max_selected_bytes" in ''|*[!0-9]*) _mnir_max_selected_bytes=32768 ;; esac
+  [ "$_mnir_max_selected_bytes" -gt 0 ] 2>/dev/null || _mnir_max_selected_bytes=32768
+  _mnir_max_selected_records="${MERV_NVRAM_INVENTORY_MAX_SELECTED_RECORDS:-128}"
+  case "$_mnir_max_selected_records" in ''|*[!0-9]*) _mnir_max_selected_records=128 ;; esac
+  [ "$_mnir_max_selected_records" -gt 0 ] 2>/dev/null || _mnir_max_selected_records=128
+  _mnir_max_selected_line="${MERV_NVRAM_INVENTORY_MAX_SELECTED_LINE_BYTES:-256}"
+  case "$_mnir_max_selected_line" in ''|*[!0-9]*) _mnir_max_selected_line=256 ;; esac
+  [ "$_mnir_max_selected_line" -gt 0 ] 2>/dev/null || _mnir_max_selected_line=256
+  _mnir_max_selected_value="${MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES:-128}"
+  case "$_mnir_max_selected_value" in ''|*[!0-9]*) _mnir_max_selected_value=128 ;; esac
+  [ "$_mnir_max_selected_value" -gt 0 ] 2>/dev/null || _mnir_max_selected_value=128
+  [ -f "$_mnir_raw" ] && [ ! -L "$_mnir_raw" ] || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 cache-input-untrusted
+    return $?
+  }
+  (
+    set -C
+    [ ! -e "$_mnir_filtered" ] || exit 126
+    exec 3< "$_mnir_raw" 2>/dev/null || exit 127
+    [ ! -L "$_mnir_raw" ] || { exec 3<&-; exit 127; }
+    awk -v max_raw_records="$_mnir_max_records" \
+      -v max_raw_lines="$_mnir_max_lines" \
+      -v max_raw_line="$_mnir_max_line" \
+      -v max_selected_records="$_mnir_max_selected_records" \
+      -v max_selected_line="$_mnir_max_selected_line" \
+      -v max_selected_value="$_mnir_max_selected_value" '
+    {
+      if (NR > max_raw_lines) { bad=1; next }
+      if (length($0) > max_raw_line) { bad=1; next }
+      if ($0 ~ /^[[:space:]]*$/) next
+      if (index($0, "=") > 0) records++
+      if (records > max_raw_records) { bad=1; next }
+      if (index($0, "=") == 0) {
+        # Broadcom nvram applets append a human-readable size summary.
+        if ($0 ~ /^size:[[:space:]]*/) next
+        # Only an exact selected key without its separator is malformed;
+        # near-match namespaces remain unrelated input and are ignored.
+        if ($0 ~ /^wl[0-9]+(\.[0-9]+)?_(ssid|ifname)$/) bad=1
+        next
+      }
+      eq=index($0, "=")
+      key=substr($0, 1, eq-1)
+      val=substr($0, eq+1)
+      if (key !~ /^wl[0-9]+(\.[0-9]+)?_(ssid|ifname)$/) {
+        # NVRAM contains unrelated keys with colons, slashes, and other
+        # firmware-specific punctuation.  They are not inventory targets.
+        next
+      }
+      if (length($0) > max_selected_line || length(val) > max_selected_value ||
+          val ~ /[[:cntrl:]]/ || seen[key]++ || ++selected_records > max_selected_records) {
+        bad=1; next
+      }
+      if (key ~ /_ifname$/) {
+        clean=val
+        sub(/^[[:space:]]+/, "", clean)
+        sub(/[[:space:]]+$/, "", clean)
+        if (clean ~ /^\".*\"$/)
+          clean=substr(clean, 2, length(clean)-2)
+        if (clean != "" && clean !~ /^[A-Za-z0-9_.:-]+$/) { bad=1; next }
+      }
+      print key "=" val
+    }
+    END { exit bad ? 65 : 0 }
+    ' <&3 > "$_mnir_filtered" 2>/dev/null
+    _mnir_rc=$?
+    exec 3<&-
+    exit "$_mnir_rc"
+  )
+  _mnir_rc=$?
+  if [ "$_mnir_rc" -ne 0 ]; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-malformed
+    return $?
+  fi
+
+  [ -f "$_mnir_filtered" ] && [ ! -L "$_mnir_filtered" ] || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 cache-input-untrusted
+    return $?
+  }
+  _mnir_selected_bytes=$(
+    exec 3< "$_mnir_filtered" 2>/dev/null || exit 1
+    [ ! -L "$_mnir_filtered" ] || { exec 3<&-; exit 1; }
+    wc -c <&3
+    exec 3<&-
+  ) || _mnir_selected_bytes=""
+  case "$_mnir_selected_bytes" in ''|*[!0-9]*)
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-size-unreadable
+    return $? ;;
+  esac
+  if ! [ "$_mnir_selected_bytes" -le "$_mnir_max_selected_bytes" ] 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-selected-too-large
+    return $?
+  fi
+
+  if ! mv -f "$_mnir_filtered" "$_mnir_data" 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 inventory-cache-write-failed
+    return $?
+  fi
+  if ! chmod 600 "$_mnir_data" 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 inventory-cache-mode-failed
+    return $?
+  fi
+  rm -f "$_mnir_raw" 2>/dev/null || :
+  _mnir_start="$_mnir_current_start"
+  if ! merv_nvram_inventory_publish_state "$_mnir_path" \
+       "valid|$$|$_mnir_start|0|ok"; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 inventory-state-write-failed
+    return $?
+  fi
+  MERV_NVRAM_INVENTORY_FILE="$_mnir_data"
+  MERV_NVRAM_INVENTORY_STATUS=valid
+  MERV_NVRAM_INVENTORY_REASON=ok
+  MERV_NVRAM_INVENTORY_RC=0
+  return 0
+}
+
+# merv_nvram_inventory_value <key>
+# Print one validated value from the current inventory.  This is intentionally
+# a file read rather than `nvram get`: all manager/Shield lookups then share
+# the one bounded inventory read and retain its failure classification.
+merv_nvram_inventory_value() {
+  local _mniv_key="$1" _mniv_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  local _mniv_name _mniv_value _mniv_found=0 _mniv_result=""
+  merv_nvram_inventory_target_key_valid "$_mniv_key" || return 1
+  if [ -z "$_mniv_file" ]; then
+    _mniv_file=$(merv_nvram_inventory_path 2>/dev/null) || return 1
+    _mniv_file="${_mniv_file}.data"
+  fi
+  [ -f "$_mniv_file" ] && [ ! -L "$_mniv_file" ] || return 1
+  exec 3< "$_mniv_file" 2>/dev/null || return 1
+  [ ! -L "$_mniv_file" ] || {
+    exec 3<&-
+    return 1
+  }
+  while IFS='=' read -r _mniv_name _mniv_value; do
+    merv_nvram_inventory_target_key_valid "$_mniv_name" || {
+      exec 3<&-
+      return 1
+    }
+    [ "$_mniv_name" = "$_mniv_key" ] || continue
+    [ "$_mniv_found" -eq 0 ] || {
+      exec 3<&-
+      return 1
+    }
+    _mniv_found=1
+    _mniv_result="$_mniv_value"
+  done <&3
+  exec 3<&-
+  [ "$_mniv_found" -eq 1 ] || return 1
+  printf '%s\n' "$_mniv_result"
+  return 0
+}
 
 # ============================================================================
 # Snapshot status output globals
@@ -186,7 +867,8 @@ merv_mac_boot_init() {
 #   - Output is deduplicated: same iface appearing in multiple slots emitted once
 # ============================================================================
 merv_mac_build_expected_iface_vid() {
-  local max_ssids i ssid vlan nvram_ssids key rawval val base iface
+  local max_ssids i ssid vlan key rawval val base iface
+  local nvram_file ifname_key ifname_raw
 
   # Use merv_cap_ssids to get a safe, cap-bounded slot count.
   # Falls back to 12 if MAX_SSIDS is 0/unset, and never exceeds Limits.MAX_SSID_CAP.
@@ -198,15 +880,15 @@ merv_mac_build_expected_iface_vid() {
   fi
 
   # Single cached NVRAM read across all slot iterations. Some ASUS firmware
-  # builds can leave `nvram show` asleep indefinitely; fail this snapshot
-  # generation instead of holding the observation worker forever.
-  nvram_ssids=$(_merv_timeout_run "$MERV_NVRAM_READ_TIMEOUT" nvram show 2>/dev/null)
-  _mmb_nvram_rc=$?
-  if [ "$_mmb_nvram_rc" -ne 0 ]; then
-    _merv_mac_log warn "MERV_MAC: timed out reading NVRAM SSID inventory (rc=$_mmb_nvram_rc)"
+  # builds can leave `nvram show` asleep indefinitely; the inventory helper
+  # bounds and memoizes that failure instead of repeating it per guard tick.
+  merv_nvram_inventory_read || {
+    _mmb_nvram_rc=$?
+    _merv_mac_log warn "MERV_MAC: NVRAM SSID inventory unavailable (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_mmb_nvram_rc})"
     return 1
-  fi
-  nvram_ssids=$(printf '%s\n' "$nvram_ssids" | grep -E '^wl[0-9][0-9]*(\.([0-9]+))?_ssid=')
+  }
+  nvram_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  [ -f "$nvram_file" ] && [ ! -L "$nvram_file" ] || return 1
 
   i=1
   while [ "$i" -le "$max_ssids" ]; do
@@ -222,7 +904,12 @@ merv_mac_build_expected_iface_vid() {
     mervqt_valid_vid "$vlan" || continue
 
     # Scan cached NVRAM for wl subinterfaces matching this SSID
+    [ -f "$nvram_file" ] && [ ! -L "$nvram_file" ] || return 1
     while IFS='=' read -r key rawval; do
+      case "$key" in
+        wl[0-9]*_ssid) ;;
+        *) continue ;;
+      esac
       # Strip quotes and surrounding whitespace from NVRAM value
       val=$(printf '%s' "$rawval" \
         | sed "s/^[[:space:]]*['\"]//;s/['\"][[:space:]]*\$//;s/^[[:space:]]*//;s/[[:space:]]*\$//")
@@ -241,9 +928,19 @@ merv_mac_build_expected_iface_vid() {
         esac
       fi
 
-      # Resolve ifname from NVRAM; fall back to base key name if empty
-      iface=$(nvram get "${base}_ifname" 2>/dev/null \
-        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      # Resolve ifname from the same validated inventory; fall back to the
+      # base key name when firmware omitted the optional mapping, matching the
+      # historical builder's fallback without another unbounded NVRAM call.
+      ifname_key="${base}_ifname"
+      ifname_raw=""
+      [ -f "$nvram_file" ] && [ ! -L "$nvram_file" ] || return 1
+      while IFS='=' read -r _mmb_name _mmb_value; do
+        [ "$_mmb_name" = "$ifname_key" ] || continue
+        ifname_raw="$_mmb_value"
+        break
+      done < "$nvram_file"
+      iface=$(printf '%s' "$ifname_raw" \
+        | sed 's/^[[:space:]]*[\"]//;s/[\"][[:space:]]*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')
       [ -n "$iface" ] || iface="$base"
 
       # Emit only wl subinterfaces (strict check)
@@ -255,11 +952,40 @@ merv_mac_build_expected_iface_vid() {
         esac
       fi
 
-    done <<_NVRAM_
-$nvram_ssids
-_NVRAM_
+    done < "$nvram_file"
 
-  done | awk '!seen[$1]++'
+  done | awk '
+    NF == 0 { next }
+    NF != 2 || $1 !~ /^wl[0-9]+\.[0-9]+$/ ||
+      $2 !~ /^[0-9]+$/ || $2 < 2 || $2 > 4094 { bad=1; next }
+    !seen[$1]++ { print }
+    END { exit bad ? 65 : 0 }
+  '
+}
+
+merv_iface_vid_pairs_validate() {
+  local _mipv_pairs="$1" _mipv_iface _mipv_vid _mipv_extra
+  while IFS=' ' read -r _mipv_iface _mipv_vid _mipv_extra; do
+    [ -n "$_mipv_iface" ] || {
+      [ -z "$_mipv_vid" ] && [ -z "$_mipv_extra" ] && continue
+      return 1
+    }
+    [ -n "$_mipv_vid" ] && [ -z "$_mipv_extra" ] || return 1
+    if type mervqt_valid_wl_subif >/dev/null 2>&1; then
+      mervqt_valid_wl_subif "$_mipv_iface" || return 1
+    else
+      case "$_mipv_iface" in wl[0-9]*.*) ;; *) return 1 ;; esac
+    fi
+    if type mervqt_valid_vid >/dev/null 2>&1; then
+      mervqt_valid_vid "$_mipv_vid" || return 1
+    else
+      case "$_mipv_vid" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$_mipv_vid" -ge 2 ] 2>/dev/null && [ "$_mipv_vid" -le 4094 ] 2>/dev/null || return 1
+    fi
+  done <<_MERV_IFACE_VID_PAIRS_
+$_mipv_pairs
+_MERV_IFACE_VID_PAIRS_
+  return 0
 }
 
 # ============================================================================
@@ -270,9 +996,10 @@ _NVRAM_
 # either the cache is invalidated (merv_iface_vid_cache_invalidate) or
 # disabled (merv_iface_vid_cache_disable).
 #
-# Cache scope: in-memory shell variable. Process-local. Subshells (pipelines)
-# do NOT mutate the parent's cache, so callers that consume output via a pipe
-# still benefit because the parent shell populates the cache before the pipe.
+# Cache scope: the derived iface/VID output remains an in-memory optimization,
+# while the underlying NVRAM inventory is file-backed and process-scoped.  The
+# latter is required because subshells (pipelines/command substitutions) do
+# NOT mutate the parent's shell variables.
 #
 # Callers that MUST see fresh state (final security check, snapshot
 # preconditions) should call merv_mac_build_expected_iface_vid directly and
@@ -282,24 +1009,85 @@ _MERV_IFACE_VID_CACHE=""
 _MERV_IFACE_VID_CACHE_ON=0
 _MERV_IFACE_VID_CACHE_STATUS="unset"
 
+merv_iface_vid_cache_path() {
+  local _mivcp_path
+  _mivcp_path=$(merv_nvram_inventory_path 2>/dev/null) || {
+    merv_nvram_inventory_clear_state
+    return 1
+  }
+  printf '%s.iface\n' "$_mivcp_path"
+}
+
+merv_iface_vid_cache_remove_files() {
+  local _mivrf_path="$1" _mivrf_file _mivrf_failed=0
+  [ -n "$_mivrf_path" ] || return 1
+  merv_nvram_inventory_process_start "${_mivrf_path%/*}" >/dev/null 2>&1 || {
+    merv_nvram_inventory_clear_state
+    return 1
+  }
+  for _mivrf_file in "${_mivrf_path}.data" "${_mivrf_path}.state" \
+    "${_mivrf_path}.tmp" "${_mivrf_path}.state.tmp"; do
+    rm -f "$_mivrf_file" 2>/dev/null || _mivrf_failed=1
+  done
+  for _mivrf_file in "${_mivrf_path}.data" "${_mivrf_path}.state" \
+    "${_mivrf_path}.tmp" "${_mivrf_path}.state.tmp"; do
+    if [ -e "$_mivrf_file" ] || [ -L "$_mivrf_file" ]; then
+      _mivrf_failed=1
+    fi
+  done
+  [ "$_mivrf_failed" -eq 0 ]
+}
+
 merv_iface_vid_cache_enable() {
+  local _mivce_path
+  merv_nvram_inventory_clear_state
   _MERV_IFACE_VID_CACHE_ON=1
   _MERV_IFACE_VID_CACHE=""
   _MERV_IFACE_VID_CACHE_STATUS="unset"
+  _mivce_path=$(merv_iface_vid_cache_path 2>/dev/null) || {
+    _MERV_IFACE_VID_CACHE_ON=0
+    _MERV_IFACE_VID_CACHE_STATUS=error
+    return 1
+  }
+  if ! merv_iface_vid_cache_remove_files "$_mivce_path"; then
+    _MERV_IFACE_VID_CACHE_ON=0
+    _MERV_IFACE_VID_CACHE_STATUS=error
+    return 1
+  fi
+  return 0
 }
 
 merv_iface_vid_cache_invalidate() {
+  local _mivci_path
+  merv_nvram_inventory_clear_state
+  _MERV_IFACE_VID_CACHE_ON=1
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="error"
+  _mivci_path=$(merv_iface_vid_cache_path 2>/dev/null) || return 1
+  merv_iface_vid_cache_remove_files "$_mivci_path" || return 1
+  type merv_nvram_inventory_invalidate >/dev/null 2>&1 || return 1
+  merv_nvram_inventory_invalidate || return 1
   _MERV_IFACE_VID_CACHE_STATUS="unset"
+  return 0
 }
 
 merv_iface_vid_cache_disable() {
+  local _mivcd_path
+  merv_nvram_inventory_clear_state
   _MERV_IFACE_VID_CACHE_ON=0
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="error"
+  _mivcd_path=$(merv_iface_vid_cache_path 2>/dev/null) || return 1
+  merv_iface_vid_cache_remove_files "$_mivcd_path" || return 1
+  type merv_nvram_inventory_invalidate >/dev/null 2>&1 || return 1
+  merv_nvram_inventory_invalidate || return 1
   _MERV_IFACE_VID_CACHE_STATUS="unset"
+  return 0
 }
 
 merv_iface_vid_list() {
+  local _mivl_path _mivl_state _mivl_data _mivl_start _mivl_tmp
+  local _mivl_kind _mivl_pid _mivl_cached_start _mivl_rc _mivl_reason
   if [ "${_MERV_IFACE_VID_CACHE_ON:-0}" = "1" ]; then
     case "${_MERV_IFACE_VID_CACHE_STATUS:-unset}" in
       valid)
@@ -308,13 +1096,99 @@ merv_iface_vid_list() {
         ;;
       error) return 1 ;;
     esac
-    if _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null); then
+
+    # merv_iface_vid_list is commonly consumed through command substitution
+    # by the QT verifier.  Rehydrate the derived cache from a process-scoped
+    # file before rebuilding so that the parent/child shell boundary cannot
+    # turn one inventory read into one read per guard tick.
+    _mivl_path=$(merv_iface_vid_cache_path 2>/dev/null) || {
+      merv_nvram_inventory_clear_state
+      _MERV_IFACE_VID_CACHE=""
+      _MERV_IFACE_VID_CACHE_STATUS=error
+      return 1
+    }
+    _mivl_state="${_mivl_path}.state"
+    _mivl_data="${_mivl_path}.data"
+    _mivl_start=$(merv_nvram_inventory_process_start) || {
+      merv_nvram_inventory_clear_state
+      _MERV_IFACE_VID_CACHE=""
+      _MERV_IFACE_VID_CACHE_STATUS=error
+      return 1
+    }
+    if [ -n "$_mivl_path" ] && [ -f "$_mivl_state" ] && [ ! -L "$_mivl_state" ]; then
+      _mivl_kind=""; _mivl_pid=""; _mivl_cached_start=""; _mivl_rc=""; _mivl_reason=""
+      [ ! -L "$_mivl_state" ] || {
+        _MERV_IFACE_VID_CACHE=""
+        _MERV_IFACE_VID_CACHE_STATUS=error
+        return 1
+      }
+      IFS='|' read -r _mivl_kind _mivl_pid _mivl_cached_start _mivl_rc _mivl_reason < "$_mivl_state" || :
+      if [ "$_mivl_pid" = "$$" ] && [ "$_mivl_cached_start" = "$_mivl_start" ]; then
+        case "$_mivl_kind" in
+          valid)
+            if [ "$_mivl_rc" = 0 ] && [ "$_mivl_reason" = ok ] &&
+               [ -f "$_mivl_data" ] && [ ! -L "$_mivl_data" ]; then
+              [ ! -L "$_mivl_data" ] || {
+                _MERV_IFACE_VID_CACHE=""
+                _MERV_IFACE_VID_CACHE_STATUS=error
+                return 1
+              }
+              _MERV_IFACE_VID_CACHE=$(cat "$_mivl_data" 2>/dev/null) || return 1
+              merv_iface_vid_pairs_validate "$_MERV_IFACE_VID_CACHE" || {
+                _MERV_IFACE_VID_CACHE=""
+                _MERV_IFACE_VID_CACHE_STATUS=error
+                return 1
+              }
+              _MERV_IFACE_VID_CACHE_STATUS=valid
+              [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+              return 0
+            fi
+            ;;
+          error)
+            _MERV_IFACE_VID_CACHE=""
+            _MERV_IFACE_VID_CACHE_STATUS=error
+            return 1
+            ;;
+        esac
+      fi
+      rm -f "$_mivl_state" "$_mivl_data" 2>/dev/null || return 1
+    fi
+
+    if _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null) &&
+       merv_iface_vid_pairs_validate "$_MERV_IFACE_VID_CACHE"; then
+      if ! merv_nvram_inventory_process_start "${_mivl_path%/*}" >/dev/null 2>&1; then
+        _MERV_IFACE_VID_CACHE=""
+        _MERV_IFACE_VID_CACHE_STATUS=error
+        return 1
+      fi
+      if [ -n "$_mivl_path" ]; then
+        _mivl_tmp="${_mivl_path}.tmp"
+        [ ! -L "$_mivl_tmp" ] || return 1
+        [ ! -e "$_mivl_tmp" ] || rm -f "$_mivl_tmp" 2>/dev/null || return 1
+        [ ! -L "$_mivl_data" ] || return 1
+        (
+          set -C
+          printf '%s\n' "$_MERV_IFACE_VID_CACHE" > "$_mivl_tmp" 2>/dev/null
+        ) || return 1
+        [ ! -L "$_mivl_tmp" ] || {
+          rm -f "$_mivl_tmp" 2>/dev/null
+          return 1
+        }
+        chmod 600 "$_mivl_tmp" 2>/dev/null || { rm -f "$_mivl_tmp" 2>/dev/null; return 1; }
+        mv -f "$_mivl_tmp" "$_mivl_data" 2>/dev/null || { rm -f "$_mivl_tmp" 2>/dev/null; return 1; }
+        merv_nvram_inventory_publish_state "$_mivl_path" \
+          "valid|$$|$_mivl_start|0|ok" || return 1
+      fi
       _MERV_IFACE_VID_CACHE_STATUS="valid"
       [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
       return 0
     else
       _MERV_IFACE_VID_CACHE=""
       _MERV_IFACE_VID_CACHE_STATUS="error"
+      if [ -n "$_mivl_path" ]; then
+        merv_nvram_inventory_publish_state "$_mivl_path" \
+          "error|$$|$_mivl_start|1|derived-rows-invalid" || :
+      fi
       return 1
     fi
   fi

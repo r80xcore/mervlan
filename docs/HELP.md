@@ -204,13 +204,12 @@ Controls which devices in your network manage each SSID.
 > [!TIP]
 > **SSID Assignment Tips**
 >
-> - **Select broadcasting devices:** Picking only the hardware where the SSID is
->   active is best practice. MAIN and nodes may safely have different SSID sets.
-> - **Node-only SSIDs:** Deselect **MAIN** if an SSID exists solely on mesh nodes
->   to eliminate unnecessary router processing.
-> - **Safe to guess:** If you are unsure, selecting candidate devices is safe—
->   unmatched SSIDs are cleanly logged and ignored; MerVLAN never creates them
->   automatically.
+> * **Select only broadcasting devices:** Assign each SSID only to the MAIN router and/or nodes where that SSID is actually enabled in ASUS. MAIN and nodes may safely use different SSID sets.
+> * **Node-only SSIDs:** Deselect **MAIN** when an SSID exists only on one or more mesh nodes. This avoids unnecessary processing and keeps MerVLAN's expected topology accurate.
+> * **Missing SSIDs are logged, not created:** If an assigned SSID is not present on a device, MerVLAN logs it as missing and does not create it automatically. MerVLAN cannot create SSIDs and will not attempt to do so. These must be created manually in the ASUS Web UI under **Guest Network** or under **Wireless → General** for base SSIDs.
+> * **Be careful with SSID-only VLANs:** A missing SSID can be harmless if its VLAN is still active through another SSID or interface on that device. However, if that SSID is the only expected member of its VLAN, the VLAN may remain missing and HEAL can repeatedly try to restore it.
+> * **Best practice:** Match the device selections to where ASUS is actually broadcasting each SSID. Selecting extra devices can create incorrect topology expectations and unnecessary HEAL activity.
+
 
 ### Example Setup
 

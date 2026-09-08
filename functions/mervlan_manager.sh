@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.7"                #
+#             - File: mervlan_manager.sh || version="0.72.8"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -682,14 +682,25 @@ iface_exists() { [ -d "/sys/class/net/$1" ]; }
 # Returns: 0 if integer, 1 otherwise
 is_number()    { expr "$1" + 0 >/dev/null 2>&1; }
 
-# ssid_configured_for_iface — true if nvram has a non-empty SSID for this wl iface
+# ssid_configured_for_iface — true if validated inventory has a non-empty SSID
 # Args: $1=iface_name like wl0.1
-# Returns: 0 if configured, 1 otherwise
+# Returns: 0 if configured, 1 if valid inventory says not configured,
+#          2 if inventory could not be read/validated
 ssid_configured_for_iface() {
-  local ifn ssid
+  local ifn ssid inv_rc
   ifn="$1"
 
-  ssid="$(nvram get "${ifn}_ssid" 2>/dev/null)"
+  if merv_nvram_inventory_read; then
+    :
+  else
+    inv_rc=$?
+    # Keep operational failure distinct from a valid inventory with a missing
+    # SSID.  Callers must stop before topology mutation instead of treating an
+    # unavailable inventory as a configured/external interface.
+    warn -c cli,vlan "VAP classification: NVRAM inventory unavailable for '$ifn' (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$inv_rc})"
+    return 2
+  fi
+  ssid="$(merv_nvram_inventory_value "${ifn}_ssid" 2>/dev/null)"
   ssid="$(printf '%s' "$ssid" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//')"
 
   [ -n "$ssid" ] || return 1
@@ -704,7 +715,7 @@ ssid_configured_for_iface() {
 # Rule: wlX.Y is internal only if nvram key wlX.Y_ssid is missing/empty.
 # Never block wlX base radios or eth*.
 is_internal_vap() {
-  local ifn
+  local ifn _ssid_rc
   ifn="$1"
 
   [ -n "$ifn" ] || return 1
@@ -718,7 +729,14 @@ is_internal_vap() {
 
   # Strict VAP check: slot portion must be a pure unsigned integer
   if merv_is_wl_vap_iface "$ifn"; then
-    ssid_configured_for_iface "$ifn" && return 1
+    if ssid_configured_for_iface "$ifn"; then
+      return 1
+    else
+      _ssid_rc=$?
+      # Propagate inventory failure distinctly.  A failed read is not the
+      # same state as a valid inventory with an empty/missing SSID.
+      [ "$_ssid_rc" -eq 2 ] && return 2
+    fi
     return 0
   fi
 
@@ -940,6 +958,7 @@ verify_interface_binding() {
 # Returns: none (logs errors, continues on non-critical failures)
 # Explanation: Validates VLAN, filters internal VAPs, ensures bridge exists, adds interface
 attach_to_bridge() {
+  local _internal_rc
   IF="$1"
   VID="$2"
   LABEL="$3"
@@ -947,8 +966,20 @@ attach_to_bridge() {
   # Validate VLAN ID before attempting attachment
   validate_vlan_id "$VID" || { warn -c cli,vlan "Invalid VLAN $VID for $LABEL, skipping"; return 1; }
 
-  # Skip VAPs flagged as internal (those without a configured SSID)
-  is_internal_vap "$IF" && { warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"; return 1; }
+  # Skip VAPs flagged as internal (those without a configured SSID).  An
+  # inventory failure is an operational error: fail closed before any bridge
+  # or interface mutation rather than treating it as an internal/not-found
+  # result.
+  if is_internal_vap "$IF"; then
+    warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"
+    return 1
+  else
+    _internal_rc=$?
+    if [ "$_internal_rc" -eq 2 ]; then
+      error -c cli,vlan "$LABEL ($IF): NVRAM inventory unavailable; refusing attachment"
+      return 1
+    fi
+  fi
   # Verify interface exists in kernel before attachment
   iface_exists "$IF" || { warn -c cli,vlan "$LABEL ($IF) - not present, skipping"; return 1; }
 
@@ -1090,6 +1121,8 @@ iface_bound() {
 # Explanation: Resolves from nvram first, then callers wait for the interface
 #   to appear. This avoids dropping later-starting bands during boot/restart.
 find_if_by_ssid() {
+  local BAND TARGET TARGET_NORM TARGET_LOWER FALLBACK_IFACE FALLBACK_LABEL
+  local FALLBACK_COUNT inventory_rc SSID_BASE IF_BASE SSID_NORM IFN SSID slot
   BAND="$1"
   TARGET="$2"
 
@@ -1098,12 +1131,21 @@ find_if_by_ssid() {
   [ "$TARGET_NORM" = "unused-placeholder" ] && return 1
   TARGET_LOWER=$(to_lower "$TARGET_NORM")
 
+  case "$BAND" in ''|*[!0-9]*) return 1 ;; esac
+  if merv_nvram_inventory_read; then
+    :
+  else
+    inventory_rc=$?
+    warn -c cli,vlan "Band SSID lookup: NVRAM inventory unavailable (band=$BAND, reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$inventory_rc})"
+    return 2
+  fi
+
   FALLBACK_IFACE=""
   FALLBACK_LABEL=""
   FALLBACK_COUNT=0
 
-  SSID_BASE="$(nvram get wl${BAND}_ssid 2>/dev/null)"
-  IF_BASE="$(nvram get wl${BAND}_ifname 2>/dev/null)"
+  SSID_BASE="$(merv_nvram_inventory_value "wl${BAND}_ssid" 2>/dev/null)"
+  IF_BASE="$(merv_nvram_inventory_value "wl${BAND}_ifname" 2>/dev/null)"
   IF_BASE=$(normalize_iface "$IF_BASE")
   if [ -n "$IF_BASE" ]; then
     BASE_NORM=$(normalize_ssid "$SSID_BASE")
@@ -1119,8 +1161,8 @@ find_if_by_ssid() {
   fi
 
   for slot in 1 2 3 4 5 6 7 8 9; do
-    SSID="$(nvram get wl${BAND}.${slot}_ssid 2>/dev/null)"
-    IFN="$(nvram get wl${BAND}.${slot}_ifname 2>/dev/null)"
+    SSID="$(merv_nvram_inventory_value "wl${BAND}.${slot}_ssid" 2>/dev/null)"
+    IFN="$(merv_nvram_inventory_value "wl${BAND}.${slot}_ifname" 2>/dev/null)"
     IFN=$(normalize_iface "$IFN")
     [ -n "$IFN" ] || continue
     SSID_NORM=$(normalize_ssid "$SSID")
@@ -1161,11 +1203,30 @@ find_if_by_ssid() {
 #   first radio that happens to be up.
 # Use case: Fallback when band/slot unknown, or user moves SSID between bands
 find_if_by_ssid_any() {
+  local ssid TARGET_NORM TARGET_LOWER EXACT_MATCHES EXACT_COUNT FALLBACK_IFACE
+  local FALLBACK_LABELS FALLBACK_COUNT inventory_file entry key raw base iface
+  local inv_rc internal_rc
   ssid="$1"
   TARGET_NORM=$(normalize_ssid "$ssid")
   [ -z "$TARGET_NORM" ] && return 1
   [ "$TARGET_NORM" = "unused-placeholder" ] && return 1
   TARGET_LOWER=$(to_lower "$TARGET_NORM")
+
+  # Resolve every candidate from one bounded, validated inventory.  A failed
+  # inventory read is distinct from a valid inventory with no matching SSID;
+  # callers use status 2 to fail closed before topology mutation.
+  if merv_nvram_inventory_read; then
+    :
+  else
+    inv_rc=$?
+    warn -c cli,vlan "SSID lookup: NVRAM inventory unavailable (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$inv_rc})"
+    return 2
+  fi
+  inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  if [ -z "$inventory_file" ] || [ ! -f "$inventory_file" ] || [ -L "$inventory_file" ]; then
+    warn -c cli,vlan "SSID lookup: validated NVRAM inventory file is unavailable"
+    return 2
+  fi
 
   EXACT_MATCHES=""
   EXACT_COUNT=0
@@ -1185,10 +1246,18 @@ find_if_by_ssid_any() {
           *) continue ;;
         esac
 
-        iface=$(nvram get "${base}_ifname" 2>/dev/null)
+        iface=$(merv_nvram_inventory_value "${base}_ifname" 2>/dev/null)
         iface=$(normalize_iface "$iface")
         [ -n "$iface" ] || continue
-        is_internal_vap "$iface" && continue
+        if is_internal_vap "$iface"; then
+          continue
+        else
+          internal_rc=$?
+          if [ "$internal_rc" -eq 2 ]; then
+            warn -c cli,vlan "SSID lookup: cannot classify '$iface' because NVRAM inventory became unavailable"
+            return 2
+          fi
+        fi
 
         ssid_norm=$(normalize_ssid "$raw")
 
@@ -1208,9 +1277,7 @@ find_if_by_ssid_any() {
         fi
         ;;
     esac
-  done <<EOF
-$(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.[0-9]+)?_ssid=')
-EOF
+  done < "$inventory_file"
 
   # Return all exact matches (one per line) if any were found
   if [ "$EXACT_COUNT" -ge 1 ]; then
@@ -1235,20 +1302,41 @@ EOF
 # BOOT SSID READINESS GATE — Wait for configured SSIDs during boot mode      #
 # ========================================================================== #
 
-# ssid_in_nvram — Check if an SSID exists anywhere in nvram
+# ssid_in_nvram — Check if an SSID exists anywhere in the validated inventory
 # Args: $1=ssid_name
-# Returns: 0 if found, 1 if not found
+# Returns: 0 if found, 1 if not found, 2 if inventory is unavailable
 ssid_in_nvram() {
+  local _needle _inventory_file _entry _key _raw _value _inv_rc
   _needle="$1"
   [ -n "$_needle" ] || return 1
-  # Cache nvram output for efficiency (only fetch once)
-  [ -n "${_NVRAM_SSID_CACHE:-}" ] || _NVRAM_SSID_CACHE="$(nvram show 2>/dev/null | grep '_ssid=')"
-  printf '%s\n' "$_NVRAM_SSID_CACHE" | grep -Fq "_ssid=$_needle"
+  if merv_nvram_inventory_read; then
+    :
+  else
+    _inv_rc=$?
+    warn -c cli,vlan "SSID readiness: NVRAM inventory unavailable (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_inv_rc})"
+    return 2
+  fi
+  _inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  if [ -z "$_inventory_file" ] || [ ! -f "$_inventory_file" ] || [ -L "$_inventory_file" ]; then
+    warn -c cli,vlan "SSID readiness: validated NVRAM inventory file is unavailable"
+    return 2
+  fi
+  while IFS='=' read -r _key _raw; do
+    case "$_key" in
+      wl[0-9]*_ssid) ;;
+      *) continue ;;
+    esac
+    _value=$(printf '%s' "$_raw" \
+      | sed 's/^[[:space:]]*[\"]//;s/[\"][[:space:]]*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ "$_value" = "$_needle" ] && return 0
+  done < "$_inventory_file"
+  return 1
 }
 
 # boot_wait_for_configured_ssids — Block until configured SSIDs are ready (boot mode only)
 # Args: $1=timeout_seconds (default 30)
-# Returns: 0 always (logs warnings on timeout/missing SSIDs, continues anyway)
+# Returns: 0 on readiness/timeout, 1 when the validated NVRAM inventory cannot
+# be read (logs warnings on timeout/missing SSIDs, continues for those cases)
 # Purpose: Reduce boot race conditions by waiting for WLAN interfaces to appear
 boot_wait_for_configured_ssids() {
   [ "$MERV_MANAGER_MODE" = "boot" ] || return 0
@@ -1291,6 +1379,11 @@ $i|$ssid"
       waitlist="${waitlist}
 $idx|$ssid"
     else
+      _sin_rc=$?
+      if [ "$_sin_rc" -eq 2 ]; then
+        error -c cli,vlan "Boot SSID wait: cannot validate configured SSIDs because NVRAM inventory is unavailable; aborting before topology mutation"
+        return 1
+      fi
       missing_nvram="${missing_nvram}
 SSID_$(printf '%02d' "$idx")='$ssid'"
     fi
@@ -1325,6 +1418,11 @@ EOF
       # find_if_by_ssid_any may return multiple lines (dual-band identical SSIDs)
       # Mark ready if ANY of the resolved interfaces is present in the kernel
       _resolved="$(find_if_by_ssid_any "$ssid")"
+      _find_rc=$?
+      if [ "$_find_rc" -eq 2 ]; then
+        error -c cli,vlan "Boot SSID wait: NVRAM inventory became unavailable while resolving '$ssid'; aborting before topology mutation"
+        return 1
+      fi
       _ssid_ready=0
       if [ -n "$_resolved" ]; then
         while IFS= read -r _boot_ifn; do
@@ -1376,20 +1474,35 @@ EOF
 # Returns: none (logs errors on failure, continues)
 # Explanation: Uses wl command for immediate effect; persists via NVRAM if requested
 nvram_base_for_ifname() {
-  local ifn line key val base
+  local ifn line key val base inventory_file inv_rc
   ifn="$1"
   [ -n "$ifn" ] || return 1
 
-  while IFS= read -r line; do
-    key=${line%%=*}
-    val=${line#*=}
+  if merv_nvram_inventory_read; then
+    :
+  else
+    inv_rc=$?
+    warn -c cli,vlan "AP isolation: NVRAM inventory unavailable while mapping '$ifn' (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$inv_rc})"
+    return 2
+  fi
+  inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  if [ -z "$inventory_file" ] || [ ! -f "$inventory_file" ] || [ -L "$inventory_file" ]; then
+    warn -c cli,vlan "AP isolation: validated NVRAM inventory file is unavailable"
+    return 2
+  fi
+
+  while IFS='=' read -r key val; do
+    case "$key" in
+      wl[0-9]*_ifname) ;;
+      *) continue ;;
+    esac
+    val=$(printf '%s' "$val" \
+      | sed 's/^[[:space:]]*[\"]//;s/[\"][[:space:]]*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')
     [ "$val" = "$ifn" ] || continue
     base=${key%_ifname}
     echo "$base"
     return 0
-  done <<EOF
-$(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.[0-9]+)?_ifname=')
-EOF
+  done < "$inventory_file"
 
   return 1
 }
@@ -1410,6 +1523,11 @@ set_ap_isolation() {
         # Persist in NVRAM for specific bands/slots (wl0, wl0.1, etc.)
         if [ "$PERSISTENT" = "yes" ]; then
           base="$(nvram_base_for_ifname "$IFN")"
+          _base_rc=$?
+          if [ "$_base_rc" -eq 2 ]; then
+            error -c cli,vlan "Persistent AP isolation: cannot map '$IFN' because NVRAM inventory is unavailable"
+            return 1
+          fi
           if [ -n "$base" ]; then
             nvram set "${base}_ap_isolate=$VAL"
             nvram commit
@@ -1430,6 +1548,8 @@ set_ap_isolation() {
 # Initial pass is immediate; the post-restart second pass acts as the VAP safety net.
 # Also restores unconfigured SSIDs to br0 (prevents orphaning on VLAN changes)
 bind_configured_ssids() {
+  local _bc_inventory_file _bc_inv_rc _find_if_rc _seen_unconfigured _internal_rc
+  local _bc_key _bc_raw _bc_iface
   # Pre-scan: build the list of configured + filter-allowed slot numbers in a
   # single pass. The bind loop below iterates only this list, avoiding the
   # double JSON read (get_ssid_slot_value + get_vlan_slot_value) for empty or
@@ -1465,6 +1585,22 @@ bind_configured_ssids() {
     return 1
   fi
 
+  # Inventory validation is a hard precondition for this mutating function.
+  # Do it once before the first attach and retain the explicit failure class;
+  # an empty valid inventory is handled as ordinary SSID-not-found below.
+  if merv_nvram_inventory_read; then
+    :
+  else
+    _bc_inv_rc=$?
+    error -c cli,vlan "bind_configured_ssids: NVRAM inventory unavailable; aborting before bridge mutation (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_bc_inv_rc})"
+    return 1
+  fi
+  _bc_inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  if [ -z "$_bc_inventory_file" ] || [ ! -f "$_bc_inventory_file" ] || [ -L "$_bc_inventory_file" ]; then
+    error -c cli,vlan "bind_configured_ssids: validated NVRAM inventory file is unavailable; aborting before bridge mutation"
+    return 1
+  fi
+
   # Bind loop: only configured + allowed slots. Unused/denied slots are not
   # re-read and no longer emit a per-slot "skipped" log line — the pre-scan
   # summary above already covers them.
@@ -1480,6 +1616,11 @@ bind_configured_ssids() {
     validate_vlan_id "$vlan" || continue
     # Find ALL interfaces for this SSID (handles dual-band identical SSIDs)
     IFN="$(find_if_by_ssid_any "$ssid")"
+    _find_if_rc=$?
+    if [ "$_find_if_rc" -eq 2 ]; then
+      error -c cli,vlan "bind_configured_ssids: NVRAM inventory became unavailable while resolving '$ssid'; aborting before bridge mutation"
+      return 1
+    fi
     if [ -n "$IFN" ]; then
       while IFS= read -r _ifn; do
         [ -n "$_ifn" ] || continue
@@ -1509,19 +1650,38 @@ _SSID_EOF_
   done
 
   BOUND_SET=" $BOUND_IFACES "
-  for iface in $(nvram show 2>/dev/null | grep -E '^wl[0-9][0-9]*(\.[0-9]+)?_ifname=' | awk -F= '{print $2}' | sort -u); do
-        iface=$(normalize_iface "$iface")
-        [ -n "$iface" ] || continue
-        iface_exists "$iface" || continue
-        is_internal_vap "$iface" && continue
-        is_wl_iface "$iface" || continue
+  _seen_unconfigured=""
+  while IFS='=' read -r _bc_key _bc_raw; do
+    case "$_bc_key" in
+      wl[0-9]*_ifname) ;;
+      *) continue ;;
+    esac
+    _bc_iface=$(printf '%s' "$_bc_raw" \
+      | sed 's/^[[:space:]]*[\"]//;s/[\"][[:space:]]*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')
+    iface=$(normalize_iface "$_bc_iface")
+    [ -n "$iface" ] || continue
+    case " $_seen_unconfigured " in
+      *" $iface "*) continue ;;
+    esac
+    _seen_unconfigured="$_seen_unconfigured $iface"
+    iface_exists "$iface" || continue
+    if is_internal_vap "$iface"; then
+      continue
+    else
+      _internal_rc=$?
+      if [ "$_internal_rc" -eq 2 ]; then
+        error -c cli,vlan "bind_configured_ssids: NVRAM inventory unavailable while classifying '$iface'; aborting before bridge mutation"
+        return 1
+      fi
+    fi
+    is_wl_iface "$iface" || continue
 
-        case "$BOUND_SET" in
-          *" $iface "*) continue ;;
-        esac
+    case "$BOUND_SET" in
+      *" $iface "*) continue ;;
+    esac
 
-        attach_to_bridge "$iface" "none" "Unconfigured IF $iface"
-      done
+    attach_to_bridge "$iface" "none" "Unconfigured IF $iface"
+  done < "$_bc_inventory_file"
 }
 
 # --------------------------
@@ -1545,8 +1705,18 @@ resolve_and_attach() {
   for _ in 1 2 3 4 5; do
     if [ "$BAND" = "auto" ] || [ "$BAND" = "any" ] || [ -z "$BAND" ]; then
       IFN="$(find_if_by_ssid_any "$SSID")"
+      _resolve_if_rc=$?
+      if [ "$_resolve_if_rc" -eq 2 ]; then
+        error -c cli,vlan "$LABEL: NVRAM inventory unavailable while resolving '$SSID'; aborting before interface attachment"
+        return 1
+      fi
     else
       IFN="$(find_if_by_ssid "$BAND" "$SSID")"
+      _resolve_if_rc=$?
+      if [ "$_resolve_if_rc" -eq 2 ]; then
+        error -c cli,vlan "$LABEL: NVRAM inventory unavailable while resolving '$SSID'; aborting before interface attachment"
+        return 1
+      fi
     fi
     [ -n "$IFN" ] && break
     sleep 1
@@ -1993,13 +2163,27 @@ safe_service_restart() {
   run_service_with_timeout "$subcmd" "$timeout_sec"
 }
 
+merv_rc_quiet_now() {
+  _now=$(date +%s 2>/dev/null) || return 1
+  case "$_now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$_now"
+}
+
+merv_rc_quiet_sleep() {
+  sleep "${1:-1}"
+}
+
 wait_for_rc_quiet() {
-  local need max_wait quiet start now
+  local need max_wait quiet_since start now elapsed_wait elapsed_quiet
+  local guard_start guard_elapsed
+  local rc_pattern proc_pattern
 
   need="${1:-6}"
   max_wait="${2:-30}"
-  quiet=0
-  start=$(date +%s)
+  case "$need" in ''|*[!0-9]*) need=6 ;; esac
+  case "$max_wait" in ''|*[!0-9]*) max_wait=30 ;; esac
 
   info -c vlan "wait_for_rc_quiet: watching rc (need=${need}s quiet, max=${max_wait}s)"
 
@@ -2007,8 +2191,55 @@ wait_for_rc_quiet() {
   # calls merv_mac_build_expected_iface_vid (expensive). Per-tick calls multiply that cost
   # across every sleep interval. The per-tick guard tick below handles cheap chain repair.
   ebt_quarantine_ensure_expected_rules || return 1
+
+  # Observation timeout starts AFTER pre-loop QT reconciliation finishes
+  start=$(merv_rc_quiet_now) || {
+    warn -c vlan "wait_for_rc_quiet: failed to acquire initial timestamp; failing closed"
+    return 1
+  }
+  quiet_since=""
+  rc_pattern='restart_wireless|start_lan|stop_lan|switch|httpd'
+  proc_pattern='restart_wireless|wlconf|start_lan|switch|httpd'
+
   while :; do
-    # Re-arm ALL L2 shields on every tick — rc's restart_wireless wipes ebtables,
+    now=$(merv_rc_quiet_now) || {
+      warn -c vlan "wait_for_rc_quiet: failed to acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    if [ -n "$quiet_since" ] && [ "$now" -lt "$quiet_since" ]; then
+      quiet_since="$now"
+    fi
+
+    # 1. Sample RC state before running guard work
+    if rc_queue_has "$rc_pattern" || rc_proc_busy "$proc_pattern"; then
+      quiet_since=""
+    elif [ -n "$quiet_since" ]; then
+      # If a continuous quiet interval was established earlier and survived across
+      # the preceding sleep interval, evaluate completion before running another guard tick.
+      if [ $((now - quiet_since)) -ge "$need" ]; then
+        elapsed_quiet=$((now - quiet_since))
+        info -c vlan "wait_for_rc_quiet: rc quiet for ${elapsed_quiet}s; proceeding"
+        return 0
+      fi
+    fi
+
+    # Do not start another guard operation once the wall-clock deadline has
+    # already been reached.  A guard tick is synchronous, so the post-sample
+    # below also checks its duration; no quiet result may cross the deadline.
+    elapsed_wait=$((now - start))
+    if [ "$elapsed_wait" -ge "$max_wait" ]; then
+      if rc_queue_has "$rc_pattern" || rc_proc_busy "$proc_pattern"; then
+        warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s with rc idle; continuing to stable verification"
+      return 0
+    fi
+    # If quiet_since is unset, do NOT establish it pre-guard: unobserved guard
+    # duration must not be credited as continuous quiet without an established baseline.
+
+    # 2. Re-arm ALL L2 shields on every tick — rc's restart_wireless wipes ebtables,
     # so MERV_QT, MERV_MAC and the DHCP hold all need active re-arming while wl
     # interfaces sit in br0. merv_guard_tick reads the ebtables table once and
     # repairs each layer; every path fast-paths to a no-op when intact, and only
@@ -2016,31 +2247,65 @@ wait_for_rc_quiet() {
     #
     # During rc/wlconf we restore shields only. Do NOT brctl-delif VAPs here;
     # that fights Broadcom restart handling and lengthens restart_wireless.
+    guard_start="$now"
     merv_guard_tick || return 1
 
-    if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
-       rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
-      quiet=0
-    else
-      quiet=$((quiet + 1))
-      [ "$quiet" -ge "$need" ] && {
-        info -c vlan "wait_for_rc_quiet: rc quiet for ${quiet}s; proceeding"
-        return 0
-      }
+    # 3. Sample RC state again after guard work completes
+    now=$(merv_rc_quiet_now) || {
+      warn -c vlan "wait_for_rc_quiet: failed to acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    if [ -n "$quiet_since" ] && [ "$now" -lt "$quiet_since" ]; then
+      quiet_since="$now"
     fi
+    guard_elapsed=$((now - guard_start))
+    case "$guard_elapsed" in
+      ''|*[!0-9]*)
+        warn -c vlan "wait_for_rc_quiet: guard duration observation was invalid; failing closed"
+        return 1
+        ;;
+    esac
 
-    now=$(date +%s)
-    if [ $((now - start)) -ge "$max_wait" ]; then
-      if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' || \
-         rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd'; then
-        warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s while rc remains active; retaining DHCP protection"
+    # A synchronous guard can finish after the observation deadline.  Sample
+    # RC first, but keep the deadline authoritative: an idle result at this
+    # point is only the documented stable-verification fallback, never a quiet
+    # success credited to time spent inside the guard operation.
+    elapsed_wait=$((now - start))
+    if [ "$elapsed_wait" -ge "$max_wait" ]; then
+      if rc_queue_has "$rc_pattern" || rc_proc_busy "$proc_pattern"; then
+        warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s while rc remains active; retaining DHCP protection"
         return 1
       fi
-      warn -c vlan "wait_for_rc_quiet: timeout after ${max_wait}s with rc idle; continuing to stable verification"
+      warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s with rc idle; continuing to stable verification"
       return 0
     fi
 
-    sleep 1
+    if rc_queue_has "$rc_pattern" || rc_proc_busy "$proc_pattern"; then
+      quiet_since=""
+    else
+      if [ -z "$quiet_since" ]; then
+        # Establish continuous quiet baseline only after RC is observed idle post-guard
+        quiet_since="$now"
+      elif [ $((now - quiet_since)) -ge "$need" ]; then
+        elapsed_quiet=$((now - quiet_since))
+        info -c vlan "wait_for_rc_quiet: rc quiet for ${elapsed_quiet}s; proceeding"
+        return 0
+      fi
+    fi
+
+    # 4. Evaluate observation timeout against elapsed observation time
+    elapsed_wait=$((now - start))
+    if [ "$elapsed_wait" -ge "$max_wait" ]; then
+      if rc_queue_has "$rc_pattern" || rc_proc_busy "$proc_pattern"; then
+        warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s with rc idle; continuing to stable verification"
+      return 0
+    fi
+
+    merv_rc_quiet_sleep 1
   done
 }
 
@@ -2124,6 +2389,13 @@ merv_manager_settle_observe() {
 merv_manager_arm_l2_before_mutation() {
   # Expected state, DHCP ownership and exact L2 protection are prerequisites
   # for cleanup/restart/WAN mutation. Unknown resolver state is terminal.
+  if merv_nvram_inventory_read; then
+    :
+  else
+    _arm_nvram_rc=$?
+    error -c cli,vlan "Cannot validate NVRAM inventory before L2 arming; aborting before mutation (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_arm_nvram_rc})"
+    return 1
+  fi
   merv_qt_expected_iface_vid_list >/dev/null || return 1
   merv_dhcp_hold_rules_present || return 1
   merv_qt_ensure_expected_rules || return 1
@@ -2303,9 +2575,23 @@ main() {
   validate_configuration
   merv_action_progress_update validate 1 1 15 "Validating VLAN and SSID settings..."
 
+  # Validate the bounded NVRAM inventory before boot shield restoration or any
+  # later topology mutation. A valid empty inventory is allowed to proceed as
+  # ordinary SSID-not-found; read/validation failures are terminal.
+  if merv_nvram_inventory_read; then
+    :
+  else
+    _main_nvram_rc=$?
+    error -c cli,vlan "NVRAM inventory preflight failed; aborting before topology mutation (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_main_nvram_rc})"
+    return 1
+  fi
+
   # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
   # This only runs when invoked with "boot" argument from services-start
-  boot_wait_for_configured_ssids 30
+  if ! boot_wait_for_configured_ssids 30; then
+    error -c cli,vlan "Boot SSID readiness failed because NVRAM inventory could not be validated"
+    return 1
+  fi
 
   # Boot mode: restore MERV_MAC shield from JFFS checkpoint before first apply
   if [ "$MERV_MANAGER_MODE" = "boot" ]; then
@@ -2370,7 +2656,15 @@ main() {
   # below after restart_services returns because rc/wlconf can reshuffle
   # wl*.*_ifname NVRAM mappings, and disabled before the final security check
   # and snapshot so they always see fresh state.
-  type merv_iface_vid_cache_enable >/dev/null 2>&1 && merv_iface_vid_cache_enable
+  if type merv_iface_vid_cache_enable >/dev/null 2>&1; then
+    if ! merv_iface_vid_cache_enable; then
+      error -c cli,vlan "Cannot initialize iface-to-VID cache; aborting before mutation"
+      return 1
+    fi
+  else
+    error -c cli,vlan "Iface-to-VID cache helper unavailable; aborting before mutation"
+    return 1
+  fi
   if [ "$DRY_RUN" != "yes" ] && ! merv_manager_arm_l2_before_mutation; then
     error -c cli,vlan "Cannot prove exact L2 protection; aborting before mutation"
     return 1
@@ -2412,7 +2706,10 @@ main() {
   # This includes restoring unconfigured SSIDs to br0
   WATCHDOG_QUEUE_LOG=0
   export WATCHDOG_QUEUE_LOG
-  bind_configured_ssids
+  if ! bind_configured_ssids; then
+    error -c cli,vlan "SSID binding failed; aborting before AP isolation and final topology changes"
+    return 1
+  fi
 
   # Configuration phase 3: Apply AP isolation policies across all SSIDs
   # Iterate through configured SSIDs and apply APISO settings (filtered by node assignment)
@@ -2423,11 +2720,23 @@ main() {
     # Apply AP isolation if SSID is configured and APISO value is set
     if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && [ -n "$apiso" ]; then
       _apiso_iflist=$(find_if_by_ssid_any "$ssid")
+      _apiso_find_rc=$?
+      if [ "$_apiso_find_rc" -eq 2 ]; then
+        error -c cli,vlan "AP isolation: NVRAM inventory unavailable while resolving '$ssid'; aborting"
+        return 1
+      fi
       if [ -n "$_apiso_iflist" ]; then
-        printf '%s\n' "$_apiso_iflist" | while IFS= read -r _apiso_ifn; do
+        _apiso_failed=0
+        while IFS= read -r _apiso_ifn; do
           [ -n "$_apiso_ifn" ] || continue
-          set_ap_isolation "$_apiso_ifn" "$apiso"
-        done
+          set_ap_isolation "$_apiso_ifn" "$apiso" || _apiso_failed=1
+        done <<_APISO_EOF_
+$_apiso_iflist
+_APISO_EOF_
+        if [ "$_apiso_failed" -ne 0 ]; then
+          error -c cli,vlan "AP isolation: one or more interface updates failed; aborting"
+          return 1
+        fi
       fi
     fi
     i=$((i+1))
@@ -2446,7 +2755,15 @@ main() {
     # post-rc NVRAM. The cache stays enabled and is repopulated on first use
     # below — that one rebuild is then reused across all post-restart shield
     # re-arm calls (soft evict + ebt_quarantine_ensure + post_qt rebuild).
-    type merv_iface_vid_cache_invalidate >/dev/null 2>&1 && merv_iface_vid_cache_invalidate
+    if type merv_iface_vid_cache_invalidate >/dev/null 2>&1; then
+      if ! merv_iface_vid_cache_invalidate; then
+        error -c cli,vlan "Post-restart iface-to-VID cache invalidation failed; aborting before post-restart guard work"
+        return 1
+      fi
+    else
+      error -c cli,vlan "Post-restart iface-to-VID cache invalidation helper unavailable; aborting"
+      return 1
+    fi
 
     # Immediate bridge-only sweep after restart_services returns:
     # rc/wlconf may already have recreated VAPs and attached them to br0.
@@ -2510,11 +2827,22 @@ main() {
   info -c cli,vlan "Second pass for new VAPs..."
   WATCHDOG_QUEUE_LOG=1
   export WATCHDOG_QUEUE_LOG
-    bind_configured_ssids
+    if ! bind_configured_ssids; then
+      error -c cli,vlan "Second SSID binding pass failed; aborting before final verification"
+      return 1
+    fi
 
     # Disable the iface→VID cache so post_rc_watchdog, the final security
     # check, and the backgrounded MERV_MAC snapshot all see fresh NVRAM.
-    type merv_iface_vid_cache_disable >/dev/null 2>&1 && merv_iface_vid_cache_disable
+    if type merv_iface_vid_cache_disable >/dev/null 2>&1; then
+      if ! merv_iface_vid_cache_disable; then
+        error -c cli,vlan "Post-restart iface-to-VID cache cleanup failed; aborting before final verification"
+        return 1
+      fi
+    else
+      error -c cli,vlan "Post-restart iface-to-VID cache cleanup helper unavailable; aborting"
+      return 1
+    fi
 
     MANAGER_SETTLE_VERIFIED=0
     post_rc_watchdog && MANAGER_SETTLE_VERIFIED=1

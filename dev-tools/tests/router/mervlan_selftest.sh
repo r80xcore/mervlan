@@ -289,9 +289,11 @@ selftest_reset() {
   : > "$SELFTEST_FAKE_STATE/chains/INPUT"
   rm -f "$MERV_DHCP_HOLD_LEGACY_MARKER"
   unset FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
-    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION \
+    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT
   export FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
-    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION \
+    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT
 }
 
 pass() {
@@ -905,7 +907,142 @@ test_process_identity() {
   assert_rc 1 "invalid PID rejected" merv_proc_start_time "../1" "$MERV_DHCP_HOLD_PROC_ROOT"
 }
 
+# Deterministic replacement-window fixture used by the owner-lock tests. The
+# production hook is inert unless its named fault is enabled below.
+merv_owner_lock_quarantine_hook() {
+  _soqr_lock="$1"
+  _soqr_backup="${_soqr_lock}.race-original"
+  rm -rf "$_soqr_backup" 2>/dev/null || return 1
+  mv "$_soqr_lock" "$_soqr_backup" || return 1
+  mkdir "$_soqr_lock" || return 1
+  _soqr_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+  merv_owner_v2_write_atomic "$_soqr_lock" "$$" "$_soqr_start" replacement-owner 1 1
+}
+
+merv_dhcp_state_lock_quarantine_hook() {
+  _sdqr_lock="$1"
+  _sdqr_backup="${_sdqr_lock}.race-original"
+  rm -rf "$_sdqr_backup" 2>/dev/null || return 1
+  mv "$_sdqr_lock" "$_sdqr_backup" || return 1
+  mkdir "$_sdqr_lock" || return 1
+  _sdqr_start=$(merv_proc_start_time "$$" "$MERV_DHCP_HOLD_PROC_ROOT" 2>/dev/null) || return 1
+  _sdqr_now=$(merv_dhcp_state_lock_now 2>/dev/null) || return 1
+  printf '%s\n' "$$" > "$_sdqr_lock/pid" || return 1
+  printf '%s\n' "$_sdqr_start" > "$_sdqr_lock/proc_start_time" || return 1
+  printf '%s\n' "$_sdqr_now" > "$_sdqr_lock/created_epoch" || return 1
+  printf '%s\n' replacement-owner > "$_sdqr_lock/owner_nonce"
+}
+
+test_owner_state_release_probe() {
+  selftest_reset || return 1
+  _tosr_lock="$SELFTEST_ROOT/owner-state-release/claim.lock"
+  mkdir -p "${_tosr_lock%/*}" || return 1
+  mkdir "$_tosr_lock" || return 1
+  (
+    TOSR_LS_ONCE=1
+    TOSR_PATH="$_tosr_lock"
+    ls() {
+      command ls "$@"
+      _tosr_ls_rc=$?
+      if [ "${TOSR_LS_ONCE:-0}" -eq 1 ]; then
+        TOSR_LS_ONCE=0
+        rmdir "$TOSR_PATH" 2>/dev/null || :
+      fi
+      return "$_tosr_ls_rc"
+    }
+    _tosr_state=$(merv_owner_lock_state "$TOSR_PATH")
+    [ "$_tosr_state" = absent ]
+  ) && pass "owner state reclassifies post-probe release as absent" ||
+    fail "owner state reclassifies post-probe release as absent"
+}
+
+test_owner_state_timestamp_release_probe() {
+  selftest_reset || return 1
+  _totsr_dir="$SELFTEST_ROOT/owner-state-timestamp-release"
+  _totsr_lock="$_totsr_dir/claim.lock"
+  _totsr_trace="$_totsr_dir/date.trace"
+  _totsr_state="$_totsr_dir/state"
+  _totsr_state_rc="$_totsr_dir/state.rc"
+  _totsr_acquire_rc="$_totsr_dir/acquire.rc"
+  _totsr_owner="$_totsr_dir/acquired.owner"
+  _totsr_release_rc="$_totsr_dir/release.rc"
+  _totsr_output="$_totsr_dir/acquire.output"
+  mkdir -p "$_totsr_dir" || return 1
+  mkdir "$_totsr_lock" || return 1
+
+  # This hook is intentionally limited to the production mtime form. The
+  # initial ls probe and the now/temporary-name date calls remain untouched;
+  # only date -r <lock> removes the incomplete claim before date runs.
+  (
+    TOTS_DATE_ONCE=1
+    TOTS_PATH="$_totsr_lock"
+    TOTS_TRACE="$_totsr_trace"
+    date() {
+      printf 'date %s\n' "$*" >> "$TOTS_TRACE"
+      if [ "${1:-}" = -r ] && [ "${2:-}" = "$TOTS_PATH" ] &&
+         [ "${TOTS_DATE_ONCE:-0}" -eq 1 ]; then
+        TOTS_DATE_ONCE=0
+        printf '%s\n' remove-at-mtime >> "$TOTS_TRACE"
+        rmdir "$TOTS_PATH" 2>/dev/null || :
+      fi
+      /bin/date "$@"
+    }
+
+    merv_owner_lock_state "$TOTS_PATH" > "$_totsr_state" 2>/dev/null
+    printf '%s\n' "$?" > "$_totsr_state_rc"
+
+    # Recreate the same incomplete claim and repeat the exact seam through the
+    # real acquisition path. A fixed implementation must retry only after the
+    # authoritative absence recheck, then publish and release its own owner.
+    mkdir "$TOTS_PATH" || exit 70
+    TOTS_DATE_ONCE=1
+    merv_owner_lock_acquire "$TOTS_PATH" 0 0 timestamp-release > "$_totsr_output" 2>&1
+    _totsr_acq_rc=$?
+    printf '%s\n' "$_totsr_acq_rc" > "$_totsr_acquire_rc"
+    if [ "$_totsr_acq_rc" -eq 0 ] && [ -f "$TOTS_PATH/owner" ]; then
+      cp "$TOTS_PATH/owner" "$_totsr_owner" || exit 71
+      merv_owner_lock_release "$TOTS_PATH" "$MERV_LOCK_NONCE" > /dev/null 2>&1
+      printf '%s\n' "$?" > "$_totsr_release_rc"
+    else
+      printf '%s\n' not-published > "$_totsr_owner"
+      printf '%s\n' not-attempted > "$_totsr_release_rc"
+    fi
+  )
+
+  _totsr_state_value=$(cat "$_totsr_state" 2>/dev/null || printf '')
+  _totsr_state_status=$(cat "$_totsr_state_rc" 2>/dev/null || printf '')
+  _totsr_mtime_calls=$(grep -Fxc -- "date -r $_totsr_lock +%s" "$_totsr_trace" 2>/dev/null || printf 0)
+  _totsr_remove_calls=$(grep -Fxc -- remove-at-mtime "$_totsr_trace" 2>/dev/null || printf 0)
+  case "$_totsr_state_status" in ''|*[!0-9]*) _totsr_state_status=99 ;; esac
+  case "$_totsr_mtime_calls" in ''|*[!0-9]*) _totsr_mtime_calls=99 ;; esac
+  case "$_totsr_remove_calls" in ''|*[!0-9]*) _totsr_remove_calls=99 ;; esac
+  if [ "$_totsr_state_status" -eq 0 ] 2>/dev/null &&
+     [ "$_totsr_state_value" = absent ] &&
+     [ "$_totsr_mtime_calls" -eq 2 ] 2>/dev/null &&
+     [ "$_totsr_remove_calls" -eq 2 ] 2>/dev/null; then
+    pass "owner state reclassifies release at timestamp retrieval as absent"
+  else
+    fail "owner state reclassifies release at timestamp retrieval as absent (state=$_totsr_state_value state_rc=$_totsr_state_status mtime_calls=$_totsr_mtime_calls remove_calls=$_totsr_remove_calls)"
+  fi
+
+  _totsr_acq_status=$(cat "$_totsr_acquire_rc" 2>/dev/null || printf '')
+  _totsr_release_status=$(cat "$_totsr_release_rc" 2>/dev/null || printf '')
+  case "$_totsr_acq_status" in ''|*[!0-9]*) _totsr_acq_status=99 ;; esac
+  case "$_totsr_release_status" in ''|*[!0-9]*) _totsr_release_status=99 ;; esac
+  if [ "$_totsr_acq_status" -eq 0 ] 2>/dev/null &&
+     grep -q '^pid=' "$_totsr_owner" 2>/dev/null &&
+     [ "$_totsr_release_status" -eq 0 ] 2>/dev/null &&
+     [ ! -e "$_totsr_lock" ]; then
+    pass "owner acquisition retries after timestamp-release and releases exact owner"
+  else
+    fail "owner acquisition retries after timestamp-release and releases exact owner (acquire_rc=$_totsr_acq_status release_rc=$_totsr_release_status state=$_totsr_state_value)"
+  fi
+}
+
 test_owner_lock_contract() {
+  selftest_reset || return 1
+  test_owner_state_release_probe || return 1
+  test_owner_state_timestamp_release_probe || return 1
   selftest_reset || return 1
   _tol_root="$SELFTEST_ROOT/owner-lock"
   _tol_lock="$_tol_root/claim"
@@ -1003,6 +1140,29 @@ test_owner_lock_contract() {
     fail "symlink lock obstruction is fail-closed"
   assert_rc 1 "symlink lock obstruction fails bounded acquisition" \
     merv_owner_lock_acquire "$_tol_lock" 0 0 owner-symlink-obstruction
+
+  # A live replacement installed after dead-owner classification must not be
+  # moved into the stale quarantine. The hook opens the exact rename window;
+  # production verification restores the replacement and fails closed.
+  rm -rf "$_tol_lock" "${_tol_lock}.race-original" 2>/dev/null || return 1
+  mkdir "$_tol_lock" || return 1
+  merv_owner_v2_write_atomic "$_tol_lock" 999999 1 stale-before-replacement 1 1 || return 1
+  MERV_OWNER_LOCK_FAULT=quarantine-window
+  export MERV_OWNER_LOCK_FAULT
+  assert_rc 1 "replacement owner blocks generic stale quarantine" \
+    merv_owner_lock_acquire "$_tol_lock" 0 0 owner-replacement-race
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tol_lock" 2>/dev/null &&
+    [ "$MERV_OWNER_V2_NONCE" = replacement-owner ] &&
+    pass "generic replacement owner remains authoritative" ||
+    fail "generic replacement owner remains authoritative"
+  [ -d "${_tol_lock}.race-original" ] &&
+    pass "generic original stale claim is retained for inspection" ||
+    fail "generic original stale claim is retained for inspection"
+  assert_ok "generic replacement owner releases after failed reclaim" \
+    merv_owner_lock_release "$_tol_lock" replacement-owner
+  rm -rf "${_tol_lock}.race-original" 2>/dev/null || return 1
 }
 
 test_maintenance_lock_interop() {
@@ -1440,6 +1600,82 @@ test_lock_reclaim() {
 test_dhcp_incomplete_lock() {
   selftest_reset || return 1
   _tdil_lock="$SELFTEST_STATE/state.lock"
+
+  # A timestamp read can lose a release race. The replacement timestamp helper
+  # removes the real lock before failing; acquisition may retry only after the
+  # authoritative non-following absence probe succeeds, and must not warn.
+  mkdir "$_tdil_lock" || return 1
+  _tdil_absent_output=$( \
+    merv_dhcp_state_lock_timestamp() { rmdir "$_tdil_lock" 2>/dev/null || :; return 1; }
+    merv_dhcp_state_lock_acquire
+  ) 2>&1
+  _tdil_absent_rc=$?
+  if [ "$_tdil_absent_rc" -eq 0 ] && [ -z "$_tdil_absent_output" ] &&
+     [ -d "$_tdil_lock" ] && [ -f "$_tdil_lock/owner_nonce" ]; then
+    pass "timestamp failure retries only after verified lock absence"
+  else
+    fail "timestamp failure retries only after verified lock absence"
+  fi
+  _tdil_nonce=$(cat "$_tdil_lock/owner_nonce" 2>/dev/null || printf '')
+  assert_ok "timestamp-race successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  # An unreadable timestamp with the lock still present must warn and retain the
+  # claim; no retry or reclaim is allowed from an ambiguous observation.
+  mkdir "$_tdil_lock" || return 1
+  _tdil_retain_log_root="$SELFTEST_ROOT/dhcp-retain-logs"
+  _tdil_retain_log="$_tdil_retain_log_root/vlan.log"
+  mkdir -p "$_tdil_retain_log_root" || return 1
+  _tdil_retain_output=$( \
+    LOGROOT="$_tdil_retain_log_root"
+    LOG_chan_cli="$_tdil_retain_log_root/cli.log"
+    LOG_chan_vlan="$_tdil_retain_log"
+    LOG_SYSLOG=0
+    unset LOG_SETTINGS_LOADED
+    . "$MERV_BASE/settings/log_settings.sh" || exit 2
+    merv_dhcp_state_lock_timestamp() { return 1; }
+    merv_dhcp_state_lock_acquire
+  ) 2>&1
+  _tdil_retain_rc=$?
+  if [ "$_tdil_retain_rc" -eq 2 ] && [ -d "$_tdil_lock" ] &&
+     [ -f "$_tdil_retain_log" ] &&
+     grep -q 'age is unverifiable' "$_tdil_retain_log"; then
+    pass "timestamp failure with retained lock warns without reclaim"
+  else
+    fail "timestamp failure with retained lock warns without reclaim"
+  fi
+  rmdir "$_tdil_lock" || return 1
+
+  # Open the exact complete-owner quarantine window. A live replacement must
+  # remain at state.lock while the stale predecessor is retained separately.
+  mkdir "$_tdil_lock" || return 1
+  printf '999999\n1\n1\ndead-before-replacement\n' | {
+    IFS= read -r _tdil_pid
+    IFS= read -r _tdil_start
+    IFS= read -r _tdil_created
+    IFS= read -r _tdil_nonce
+    printf '%s\n' "$_tdil_pid" > "$_tdil_lock/pid"
+    printf '%s\n' "$_tdil_start" > "$_tdil_lock/proc_start_time"
+    printf '%s\n' "$_tdil_created" > "$_tdil_lock/created_epoch"
+    printf '%s\n' "$_tdil_nonce" > "$_tdil_lock/owner_nonce"
+  }
+  MERV_DHCP_STATE_LOCK_FAULT=quarantine-window
+  export MERV_DHCP_STATE_LOCK_FAULT
+  assert_rc 2 "replacement owner blocks DHCP stale quarantine" merv_dhcp_state_lock_acquire
+  unset MERV_DHCP_STATE_LOCK_FAULT
+  export MERV_DHCP_STATE_LOCK_FAULT
+  if [ "$(cat "$_tdil_lock/pid" 2>/dev/null)" = "$$" ] &&
+     [ "$(cat "$_tdil_lock/owner_nonce" 2>/dev/null)" = replacement-owner ]; then
+    pass "DHCP replacement owner remains authoritative"
+  else
+    fail "DHCP replacement owner remains authoritative"
+  fi
+  [ -d "${_tdil_lock}.race-original" ] &&
+    pass "DHCP stale predecessor is retained for inspection" ||
+    fail "DHCP stale predecessor is retained for inspection"
+  assert_ok "DHCP replacement owner releases after failed reclaim" \
+    merv_dhcp_state_lock_release replacement-owner
+  rm -rf "${_tdil_lock}.race-original" 2>/dev/null || return 1
 
   # A just-published empty claim must remain protected long enough for its
   # writer to complete. Its owner removes it, after which this waiter may

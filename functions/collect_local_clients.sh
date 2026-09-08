@@ -27,6 +27,7 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || true
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
@@ -97,6 +98,8 @@ trap 'local_collect_handle_signal 143' TERM
 info -c vlan "Collecting VLAN clients (MAC-only) on $NODE_NAME"
 info -c vlan "collect_local_clients: COLLECTDIR='$COLLECTDIR' OUT='$OUT_TARGET'"
 
+: "${MERV_SYS_CLASS_NET_ROOT:=/sys/class/net}"
+
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
 # Utility functions for JSON escaping, bridge enumeration, and MAC address     #
@@ -118,9 +121,9 @@ json_escape() {
 # List all VLAN bridge interfaces (br1, br2, etc.) excluding br0.              #
 # Uses numeric sort to ensure natural ordering (br2 before br10).              #
 # ============================================================================ #
-get_bridges() {
-  # List all network interfaces in /sys/class/net matching br[0-9]+ pattern
-  ls /sys/class/net/ 2>/dev/null \
+type get_bridges >/dev/null 2>&1 || get_bridges() {
+  # List all network interfaces in sysfs matching br[0-9]+ pattern
+  ls "$MERV_SYS_CLASS_NET_ROOT/" 2>/dev/null \
     | grep -E '^br[0-9]+$' \
     | grep -v '^br0$' \
     | sed 's/^br//' \
@@ -130,11 +133,11 @@ get_bridges() {
 
 # ============================================================================ #
 # get_bridge_members                                                           #
-# List all interfaces attached to a bridge by reading /sys/class/net/brX/brif  #
+# List all interfaces attached to a bridge by reading sysfs brX/brif           #
 # ============================================================================ #
-get_bridge_members() {
+type get_bridge_members >/dev/null 2>&1 || get_bridge_members() {
   local bridge="$1"
-  ls "/sys/class/net/$bridge/brif/" 2>/dev/null
+  ls "$MERV_SYS_CLASS_NET_ROOT/$bridge/brif/" 2>/dev/null
 }
 
 # ============================================================================ #
@@ -144,7 +147,7 @@ get_bridge_members() {
 # NOTE: eth0 is the internal switch fabric on Asus routers, not user-facing.   #
 #       Only eth1-eth7 are actual LAN ports that users can configure.          #
 # ============================================================================ #
-classify_interface() {
+type classify_interface >/dev/null 2>&1 || classify_interface() {
   local iface="$1"
   case "$iface" in
     wl[0-9]*|wl[0-9]*.[0-9]*)
@@ -181,9 +184,9 @@ classify_interface() {
 # NOTE: Excludes eth0 which is internal switch fabric, not a user trunk        #
 # Returns: list of base ports that are trunks (e.g., "eth1 eth2")              #
 # ============================================================================ #
-get_trunk_ports() {
+type get_trunk_ports >/dev/null 2>&1 || get_trunk_ports() {
   # Find all eth[1-9]*.VLAN interfaces (exclude eth0), extract base port
-  ls /sys/class/net/ 2>/dev/null \
+  ls "$MERV_SYS_CLASS_NET_ROOT/" 2>/dev/null \
     | grep -E '^eth[1-9][0-9]*\.[0-9]+$' \
     | sed 's/\.[0-9]*$//' \
     | sort | uniq -c \
@@ -195,9 +198,9 @@ get_trunk_ports() {
 # For a given base port, list all tagged VLANs (from eth*.VLAN interfaces)     #
 # Returns: comma-separated VLAN IDs                                            #
 # ============================================================================ #
-get_trunk_vlans() {
+type get_trunk_vlans >/dev/null 2>&1 || get_trunk_vlans() {
   local base_port="$1"
-  ls /sys/class/net/ 2>/dev/null \
+  ls "$MERV_SYS_CLASS_NET_ROOT/" 2>/dev/null \
     | grep -E "^${base_port}\.[0-9]+$" \
     | sed "s/^${base_port}\.//" \
     | sort -n \
@@ -210,11 +213,11 @@ get_trunk_vlans() {
 # Find native/untagged VLAN for a trunk port (if base port is on a bridge)     #
 # Returns: VLAN ID or empty if not found                                       #
 # ============================================================================ #
-get_trunk_native_vlan() {
+type get_trunk_native_vlan >/dev/null 2>&1 || get_trunk_native_vlan() {
   local base_port="$1"
   # Check each bridge to see if the untagged base port is a member
   for br in $(get_bridges) br0; do
-    if [ -d "/sys/class/net/$br/brif/$base_port" ]; then
+    if [ -d "$MERV_SYS_CLASS_NET_ROOT/$br/brif/$base_port" ]; then
       # Extract VLAN ID from bridge name (br0 = native/untagged)
       vlan_id="${br#br}"
       [ "$vlan_id" = "0" ] && vlan_id="native"
@@ -231,7 +234,7 @@ get_trunk_native_vlan() {
 # This prevents excluding legitimate trunk-connected clients                   #
 # ============================================================================ #
 TRUNK_PORTS=""
-init_trunk_detection() {
+type init_trunk_detection >/dev/null 2>&1 || init_trunk_detection() {
   TRUNK_PORTS=$(get_trunk_ports)
 }
 
@@ -320,12 +323,12 @@ classify_source() {
 # per-member port_no files. Lets us translate brctl showmacs port numbers back #
 # to the interface the MAC was learned on. Empty file when no members resolve.  #
 # ============================================================================ #
-build_port_map() {
+type build_port_map >/dev/null 2>&1 || build_port_map() {
   local bridge="$1"
   local mapfile="$2"
   local d pn iface
   : > "$mapfile"
-  for d in "/sys/class/net/$bridge/brif/"*; do
+  for d in "$MERV_SYS_CLASS_NET_ROOT/$bridge/brif/"*; do
     [ -e "$d/port_no" ] || continue
     pn=$(cat "$d/port_no" 2>/dev/null)
     # Normalize (handles decimal or 0x-prefixed values) to a plain integer.
@@ -372,7 +375,7 @@ append_own_mac_candidate() {
 # U/L-bit pairs) into $1. Called once before PASS 3 so every client row can   #
 # be checked in O(1) by mac_is_own_interface.                                  #
 # ============================================================================ #
-build_own_mac_exclude() {
+type build_own_mac_exclude >/dev/null 2>&1 || build_own_mac_exclude() {
   local out="$1"
   local tmp="${out}.tmp"
   local p iface mac br
@@ -380,7 +383,7 @@ build_own_mac_exclude() {
   : > "$tmp" || return 0
 
   # All kernel network interfaces
-  for p in /sys/class/net/*/address; do
+  for p in "$MERV_SYS_CLASS_NET_ROOT"/*/address; do
     [ -f "$p" ] || continue
     mac=$(cat "$p" 2>/dev/null)
     append_own_mac_candidate "$mac" "$tmp"
@@ -394,8 +397,8 @@ build_own_mac_exclude() {
   done
 
   # Wireless VAP addresses (cur_etheraddr / perm_etheraddr / bssid may differ)
-  for iface in $(ls /sys/class/net 2>/dev/null | grep -E '^wl[0-9]+(\.[0-9]+)?$'); do
-    cat "/sys/class/net/$iface/address" 2>/dev/null
+  for iface in $(ls "$MERV_SYS_CLASS_NET_ROOT" 2>/dev/null | grep -E '^wl[0-9]+(\.[0-9]+)?$'); do
+    cat "$MERV_SYS_CLASS_NET_ROOT/$iface/address" 2>/dev/null
     wl -i "$iface" cur_etheraddr 2>/dev/null
     wl -i "$iface" perm_etheraddr 2>/dev/null
     wl -i "$iface" bssid 2>/dev/null
@@ -430,11 +433,27 @@ mac_is_own_interface() {
 # Begin the vlans array which will be populated in main loop.                  #
 # ============================================================================ #
 
+# Derive parent directory of output target
+_out_dir="${OUT_TARGET%/*}"
+[ -n "$_out_dir" ] && [ "$_out_dir" != "$OUT_TARGET" ] || _out_dir="."
+
+# Ensure collection directory exists before writing any output or scratch files
+if ! mkdir -p "$COLLECTDIR" 2>/dev/null || [ ! -d "$COLLECTDIR" ]; then
+  error -c cli,vlan "Local client collection could not create collection directory: '$COLLECTDIR'"
+  exit 1
+fi
+
+# Ensure output target directory exists before writing initial JSON header
+if ! mkdir -p "$_out_dir" 2>/dev/null || [ ! -d "$_out_dir" ]; then
+  error -c cli,vlan "Local client collection could not create output directory: '$_out_dir'"
+  exit 1
+fi
+
 # Capture current timestamp in ISO 8601 format for "generated" field
 DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
 
 # Write JSON header with metadata (not yet closing vlans array)
-{
+if ! {
   echo "{"
   printf '  "generated": "%s",\n' "$DATE_NOW"
   printf '  "router": "%s",\n' "$(json_escape "$NODE_NAME")"
@@ -442,7 +461,11 @@ DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
     printf '  "ip": "%s",\n' "$(json_escape "$NODE_IP")"
   fi
   echo '  "vlans": ['
-} > "$OUT"
+} > "$OUT" || [ ! -s "$OUT" ]; then
+  rm -f "$OUT" 2>/dev/null || :
+  error -c cli,vlan "Local client collection could not initialize output candidate: '$OUT'"
+  exit 1
+fi
 
 # ============================================================================ #
 #                       BRIDGE ENUMERATION & MACs COLLECTION                   #
@@ -454,8 +477,6 @@ DATE_NOW=$(date +'%Y-%m-%dT%H:%M:%S')
 FIRST_VLAN=true
 # Counter for total unique clients found across all VLANs
 TOTAL_COUNT=0
-# Ensure collection directory exists
-mkdir -p "$COLLECTDIR" 2>/dev/null
 
 # Clean previous per-bridge temp lists to avoid stale merges on re-run
 rm -f "$COLLECTDIR"/mac_br*.lst "$COLLECTDIR"/mac_exclude.lst 2>/dev/null
@@ -602,7 +623,6 @@ for BR in $BR_LIST; do
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
     VLAN_CLIENTS=$((VLAN_CLIENTS + 1))
   done < "$MACS_FILE"
-  rm -f "$PORTMAP" 2>/dev/null
 
   # Close clients array and VLAN object
   {
@@ -629,7 +649,299 @@ done
   echo '}'
 } >> "$OUT"
 
+preserve_collection_fault() {
+  local _fault_candidate="$1"
+  local _fault_root="${RESULTDIR:-/tmp/mervlan_tmp/results}/client_collection_faults"
+  local _f_pid="$$"
+  local _f_start _f_nonce _f_dir _f_meta _f_meta_tmp _f_sz _f_ts
+  local _esc_node _esc_ip _saved_umask
+  local _candidate_saved=0 _scratch_saved=1 _metadata_complete=0 _perms_secure=1
+  local _metadata_escaped=1 _f_status="partial" _meta_comp=0
+  local _pattern _src _bname _old_fault _f
+  local _rest _cand_pid _cand_start _cand_nonce _valid_count
+  local _n_rest _n_epoch _n_pid _n_start _n_seq
+
+  _saved_umask=$(umask)
+  umask 077
+
+  _f_start=$(merv_identity_current_start 2>/dev/null) || {
+    warn -c cli,vlan "Could not acquire process start identity; skipping client fault preservation"
+    umask "$_saved_umask"
+    return 1
+  }
+  merv_identity_nonce_next || {
+    warn -c cli,vlan "Could not acquire identity nonce; skipping client fault preservation"
+    umask "$_saved_umask"
+    return 1
+  }
+  _f_nonce="$MERV_IDENTITY_NONCE"
+  [ -n "$_f_nonce" ] || {
+    warn -c cli,vlan "Empty identity nonce; skipping client fault preservation"
+    umask "$_saved_umask"
+    return 1
+  }
+
+  if [ ! -d "$_fault_root" ]; then
+    mkdir -p "$_fault_root" 2>/dev/null || {
+      warn -c cli,vlan "Could not create fault root directory '$_fault_root'"
+      umask "$_saved_umask"
+      return 1
+    }
+  fi
+  chmod 700 "$_fault_root" 2>/dev/null || {
+    warn -c cli,vlan "Could not set secure permissions (0700) on fault root '$_fault_root'"
+    umask "$_saved_umask"
+    return 1
+  }
+
+  _f_dir="${_fault_root}/fault.${_f_pid}.${_f_start}.${_f_nonce}"
+  mkdir -p "$_f_dir" 2>/dev/null || {
+    warn -c cli,vlan "Could not create fault preservation directory '$_f_dir'"
+    umask "$_saved_umask"
+    return 1
+  }
+  chmod 700 "$_f_dir" 2>/dev/null || {
+    warn -c cli,vlan "Could not set secure permissions (0700) on fault directory '$_f_dir'"
+    umask "$_saved_umask"
+    return 1
+  }
+
+  # Copy rejected candidate
+  if [ -f "$_fault_candidate" ]; then
+    if cp "$_fault_candidate" "$_f_dir/candidate.json" 2>/dev/null && [ -s "$_f_dir/candidate.json" ]; then
+      _candidate_saved=1
+    else
+      warn -c cli,vlan "Failed to copy candidate file '$_fault_candidate' to '$_f_dir/candidate.json'"
+    fi
+  else
+    warn -c cli,vlan "Candidate file '$_fault_candidate' missing or empty at preservation time"
+  fi
+
+  # Copy scratch evidence files that existed at validation failure
+  if [ -d "$COLLECTDIR" ]; then
+    for _pattern in 'mac_br*.lst' 'portmap_br*.lst' 'mac_own_ifaces.lst' 'mac_exclude.lst'; do
+      for _src in "$COLLECTDIR"/$_pattern; do
+        [ -e "$_src" ] || continue
+        _bname="${_src##*/}"
+        if cp "$_src" "$_f_dir/$_bname" 2>/dev/null && [ -e "$_f_dir/$_bname" ]; then
+          :
+        else
+          _scratch_saved=0
+          warn -c cli,vlan "Failed to copy scratch evidence '$_src' to fault directory"
+        fi
+      done
+    done
+  fi
+
+  # Format dynamic fields for metadata; no lossy fallback
+  _esc_node=""
+  _esc_ip=""
+  if type json_escape_string >/dev/null 2>&1; then
+    _esc_node=$(json_escape_string "$NODE_NAME" 2>/dev/null) || _metadata_escaped=0
+    _esc_ip=$(json_escape_string "$NODE_IP" 2>/dev/null) || _metadata_escaped=0
+  else
+    _metadata_escaped=0
+  fi
+
+  if [ "$_metadata_escaped" -ne 1 ]; then
+    warn -c cli,vlan "Failed to safely JSON-escape metadata fields; recording fallback constants"
+    _esc_node="unavailable"
+    _esc_ip="unavailable"
+  fi
+
+  _f_sz=$(wc -c < "$_fault_candidate" 2>/dev/null || printf '0')
+  _f_sz=$(printf '%s' "$_f_sz" | tr -d '[:space:]')
+  _f_ts=$(date +%s 2>/dev/null || printf '0')
+
+  # Enforce 0600 on all preserved evidence files
+  for _f in "$_f_dir"/*; do
+    [ -e "$_f" ] || continue
+    chmod 600 "$_f" 2>/dev/null || {
+      warn -c cli,vlan "Could not set secure permissions (0600) on preserved evidence '$_f'"
+      _perms_secure=0
+    }
+  done
+
+  # Stage, verify, and atomically publish metadata
+  _f_meta="$_f_dir/metadata.json"
+  _f_meta_tmp="$_f_dir/metadata.json.tmp.$$"
+
+  _publish_meta() {
+    _pm_status="$1"
+    _pm_complete="$2"
+    rm -f "$_f_meta_tmp" 2>/dev/null || :
+
+    {
+      printf '{\n'
+      printf '  "timestamp": %s,\n' "${_f_ts:-0}"
+      printf '  "pid": %s,\n' "$_f_pid"
+      printf '  "start": %s,\n' "$_f_start"
+      printf '  "nonce": "%s",\n' "$_f_nonce"
+      printf '  "validator": "json_validate_file",\n'
+      printf '  "validator_result": "rejected",\n'
+      printf '  "candidate_size_bytes": %s,\n' "${_f_sz:-0}"
+      [ "$_candidate_saved" -eq 1 ] && printf '  "candidate_preserved": true,\n' || printf '  "candidate_preserved": false,\n'
+      [ "$_scratch_saved" -eq 1 ] && printf '  "scratch_preserved": true,\n' || printf '  "scratch_preserved": false,\n'
+      [ "$_pm_complete" -eq 1 ] && printf '  "metadata_complete": true,\n' || printf '  "metadata_complete": false,\n'
+      printf '  "preservation_status": "%s",\n' "$_pm_status"
+      printf '  "node_name": "%s",\n' "$_esc_node"
+      printf '  "node_ip": "%s"\n' "$_esc_ip"
+      printf '}\n'
+    } > "$_f_meta_tmp" 2>/dev/null || {
+      rm -f "$_f_meta_tmp" 2>/dev/null || :
+      return 1
+    }
+
+    [ -s "$_f_meta_tmp" ] || {
+      rm -f "$_f_meta_tmp" 2>/dev/null || :
+      return 1
+    }
+
+    chmod 600 "$_f_meta_tmp" 2>/dev/null || {
+      rm -f "$_f_meta_tmp" 2>/dev/null || :
+      return 1
+    }
+
+    if type json_validate_file >/dev/null 2>&1; then
+      json_validate_file "$_f_meta_tmp" 2>/dev/null || {
+        rm -f "$_f_meta_tmp" 2>/dev/null || :
+        return 1
+      }
+    fi
+
+    mv -f "$_f_meta_tmp" "$_f_meta" 2>/dev/null || {
+      rm -f "$_f_meta_tmp" "$_f_meta" 2>/dev/null || :
+      return 1
+    }
+
+    return 0
+  }
+
+  _f_status="partial"
+  if [ "$_candidate_saved" -eq 1 ] && [ "$_scratch_saved" -eq 1 ] && \
+     [ "$_metadata_escaped" -eq 1 ] && [ "$_perms_secure" -eq 1 ]; then
+    if _publish_meta "complete" 1; then
+      _f_status="complete"
+    else
+      warn -c cli,vlan "Could not securely publish complete metadata in '$_f_dir'"
+      _f_status="partial"
+    fi
+  else
+    _meta_comp=0
+    [ "$_metadata_escaped" -eq 1 ] && _meta_comp=1
+    _publish_meta "partial" "$_meta_comp" || warn -c cli,vlan "Could not publish partial metadata in '$_f_dir'"
+  fi
+
+  # Restore umask immediately
+  umask "$_saved_umask"
+
+  if [ "$_f_status" = "complete" ]; then
+    info -c cli,vlan "Preserved invalid client collection candidate in '$_f_dir' (status=complete)"
+  else
+    warn -c cli,vlan "Partial client collection fault preservation in '$_f_dir' (status=partial)"
+  fi
+
+  case "$_fault_root" in
+    /*)
+      if [ -d "$_fault_root" ]; then
+        _valid_count=0
+        ls -dt "$_fault_root"/* 2>/dev/null | while IFS= read -r _old_fault; do
+          [ -d "$_old_fault" ] || continue
+          [ ! -L "$_old_fault" ] || continue
+
+          _bname="${_old_fault##*/}"
+          case "$_bname" in
+            fault.*) ;;
+            *) continue ;;
+          esac
+
+          _rest="${_bname#fault.}"
+          _cand_pid="${_rest%%.*}"
+          case "$_rest" in
+            *.*) _rest="${_rest#*.}" ;;
+            *) continue ;;
+          esac
+
+          _cand_start="${_rest%%.*}"
+          case "$_rest" in
+            *.*) _cand_nonce="${_rest#*.}" ;;
+            *) continue ;;
+          esac
+
+          # 1. Outer PID & start must be positive integers
+          if type merv_identity_positive_uint >/dev/null 2>&1; then
+            merv_identity_positive_uint "$_cand_pid" || continue
+            merv_identity_positive_uint "$_cand_start" || continue
+          else
+            case "$_cand_pid" in ''|*[!0-9]*|0) continue ;; esac
+            case "$_cand_start" in ''|*[!0-9]*|0) continue ;; esac
+          fi
+
+          # 2. Nonce must satisfy canonical nonce character & length grammar
+          if type merv_identity_nonce_valid >/dev/null 2>&1; then
+            merv_identity_nonce_valid "$_cand_nonce" || continue
+          else
+            case "$_cand_nonce" in ''|*[!A-Za-z0-9._:-]*) continue ;; esac
+            [ "${#_cand_nonce}" -le 160 ] || continue
+          fi
+
+          # 3. Nonce must structurally contain exactly 4 dot-separated fields:
+          #    <epoch>.<nonce_pid>.<nonce_start>.<sequence>
+          _n_rest="$_cand_nonce"
+          _n_epoch="${_n_rest%%.*}"
+          case "$_n_rest" in
+            *.*) _n_rest="${_n_rest#*.}" ;;
+            *) continue ;;
+          esac
+
+          _n_pid="${_n_rest%%.*}"
+          case "$_n_rest" in
+            *.*) _n_rest="${_n_rest#*.}" ;;
+            *) continue ;;
+          esac
+
+          _n_start="${_n_rest%%.*}"
+          case "$_n_rest" in
+            *.*) _n_seq="${_n_rest#*.}" ;;
+            *) continue ;;
+          esac
+
+          # Reject if extra components exist in sequence
+          case "$_n_seq" in
+            *.*) continue ;;
+          esac
+
+          # 4. Nonce components must satisfy numeric identity expectations
+          case "$_n_epoch" in ''|*[!0-9]*) continue ;; esac
+          if type merv_identity_positive_uint >/dev/null 2>&1; then
+            merv_identity_positive_uint "$_n_pid" || continue
+            merv_identity_positive_uint "$_n_start" || continue
+            merv_identity_positive_uint "$_n_seq" || continue
+          else
+            case "$_n_pid" in ''|*[!0-9]*|0) continue ;; esac
+            case "$_n_start" in ''|*[!0-9]*|0) continue ;; esac
+            case "$_n_seq" in ''|*[!0-9]*|0) continue ;; esac
+          fi
+
+          # 5. Nonce PID & start must match outer PID & start
+          [ "$_n_pid" = "$_cand_pid" ] || continue
+          [ "$_n_start" = "$_cand_start" ] || continue
+
+          _valid_count=$((_valid_count + 1))
+          if [ "$_valid_count" -gt 5 ]; then
+            rm -rf "$_old_fault" 2>/dev/null || :
+          fi
+        done
+      fi
+      ;;
+  esac
+
+  [ "$_f_status" = "complete" ] && return 0
+  return 1
+}
+
 if ! json_validate_file "$OUT"; then
+  preserve_collection_fault "$OUT" || :
   error -c cli,vlan "Local client collection produced invalid JSON; preserving the previous artifact"
   exit 1
 fi

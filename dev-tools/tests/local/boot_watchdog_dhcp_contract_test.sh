@@ -15,10 +15,16 @@ umask 077
 mkdir -p "$TEST_ROOT" || exit 1
 
 _p_before=""; _p_during=""; _p_after=""; _p_normal=""; _p_kill=""
+_replace_writer_pid=""
 _cleanup() {
   for _p in "$_p_before" "$_p_during" "$_p_after" "$_p_normal" "$_p_kill"; do
     [ -n "$_p" ] && kill "$_p" 2>/dev/null || :
   done
+  # The replacement publisher can be waiting on the same transient lock when
+  # an assertion fails.  Reap it before removing its workspace so no writer
+  # survives this isolated fixture.
+  [ -n "$_replace_writer_pid" ] && kill "$_replace_writer_pid" 2>/dev/null || :
+  [ -n "$_replace_writer_pid" ] && wait "$_replace_writer_pid" 2>/dev/null || :
   rm -rf "$TEST_ROOT" 2>/dev/null || :
 }
 trap _cleanup 0 1 2 3 15
@@ -41,12 +47,46 @@ merv_owner_lock_acquire() {
   _lock="$1"
   mkdir -p "${_lock%/*}" 2>/dev/null || return 1
   while ! mkdir "$_lock" 2>/dev/null; do sleep 1; done
-  MERV_LOCK_NONCE=fixture-lock
+  _start=$(merv_proc_start_time "$$") || { rmdir "$_lock" 2>/dev/null || :; return 1; }
+  case "$_start" in ''|*[!0-9]*|0) rmdir "$_lock" 2>/dev/null || :; return 1 ;; esac
+  MERV_LOCK_NONCE="fixture-lock-$$"
+  MERV_LOCK_START="$_start"
+  # Model the authoritative v2 owner record exactly: parent rollback must
+  # prove this process, start time, and nonce while it still owns the lock.
+  printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=1\nheartbeat=1\n' \
+    "$$" "$MERV_LOCK_START" "$MERV_LOCK_NONCE" > "$_lock/owner" || {
+      rmdir "$_lock" 2>/dev/null || :
+      return 1
+    }
   return 0
 }
-merv_owner_lock_release() { rmdir "$1" 2>/dev/null; }
 merv_dhcp_hold_valid_id() { case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 merv_proc_start_time() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+merv_process_identity_matches() {
+  _pid="$1"; _start="$2"
+  case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_start" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$_pid" 2>/dev/null || return 1
+  [ "$(merv_proc_start_time "$_pid" 2>/dev/null || printf '')" = "$_start" ]
+}
+merv_owner_lock_owner_matches() {
+  _lock="$1"; _nonce="$2"
+  [ -d "$_lock" ] && [ -f "$_lock/owner" ] || return 1
+  _start=$(merv_proc_start_time "$$" 2>/dev/null || printf '')
+  case "$_start" in ''|*[!0-9]*|0) return 1 ;; esac
+  _expected=$(printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=1\nheartbeat=1' \
+    "$$" "$_start" "$_nonce")
+  [ "$(cat "$_lock/owner" 2>/dev/null || printf '')" = "$_expected" ] || return 1
+  merv_process_identity_matches "$$" "$_start"
+}
+merv_owner_lock_release() {
+  _lock="$1"; _nonce="${2:-${MERV_LOCK_NONCE:-}}"
+  [ -d "$_lock" ] || return 0
+  merv_owner_lock_owner_matches "$_lock" "$_nonce" || return 1
+  rm -f "$_lock/owner" || return 1
+  rmdir "$_lock" 2>/dev/null || return 1
+  MERV_LOCK_NONCE=''; MERV_LOCK_START=''
+}
 merv_dhcp_hold_acquire() {
   printf '%s\n' acquired > "$PHASE_DIR/acquire"
   if [ "${WATCHDOG_PHASE:-}" = before ]; then sleep 20; fi
@@ -101,12 +141,13 @@ _wait_for() {
 _run_watchdog() {
   _rw_name="$1"; _rw_phase="$2"; _rw_mode="$3"
   _rw_dir="$TEST_ROOT/$_rw_name"
+  _rw_run="$_rw_name-run"
   mkdir -p "$_rw_dir" || return 1
-  : > "$_rw_dir/marker"
+  printf 'run_id=%s\n' "$_rw_run" > "$_rw_dir/marker" || return 1
   printf '%s\n' "$_rw_mode" > "$_rw_dir/abort_mode"
   MERV_TEST_PHASE_DIR="$_rw_dir" WATCHDOG_PHASE="$_rw_phase" LOCKDIR="$_rw_dir/locks" \
     "$_fixture" run "$_rw_dir/marker" "$_rw_dir/ready" \
-      "$_rw_dir/context" 60 "$_rw_dir/pid" &
+      "$_rw_dir/context" 60 "$_rw_dir/pid" "$_rw_run" &
   _rw_pid=$!
   case "$_rw_name" in
     before) _p_before="$_rw_pid" ;;
@@ -199,6 +240,7 @@ chmod 700 "$_replace_writer"
 _replace_writer_pid=$!
 wait "$_replace_pid" 2>/dev/null; _replace_rc=$?
 wait "$_replace_writer_pid" 2>/dev/null || :
+_replace_writer_pid=""
 [ "$_replace_rc" -ne 0 ] || fail 'replacement race unexpectedly reported clean completion'
 [ -e "$_replace_dir/marker" ] && [ -e "$_replace_dir/context" ] &&
   [ -e "$_replace_dir/pid" ] && [ -e "$_replace_dir/pid.start" ] ||

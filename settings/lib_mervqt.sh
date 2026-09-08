@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.57"                      #
+#                  - File: lib_mervqt.sh || version="0.58"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -302,6 +302,105 @@ merv_dhcp_state_lock_timestamp() {
   printf '%s\n' "$_mdlt_epoch"
 }
 
+# Return success only when state.lock is authoritatively absent.  The `ls -ld`
+# probe does not follow a dangling symlink, so files and symlink obstructions
+# remain fail-closed rather than being mistaken for a released lock.
+merv_dhcp_state_lock_absent_authoritative() {
+  local _mdlaa_lock="${1:-$MERV_DHCP_HOLD_STATE_ROOT/state.lock}" _mdlaa_parent
+  [ -n "$_mdlaa_lock" ] || return 1
+  ls -ld "$_mdlaa_lock" >/dev/null 2>&1 && return 1
+  _mdlaa_parent=${_mdlaa_lock%/*}
+  [ -d "$_mdlaa_parent" ] && [ -r "$_mdlaa_parent" ] && [ -x "$_mdlaa_parent" ]
+}
+
+merv_dhcp_state_lock_quarantine_restore() {
+  local _mdqr_src="${1:-}" _mdqr_lock="${2:-}"
+  [ -e "$_mdqr_src" ] || [ -L "$_mdqr_src" ] || return 1
+  # Never overwrite a successor that appeared while the old claim was moved.
+  if ls -ld "$_mdqr_lock" >/dev/null 2>&1 || [ -L "$_mdqr_lock" ]; then
+    return 1
+  fi
+  mv "$_mdqr_src" "$_mdqr_lock" 2>/dev/null
+}
+
+# Move one exact DHCP state-lock object only after checking the observed four
+# metadata fields, and verify the same fields after the atomic rename.  This
+# closes the classification-to-quarantine window: a replacement owner is
+# restored when the path is still free, or retained beside its successor when
+# it is not. Arguments 3-10 are the observed values and presence bits for
+# pid, proc_start_time, created_epoch, and owner_nonce respectively.
+merv_dhcp_state_lock_quarantine() {
+  local _mdq_lock="${1:-}" _mdq_dest="${2:-}"
+  local _mdq_exp_pid="${3:-}" _mdq_exp_start="${4:-}"
+  local _mdq_exp_created="${5:-}" _mdq_exp_nonce="${6:-}"
+  local _mdq_pid_present="${7:-}" _mdq_start_present="${8:-}"
+  local _mdq_created_present="${9:-}" _mdq_nonce_present="${10:-}"
+  local _mdq_pid _mdq_start _mdq_created _mdq_nonce _mdq_valid
+  local _mdq_actual _mdq_present
+  ls -ld "$_mdq_lock" >/dev/null 2>&1 || return 2
+  [ ! -L "$_mdq_lock" ] && [ -d "$_mdq_lock" ] || return 1
+  case "$_mdq_pid_present$_mdq_start_present$_mdq_created_present$_mdq_nonce_present" in
+    0000|0001|0010|0011|0100|0101|0110|0111|1000|1001|1010|1011|1100|1101|1110|1111) ;;
+    *) return 1 ;;
+  esac
+
+  [ ! -L "$_mdq_lock/pid" ] && [ ! -L "$_mdq_lock/proc_start_time" ] &&
+    [ ! -L "$_mdq_lock/created_epoch" ] && [ ! -L "$_mdq_lock/owner_nonce" ] || return 1
+  _mdq_pid=''; _mdq_start=''; _mdq_created=''; _mdq_nonce=''
+  _mdq_present=0; [ -e "$_mdq_lock/pid" ] && _mdq_present=1
+  [ "$_mdq_present" -eq "$_mdq_pid_present" ] || return 1
+  _mdq_present=0; [ -e "$_mdq_lock/proc_start_time" ] && _mdq_present=1
+  [ "$_mdq_present" -eq "$_mdq_start_present" ] || return 1
+  _mdq_present=0; [ -e "$_mdq_lock/created_epoch" ] && _mdq_present=1
+  [ "$_mdq_present" -eq "$_mdq_created_present" ] || return 1
+  _mdq_present=0; [ -e "$_mdq_lock/owner_nonce" ] && _mdq_present=1
+  [ "$_mdq_present" -eq "$_mdq_nonce_present" ] || return 1
+  if [ "$_mdq_pid_present" -eq 1 ]; then _mdq_pid=$(cat "$_mdq_lock/pid" 2>/dev/null) || return 1; fi
+  if [ "$_mdq_start_present" -eq 1 ]; then _mdq_start=$(cat "$_mdq_lock/proc_start_time" 2>/dev/null) || return 1; fi
+  if [ "$_mdq_created_present" -eq 1 ]; then _mdq_created=$(cat "$_mdq_lock/created_epoch" 2>/dev/null) || return 1; fi
+  if [ "$_mdq_nonce_present" -eq 1 ]; then _mdq_nonce=$(cat "$_mdq_lock/owner_nonce" 2>/dev/null) || return 1; fi
+  [ "$_mdq_pid" = "$_mdq_exp_pid" ] && [ "$_mdq_start" = "$_mdq_exp_start" ] &&
+    [ "$_mdq_created" = "$_mdq_exp_created" ] && [ "$_mdq_nonce" = "$_mdq_exp_nonce" ] || return 1
+
+  # Test-only deterministic race gate. It is inert unless both the named
+  # fault and an explicitly defined function are supplied by a self-test.
+  if [ "${MERV_DHCP_STATE_LOCK_FAULT:-}" = quarantine-window ] &&
+     type merv_dhcp_state_lock_quarantine_hook >/dev/null 2>&1; then
+    merv_dhcp_state_lock_quarantine_hook "$_mdq_lock" "$_mdq_dest" || return 1
+  fi
+  if mv "$_mdq_lock" "$_mdq_dest" 2>/dev/null; then
+    _mdq_valid=1
+    [ ! -L "$_mdq_dest" ] && [ -d "$_mdq_dest" ] || _mdq_valid=0
+    [ ! -L "$_mdq_dest/pid" ] && [ ! -L "$_mdq_dest/proc_start_time" ] &&
+      [ ! -L "$_mdq_dest/created_epoch" ] && [ ! -L "$_mdq_dest/owner_nonce" ] || _mdq_valid=0
+    _mdq_present=0; [ -e "$_mdq_dest/pid" ] && _mdq_present=1
+    [ "$_mdq_present" -eq "$_mdq_pid_present" ] || _mdq_valid=0
+    _mdq_present=0; [ -e "$_mdq_dest/proc_start_time" ] && _mdq_present=1
+    [ "$_mdq_present" -eq "$_mdq_start_present" ] || _mdq_valid=0
+    _mdq_present=0; [ -e "$_mdq_dest/created_epoch" ] && _mdq_present=1
+    [ "$_mdq_present" -eq "$_mdq_created_present" ] || _mdq_valid=0
+    _mdq_present=0; [ -e "$_mdq_dest/owner_nonce" ] && _mdq_present=1
+    [ "$_mdq_present" -eq "$_mdq_nonce_present" ] || _mdq_valid=0
+    _mdq_actual=''
+    if [ "$_mdq_valid" -eq 1 ] && [ "$_mdq_pid_present" -eq 1 ]; then _mdq_actual=$(cat "$_mdq_dest/pid" 2>/dev/null) || _mdq_valid=0; fi
+    [ "$_mdq_pid_present" -eq 0 ] || [ "$_mdq_actual" = "$_mdq_exp_pid" ] || _mdq_valid=0
+    _mdq_actual=''
+    if [ "$_mdq_valid" -eq 1 ] && [ "$_mdq_start_present" -eq 1 ]; then _mdq_actual=$(cat "$_mdq_dest/proc_start_time" 2>/dev/null) || _mdq_valid=0; fi
+    [ "$_mdq_start_present" -eq 0 ] || [ "$_mdq_actual" = "$_mdq_exp_start" ] || _mdq_valid=0
+    _mdq_actual=''
+    if [ "$_mdq_valid" -eq 1 ] && [ "$_mdq_created_present" -eq 1 ]; then _mdq_actual=$(cat "$_mdq_dest/created_epoch" 2>/dev/null) || _mdq_valid=0; fi
+    [ "$_mdq_created_present" -eq 0 ] || [ "$_mdq_actual" = "$_mdq_exp_created" ] || _mdq_valid=0
+    _mdq_actual=''
+    if [ "$_mdq_valid" -eq 1 ] && [ "$_mdq_nonce_present" -eq 1 ]; then _mdq_actual=$(cat "$_mdq_dest/owner_nonce" 2>/dev/null) || _mdq_valid=0; fi
+    [ "$_mdq_nonce_present" -eq 0 ] || [ "$_mdq_actual" = "$_mdq_exp_nonce" ] || _mdq_valid=0
+    [ "$_mdq_valid" -eq 1 ] && return 0
+    merv_dhcp_state_lock_quarantine_restore "$_mdq_dest" "$_mdq_lock" || :
+    return 1
+  fi
+  merv_dhcp_state_lock_absent_authoritative "$_mdq_lock" && return 2
+  return 1
+}
+
 # Sets MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE to an incomplete publication's
 # measured age. The reason remains available to the caller for a fail-closed
 # diagnostic; it is deliberately never replaced by a synthetic current time.
@@ -353,6 +452,7 @@ merv_dhcp_state_lock_acquire() {
   local _mdla_lock _mdla_pid _mdla_start _mdla_nonce _mdla_created _mdla_owner_nonce
   local _mdla_quarantine _mdla_proc _mdla_attempt=0 _mdla_max=5
   local _mdla_now _mdla_age _mdla_incomplete_stale
+  local _mdla_pid_present _mdla_start_present _mdla_created_present _mdla_nonce_present
   merv_dhcp_hold_state_init || return $?
   _mdla_proc=$(merv_dhcp_proc_root) || return 1
   type usleep >/dev/null 2>&1 && _mdla_max=100
@@ -413,13 +513,41 @@ merv_dhcp_state_lock_acquire() {
       # it expires, even a readable PID-only claim is not ownership and is
       # quarantined rather than protected indefinitely.
       if ! merv_dhcp_state_lock_incomplete_age "$_mdla_lock"; then
+        # The timestamp failure may itself be the release race.  Continue only
+        # when a non-following reinspection proves the exact lock path absent;
+        # an existing file, symlink, or replacement remains fail-closed.
+        if merv_dhcp_state_lock_absent_authoritative "$_mdla_lock"; then
+          _mdla_attempt=$((_mdla_attempt + 1))
+          continue
+        fi
         _merv_dhcp_log warn "DHCP state lock age is unverifiable (${MERV_DHCP_STATE_LOCK_INCOMPLETE_REASON:-incomplete-age-unknown}); refusing reclaim"
+        return 2
       elif [ "$MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE" -ge "$_mdla_incomplete_stale" ]; then
         _mdla_now=$(merv_dhcp_state_lock_now 2>/dev/null || printf '')
         if [ -n "$_mdla_now" ]; then
           _mdla_quarantine="${_mdla_lock}.incomplete-stale.${_mdla_now}.$$.$_mdla_attempt"
-          if mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null; then
+          _mdla_pid_present=0; _mdla_start_present=0
+          _mdla_created_present=0; _mdla_nonce_present=0
+          [ -e "$_mdla_lock/pid" ] && _mdla_pid_present=1
+          [ -e "$_mdla_lock/proc_start_time" ] && _mdla_start_present=1
+          [ -e "$_mdla_lock/created_epoch" ] && _mdla_created_present=1
+          [ -e "$_mdla_lock/owner_nonce" ] && _mdla_nonce_present=1
+          if merv_dhcp_state_lock_quarantine "$_mdla_lock" "$_mdla_quarantine" \
+             "$_mdla_pid" "$_mdla_start" "$_mdla_created" "$_mdla_owner_nonce" \
+             "$_mdla_pid_present" "$_mdla_start_present" \
+             "$_mdla_created_present" "$_mdla_nonce_present"; then
             _merv_dhcp_log warn "quarantined stale incomplete DHCP state lock"
+            _mdla_attempt=$((_mdla_attempt + 1))
+            continue
+          else
+            _mdla_quarantine_rc=$?
+            if [ "$_mdla_quarantine_rc" -ne 2 ]; then
+              # A replacement or obstruction won the exact quarantine
+              # window.  Preserve it and fail closed with one bounded,
+              # non-sensitive post-classification diagnostic.
+              _merv_dhcp_log warn "DHCP state lock changed during reclaim; refusing ownership"
+              return 2
+            fi
             _mdla_attempt=$((_mdla_attempt + 1))
             continue
           fi
@@ -442,13 +570,33 @@ merv_dhcp_state_lock_acquire() {
       _mdla_attempt=$((_mdla_attempt + 1))
       continue
     fi
-    _mdla_created=$(merv_dhcp_state_lock_now 2>/dev/null || return 2)
-    _mdla_quarantine="${_mdla_lock}.stale.${_mdla_created}.$$.$_mdla_attempt"
-    if mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null; then
+    _mdla_now=$(merv_dhcp_state_lock_now 2>/dev/null || printf '')
+    if [ -z "$_mdla_now" ]; then
+      _merv_dhcp_log warn "DHCP state lock reclaim timestamp is unavailable; refusing ownership"
+      return 2
+    fi
+    _mdla_quarantine="${_mdla_lock}.stale.${_mdla_now}.$$.$_mdla_attempt"
+    if merv_dhcp_state_lock_quarantine "$_mdla_lock" "$_mdla_quarantine" \
+       "$_mdla_pid" "$_mdla_start" "$_mdla_created" "$_mdla_owner_nonce" 1 1 1 1; then
       _merv_dhcp_log warn "quarantined dead or reused-PID DHCP state lock"
+    else
+      _mdla_quarantine_rc=$?
+      if [ "$_mdla_quarantine_rc" -ne 2 ]; then
+        # The exact object changed after classification.  Keep the successor
+        # or obstruction in place and report one bounded, non-sensitive
+        # diagnostic; never convert a replacement into a fresh claim.
+        _merv_dhcp_log warn "DHCP state lock changed during reclaim; refusing ownership"
+        return 2
+      fi
     fi
     _mdla_attempt=$((_mdla_attempt + 1))
   done
+  # A bounded wait may end with an incomplete/live replacement still at the
+  # path.  Exact absence remains silent so a release race can be retried by a
+  # caller; every retained object gets one generic post-classification note.
+  if ! merv_dhcp_state_lock_absent_authoritative "$_mdla_lock"; then
+    _merv_dhcp_log warn "DHCP state lock remained occupied or ambiguous; refusing ownership"
+  fi
   return 2
 }
 

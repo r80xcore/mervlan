@@ -36,7 +36,6 @@ MERV_BASE_PLACEHOLDER/functions/service-event-handler.sh "$@"
 # Arm the L2 boot shield FIRST (synchronous; ~50ms) so the DHCP escape
 # window is closed before rc settles and the manager runs.
 if MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1; then
-  sleep 10
   MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
 fi
 sleep 10
@@ -48,7 +47,6 @@ MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 
 # Arm the L2 boot shield FIRST (synchronous; ~50ms) so the DHCP escape
 # window is closed before rc settles and the manager runs.
 if MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1; then
-  sleep 10
   MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
 fi
 sleep 10
@@ -57,13 +55,11 @@ MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 
 
 %%TEMPLATE services-start-addon 1
 # MerVLAN mount addon on boot
-sleep 5
 MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh install </dev/null >/dev/null 2>&1 &
 %%END
 
 %%TEMPLATE services-start-addon 2
 # MerVLAN mount addon on boot
-sleep 5
 MERV_BASE_PLACEHOLDER/functions/mervlan_boot_wrap.sh install </dev/null >/dev/null 2>&1 &
 %%END
 

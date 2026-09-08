@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.73"                   #
+#                - File: update_mervlan.sh || version="0.74"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -208,15 +208,38 @@ update_wait_for_runtime_idle() {
 		error -c cli,vlan "Update cannot quiesce safely: DHCP handoff classifier is unavailable"
 		return 1
 	}
+	type merv_update_maintenance_lock_state >/dev/null 2>&1 || {
+		error -c cli,vlan "Update cannot quiesce safely: maintenance lock classifier is unavailable"
+		return 1
+	}
+	_update_maintenance_owned=0
+	if type merv_update_owner_context_valid >/dev/null 2>&1 &&
+	   merv_update_owner_context_valid; then
+		_update_maintenance_owned=1
+	elif type merv_maintenance_delegation_valid >/dev/null 2>&1 &&
+	     merv_maintenance_delegation_valid; then
+		_update_maintenance_owned=1
+	fi
 	while :; do
 		_update_busy="0"
+		# The Update parent may inspect the runtime while holding its own
+		# authenticated maintenance owner.  Every other caller must classify
+		# the exact lock path non-followingly; obstructions and unverifiable
+		# records remain busy rather than looking absent through a symlink.
+		if [ "$_update_maintenance_owned" -ne 1 ]; then
+			_update_maintenance_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
+			case "$_update_maintenance_state" in
+				absent|dead|reused) ;;
+				*) _update_busy="1" ;;
+			esac
+		fi
 		for _update_lock in \
 			"$LOCKDIR/mervlan_manager.lock" \
 			"$LOCKDIR/vlan_event.lock" \
 			"$LOCKDIR/execute_nodes.lock" \
 			"$LOCKDIR/client_collect.lock"
 		do
-			[ -e "$_update_lock" ] || continue
+			[ -e "$_update_lock" ] || [ -L "$_update_lock" ] || continue
 			case "$(merv_owner_lock_state "$_update_lock")" in
 				live) _update_busy="1" ;;
 				dead|reused) : ;;
@@ -227,14 +250,18 @@ update_wait_for_runtime_idle() {
 		# metadata schema from merv_owner_lock_state. Presence is therefore treated as
 		# busy and allowed to drain, while malformed/stale state cannot be
 		# mistaken for an idle runtime.
-		if [ -e "$LOCKDIR/mervlan_action.lock" ] &&
-		   ! merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"; then
-			_update_busy="1"
+		if [ -e "$LOCKDIR/mervlan_action.lock" ] || [ -L "$LOCKDIR/mervlan_action.lock" ]; then
+			if ! merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"; then
+				_update_busy="1"
+			fi
 		fi
 		if ! merv_observation_wait_idle 0 >/dev/null 2>&1; then
 			_update_busy="1"
 		fi
-		if [ -f "$LOCKDIR/merv_boot_shield.active" ]; then
+		# A dangling marker is an obstruction, not an idle runtime. Keep the
+		# quiesce gate busy until the marker can be classified authoritatively.
+		if [ -f "$LOCKDIR/merv_boot_shield.active" ] ||
+		   [ -L "$LOCKDIR/merv_boot_shield.active" ]; then
 			_update_busy="1"
 		fi
 		if [ "$_update_busy" = "0" ]; then

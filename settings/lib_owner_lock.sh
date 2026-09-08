@@ -260,18 +260,152 @@ merv_owner_lock_compat_publish() {
   merv_owner_lock_compat_write "$_molcp_lock" heartbeat "$_molcp_heartbeat"
 }
 
+# Return success only when the lock path is authoritatively absent.  `-e` is
+# deliberately not used here because it follows symlinks and would turn a
+# dangling symlink into an absent path.
+merv_owner_lock_absent_authoritative() {
+  _molaa_lock="${1:-}"
+  [ -n "$_molaa_lock" ] || return 1
+  ls -ld "$_molaa_lock" >/dev/null 2>&1 && return 1
+  _molaa_parent=${_molaa_lock%/*}
+  [ -d "$_molaa_parent" ] && [ -r "$_molaa_parent" ] && [ -x "$_molaa_parent" ]
+}
+
+# Read and validate a directory mtime without following a symlink. Keeping the
+# timestamp boundary in one helper also gives deterministic tests a narrow seam
+# without replacing the owner-state classifier itself.
+merv_owner_lock_timestamp() {
+  _molt_path="${1:-}"
+  [ -d "$_molt_path" ] || return 1
+  [ ! -L "$_molt_path" ] || return 1
+  _molt_epoch=$(date -r "$_molt_path" +%s 2>/dev/null || printf '')
+  merv_owner_v2_positive_uint "$_molt_epoch" || return 1
+  printf '%s\n' "$_molt_epoch"
+}
+
+merv_owner_lock_quarantine_restore() {
+  _molqr_src="${1:-}"; _molqr_lock="${2:-}"
+  [ -e "$_molqr_src" ] || [ -L "$_molqr_src" ] || return 1
+  # Never overwrite a replacement that appeared while the old claim was in
+  # quarantine.  In that case the old object remains retained for inspection.
+  if ls -ld "$_molqr_lock" >/dev/null 2>&1 || [ -L "$_molqr_lock" ]; then
+    return 1
+  fi
+  mv "$_molqr_src" "$_molqr_lock" 2>/dev/null
+}
+
 # Move only the exact lock directory into a sibling quarantine name.  A move is
-# preferred to deletion so a failed acquisition remains inspectable.
+# preferred to deletion so a failed acquisition remains inspectable.  The
+# source is snapshotted immediately before the rename and the moved object is
+# verified afterwards; a replacement is restored when possible and otherwise
+# retained beside the new owner.
 merv_owner_lock_quarantine() {
   _molq_lock="${1:-}"; _molq_reason="${2:-quarantine}"
+  _molq_expected_pid="${3:-}"; _molq_expected_start="${4:-}"
+  _molq_expected_nonce="${5:-}"; _molq_expected_created="${6:-}"
+  _molq_expected_heartbeat="${7:-}"
+  _molq_expected_contract=0
+  if [ -n "$_molq_expected_pid" ] && [ -n "$_molq_expected_start" ] &&
+     [ -n "$_molq_expected_nonce" ] && [ -n "$_molq_expected_created" ] &&
+     [ -n "$_molq_expected_heartbeat" ]; then
+    _molq_expected_contract=1
+  fi
+  # Re-inspect the exact path without following it immediately before the
+  # rename.  A stale classification is only a hint: a release or a new owner
+  # may have changed the path since the caller observed it.
+  ls -ld "$_molq_lock" >/dev/null 2>&1 || return 2
+  [ ! -L "$_molq_lock" ] || return 1
   [ -d "$_molq_lock" ] || return 1
+  if [ -e "$_molq_lock/owner" ] || [ -L "$_molq_lock/owner" ]; then
+    [ ! -L "$_molq_lock/owner" ] || return 1
+  fi
+  _molq_expected_owner=0
+  if [ -e "$_molq_lock/owner" ]; then
+    merv_owner_v2_read "$_molq_lock" 2>/dev/null || return 1
+    _molq_expected_owner=1
+    if [ "$_molq_expected_contract" -eq 1 ]; then
+      [ "$MERV_OWNER_V2_PID" = "$_molq_expected_pid" ] || return 1
+      [ "$MERV_OWNER_V2_PROC_START_TIME" = "$_molq_expected_start" ] || return 1
+      [ "$MERV_OWNER_V2_NONCE" = "$_molq_expected_nonce" ] || return 1
+      [ "$MERV_OWNER_V2_CREATED" = "$_molq_expected_created" ] || return 1
+      [ "$MERV_OWNER_V2_HEARTBEAT" = "$_molq_expected_heartbeat" ] || return 1
+    else
+      _molq_expected_pid="$MERV_OWNER_V2_PID"
+      _molq_expected_start="$MERV_OWNER_V2_PROC_START_TIME"
+      _molq_expected_nonce="$MERV_OWNER_V2_NONCE"
+      _molq_expected_created="$MERV_OWNER_V2_CREATED"
+      _molq_expected_heartbeat="$MERV_OWNER_V2_HEARTBEAT"
+    fi
+  fi
+  if [ "$_molq_expected_owner" -eq 1 ]; then
+    _molq_state=$(merv_owner_lock_state "$_molq_lock" "${MERV_OWNER_LOCK_PROC_ROOT:-/proc}" 2>/dev/null || printf unknown)
+    case "$_molq_reason:$_molq_state" in
+      dead:dead|dead:reused|reused:dead|reused:reused) ;;
+      *) return 1 ;;
+    esac
+  fi
   _molq_parent=${_molq_lock%/*}; _molq_base=${_molq_lock##*/}
   [ -n "$_molq_parent" ] && [ -n "$_molq_base" ] || return 1
   merv_owner_lock_tmp_next || return 1
   _molq_try=0
   while [ "$_molq_try" -lt 8 ]; do
     _molq_dest="$_molq_parent/.${_molq_base}.${_molq_reason}.$$.${MERV_OWNER_LOCK_TMP_SUFFIX}.${_molq_try}"
-    mv "$_molq_lock" "$_molq_dest" 2>/dev/null && return 0
+    # Test-only deterministic race gate. Production has no hook unless both a
+    # named fault and an explicitly defined function are present.
+    if merv_owner_lock_fault quarantine-window &&
+       type merv_owner_lock_quarantine_hook >/dev/null 2>&1; then
+      merv_owner_lock_quarantine_hook "$_molq_lock" "$_molq_dest" || return 1
+    fi
+    if mv "$_molq_lock" "$_molq_dest" 2>/dev/null; then
+      _molq_valid=1
+      [ ! -L "$_molq_dest" ] || _molq_valid=0
+      [ -d "$_molq_dest" ] || _molq_valid=0
+      if [ "$_molq_valid" -eq 1 ] && [ "$_molq_expected_owner" -eq 1 ]; then
+        [ ! -L "$_molq_dest/owner" ] || _molq_valid=0
+        if [ "$_molq_valid" -eq 1 ] && merv_owner_v2_read "$_molq_dest" 2>/dev/null; then
+          [ "$MERV_OWNER_V2_PID" = "$_molq_expected_pid" ] || _molq_valid=0
+          [ "$MERV_OWNER_V2_PROC_START_TIME" = "$_molq_expected_start" ] || _molq_valid=0
+          [ "$MERV_OWNER_V2_NONCE" = "$_molq_expected_nonce" ] || _molq_valid=0
+          [ "$MERV_OWNER_V2_CREATED" = "$_molq_expected_created" ] || _molq_valid=0
+          [ "$MERV_OWNER_V2_HEARTBEAT" = "$_molq_expected_heartbeat" ] || _molq_valid=0
+        else
+          _molq_valid=0
+        fi
+        if [ "$_molq_valid" -eq 1 ]; then
+          _molq_state=$(merv_owner_lock_state "$_molq_dest" "${MERV_OWNER_LOCK_PROC_ROOT:-/proc}" 2>/dev/null || printf unknown)
+          case "$_molq_state" in
+            dead|reused) ;;
+            *) _molq_valid=0 ;;
+          esac
+        fi
+      elif [ "$_molq_valid" -eq 1 ] && [ -e "$_molq_dest/owner" -o -L "$_molq_dest/owner" ]; then
+        _molq_valid=0
+      fi
+      [ "$_molq_valid" -eq 1 ] && return 0
+      # A changed object was moved. Restore it only into a still-absent path;
+      # never overwrite a successor owner. Failure leaves both objects for
+      # fail-closed reconciliation.
+      merv_owner_lock_quarantine_restore "$_molq_dest" "$_molq_lock" || :
+      return 1
+    fi
+    if merv_owner_lock_absent_authoritative "$_molq_lock"; then
+      # The contender released between observation and rename.  The caller may
+      # retry, but only after this non-following absence reinspection succeeds.
+      return 2
+    fi
+    # A replacement or obstruction now owns the path. Do not retry a blind mv.
+    [ ! -L "$_molq_lock" ] && [ -d "$_molq_lock" ] || return 1
+    if [ "$_molq_expected_owner" -eq 1 ]; then
+      [ ! -L "$_molq_lock/owner" ] || return 1
+      merv_owner_v2_read "$_molq_lock" 2>/dev/null || return 1
+      [ "$MERV_OWNER_V2_PID" = "$_molq_expected_pid" ] || return 1
+      [ "$MERV_OWNER_V2_PROC_START_TIME" = "$_molq_expected_start" ] || return 1
+      [ "$MERV_OWNER_V2_NONCE" = "$_molq_expected_nonce" ] || return 1
+      [ "$MERV_OWNER_V2_CREATED" = "$_molq_expected_created" ] || return 1
+      [ "$MERV_OWNER_V2_HEARTBEAT" = "$_molq_expected_heartbeat" ] || return 1
+    elif [ -e "$_molq_lock/owner" ] || [ -L "$_molq_lock/owner" ]; then
+      return 1
+    fi
     _molq_try=$((_molq_try + 1))
   done
   return 1
@@ -292,6 +426,15 @@ merv_owner_lock_cleanup_claim() {
   merv_owner_lock_quarantine "$_molcc_lock" acquire-failed
 }
 
+# merv_owner_lock_state_emit <state>
+# Keep the last direct state observation available to callers that must retain
+# its identity snapshot without using command substitution (which runs the
+# observer in a subshell and loses parsed fields).
+merv_owner_lock_state_emit() {
+  MERV_OWNER_LOCK_STATE="$1"
+  printf '%s' "$1"
+}
+
 # merv_owner_lock_state <lock-dir> [proc-root]
 #
 # Prints one of: absent, live, dead, reused, incomplete-grace,
@@ -301,58 +444,75 @@ merv_owner_lock_cleanup_claim() {
 # the lock path is never equivalent to absence.
 merv_owner_lock_state() {
   _mols_lock="${1:-}"; _mols_proc="${2:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}"
-  [ -n "$_mols_lock" ] || { printf 'unknown'; return 1; }
+  MERV_OWNER_LOCK_STATE=unknown
+  [ -n "$_mols_lock" ] || { merv_owner_lock_state_emit unknown; return 1; }
   # Probe the lock path itself without following it. Owner-lock state must
   # distinguish true absence from fail-closed obstructions such as regular
   # files and dangling symlinks; `ls -ld` preserves that distinction.
   if ! ls -ld "$_mols_lock" >/dev/null 2>&1; then
     _mols_parent=${_mols_lock%/*}
     if [ -d "$_mols_parent" ] && [ -r "$_mols_parent" ] && [ -x "$_mols_parent" ]; then
-      printf 'absent'
+      merv_owner_lock_state_emit absent
     else
-      printf 'unknown'
+      merv_owner_lock_state_emit unknown
     fi
     return 0
   fi
-  [ ! -L "$_mols_lock" ] || { printf 'unknown'; return 0; }
-  [ -d "$_mols_lock" ] || { printf 'unknown'; return 0; }
+  if [ -L "$_mols_lock" ] || [ ! -d "$_mols_lock" ]; then
+    # The initial ls succeeded, but the object changed during observation. A
+    # second non-following probe distinguishes a real release from a file or
+    # symlink replacement; only the former is equivalent to absence.
+    if merv_owner_lock_absent_authoritative "$_mols_lock"; then
+      merv_owner_lock_state_emit absent
+    else
+      merv_owner_lock_state_emit unknown
+    fi
+    return 0
+  fi
   if [ -e "$_mols_lock/owner" ] || [ -L "$_mols_lock/owner" ]; then
-    [ -r "$_mols_lock/owner" ] || { printf 'unknown'; return 0; }
-    merv_owner_v2_read "$_mols_lock" 2>/dev/null || { printf 'malformed'; return 0; }
-    type merv_identity_proc_start >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-    [ -d "$_mols_proc" ] && [ -r "$_mols_proc" ] || { printf 'unknown'; return 0; }
+    [ ! -L "$_mols_lock/owner" ] || { merv_owner_lock_state_emit unknown; return 0; }
+    [ -r "$_mols_lock/owner" ] || { merv_owner_lock_state_emit unknown; return 0; }
+    merv_owner_v2_read "$_mols_lock" 2>/dev/null || { merv_owner_lock_state_emit malformed; return 0; }
+    type merv_identity_proc_start >/dev/null 2>&1 || { merv_owner_lock_state_emit unknown; return 0; }
+    [ -d "$_mols_proc" ] && [ -r "$_mols_proc" ] || { merv_owner_lock_state_emit unknown; return 0; }
     _mols_actual=$(merv_identity_proc_start "$MERV_OWNER_V2_PID" "$_mols_proc" 2>/dev/null)
     if merv_owner_v2_positive_uint "$_mols_actual"; then
       if [ "$_mols_actual" != "$MERV_OWNER_V2_PROC_START_TIME" ]; then
-        printf 'reused'
+        merv_owner_lock_state_emit reused
       elif [ "$_mols_proc" != /proc ]; then
-        printf 'live'
+        merv_owner_lock_state_emit live
       elif kill -0 "$MERV_OWNER_V2_PID" 2>/dev/null; then
-        printf 'live'
+        merv_owner_lock_state_emit live
       else
         # A readable stat with an unprobeable process could be a permissions
         # boundary or an exit race; neither proves a reclaimable dead owner.
-        printf 'unknown'
+        merv_owner_lock_state_emit unknown
       fi
       return 0
     fi
     if [ -e "$_mols_proc/$MERV_OWNER_V2_PID/stat" ]; then
-      printf 'unknown'
+      merv_owner_lock_state_emit unknown
     else
-      printf 'dead'
+      merv_owner_lock_state_emit dead
     fi
     return 0
   fi
-  _mols_now=$(merv_owner_lock_now 2>/dev/null) || { printf 'incomplete-unknown'; return 0; }
-  _mols_mtime=$(date -r "$_mols_lock" +%s 2>/dev/null || printf '')
-  merv_owner_v2_positive_uint "$_mols_mtime" || { printf 'incomplete-unknown'; return 0; }
-  case "${MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC:-}" in ''|*[!0-9]*) printf 'incomplete-unknown'; return 0 ;; esac
-  [ "$_mols_now" -ge "$_mols_mtime" ] 2>/dev/null || { printf 'incomplete-unknown'; return 0; }
+  _mols_now=$(merv_owner_lock_now 2>/dev/null) || { merv_owner_lock_state_emit incomplete-unknown; return 0; }
+  _mols_mtime=$(merv_owner_lock_timestamp "$_mols_lock" 2>/dev/null) || {
+    if merv_owner_lock_absent_authoritative "$_mols_lock"; then
+      merv_owner_lock_state_emit absent
+    else
+      merv_owner_lock_state_emit incomplete-unknown
+    fi
+    return 0
+  }
+  case "${MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC:-}" in ''|*[!0-9]*) merv_owner_lock_state_emit incomplete-unknown; return 0 ;; esac
+  [ "$_mols_now" -ge "$_mols_mtime" ] 2>/dev/null || { merv_owner_lock_state_emit incomplete-unknown; return 0; }
   _mols_age=$((_mols_now - _mols_mtime))
   if [ "$_mols_age" -le "$MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC" ]; then
-    printf 'incomplete-grace'
+    merv_owner_lock_state_emit incomplete-grace
   else
-    printf 'incomplete-expired'
+    merv_owner_lock_state_emit incomplete-expired
   fi
 }
 
@@ -378,13 +538,29 @@ merv_owner_lock_acquire() {
   merv_owner_v2_nonce_valid "$_mola_nonce" || return 1
   mkdir -p "$_mola_parent" 2>/dev/null || return 1
   while ! mkdir "$_mola_lock" 2>/dev/null; do
-    _mola_state=$(merv_owner_lock_state "$_mola_lock")
+    # Keep the parsed owner identity in this shell. Command substitution would
+    # hide it and allow quarantine to snapshot a replacement owner instead of
+    # the contender that was classified dead/reused.
+    merv_owner_lock_state "$_mola_lock" >/dev/null 2>&1
+    _mola_state="$MERV_OWNER_LOCK_STATE"
     case "$_mola_state" in
       dead|reused)
-        merv_owner_lock_quarantine "$_mola_lock" "$_mola_state" || return 1
+        merv_owner_lock_quarantine "$_mola_lock" "$_mola_state" \
+          "$MERV_OWNER_V2_PID" "$MERV_OWNER_V2_PROC_START_TIME" \
+          "$MERV_OWNER_V2_NONCE" "$MERV_OWNER_V2_CREATED" \
+          "$MERV_OWNER_V2_HEARTBEAT"
+        _mola_reclaim_rc=$?
+        case "$_mola_reclaim_rc" in
+          0) ;;
+          2) continue ;;
+          *) return 1 ;;
+        esac
         ;;
       absent)
-        # A concurrent release won the race; try to claim again without delay.
+        # A concurrent release won the race; retry only after an authoritative
+        # non-following absence reinspection of the exact path.
+        merv_owner_lock_absent_authoritative "$_mola_lock" || return 1
+        continue
         ;;
       live|incomplete-grace)
         [ "$_mola_attempt" -lt "$_mola_max" ] || return 1
