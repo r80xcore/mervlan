@@ -290,10 +290,29 @@ selftest_reset() {
   rm -f "$MERV_DHCP_HOLD_LEGACY_MARKER"
   unset FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
     FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION \
-    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT
+    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT MERV_SELFTEST_HANDOFF_INTERLEAVE
   export FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
     FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION \
-    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT
+    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT MERV_SELFTEST_HANDOFF_INTERLEAVE
+}
+
+# The production handoff request exposes a test-only hook after the parent
+# transition and before the requested record is made visible. Re-run the
+# reconciler directly at that boundary to model the exact lock-serialized
+# interleaving that previously classified a requested record as orphaned.
+merv_dhcp_handoff_request_hook() {
+  [ "${MERV_SELFTEST_HANDOFF_INTERLEAVE:-0}" = 1 ] || return 0
+  _tdhi_id="$1"
+  _tdhi_owner="$2"
+  _tdhi_pending="$3"
+  [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/$_tdhi_id" ] || return 1
+  [ "$(cat "$_tdhi_owner/phase" 2>/dev/null)" = handoff_wait ] || return 1
+  [ "$(cat "$_tdhi_owner/handoff_id" 2>/dev/null)" = "$_tdhi_id" ] || return 1
+  [ -d "$_tdhi_pending" ] && [ ! -e "$_tdhi_pending/ready" ] || return 1
+  _merv_dhcp_reconcile_handoffs_locked || return 1
+  [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/$_tdhi_id" ] || return 1
+  : > "$SELFTEST_ROOT/handoff-interleave-proof"
+  return 0
 }
 
 pass() {
@@ -1955,6 +1974,48 @@ test_dhcp_crash_points() {
 }
 
 test_heal_handoff() {
+  selftest_reset || return 1
+  assert_ok "handoff transaction parent acquires" merv_dhcp_hold_acquire heal heal-transaction-parent
+  _thh_tx_parent="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "handoff transaction parent mutates" merv_dhcp_hold_mark_mutating "$_thh_tx_parent" heal-eviction
+  MERV_SELFTEST_HANDOFF_INTERLEAVE=1
+  export MERV_SELFTEST_HANDOFF_INTERLEAVE
+  assert_ok "handoff transaction publishes parent before requested record" \
+    merv_dhcp_handoff_request "$_thh_tx_parent" manager heal-transaction-handoff
+  unset MERV_SELFTEST_HANDOFF_INTERLEAVE
+  export MERV_SELFTEST_HANDOFF_INTERLEAVE
+  assert_file "$SELFTEST_ROOT/handoff-interleave-proof" \
+    "reconciler interleaving sees no unpaired requested handoff"
+  [ "$(cat "$SELFTEST_STATE/owners/$_thh_tx_parent/phase" 2>/dev/null)" = handoff_wait ] &&
+    [ "$(cat "$SELFTEST_STATE/owners/$_thh_tx_parent/handoff_id" 2>/dev/null)" = heal-transaction-handoff ] &&
+    [ "$(cat "$SELFTEST_STATE/handoffs/heal-transaction-handoff/handoff_state" 2>/dev/null)" = requested ] &&
+    pass "handoff transaction leaves exact parent and requested state" ||
+    fail "handoff transaction leaves exact parent and requested state"
+  assert_ok "handoff transaction cleanup remains fail-closed" \
+    merv_dhcp_hold_abandon "$_thh_tx_parent" transaction-test-cleanup
+
+  selftest_reset || return 1
+  assert_ok "handoff fault parent acquires" merv_dhcp_hold_acquire heal heal-fault-parent
+  _thh_fault_parent="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "handoff fault parent mutates" merv_dhcp_hold_mark_mutating "$_thh_fault_parent" heal-eviction
+  MERV_DHCP_HOLD_FAULT_POINT=handoff-parent-transition-published
+  MERV_DHCP_HOLD_FAULT_ACTION=return
+  export MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  assert_rc 4 "handoff transition fault is reported" \
+    merv_dhcp_handoff_request "$_thh_fault_parent" manager heal-fault-handoff
+  unset MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  export MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  [ "$(cat "$SELFTEST_STATE/owners/$_thh_fault_parent/phase" 2>/dev/null)" = handoff_wait ] &&
+    [ "$(cat "$SELFTEST_STATE/owners/$_thh_fault_parent/handoff_id" 2>/dev/null)" = heal-fault-handoff ] &&
+    [ ! -e "$SELFTEST_STATE/handoffs/heal-fault-handoff" ] &&
+    [ -z "$(find "$SELFTEST_STATE/handoffs" -mindepth 1 -maxdepth 1 -name '.heal-fault-handoff.pending.*' -print 2>/dev/null)" ] &&
+    [ -f "$SELFTEST_STATE/recovery.pending" ] &&
+    pass "handoff fault rollback retains fail-closed parent state" ||
+    fail "handoff fault rollback retains fail-closed parent state"
+  assert_ok "handoff fault cleanup retains DHCP protection" \
+    merv_dhcp_hold_abandon "$_thh_fault_parent" transaction-fault-cleanup
+  assert_ok "handoff fault cleanup leaves exact hold" merv_dhcp_hold_rules_present
+
   selftest_reset || return 1
   assert_ok "heal parent acquires" merv_dhcp_hold_acquire heal heal-parent
   _thh_parent="$MERV_DHCP_HOLD_TOKEN"

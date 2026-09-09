@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: lib_ssh.sh || version="0.72.4"                       #
+#              - File: lib_ssh.sh || version="0.72.5"                       #
 # ============================================================================ #
 # - Purpose:    Define shared SSH related functions                            #
 # ============================================================================ #
@@ -891,7 +891,11 @@ _merv_timeout_run() {
     if ! rmdir "$_mtr_dir" 2>/dev/null; then _merv_log_err "Could not remove timeout directory $_mtr_dir"; fi
     return 125
   }
-  "$@" <&9 >"$_mtr_out" 2>"$_mtr_err" &
+  # Callers such as the NVRAM inventory writer may enable noclobber while
+  # protecting their own shared artifact.  These files were created above on
+  # purpose, so override noclobber for the child capture redirections without
+  # changing the caller's shell options.
+  "$@" <&9 >|"$_mtr_out" 2>|"$_mtr_err" &
   _mtr_pid=$!
   exec 9<&-
   (

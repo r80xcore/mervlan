@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: lib_mervqt.sh || version="0.58"                      #
+#                  - File: lib_mervqt.sh || version="0.59"                      #
 # ============================================================================ #
 # Purpose: Shared L2 shield enforcement library.
 #   Provides shared validators, MERV_MAC ebtables chain lifecycle, db path
@@ -1101,6 +1101,23 @@ _merv_dhcp_pending_remove_locked() {
   return 0
 }
 
+_merv_dhcp_handoff_pending_remove_locked() {
+  local _mdhpr_dir="$1"
+  case "$_mdhpr_dir" in "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/".*.pending.*) ;; *) return 1 ;; esac
+  [ -d "$_mdhpr_dir" ] || return 0
+  rm -f "$_mdhpr_dir/handoff_id" "$_mdhpr_dir/parent_owner_type" \
+    "$_mdhpr_dir/parent_run_id" "$_mdhpr_dir/parent_token_reference" \
+    "$_mdhpr_dir/child_owner_type" "$_mdhpr_dir/requested_epoch" \
+    "$_mdhpr_dir/handoff_state" "$_mdhpr_dir/ready" \
+    "$_mdhpr_dir/ack_child_run_id" "$_mdhpr_dir/ack_child_token_reference" \
+    "$_mdhpr_dir/ack_epoch" "$_mdhpr_dir/completed_epoch" \
+    "$_mdhpr_dir/parent_retired_epoch" "$_mdhpr_dir/coalesced_epoch" \
+    "$_mdhpr_dir/failed_epoch" "$_mdhpr_dir/failure_reason" \
+    "$_mdhpr_dir/verification_id" 2>/dev/null || return 2
+  rmdir "$_mdhpr_dir" 2>/dev/null || return 2
+  return 0
+}
+
 _merv_dhcp_owner_type_valid() {
   case "$1" in boot-watchdog|manager|heal|recovery) return 0 ;; *) return 1 ;; esac
 }
@@ -1363,6 +1380,24 @@ merv_dhcp_hold_mark_handoff_wait() {
   _merv_dhcp_owner_is_caller_locked "$_mdhw_token" || { merv_dhcp_state_lock_release_or_report "$_mdhw_nonce" || return 2; return 1; }
   case "$_MERV_DHCP_OWNER_PHASE" in
     protected|mutating) ;;
+    handoff_wait)
+      # merv_dhcp_handoff_request now publishes the exact parent transition
+      # and requested record in one state-lock transaction. Keep the legacy
+      # caller sequence safe and idempotent while rejecting a mismatched
+      # successor identity.
+      [ "$(cat "$_MERV_DHCP_OWNER_DIR/handoff_id" 2>/dev/null)" = "$_mdhw_handoff" ] &&
+        _merv_dhcp_handoff_load_locked "$_mdhw_handoff" || {
+          merv_dhcp_state_lock_release_or_report "$_mdhw_nonce" || return 2
+          return 1
+        }
+      [ "$_MERV_DHCP_HANDOFF_PARENT_TOKEN" = "$_mdhw_token" ] &&
+        [ "$_MERV_DHCP_HANDOFF_PARENT_RUN" = "$_MERV_DHCP_OWNER_RUN_ID" ] || {
+          merv_dhcp_state_lock_release_or_report "$_mdhw_nonce" || return 2
+          return 1
+        }
+      merv_dhcp_state_lock_release "$_mdhw_nonce" || return 2
+      return 0
+      ;;
     *) merv_dhcp_state_lock_release_or_report "$_mdhw_nonce" || return 2; return 1 ;;
   esac
   _merv_dhcp_phase_set_locked "$_mdhw_token" handoff_wait handoff-requested &&
@@ -1423,7 +1458,8 @@ _merv_dhcp_handoff_ack_valid_locked() {
 
 merv_dhcp_handoff_request() {
   local _mdhr_token="$1" _mdhr_child="$2" _mdhr_id="${3:-}"
-  local _mdhr_now _mdhr_nonce _mdhr_tmp _mdhr_dir
+  local _mdhr_now _mdhr_nonce _mdhr_tmp _mdhr_dir _mdhr_parent_handoff
+  MERV_DHCP_HANDOFF_ID=""
   _merv_dhcp_owner_type_valid "$_mdhr_child" || return 1
   _mdhr_now=$(date +%s 2>/dev/null || printf '0')
   if [ -z "$_mdhr_id" ]; then
@@ -1446,7 +1482,12 @@ merv_dhcp_handoff_request() {
     merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
     return 1
   }
-  _mdhr_tmp="${_mdhr_dir}.pending.$$"
+  _mdhr_parent_handoff=$(cat "$_MERV_DHCP_OWNER_DIR/handoff_id" 2>/dev/null || printf '')
+  [ -z "$_mdhr_parent_handoff" ] || {
+    merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+    return 1
+  }
+  _mdhr_tmp="$MERV_DHCP_HOLD_STATE_ROOT/handoffs/.${_mdhr_id}.pending.$$"
   mkdir "$_mdhr_tmp" 2>/dev/null || {
     merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
     return 2
@@ -1457,16 +1498,60 @@ merv_dhcp_handoff_request() {
     _merv_dhcp_atomic_field "$_mdhr_tmp" parent_token_reference "$_mdhr_token" &&
     _merv_dhcp_atomic_field "$_mdhr_tmp" child_owner_type "$_mdhr_child" &&
     _merv_dhcp_atomic_field "$_mdhr_tmp" requested_epoch "$_mdhr_now" &&
-    _merv_dhcp_atomic_field "$_mdhr_tmp" handoff_state requested &&
-    _merv_dhcp_atomic_field "$_mdhr_tmp" ready 1 &&
-    mv "$_mdhr_tmp" "$_mdhr_dir" 2>/dev/null || {
-      rm -f "$_mdhr_tmp/"* 2>/dev/null || :
-      rmdir "$_mdhr_tmp" 2>/dev/null || :
+    _merv_dhcp_atomic_field "$_mdhr_tmp" handoff_state requested || {
+      _merv_dhcp_handoff_pending_remove_locked "$_mdhr_tmp" || :
       merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
       return 2
     }
-  merv_dhcp_state_lock_release "$_mdhr_nonce" || return 2
+  # Publish the parent handoff identity and phase before making the requested
+  # record visible. Both publications are serialized by state.lock; a
+  # reconciler therefore cannot observe a requested record paired with a
+  # protected/mutating parent. If this transaction is interrupted after the
+  # parent transition, the owner remains protected and is reconciled fail
+  # closed rather than being released optimistically.
+  if ! _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" handoff_id "$_mdhr_id" ||
+     ! _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" phase handoff_wait ||
+     ! _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" reason handoff-requested ||
+     ! _merv_dhcp_atomic_field "$_MERV_DHCP_OWNER_DIR" heartbeat_epoch "$_mdhr_now"; then
+    _merv_dhcp_handoff_pending_remove_locked "$_mdhr_tmp" || :
+    _merv_dhcp_queue_recovery_locked handoff-request-publication-failed || :
+    merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+    return 2
+  fi
+  if ! merv_dhcp_hold_fault_checkpoint handoff-parent-transition-published; then
+    _merv_dhcp_handoff_pending_remove_locked "$_mdhr_tmp" || :
+    _merv_dhcp_queue_recovery_locked handoff-request-interrupted || :
+    merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+    return 4
+  fi
+  if [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = 1 ] &&
+     type merv_dhcp_handoff_request_hook >/dev/null 2>&1; then
+    if ! merv_dhcp_handoff_request_hook "$_mdhr_id" "$_MERV_DHCP_OWNER_DIR" "$_mdhr_tmp"; then
+      _merv_dhcp_handoff_pending_remove_locked "$_mdhr_tmp" || :
+      _merv_dhcp_queue_recovery_locked handoff-request-hook-failed || :
+      merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+      return 2
+    fi
+  fi
+  mv "$_mdhr_tmp" "$_mdhr_dir" 2>/dev/null || {
+    _merv_dhcp_handoff_pending_remove_locked "$_mdhr_tmp" || :
+    _merv_dhcp_queue_recovery_locked handoff-request-publication-failed || :
+    merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+    return 2
+  }
+  _mdhr_tmp=""
+  _merv_dhcp_atomic_field "$_mdhr_dir" ready 1 || {
+    _merv_dhcp_queue_recovery_locked handoff-request-publication-failed || :
+    merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+    return 2
+  }
   MERV_DHCP_HANDOFF_ID="$_mdhr_id"
+  if ! merv_dhcp_hold_fault_checkpoint handoff-request-published; then
+    _merv_dhcp_queue_recovery_locked handoff-request-interrupted || :
+    merv_dhcp_state_lock_release_or_report "$_mdhr_nonce" || return 2
+    return 4
+  fi
+  merv_dhcp_state_lock_release "$_mdhr_nonce" || return 2
   _merv_dhcp_log info "handoff requested id=$_mdhr_id parent=$_MERV_DHCP_OWNER_RUN_ID child=$_mdhr_child"
   return 0
 }

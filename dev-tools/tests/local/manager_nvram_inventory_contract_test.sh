@@ -45,6 +45,10 @@ if [ "${MANAGER_NVRAM_MODE:-normal}" = stall ]; then
   exec sleep 10
 fi
   case "${MANAGER_NVRAM_MODE:-normal}" in
+  exit-status)
+    printf 'status-output\n'
+    exit 7
+    ;;
   normal)
     {
       printf 'wl0.1_ssid=Guest\n'
@@ -156,12 +160,20 @@ extract_fn "$SNAPSHOT" merv_iface_vid_cache_disable "$EXTRACTED/iface-cache-disa
 extract_fn "$SNAPSHOT" merv_iface_vid_list "$EXTRACTED/iface-list.sh" || fail 'derived cache list extraction'
 extract_fn "$MANAGER" main "$EXTRACTED/main.sh" || fail 'manager main extraction'
 extract_fn "$MANAGER" cleanup_on_exit "$EXTRACTED/cleanup.sh" || fail 'manager cleanup extraction'
+extract_fn "$BASE_DIR/settings/lib_ssh.sh" _merv_timeout_collect_tree \
+  "$EXTRACTED/timeout-collect.sh" || fail 'timeout tree collector extraction'
+extract_fn "$BASE_DIR/settings/lib_ssh.sh" _merv_timeout_signal_tree \
+  "$EXTRACTED/timeout-signal.sh" || fail 'timeout tree signal extraction'
 extract_fn "$BASE_DIR/settings/lib_ssh.sh" _merv_timeout_run "$EXTRACTED/timeout.sh" || fail 'timeout helper extraction'
 
-# Production _merv_timeout_run selects the native timeout applet when present;
-# its merv_has dependency is intentionally tiny but keeps the real helper path.
-merv_has() { command -v "$1" >/dev/null 2>&1; }
+# XT8/ASUSWRT has no native timeout applet.  Force the production fallback so
+# normal and stalled `nvram show` paths exercise the live shell shape locally.
+merv_has() {
+  [ "${1:-}" != timeout ] && command -v "$1" >/dev/null 2>&1
+}
 _merv_log_err() { printf 'TIMEOUT-ERROR:%s\n' "$*" >> "$TRACE"; }
+. "$EXTRACTED/timeout-collect.sh" || fail 'timeout tree collector load'
+. "$EXTRACTED/timeout-signal.sh" || fail 'timeout tree signal load'
 . "$EXTRACTED/timeout.sh" || fail 'timeout helper load'
 for _inventory_piece in "$EXTRACTED"/inventory-*.sh; do
   . "$_inventory_piece" || fail "inventory helper load: $_inventory_piece"
@@ -194,12 +206,93 @@ MERV_NVRAM_INVENTORY_MAX_SELECTED_BYTES=32768
 MERV_NVRAM_INVENTORY_MAX_SELECTED_RECORDS=128
 MERV_NVRAM_INVENTORY_MAX_SELECTED_LINE_BYTES=256
 MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES=128
+MERV_SSH_TMPDIR="$TEST_ROOT/timeout-root"
+mkdir -p "$MERV_SSH_TMPDIR" || exit 1
 export MERV_NVRAM_INVENTORY_ROOT MERV_NVRAM_INVENTORY_SCOPE MERV_NVRAM_READ_TIMEOUT \
   MERV_NVRAM_INVENTORY_MAX_RAW_BYTES MERV_NVRAM_INVENTORY_MAX_RAW_RECORDS \
   MERV_NVRAM_INVENTORY_MAX_RAW_LINES MERV_NVRAM_INVENTORY_MAX_RAW_LINE_BYTES \
   MERV_NVRAM_INVENTORY_MAX_SELECTED_BYTES \
   MERV_NVRAM_INVENTORY_MAX_SELECTED_RECORDS MERV_NVRAM_INVENTORY_MAX_SELECTED_LINE_BYTES \
-  MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES
+  MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES MERV_SSH_TMPDIR
+: > "$TRACE"
+
+timeout_tree_clean() {
+  _ttc_leftovers=$(find "$MERV_SSH_TMPDIR" -type d -name 'timeout_out.*' -print 2>/dev/null) || return 1
+  [ -z "$_ttc_leftovers" ]
+}
+
+# The live inventory caller enables noclobber while holding fd 3.  Exercise
+# the real fallback directly in that shell shape and retain exact child
+# output/status assertions so an ordinary `>` regression fails deterministically.
+_case_failures=$FAILURES
+rm -f "$TEST_ROOT/fallback-success.out"
+if (
+  set -C
+  exec 3> "$TEST_ROOT/fallback-success.out" 2>/dev/null || exit 126
+  _merv_timeout_run 2 nvram show >&3 2>/dev/null
+  _timeout_capture_rc=$?
+  exec 3>&-
+  exit "$_timeout_capture_rc"
+); then
+  _timeout_capture_rc=0
+else
+  _timeout_capture_rc=$?
+fi
+[ "$_timeout_capture_rc" -eq 0 ] || fail "fallback normal command returned rc=$_timeout_capture_rc, expected 0"
+cmp -s "$MANAGER_NVRAM_NORMAL_FILE" "$TEST_ROOT/fallback-success.out" ||
+  fail 'fallback normal command output changed or was lost under noclobber'
+timeout_tree_clean || fail 'fallback normal command left timeout scratch tree behind'
+case_pass "$_case_failures" 'fallback preserved successful nvram status/output under noclobber and cleaned its tree'
+
+MANAGER_NVRAM_MODE=exit-status
+export MANAGER_NVRAM_MODE
+_case_failures=$FAILURES
+rm -f "$TEST_ROOT/fallback-status.out"
+if (
+  set -C
+  exec 3> "$TEST_ROOT/fallback-status.out" 2>/dev/null || exit 126
+  _merv_timeout_run 2 nvram show >&3 2>/dev/null
+  _timeout_capture_rc=$?
+  exec 3>&-
+  exit "$_timeout_capture_rc"
+); then
+  _timeout_capture_rc=0
+else
+  _timeout_capture_rc=$?
+fi
+[ "$_timeout_capture_rc" -eq 7 ] || fail "fallback nonzero command returned rc=$_timeout_capture_rc, expected 7"
+[ "$(cat "$TEST_ROOT/fallback-status.out" 2>/dev/null || printf '')" = status-output ] ||
+  fail 'fallback nonzero command output was not preserved exactly'
+timeout_tree_clean || fail 'fallback nonzero command left timeout scratch tree behind'
+case_pass "$_case_failures" 'fallback preserved exact nonzero status/output and cleaned its tree'
+
+MANAGER_NVRAM_MODE=stall
+export MANAGER_NVRAM_MODE
+_case_failures=$FAILURES
+rm -f "$TEST_ROOT/fallback-timeout.out"
+START_EPOCH=$(date +%s)
+if (
+  set -C
+  exec 3> "$TEST_ROOT/fallback-timeout.out" 2>/dev/null || exit 126
+  _merv_timeout_run 1 nvram show >&3 2>/dev/null
+  _timeout_capture_rc=$?
+  exec 3>&-
+  exit "$_timeout_capture_rc"
+); then
+  _timeout_capture_rc=0
+else
+  _timeout_capture_rc=$?
+fi
+END_EPOCH=$(date +%s)
+ELAPSED=$((END_EPOCH - START_EPOCH))
+[ "$_timeout_capture_rc" -eq 124 ] || fail "fallback stalled command returned rc=$_timeout_capture_rc, expected 124"
+[ ! -s "$TEST_ROOT/fallback-timeout.out" ] || fail 'fallback stalled command emitted unexpected output'
+[ "$ELAPSED" -ge 1 ] && [ "$ELAPSED" -le 5 ] || fail "fallback stalled command exceeded hard bound (${ELAPSED}s)"
+timeout_tree_clean || fail 'fallback stalled command left timeout scratch tree behind'
+case_pass "$_case_failures" "fallback enforced hard deadline/status and cleaned its tree in ${ELAPSED}s"
+
+MANAGER_NVRAM_MODE=normal
+export MANAGER_NVRAM_MODE
 : > "$TRACE"
 _case_failures=$FAILURES
 if ! merv_nvram_inventory_read; then
