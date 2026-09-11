@@ -27,6 +27,8 @@ collection_agent.cmd
 collection_agent.ps1
 compress-for-audit.ps1
 compress-for-audit.cmd
+reboot_qualification.cmd
+reboot_qualification.ps1
 mervlan-audit.zip
 functions/sync_nodes.sh.bak
 functions/wireless_backhaul.sh

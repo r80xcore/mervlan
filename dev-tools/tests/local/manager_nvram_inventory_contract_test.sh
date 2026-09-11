@@ -160,6 +160,15 @@ extract_fn "$SNAPSHOT" merv_iface_vid_cache_disable "$EXTRACTED/iface-cache-disa
 extract_fn "$SNAPSHOT" merv_iface_vid_list "$EXTRACTED/iface-list.sh" || fail 'derived cache list extraction'
 extract_fn "$MANAGER" main "$EXTRACTED/main.sh" || fail 'manager main extraction'
 extract_fn "$MANAGER" cleanup_on_exit "$EXTRACTED/cleanup.sh" || fail 'manager cleanup extraction'
+for _manager_fn in \
+  normalize_basic normalize_iface normalize_ssid to_lower \
+  merv_manager_inventory_file_is_current merv_manager_inventory_prepare \
+  ssid_configured_for_iface is_internal_vap find_if_by_ssid find_if_by_ssid_any \
+  ssid_in_nvram boot_wait_for_configured_ssids nvram_base_for_ifname \
+  set_ap_isolation attach_to_bridge bind_configured_ssids; do
+  extract_fn "$MANAGER" "$_manager_fn" "$EXTRACTED/$_manager_fn.sh" || \
+    fail "manager SSID helper extraction: $_manager_fn"
+done
 extract_fn "$BASE_DIR/settings/lib_ssh.sh" _merv_timeout_collect_tree \
   "$EXTRACTED/timeout-collect.sh" || fail 'timeout tree collector extraction'
 extract_fn "$BASE_DIR/settings/lib_ssh.sh" _merv_timeout_signal_tree \
@@ -180,6 +189,14 @@ for _inventory_piece in "$EXTRACTED"/inventory-*.sh; do
 done
 for _iface_piece in "$EXTRACTED"/iface-*.sh; do
   . "$_iface_piece" || fail "derived cache helper load: $_iface_piece"
+done
+for _manager_piece in \
+  normalize_basic normalize_iface normalize_ssid to_lower \
+  merv_manager_inventory_file_is_current merv_manager_inventory_prepare \
+  ssid_configured_for_iface is_internal_vap find_if_by_ssid find_if_by_ssid_any \
+  ssid_in_nvram boot_wait_for_configured_ssids nvram_base_for_ifname \
+  set_ap_isolation bind_configured_ssids; do
+  . "$EXTRACTED/$_manager_piece.sh" || fail "manager SSID helper load: $_manager_piece"
 done
 
 # Derived-cache tests keep the NVRAM read itself out of the oracle.  This stub
@@ -855,6 +872,297 @@ fi
 [ ! -e "$TEST_ROOT/post-restart-ebtables" ] || fail 'post-restart shield re-arm ran after invalidation failure'
 grep -Fq 'Post-restart iface-to-VID cache invalidation failed; aborting before post-restart guard work' "$TRACE" || fail 'post-restart invalidation failure was not logged'
 case_pass "$_case_failures" 'post-restart invalidation failure aborted before guard work'
+
+# Direct manager resolver/phase coverage.  The inventory reader is stubbed with
+# a file-backed counter so the assertions survive command-substitution child
+# shells.  This covers the manager-only reuse seam without changing the
+# standalone inventory contract exercised above.
+_case_failures=$FAILURES
+if (
+  set -u
+  _ssid_root="$TEST_ROOT/ssid-manager"
+  _ssid_inventory="$_ssid_root/published.data"
+  _ssid_alternate="$_ssid_root/alternate.data"
+  _ssid_symlink="$_ssid_root/published-link.data"
+  _ssid_remap_pre="$_ssid_root/remap-pre.data"
+  _ssid_remap_post="$_ssid_root/remap-post.data"
+  _ssid_trace="$_ssid_root/trace"
+  mkdir -p "$_ssid_root" || exit 1
+  cat > "$_ssid_inventory" <<'EOF_SSID'
+wl0.1_ssid=Guest
+wl0.1_ifname=wl0.1
+wl1.1_ssid=Guest
+wl1.1_ifname=wl1.1
+wl0.2_ssid=not-target
+wl0.2_ifname=wl0.2
+wl0.3_ssid=MiXeD
+wl0.3_ifname=wl0.3
+wl0.6_ssid=MiXeD
+wl0.6_ifname=wl0.6
+wl2.3_ssid=CaseOnly
+wl2.3_ifname=wl2.3
+wl0.4_ssid=Internal
+wl0.4_ifname=wl0.5
+wl0.5_ssid=
+EOF_SSID
+  printf '%s\n' 'wl9.9_ssid=Alternate' 'wl9.9_ifname=wl9.9' > "$_ssid_alternate" || exit 1
+  printf '%s\n' 'wl0.1_ssid=SSID A' 'wl0.1_ifname=wl0.1' > "$_ssid_remap_pre" || exit 1
+  printf '%s\n' 'wl1.2_ssid=SSID A' 'wl1.2_ifname=wl1.2' > "$_ssid_remap_post" || exit 1
+  : > "$_ssid_trace" || exit 1
+
+  for _manager_piece in \
+    normalize_basic normalize_iface normalize_ssid to_lower \
+    merv_manager_inventory_file_is_current merv_manager_inventory_prepare \
+    ssid_configured_for_iface is_internal_vap find_if_by_ssid find_if_by_ssid_any \
+    ssid_in_nvram boot_wait_for_configured_ssids nvram_base_for_ifname \
+    set_ap_isolation attach_to_bridge bind_configured_ssids; do
+    . "$EXTRACTED/$_manager_piece.sh" || exit 1
+  done
+
+  _phase_fail() { printf 'FAIL: SSID phase: %s\n' "$1" >&2; exit 1; }
+  _phase_expect() { "$@" || _phase_fail "$*"; }
+  _trace_count() {
+    if grep -q "^$1$" "$_ssid_trace" 2>/dev/null; then
+      grep -c "^$1$" "$_ssid_trace"
+    else
+      printf '0\n'
+    fi
+  }
+  _trace_prefix_count() {
+    if grep -q "^$1" "$_ssid_trace" 2>/dev/null; then
+      grep -c "^$1" "$_ssid_trace"
+    else
+      printf '0\n'
+    fi
+  }
+
+  info() { :; }
+  warn() { :; }
+  error() { :; }
+  track_change() { :; }
+
+  # Keep the test oracle independent of the production inventory reader while
+  # retaining its key/value lookup shape.
+  merv_nvram_inventory_read() {
+    local _ssid_published="$_ssid_inventory"
+    printf '%s\n' read >> "$_ssid_trace"
+    if [ "${SSID_READ_FAIL:-0}" = 1 ]; then
+      MERV_NVRAM_INVENTORY_FILE=''
+      MERV_NVRAM_INVENTORY_STATUS=error
+      MERV_NVRAM_INVENTORY_REASON=test-failure
+      MERV_NVRAM_INVENTORY_RC=2
+      return 2
+    fi
+    if [ "${SSID_REMAP_MODE:-}" = post ]; then
+      _ssid_published="$_ssid_remap_post"
+    elif [ "${SSID_REMAP_MODE:-}" = pre ]; then
+      _ssid_published="$_ssid_remap_pre"
+    fi
+    MERV_NVRAM_INVENTORY_FILE="$_ssid_published"
+    MERV_NVRAM_INVENTORY_STATUS=valid
+    MERV_NVRAM_INVENTORY_REASON=ok
+    MERV_NVRAM_INVENTORY_RC=0
+    return 0
+  }
+  merv_nvram_inventory_value() {
+    case "$1" in
+      *_ifname) printf '%s\n' "lookup-ifname:$1" >> "$_ssid_trace" ;;
+    esac
+    awk -F= -v wanted="$1" \
+      '$1 == wanted { print substr($0, index($0, "=") + 1); found=1; exit } END { exit(found ? 0 : 1) }' \
+      "$MERV_NVRAM_INVENTORY_FILE"
+  }
+  # This counter-bearing classifier is intentionally deterministic: wl0.5 is
+  # the internal VAP fixture, every other test interface is user-managed.
+  is_internal_vap() {
+    case " $BOUND_IFACES " in
+      *" $1 "*) printf '%s\n' "class-bound:$1" >> "$_ssid_trace" ;;
+      *) printf '%s\n' "class:$1" >> "$_ssid_trace" ;;
+    esac
+    [ "$1" = wl0.5 ]
+  }
+  iface_exists() { return 0; }
+  is_wl_iface() { printf '%s\n' "wl-check:$1" >> "$_ssid_trace"; return 0; }
+  is_ssid_slot_allowed() { [ "$1" = 1 ]; }
+  get_ssid_slot_value() { [ "$1" = 1 ] && printf '%s\n' Guest; }
+  get_vlan_slot_value() { [ "$1" = 1 ] && printf '%s\n' 10; }
+  validate_vlan_id() { return 0; }
+  ensure_vlan_bridge() { return 0; }
+  is_native_radio() { return 1; }
+  wait_for_interface() { return 0; }
+  note_bound_iface() {
+    BOUND_IFACES="$BOUND_IFACES $1"
+    printf '%s\n' "bound:$1" >> "$_ssid_trace"
+  }
+  wl() { printf '%s\n' "wl:$*" >> "$_ssid_trace"; return 0; }
+  nvram() { printf '%s\n' "nvram:$*" >> "$_ssid_trace"; return 0; }
+
+  # Exact matches still return every radio, while unrelated SSIDs do not
+  # resolve ifnames or invoke classification.  A single case-insensitive
+  # fallback and an internal VAP retain their prior semantics.
+  MERV_NVRAM_INVENTORY_FILE="$_ssid_inventory"
+  MERV_NVRAM_INVENTORY_STATUS=valid
+  MERV_NVRAM_INVENTORY_REASON=ok
+  MERV_NVRAM_INVENTORY_RC=0
+  BOUND_IFACES=''
+  : > "$_ssid_trace"
+  _resolved="$(find_if_by_ssid_any Guest "$_ssid_inventory")" || _resolved_rc=$?
+  [ "${_resolved_rc:-0}" = 0 ] || _phase_fail "exact multi-radio lookup rc=${_resolved_rc:-unset}"
+  [ "$_resolved" = "$(printf 'wl0.1\nwl1.1')" ] || _phase_fail "exact multi-radio result=$_resolved"
+  [ "$(_trace_count read)" = 0 ] || _phase_fail 'current published inventory was reread for resolver reuse'
+  [ "$(_trace_count lookup-ifname:wl0.1_ifname)" = 1 ] || _phase_fail 'first exact candidate ifname lookup count changed'
+  [ "$(_trace_count lookup-ifname:wl1.1_ifname)" = 1 ] || _phase_fail 'second exact candidate ifname lookup count changed'
+  [ "$(_trace_prefix_count lookup-ifname:)" = 2 ] || _phase_fail 'unrelated candidate reached ifname resolution'
+  [ "$(_trace_prefix_count class:)" = 2 ] || _phase_fail 'unrelated candidate reached classification'
+
+  : > "$_ssid_trace"
+  _ambiguous_rc=0
+  _resolved="$(find_if_by_ssid_any mixed "$_ssid_inventory")" || _ambiguous_rc=$?
+  [ "$_ambiguous_rc" = 1 ] || _phase_fail "ambiguous case-insensitive fallback rc=$_ambiguous_rc"
+  [ -z "$_resolved" ] || _phase_fail 'ambiguous case-insensitive fallback returned an interface'
+  [ "$(_trace_prefix_count lookup-ifname:)" = 2 ] || _phase_fail 'ambiguous fallback did not inspect both matching interfaces'
+  [ "$(_trace_prefix_count class:)" = 2 ] || _phase_fail 'ambiguous fallback classification count changed'
+
+  : > "$_ssid_trace"
+  _resolved="$(find_if_by_ssid_any caseonly "$_ssid_inventory")" || _resolved_rc=$?
+  [ "${_resolved_rc:-0}" = 0 ] || _phase_fail "case-insensitive fallback rc=${_resolved_rc:-unset}"
+  [ "$_resolved" = wl2.3 ] || _phase_fail "case-insensitive fallback result=$_resolved"
+  [ "$(_trace_prefix_count lookup-ifname:)" = 1 ] || _phase_fail 'case-insensitive fallback resolved unrelated candidates'
+  [ "$(_trace_prefix_count class:)" = 1 ] || _phase_fail 'case-insensitive fallback classification count changed'
+
+  : > "$_ssid_trace"
+  _internal_rc=0
+  _resolved="$(find_if_by_ssid_any Internal "$_ssid_inventory")" || _internal_rc=$?
+  [ "$_internal_rc" = 1 ] || _phase_fail "internal VAP lookup rc=$_internal_rc"
+  [ -z "$_resolved" ] || _phase_fail 'internal VAP leaked into resolver result'
+  [ "$(_trace_prefix_count lookup-ifname:)" = 1 ] || _phase_fail 'internal VAP did not resolve its matched ifname'
+  [ "$(_trace_prefix_count class:)" = 1 ] || _phase_fail 'internal VAP classification count changed'
+
+  # An unrelated regular path and a symlinked current path must never be
+  # trusted as the published inventory; both fall back to the authoritative
+  # reader and therefore use the fixture published by that reader.
+  : > "$_ssid_trace"
+  _resolved="$(find_if_by_ssid_any Guest "$_ssid_alternate")" || _resolved_rc=$?
+  [ "${_resolved_rc:-0}" = 0 ] || _phase_fail 'alternate inventory path did not fail over to reader'
+  [ "$_resolved" = "$(printf 'wl0.1\nwl1.1')" ] || _phase_fail 'alternate path was trusted over published inventory'
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'alternate path did not force one authoritative read'
+
+  if ln -s "$_ssid_inventory" "$_ssid_symlink" 2>/dev/null; then
+    MERV_NVRAM_INVENTORY_FILE="$_ssid_symlink"
+    MERV_NVRAM_INVENTORY_STATUS=valid
+    MERV_NVRAM_INVENTORY_REASON=ok
+    MERV_NVRAM_INVENTORY_RC=0
+    : > "$_ssid_trace"
+    _resolved="$(find_if_by_ssid_any Guest "$_ssid_symlink")" || _resolved_rc=$?
+    [ "${_resolved_rc:-0}" = 0 ] || _phase_fail 'symlinked published path did not fail over to reader'
+    [ "$_resolved" = "$(printf 'wl0.1\nwl1.1')" ] || _phase_fail 'symlinked path was trusted over published inventory'
+    [ "$(_trace_count read)" = 1 ] || _phase_fail 'symlinked path did not force one authoritative read'
+  fi
+
+  # No-argument helpers retain the standalone fail-closed read behavior.
+  SSID_READ_FAIL=1
+  MERV_NVRAM_INVENTORY_FILE=''
+  MERV_NVRAM_INVENTORY_STATUS=''
+  MERV_NVRAM_INVENTORY_REASON=''
+  MERV_NVRAM_INVENTORY_RC=''
+  : > "$_ssid_trace"
+  _standalone_rc=0
+  _resolved="$(find_if_by_ssid_any Guest)" || _standalone_rc=$?
+  [ "$_standalone_rc" = 2 ] || _phase_fail "standalone resolver failure rc=$_standalone_rc"
+  [ -z "$_resolved" ] || _phase_fail 'standalone resolver emitted output after inventory failure'
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'standalone resolver did not perform one fail-closed read'
+  SSID_READ_FAIL=0
+
+  # A restart invalidation must retire the prior derived/inventory state so a
+  # remapped SSID is rebuilt from the post-restart NVRAM view.
+  MERV_NVRAM_INVENTORY_ROOT="$_ssid_root/remap-cache"
+  MERV_NVRAM_INVENTORY_SCOPE=ssid-remap
+  mkdir -p "$MERV_NVRAM_INVENTORY_ROOT" || _phase_fail 'remap cache root setup failed'
+  SSID_REMAP_MODE=pre
+  BOUND_IFACES=''
+  MERV_NVRAM_INVENTORY_FILE=''
+  MERV_NVRAM_INVENTORY_STATUS=''
+  MERV_NVRAM_INVENTORY_REASON=''
+  MERV_NVRAM_INVENTORY_RC=''
+  : > "$_ssid_trace"
+  merv_manager_inventory_prepare '' || _phase_fail 'pre-restart inventory build failed'
+  _resolved="$(find_if_by_ssid_any 'SSID A' "$MERV_NVRAM_INVENTORY_FILE")" || _phase_fail 'pre-restart SSID resolution failed'
+  [ "$_resolved" = wl0.1 ] || _phase_fail "pre-restart SSID mapping=$_resolved"
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'pre-restart inventory was not read once'
+  _remap_cache_path="$(merv_iface_vid_cache_path)" || _phase_fail 'restart cache path lookup failed'
+  printf '%s\n' 'wl0.1 10' > "${_remap_cache_path}.data" || _phase_fail 'restart cache data setup failed'
+  printf '%s\n' "valid|$$|1|0|ok" > "${_remap_cache_path}.state" || _phase_fail 'restart cache state setup failed'
+
+  SSID_REMAP_MODE=post
+  # The earlier main() restart-failure case deliberately overrides this
+  # helper. Restore the extracted production implementation before proving
+  # successful invalidation/remap behavior in the direct phase harness.
+  . "$EXTRACTED/iface-cache-invalidate.sh" || _phase_fail 'restart cache invalidation helper restore failed'
+  merv_iface_vid_cache_invalidate || _phase_fail 'restart cache invalidation failed'
+  [ ! -e "${_remap_cache_path}.data" ] && [ ! -e "${_remap_cache_path}.state" ] ||
+    _phase_fail 'restart cache artifacts survived invalidation'
+  merv_manager_inventory_prepare '' || _phase_fail 'post-restart inventory rebuild failed'
+  _resolved="$(find_if_by_ssid_any 'SSID A' "$MERV_NVRAM_INVENTORY_FILE")" || _phase_fail 'post-restart SSID resolution failed'
+  [ "$_resolved" = wl1.2 ] || _phase_fail "post-restart SSID mapping=$_resolved"
+  [ "$(_trace_count read)" = 2 ] || _phase_fail 'post-restart inventory did not rebuild once'
+
+  # Bind validates once, reuses that path for resolution/classification, and
+  # skips BOUND_SET members before the classifier during the unconfigured sweep.
+  # Return the fixture reader to its ordinary published view after the remap
+  # proof so this phase remains independent of the restart-only mapping.
+  SSID_REMAP_MODE=''
+  MERV_NVRAM_INVENTORY_FILE="$_ssid_inventory"
+  MERV_NVRAM_INVENTORY_STATUS=valid
+  MERV_NVRAM_INVENTORY_REASON=ok
+  MERV_NVRAM_INVENTORY_RC=0
+  MERV_MANAGER_MODE=normal
+  MAX_SSIDS=1
+  SETTINGS_FILE="$_ssid_root/settings.json"
+  _SSID_FILTER_TOKEN=test
+  SSID_FILTER_FATAL=0
+  ENABLE_NATIVE_SSID=0
+  PERSISTENT=no
+  DRY_RUN=yes
+  DEFAULT_BRIDGE=br0
+  BOUND_IFACES=''
+  : > "$_ssid_trace"
+  _bind_output="$_ssid_root/bind-output"
+  bind_configured_ssids > "$_bind_output" || _phase_fail 'bind phase failed'
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'bind phase performed more than one inventory validation'
+  [ "$(_trace_count class:wl0.1)" = 1 ] || _phase_fail 'bound wl0.1 was classified again during sweep'
+  [ "$(_trace_count class:wl1.1)" = 1 ] || _phase_fail 'bound wl1.1 was classified again during sweep'
+  [ "$(_trace_count class-bound:wl0.1)" = 1 ] || _phase_fail 'bound wl0.1 attach did not use the prepared inventory'
+  [ "$(_trace_count class-bound:wl1.1)" = 1 ] || _phase_fail 'bound wl1.1 attach did not use the prepared inventory'
+  grep -Fq 'class:wl0.2' "$_ssid_trace" || _phase_fail 'unconfigured wl0.2 was not classified'
+  grep -Fq 'brctl addif br0 wl0.2' "$_bind_output" || _phase_fail 'unconfigured wl0.2 was not restored'
+  ! grep -Fq 'brctl addif br0 wl0.1' "$_bind_output" || _phase_fail 'bound wl0.1 was swept into br0'
+
+  # Boot readiness validates once, then reuses the same inventory for both
+  # the SSID presence partition and multi-radio interface resolution.
+  MERV_MANAGER_MODE=boot
+  MAX_SSIDS=1
+  : > "$_ssid_trace"
+  boot_wait_for_configured_ssids 2 || _phase_fail 'boot readiness phase failed'
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'boot readiness performed more than one inventory validation'
+  [ "$(_trace_count lookup-ifname:wl0.1_ifname)" = 1 ] || _phase_fail 'boot readiness did not reuse resolver inventory'
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'boot readiness resolver reread inventory'
+
+  # AP isolation keeps standalone mapping fail-closed while an already
+  # prepared path is reused for subsequent interfaces.
+  MERV_MANAGER_MODE=normal
+  DRY_RUN=no
+  PERSISTENT=yes
+  : > "$_ssid_trace"
+  set_ap_isolation wl0.1 1 || _phase_fail 'standalone APISO mapping failed'
+  set_ap_isolation wl1.1 0 "$_ssid_inventory" || _phase_fail 'reused APISO mapping failed'
+  [ "$(_trace_count read)" = 1 ] || _phase_fail 'APISO mappings did not validate once then reuse'
+  [ "$(_trace_prefix_count wl:)" = 2 ] || _phase_fail 'APISO interface update count changed'
+  exit 0
+); then
+  case_pass "$_case_failures" 'manager SSID resolver and phase reuse contract'
+else
+  fail 'manager SSID resolver and phase reuse contract'
+fi
 
 if [ "$SYMLINK_TESTS_BLOCKED" -ne 0 ]; then
   _manager_executed=$MANAGER_CASES

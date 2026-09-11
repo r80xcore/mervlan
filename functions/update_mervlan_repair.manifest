@@ -59,6 +59,7 @@ format=1
 0644 settings/lib_debug.sh
 0644 settings/lib_identity.sh
 0644 settings/lib_json.sh
+0644 settings/lib_maintenance_recovery.sh
 0644 settings/lib_mervqt.sh
 0644 settings/lib_node_jobs.sh
 0644 settings/lib_node_reconcile.sh

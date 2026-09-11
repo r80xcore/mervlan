@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: mervlan_boot_wrap.sh || version="0.72.7"                  #
+#          - File: mervlan_boot_wrap.sh || version="0.72.8"                  #
 # ============================================================================ #
 # - Purpose:    Boot-time wrapper that gates install/manager/cron execution.   #
 #               All ordering and flag logic lives here — core scripts are      #
@@ -743,6 +743,80 @@ _merv_boot_watchdog_transient_lock_leave() {
   merv_owner_lock_release "$_watchdog_transient_lock" "${MERV_LOCK_NONCE:-}"
 }
 
+# Keep post-handoff diagnostics useful without exposing the DHCP token or
+# handoff identity.  The publication lock is intentionally observed only;
+# this helper never changes ownership or publication state.
+_merv_boot_watchdog_log_stage_failure() {
+  local _mbwls_stage="$1" _mbwls_rc="$2" _mbwls_start _mbwls_lock_st
+  _mbwls_start=$(merv_identity_current_start 2>/dev/null ||
+    merv_proc_start_time "$$" 2>/dev/null || printf 'unknown')
+  _mbwls_lock_st=$(merv_owner_lock_state "${_watchdog_transient_lock:-}" \
+    2>/dev/null || printf 'unavailable')
+  warn -c boot,vlan "Shield: watchdog startup failure stage=$_mbwls_stage rc=$_mbwls_rc pid=$$ start=$_mbwls_start lock_state=$_mbwls_lock_st"
+}
+
+# Validate and publish the ready-side handoff state one predicate at a time.
+# This is deliberately equivalent to the historical short-circuit expression:
+# order and fail-closed behavior remain unchanged, while each failed predicate
+# now identifies its exact stage and return code.
+_merv_boot_watchdog_publish_ready_state() {
+  local _mbwprs_marker="$1" _mbwprs_ready="$2" _mbwprs_context="$3"
+  local _mbwprs_pid_file="$4" _mbwprs_start_file="$5" _mbwprs_run="$6"
+  local _mbwprs_pid="$7" _mbwprs_start="$8" _mbwprs_handoff="$9" _mbwprs_rc
+
+  _merv_boot_watchdog_marker_read "$_mbwprs_marker"
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-marker-read "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+
+  [ "${MERV_BOOT_WATCHDOG_MARKER_RUN:-}" = "$_mbwprs_run" ]
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-marker-match "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+
+  _merv_boot_watchdog_expected_matches "$_mbwprs_pid_file" pid "$_mbwprs_run" \
+    "$_mbwprs_pid" "$_mbwprs_start" "$_mbwprs_handoff" owner-active
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-pid "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+
+  _merv_boot_watchdog_expected_matches "$_mbwprs_start_file" pid-start \
+    "$_mbwprs_run" "$_mbwprs_pid" "$_mbwprs_start" "$_mbwprs_handoff" owner-active
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-pid-start "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+
+  merv_process_identity_matches "$_mbwprs_pid" "$_mbwprs_start" 2>/dev/null
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-process "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+
+  _merv_boot_watchdog_publish_state handoff-published
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-context "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+
+  _merv_boot_watchdog_publish_atomic "$_mbwprs_ready" "$_mbwprs_pid" ready
+  _mbwprs_rc=$?
+  if [ "$_mbwprs_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-publication-ready "$_mbwprs_rc"
+    return "$_mbwprs_rc"
+  fi
+  return 0
+}
+
 _merv_boot_watchdog_cleanup_transients() {
   local _mbwct_rc=0 _mbwct_locked=0
   if [ "${_watchdog_transient_lock_held:-0}" -ne 1 ]; then
@@ -1016,35 +1090,41 @@ _mode_shield_watchdog() {
   _handoff_id="$MERV_DHCP_HANDOFF_ID"
   _watchdog_handoff_inflight=0
   _watchdog_state=handoff-published
-  if ! merv_dhcp_hold_mark_handoff_wait "$_token" "$_handoff_id"; then
+  merv_dhcp_hold_mark_handoff_wait "$_token" "$_handoff_id"
+  _mbw_rc=$?
+  if [ "$_mbw_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure mark-handoff-wait "$_mbw_rc"
     _merv_boot_watchdog_cleanup boot-handoff-wait-failed >/dev/null 2>&1 || :
     trap - INT TERM
     return 1
   fi
-  _merv_boot_watchdog_transient_lock_enter || {
+  _merv_boot_watchdog_transient_lock_enter
+  _mbw_rc=$?
+  if [ "$_mbw_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-lock-enter "$_mbw_rc"
     _merv_boot_watchdog_cleanup boot-ready-lock-enter-failed >/dev/null 2>&1 || :
     trap - INT TERM
     return 1
-  }
-  if ! _merv_boot_watchdog_marker_read "$_shield_marker" ||
-     [ "${MERV_BOOT_WATCHDOG_MARKER_RUN:-}" != "$_run_id" ] ||
-     ! _merv_boot_watchdog_expected_matches "$_pid_file" pid "$_run_id" "$$" \
-       "$_self_start" "$_handoff_id" owner-active ||
-     ! _merv_boot_watchdog_expected_matches "$_pid_start_file" pid-start \
-       "$_run_id" "$$" "$_self_start" "$_handoff_id" owner-active ||
-     ! merv_process_identity_matches "$$" "$_self_start" 2>/dev/null ||
-     ! _merv_boot_watchdog_publish_state handoff-published ||
-     ! _merv_boot_watchdog_publish_atomic "$_ready_file" "$$" ready; then
-    _merv_boot_watchdog_transient_lock_leave || :
-      _merv_boot_watchdog_cleanup boot-context-publish-failed >/dev/null 2>&1 || :
-      trap - INT TERM
-      return 1
   fi
-  _merv_boot_watchdog_transient_lock_leave || {
+  _merv_boot_watchdog_publish_ready_state \
+    "$_shield_marker" "$_ready_file" "$_context_file" \
+    "$_pid_file" "$_pid_start_file" "$_run_id" "$$" \
+    "$_self_start" "$_handoff_id"
+  _mbw_rc=$?
+  if [ "$_mbw_rc" -ne 0 ]; then
+    _merv_boot_watchdog_transient_lock_leave || :
+    _merv_boot_watchdog_cleanup boot-context-publish-failed >/dev/null 2>&1 || :
+    trap - INT TERM
+    return 1
+  fi
+  _merv_boot_watchdog_transient_lock_leave
+  _mbw_rc=$?
+  if [ "$_mbw_rc" -ne 0 ]; then
+    _merv_boot_watchdog_log_stage_failure ready-lock-leave "$_mbw_rc"
     _merv_boot_watchdog_cleanup boot-ready-lock-leave-failed >/dev/null 2>&1 || :
     trap - INT TERM
     return 1
-  }
+  fi
 
   while [ -f "$_shield_marker" ] && [ "$_elapsed" -lt "$_max" ]; do
     merv_dhcp_hold_enforce >/dev/null 2>&1 || :

@@ -6,6 +6,10 @@
 #    - transient-lock-enter
 #    - marker-claim
 #    - transient-lock-leave
+#    - mark-handoff-wait
+#    - ready-lock-enter
+#    - ready-publication marker/PID/start/process/context/ready predicates
+#    - ready-lock-leave
 # 3. PID/start evidence is emitted safely
 # 4. Lock-state reporting does not mutate the lock
 # 5. Readiness timeout cleans dead child PID/start safely without cleaning live or replacement
@@ -27,18 +31,19 @@ _cleanup_test() {
   [ -n "$_RUNNER_PID" ] && kill "$_RUNNER_PID" 2>/dev/null || :
   [ -n "$_MANAGER_PID" ] && kill "$_MANAGER_PID" 2>/dev/null || :
   [ -n "$_MANAGER_HANDOFF_PID" ] && kill "$_MANAGER_HANDOFF_PID" 2>/dev/null || :
-  rm -rf "$TEST_ROOT"
+  [ "${MERV_TEST_KEEP:-0}" -eq 1 ] || rm -rf "$TEST_ROOT"
 }
 trap _cleanup_test 0 1 2 3 15
 
 _FAILURES=0
-fail() { printf 'FAIL: %s\n' "$1" >&2; _FAILURES=1; }
+fail() { printf 'FAIL: %s\n' "$1" >&2; _FAILURES=$((_FAILURES + 1)); }
 pass() { printf 'PASS: %s\n' "$1"; }
 
 # Build the fixture runner around production watchdog functions
 FIXTURE="$TEST_ROOT/watchdog_fixture.sh"
 {
   printf '%s\n' '#!/bin/sh' 'set -u'
+  printf 'MERV_TEST_PRODUCTION_BASE=%s\n' "$BASE_DIR"
   cat <<'EOF'
 PHASE_DIR=${MERV_TEST_PHASE_DIR:?}
 LOGDIR="$PHASE_DIR/logs"
@@ -117,6 +122,15 @@ merv_process_identity_matches() {
   _mpim_p="$1"; _mpim_s="$2"
   [ -n "$_mpim_p" ] && [ -n "$_mpim_s" ] || return 1
   [ -d "$LOCKDIR/merv_boot_shield.transient.lock" ] && : > "$PHASE_DIR/identity-checked-under-lock"
+  if [ "${MERV_TEST_GENERIC_TRANSIENT_LOCK:-0}" = 1 ] &&
+     [ -f "$PHASE_DIR/handoff-wait-passed" ]; then
+    merv_owner_lock_owner_matches "$LOCKDIR/merv_boot_shield.transient.lock" \
+      "${MERV_LOCK_NONCE:-}" || return 1
+    : > "$PHASE_DIR/generic-ready-owner-authenticated"
+  fi
+  if [ -f "$PHASE_DIR/fault_ready_process" ]; then
+    return 19
+  fi
   if [ -f "$PHASE_DIR/fault_parent_leave_pid_reuse" ] &&
      [ -f "$PHASE_DIR/fault_transient_leave" ] &&
      [ "$_mpim_p" = "$(cat "$PHASE_DIR/watchdog-child-pid" 2>/dev/null || printf '')" ]; then
@@ -167,6 +181,34 @@ merv_process_identity_matches() {
   [ "$(merv_proc_start_time "$_mpim_p")" = "$_mpim_s" ]
 }
 merv_owner_lock_state() { printf 'held'; }
+# The generic-ready cases install a complete actual contender after the first
+# transient release. This hook mutates that contender only when the second
+# acquire has observed its owner and crossed the named classifier boundary.
+merv_owner_lock_state_hook() {
+  _molsh_point="${1:-}"; _molsh_lock="${2:-}"
+  [ -n "${MERV_TEST_GENERIC_READY_RACE:-}" ] || return 1
+  [ "$_molsh_point" = before-readable ] || return 1
+  [ ! -e "$PHASE_DIR/generic-ready-race-fired" ] || return 0
+  case "$MERV_TEST_GENERIC_READY_RACE" in
+    disappearance)
+      rm -rf "$_molsh_lock" 2>/dev/null || return 1
+      ;;
+    obstruction)
+      rm -rf "$_molsh_lock" 2>/dev/null || return 1
+      : > "$_molsh_lock"
+      ;;
+    replacement)
+      rm -rf "$_molsh_lock" 2>/dev/null || return 1
+      mkdir "$_molsh_lock" || return 1
+      _molsh_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+      merv_owner_v2_write_atomic "$_molsh_lock" "$$" "$_molsh_start" \
+        ready-race-replacement 1 1 || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  : > "$PHASE_DIR/generic-ready-race-fired"
+  return 0
+}
 ebtables() { return 0; }
 merv_boot_shield_lan_configured() { return 0; }
 _is_update_or_safe_boot_active() { return 1; }
@@ -188,8 +230,23 @@ EOF
   # exact production helpers so rollback cases exercise their real paths.
   cat <<'EOF'
 _merv_boot_watchdog_transient_lock_enter() {
+  if [ "${MERV_TEST_GENERIC_TRANSIENT_LOCK:-0}" = 1 ]; then
+    _lock="${LOCKDIR}/merv_boot_shield.transient.lock"
+    merv_owner_lock_acquire "$_lock" 30 "${MERV_TEST_GENERIC_TRANSIENT_MAX:-30}" \
+      boot-shield-transient || return $?
+    _lock_count=$(cat "$PHASE_DIR/lock-count" 2>/dev/null || printf '0')
+    case "$_lock_count" in ''|*[!0-9]*) _lock_count=0 ;; esac
+    _lock_count=$((_lock_count + 1))
+    printf '%s\n' "$_lock_count" > "$PHASE_DIR/lock-count"
+    [ "$_lock_count" -eq 2 ] && : > "$PHASE_DIR/generic-ready-lock-acquired"
+    return 0
+  fi
   if [ -f "$PHASE_DIR/fault_transient_enter" ]; then
     return 7
+  fi
+  if [ -f "$PHASE_DIR/fault_ready_lock_enter" ] &&
+     [ -f "$PHASE_DIR/publication-initialized" ]; then
+    return 23
   fi
   if [ -f "$PHASE_DIR/fail-reconcile-lock" ] &&
      [ -f "$PHASE_DIR/publication-initialized" ]; then
@@ -219,6 +276,21 @@ _merv_boot_watchdog_transient_lock_enter() {
 }
 
 _merv_boot_watchdog_transient_lock_leave() {
+  if [ "${MERV_TEST_GENERIC_TRANSIENT_LOCK:-0}" = 1 ]; then
+    _lock="${LOCKDIR}/merv_boot_shield.transient.lock"
+    merv_owner_lock_release "$_lock" "${MERV_LOCK_NONCE:-}" || return $?
+    _lock_count=$(cat "$PHASE_DIR/lock-count" 2>/dev/null || printf '0')
+    if [ "$_lock_count" -eq 1 ] 2>/dev/null; then
+      : > "$PHASE_DIR/generic-initial-lock-released"
+      if [ -n "${MERV_TEST_GENERIC_READY_RACE:-}" ]; then
+        merv_owner_lock_acquire "$_lock" 30 0 ready-race-contender || return $?
+        : > "$PHASE_DIR/generic-contender-published"
+        MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+        export MERV_OWNER_LOCK_FAULT
+      fi
+    fi
+    return 0
+  fi
   if [ -f "$PHASE_DIR/fault_parent_leave_identity_replacement" ] &&
      [ ! -e "$PHASE_DIR/parent-leave-successor-pid" ]; then
     (sleep 30) &
@@ -233,6 +305,10 @@ _merv_boot_watchdog_transient_lock_leave() {
   fi
   if [ -f "$PHASE_DIR/fault_transient_leave" ]; then
     return 9
+  fi
+  if [ -f "$PHASE_DIR/fault_ready_lock_leave" ] &&
+     [ -f "$PHASE_DIR/handoff-wait-passed" ]; then
+    return 31
   fi
   _lock="${LOCKDIR}/merv_boot_shield.transient.lock"
   rmdir "$_lock" 2>/dev/null || rm -rf "$_lock" 2>/dev/null || :
@@ -272,16 +348,49 @@ mv() {
     pid-start:"$LOCKDIR/merv_boot_shield.pid.start.pid-start."*) return 1 ;;
     context:"$LOCKDIR/merv_boot_shield.handoff.context."*) return 1 ;;
   esac
+  if [ "$2" = "$PHASE_DIR/context" ] &&
+     [ -f "$PHASE_DIR/fault_ready_context" ] &&
+     [ -f "$PHASE_DIR/handoff-wait-passed" ]; then
+    return 29
+  fi
+  if [ "$2" = "$PHASE_DIR/ready" ] &&
+     [ -f "$PHASE_DIR/fault_ready_publication" ]; then
+    return 37
+  fi
   command mv "$@"
 }
 
-merv_dhcp_hold_acquire() { return 0; }
+merv_dhcp_hold_acquire() { MERV_DHCP_HOLD_TOKEN=token-fixture; return 0; }
 merv_dhcp_hold_release() { : > "$PHASE_DIR/dhcp-release-called"; return 0; }
 merv_dhcp_handoff_request() { MERV_DHCP_HANDOFF_ID=h-test; return 0; }
-merv_dhcp_hold_mark_handoff_wait() { return 0; }
+merv_dhcp_hold_mark_handoff_wait() {
+  if [ -f "$PHASE_DIR/fault_ready_marker_read" ]; then
+    printf '%s\n' malformed-marker > "$_shield_marker"
+  elif [ -f "$PHASE_DIR/fault_ready_marker_match" ]; then
+    printf '%s\n' run_id=replacement-run > "$_shield_marker"
+  elif [ -f "$PHASE_DIR/fault_ready_pid" ]; then
+    printf '%s\n' 999999 > "$_pid_file"
+  elif [ -f "$PHASE_DIR/fault_ready_pid_start" ]; then
+    printf '%s9\n' "$_self_start" > "$_pid_start_file"
+  fi
+  : > "$PHASE_DIR/handoff-wait-passed"
+  if [ -f "$PHASE_DIR/fault_mark_handoff_wait" ]; then
+    return 17
+  fi
+  return 0
+}
 merv_dhcp_hold_enforce() { sleep 1; return 0; }
 merv_dhcp_hold_abandon() { return 0; }
 merv_dhcp_handoff_parent_abort() { MERV_DHCP_HANDOFF_ABORT_STATE=successor-verified; return 0; }
+
+# The regular fixture uses controlled transient-lock stand-ins. Generic-lock
+# cases opt in to the installed production sources and the wrapper above then
+# delegates its lock entry/leave calls to the real generic owner lifecycle.
+if [ "${MERV_TEST_GENERIC_TRANSIENT_LOCK:-0}" = 1 ]; then
+  MERV_BASE="$MERV_TEST_PRODUCTION_BASE"
+  . "$MERV_BASE/settings/lib_identity.sh" || exit 90
+  . "$MERV_BASE/settings/lib_owner_lock.sh" || exit 91
+fi
 
 case "${1:-}" in
   run-watchdog)
@@ -417,6 +526,58 @@ else
   fail "case3-transient-leave-missing-diagnostic (expected stage=transient-lock-leave rc=9)"
 fi
 
+# --- Test Cases 3A-J: Post-handoff watchdog exit diagnostics ---------------
+# Each case drives the real _mode_shield_watchdog path through handoff
+# publication and faults exactly one post-handoff stage.  The fixture writes
+# only safe stand-ins for the DHCP token/handoff values; the production
+# diagnostic must never include either value in its log line.
+_post_handoff_diagnostic_case() {
+  _phdc_name="$1"; _phdc_fault="$2"; _phdc_stage="$3"; _phdc_rc="$4"
+  _phdc_dir="$TEST_ROOT/$_phdc_name"
+  mkdir -p "$_phdc_dir"
+  : > "$_phdc_dir/$_phdc_fault"
+  MERV_TEST_PHASE_DIR="$_phdc_dir" "$FIXTURE" run-watchdog \
+    "$_phdc_dir/marker" "$_phdc_dir/ready" "$_phdc_dir/context" 10 \
+    "$_phdc_dir/pid" > "$_phdc_dir/watchdog.out" 2>&1
+  _phdc_exit=$?
+  [ "$_phdc_exit" -ne 0 ] &&
+    pass "$_phdc_name:nonzero-exit" ||
+    fail "$_phdc_name:unexpected-success (rc=$_phdc_exit)"
+  if grep -Fq "stage=$_phdc_stage rc=$_phdc_rc" \
+    "$_phdc_dir/logs/boot_wrap.log" 2>/dev/null; then
+    pass "$_phdc_name:diagnostic-captured (exact rc=$_phdc_rc)"
+  else
+    fail "$_phdc_name:diagnostic-missing (expected stage=$_phdc_stage rc=$_phdc_rc)"
+  fi
+  if grep -Fq 'token-fixture' "$_phdc_dir/logs/boot_wrap.log" 2>/dev/null ||
+     grep -Fq 'h-test' "$_phdc_dir/logs/boot_wrap.log" 2>/dev/null; then
+    fail "$_phdc_name:secret-like-fixture-value-logged"
+  else
+    pass "$_phdc_name:no-token-or-handoff-value-logged"
+  fi
+}
+
+_post_handoff_diagnostic_case case3a-mark-handoff-wait \
+  fault_mark_handoff_wait mark-handoff-wait 17
+_post_handoff_diagnostic_case case3b-ready-lock-enter \
+  fault_ready_lock_enter ready-lock-enter 23
+_post_handoff_diagnostic_case case3c-ready-marker-read \
+  fault_ready_marker_read ready-publication-marker-read 1
+_post_handoff_diagnostic_case case3d-ready-marker-match \
+  fault_ready_marker_match ready-publication-marker-match 1
+_post_handoff_diagnostic_case case3e-ready-pid \
+  fault_ready_pid ready-publication-pid 1
+_post_handoff_diagnostic_case case3f-ready-pid-start \
+  fault_ready_pid_start ready-publication-pid-start 1
+_post_handoff_diagnostic_case case3g-ready-process \
+  fault_ready_process ready-publication-process 19
+_post_handoff_diagnostic_case case3h-ready-context \
+  fault_ready_context ready-publication-context 1
+_post_handoff_diagnostic_case case3i-ready-publication \
+  fault_ready_publication ready-publication-ready 1
+_post_handoff_diagnostic_case case3j-ready-lock-leave \
+  fault_ready_lock_leave ready-lock-leave 31
+
 # --- Test Case 4: Production-path readiness cleanup ---
 # Run the real _mode_shield function with isolated lock/state paths.  The
 # watchdog child is a controlled sleep process; all state mutations under the
@@ -429,6 +590,77 @@ _wait_for_file() {
   done
   [ -e "$_wff_path" ]
 }
+
+# --- Test Case 3K-M: Generic ready-entry lifecycle --------------------------
+# These cases use the actual generic owner-lock library beneath the real
+# watchdog publication path. The test fixture changes only the retry bound so
+# a hostile live replacement is observed once and fails promptly.
+CASE3K="$TEST_ROOT/case3k-generic-ready-release"
+mkdir -p "$CASE3K"
+MERV_TEST_PHASE_DIR="$CASE3K" MERV_TEST_GENERIC_TRANSIENT_LOCK=1 \
+  MERV_TEST_GENERIC_TRANSIENT_MAX=0 MERV_TEST_GENERIC_READY_RACE=disappearance \
+  "$FIXTURE" run-watchdog \
+  "$CASE3K/marker" "$CASE3K/ready" "$CASE3K/context" 10 "$CASE3K/pid" \
+  > "$CASE3K/watchdog.out" 2>&1 &
+_RUNNER_PID=$!
+# The actual owner library performs several atomic compatibility publications
+# before its authoritative record. Leave a bounded allowance for slow local
+# filesystems before deciding that ready entry failed.
+_wait_for_file "$CASE3K/generic-ready-owner-authenticated" 15 ||
+  fail 'case3k-generic-ready-release:ready-owner-not-authenticated'
+_wait_for_file "$CASE3K/generic-ready-lock-acquired" 2 ||
+  fail 'case3k-generic-ready-release:ready-lock-not-reacquired'
+[ -e "$CASE3K/generic-initial-lock-released" ] &&
+  [ -e "$CASE3K/generic-contender-published" ] &&
+  [ -e "$CASE3K/generic-ready-race-fired" ] &&
+  pass 'case3k-generic-ready-release:initial-generic-lock-released' ||
+  fail 'case3k-generic-ready-release:initial-release-or-contender-race-missing'
+_wait_for_file "$CASE3K/ready" 5 ||
+  fail 'case3k-generic-ready-release:ready-publication-not-observed'
+[ "$(cat "$CASE3K/ready" 2>/dev/null || printf '')" = "$(cat "$CASE3K/pid" 2>/dev/null || printf '')" ] &&
+  grep -Fq 'handoff_id=h-test' "$CASE3K/context" 2>/dev/null &&
+  pass 'case3k-generic-ready-release:authenticated-ready-publication-reached' ||
+  fail 'case3k-generic-ready-release:ready-publication-missing-or-unauthenticated'
+rm -f "$CASE3K/marker"
+wait "$_RUNNER_PID" 2>/dev/null
+CASE3K_RC=$?
+_RUNNER_PID=""
+[ "$CASE3K_RC" -eq 0 ] && [ ! -e "$CASE3K/locks/merv_boot_shield.transient.lock" ] &&
+  pass 'case3k-generic-ready-release:generic-ready-lock-released-after-publication' ||
+  fail "case3k-generic-ready-release:generic-ready-lock-or-runner-not-released (rc=$CASE3K_RC)"
+
+_generic_ready_hostile_case() {
+  _grhc_mode="$1"
+  _grhc_dir="$TEST_ROOT/case3${_grhc_mode}-generic-ready-hostile"
+  mkdir -p "$_grhc_dir"
+  MERV_TEST_PHASE_DIR="$_grhc_dir" MERV_TEST_GENERIC_TRANSIENT_LOCK=1 \
+    MERV_TEST_GENERIC_TRANSIENT_MAX=0 MERV_TEST_GENERIC_READY_RACE="$_grhc_mode" \
+    "$FIXTURE" run-watchdog "$_grhc_dir/marker" "$_grhc_dir/ready" \
+    "$_grhc_dir/context" 10 "$_grhc_dir/pid" > "$_grhc_dir/watchdog.out" 2>&1
+  _grhc_rc=$?
+  [ "$_grhc_rc" -ne 0 ] && [ -e "$_grhc_dir/generic-initial-lock-released" ] &&
+    [ ! -e "$_grhc_dir/ready" ] &&
+    pass "case3${_grhc_mode}-generic-ready-hostile:ready-entry-blocked" ||
+    fail "case3${_grhc_mode}-generic-ready-hostile:unexpected-ready-publication (rc=$_grhc_rc)"
+  case "$_grhc_mode" in
+    obstruction)
+      [ -f "$_grhc_dir/locks/merv_boot_shield.transient.lock" ] &&
+        pass 'case3obstruction-generic-ready-hostile:obstruction-preserved' ||
+        fail 'case3obstruction-generic-ready-hostile:obstruction-mutated'
+      ;;
+    replacement)
+      [ -e "$_grhc_dir/generic-contender-published" ] &&
+        [ -e "$_grhc_dir/generic-ready-race-fired" ] &&
+        [ -d "$_grhc_dir/locks/merv_boot_shield.transient.lock" ] &&
+        [ -f "$_grhc_dir/locks/merv_boot_shield.transient.lock/owner" ] &&
+        pass 'case3replacement-generic-ready-hostile:replacement-owner-preserved' ||
+        fail 'case3replacement-generic-ready-hostile:replacement-owner-lost'
+      ;;
+  esac
+}
+
+_generic_ready_hostile_case obstruction
+_generic_ready_hostile_case replacement
 
 _wait_for_boot_publication_replacement() {
   _wbpr_pidf="$1"; _wbpr_startf="$2"; _wbpr_marker="$3"; _wbpr_context="$4"

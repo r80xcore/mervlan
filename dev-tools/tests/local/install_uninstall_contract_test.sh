@@ -13,8 +13,16 @@ UPDATE_STATE="$MERV_BASE/settings/lib_update_state.sh"
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
-# Old regular lock files must not be mistaken for an absent directory and spin.
-grep -Fq '[ -d "$_mols_lock" ] || { printf '"'"'unknown'"'"'; return 0; }' "$OWNER" || fail 'owner lock obstruction is not fail-closed unknown'
+# Owner state probes must not follow obstructions: only a non-following absence
+# probe whose parent is readable/searchable may become authoritative absence;
+# regular files, dangling links, and unreadable parents remain unknown.
+grep -Fq 'merv_owner_lock_absent_authoritative() {' "$OWNER" || fail 'owner authoritative absence helper missing'
+grep -Fq 'ls -ld "$_molaa_lock" >/dev/null 2>&1 && return 1' "$OWNER" || fail 'owner absence probe follows an obstruction'
+grep -Fq '[ -d "$_molaa_parent" ] && [ -r "$_molaa_parent" ] && [ -x "$_molaa_parent" ]' "$OWNER" || fail 'owner absence probe lacks parent authority check'
+grep -Fq 'if ! ls -ld "$_mols_lock" >/dev/null 2>&1; then' "$OWNER" || fail 'owner state lacks non-following initial probe'
+grep -Fq 'if [ -L "$_mols_lock" ] || [ ! -d "$_mols_lock" ]; then' "$OWNER" || fail 'owner state lacks obstruction classification'
+grep -Fq 'merv_owner_lock_absent_authoritative "$_mols_lock"; then' "$OWNER" || fail 'owner state lacks authoritative absence reinspection'
+grep -Fq 'merv_owner_lock_state_emit unknown' "$OWNER" || fail 'owner obstruction is not classified unknown'
 grep -Fq 'incomplete-expired|incomplete-unknown|malformed|unknown|*)' "$OWNER" || fail 'owner acquire does not fail closed on unknown obstruction'
 
 # Both direct local hook paths reconcile the known legacy lock format.

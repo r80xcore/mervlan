@@ -15,6 +15,17 @@ umask 077
 mkdir -p "$TEST_ROOT/fake_sys" "$TEST_ROOT/bin" "$TEST_ROOT/runtime" "$TEST_ROOT/logs" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 
+# Keep every Update lifecycle probe private to this contract fixture.  The
+# collector must see an idle, verifiably absent maintenance namespace even
+# when the host cannot provide the unshare-based mount isolation branch.
+MERV_STATE_ROOT="$TEST_ROOT/runtime/state"
+MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
+MERV_UPDATE_MAINTENANCE_LOCK="$TEST_ROOT/runtime/maintenance/mervlan_maintenance.lock"
+mkdir -p "$MERV_STATE_ROOT" "${MERV_UPDATE_MAINTENANCE_LOCK%/*}" || exit 1
+export MERV_STATE_ROOT MERV_UPDATE_JOURNAL MERV_UPDATE_QUIESCE_FILE
+export MERV_UPDATE_MAINTENANCE_LOCK
+
 _FAILURES=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; _FAILURES=1; }
 pass() { printf 'PASS: %s\n' "$1"; }

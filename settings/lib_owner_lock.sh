@@ -450,8 +450,7 @@ merv_owner_lock_state() {
   # distinguish true absence from fail-closed obstructions such as regular
   # files and dangling symlinks; `ls -ld` preserves that distinction.
   if ! ls -ld "$_mols_lock" >/dev/null 2>&1; then
-    _mols_parent=${_mols_lock%/*}
-    if [ -d "$_mols_parent" ] && [ -r "$_mols_parent" ] && [ -x "$_mols_parent" ]; then
+    if merv_owner_lock_absent_authoritative "$_mols_lock"; then
       merv_owner_lock_state_emit absent
     else
       merv_owner_lock_state_emit unknown
@@ -471,8 +470,48 @@ merv_owner_lock_state() {
   fi
   if [ -e "$_mols_lock/owner" ] || [ -L "$_mols_lock/owner" ]; then
     [ ! -L "$_mols_lock/owner" ] || { merv_owner_lock_state_emit unknown; return 0; }
-    [ -r "$_mols_lock/owner" ] || { merv_owner_lock_state_emit unknown; return 0; }
-    merv_owner_v2_read "$_mols_lock" 2>/dev/null || { merv_owner_lock_state_emit malformed; return 0; }
+    # Test-only deterministic observation gates.  They are inert in normal
+    # operation unless both the named fault and hook are explicitly present.
+    # Keeping the gates adjacent to the two file-observation boundaries makes
+    # disappearance/replacement races reproducible without weakening either
+    # classification or acquisition policy.
+    if merv_owner_lock_fault state-owner-before-readable &&
+       type merv_owner_lock_state_hook >/dev/null 2>&1; then
+      merv_owner_lock_state_hook before-readable "$_mols_lock" || {
+        merv_owner_lock_state_emit unknown
+        return 0
+      }
+    fi
+    if merv_owner_lock_fault state-owner-unreadable; then
+      _mols_owner_readable=0
+    elif [ -r "$_mols_lock/owner" ]; then
+      _mols_owner_readable=1
+    else
+      _mols_owner_readable=0
+    fi
+    [ "$_mols_owner_readable" -eq 1 ] || {
+      if merv_owner_lock_absent_authoritative "$_mols_lock"; then
+        merv_owner_lock_state_emit absent
+      else
+        merv_owner_lock_state_emit unknown
+      fi
+      return 0
+    }
+    if merv_owner_lock_fault state-owner-during-read &&
+       type merv_owner_lock_state_hook >/dev/null 2>&1; then
+      merv_owner_lock_state_hook during-read "$_mols_lock" || {
+        merv_owner_lock_state_emit unknown
+        return 0
+      }
+    fi
+    merv_owner_v2_read "$_mols_lock" 2>/dev/null || {
+      if merv_owner_lock_absent_authoritative "$_mols_lock"; then
+        merv_owner_lock_state_emit absent
+      else
+        merv_owner_lock_state_emit malformed
+      fi
+      return 0
+    }
     type merv_identity_proc_start >/dev/null 2>&1 || { merv_owner_lock_state_emit unknown; return 0; }
     [ -d "$_mols_proc" ] && [ -r "$_mols_proc" ] || { merv_owner_lock_state_emit unknown; return 0; }
     _mols_actual=$(merv_identity_proc_start "$MERV_OWNER_V2_PID" "$_mols_proc" 2>/dev/null)

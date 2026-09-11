@@ -17,6 +17,19 @@ Fixed: Boot and startup reliability
 - Manager preflight now selects only the wireless NVRAM records MerVLAN uses
   and tolerates normal ASUS/Broadcom key syntax and large inventories.
 
+Improved: SSID/NVRAM Apply performance and qualification safety
+- SSID readiness, interface resolution, bridge binding, and AP-isolation
+  mapping now reuse one validated NVRAM inventory per manager phase instead of
+  repeatedly executing the router-wide NVRAM scan; invalid or unavailable
+  inventory still aborts safely before topology mutation, and the
+  post-restart binding pass captures a fresh authoritative inventory.
+- Repeated stale DHCP state-lock recovery now uses unique, collision-checked
+  quarantine paths, while Update repair packaging includes the maintenance
+  recovery library required by the installed runtime.
+- Expanded owner-lock, boot-watchdog, manager-inventory, observation, client,
+  installer, MAC cleanup, and router-fake regression coverage to preserve the
+  current fail-closed contracts.
+
 New: Development-only Developer Tools
 - Added a dev-build-only Settings modal for read-only runtime diagnostics,
   temporary MAIN recovery-cron controls, and selected router selftests with

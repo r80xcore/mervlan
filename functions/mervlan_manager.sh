@@ -257,6 +257,48 @@ to_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+# merv_manager_inventory_file_is_current — accept only the inventory file that
+# the validated reader most recently published for this process.  Manager
+# phases pass this path through command substitutions, so never trust an
+# arbitrary caller-supplied path merely because it is readable.
+# Args: $1=optional inventory path
+# Returns: 0 when the path is the current validated regular file, 1 otherwise
+merv_manager_inventory_file_is_current() {
+  local _candidate="${1:-}" _published="${MERV_NVRAM_INVENTORY_FILE:-}"
+  [ -n "$_candidate" ] || return 1
+  [ -n "$_published" ] || return 1
+  [ "$_candidate" = "$_published" ] || return 1
+  [ "${MERV_NVRAM_INVENTORY_STATUS:-}" = valid ] || return 1
+  [ "${MERV_NVRAM_INVENTORY_REASON:-}" = ok ] || return 1
+  [ "${MERV_NVRAM_INVENTORY_RC:-}" = 0 ] || return 1
+  [ -f "$_candidate" ] && [ ! -L "$_candidate" ]
+}
+
+# merv_manager_inventory_prepare — validate once for a manager phase, or
+# reuse the already-published inventory when the caller supplies that exact
+# safe path.  A rejected optional path falls back to the authoritative reader;
+# no caller can bypass its fail-closed result with an unrelated file.
+# Args: $1=optional previously validated inventory path
+# Returns: 0 and leaves MERV_NVRAM_INVENTORY_FILE usable, or reader failure
+merv_manager_inventory_prepare() {
+  local _candidate="${1:-}" _inventory_rc
+
+  if [ -n "$_candidate" ] &&
+     merv_manager_inventory_file_is_current "$_candidate"; then
+    return 0
+  fi
+
+  if merv_nvram_inventory_read; then
+    :
+  else
+    _inventory_rc=$?
+    return "$_inventory_rc"
+  fi
+
+  merv_manager_inventory_file_is_current "${MERV_NVRAM_INVENTORY_FILE:-}" || return 2
+  return 0
+}
+
 BOUND_IFACES=""
 WATCH_IFACES=""
 TRUNK_APPLIED=0
@@ -687,10 +729,11 @@ is_number()    { expr "$1" + 0 >/dev/null 2>&1; }
 # Returns: 0 if configured, 1 if valid inventory says not configured,
 #          2 if inventory could not be read/validated
 ssid_configured_for_iface() {
-  local ifn ssid inv_rc
+  local ifn ssid inv_rc inventory_file
   ifn="$1"
 
-  if merv_nvram_inventory_read; then
+  inventory_file="${2:-}"
+  if merv_manager_inventory_prepare "$inventory_file"; then
     :
   else
     inv_rc=$?
@@ -715,8 +758,9 @@ ssid_configured_for_iface() {
 # Rule: wlX.Y is internal only if nvram key wlX.Y_ssid is missing/empty.
 # Never block wlX base radios or eth*.
 is_internal_vap() {
-  local ifn _ssid_rc
+  local ifn _ssid_rc inventory_file
   ifn="$1"
+  inventory_file="${2:-}"
 
   [ -n "$ifn" ] || return 1
 
@@ -729,7 +773,7 @@ is_internal_vap() {
 
   # Strict VAP check: slot portion must be a pure unsigned integer
   if merv_is_wl_vap_iface "$ifn"; then
-    if ssid_configured_for_iface "$ifn"; then
+    if ssid_configured_for_iface "$ifn" "$inventory_file"; then
       return 1
     else
       _ssid_rc=$?
@@ -958,10 +1002,11 @@ verify_interface_binding() {
 # Returns: none (logs errors, continues on non-critical failures)
 # Explanation: Validates VLAN, filters internal VAPs, ensures bridge exists, adds interface
 attach_to_bridge() {
-  local _internal_rc
+  local _internal_rc _inventory_file
   IF="$1"
   VID="$2"
   LABEL="$3"
+  _inventory_file="${4:-}"
 
   # Validate VLAN ID before attempting attachment
   validate_vlan_id "$VID" || { warn -c cli,vlan "Invalid VLAN $VID for $LABEL, skipping"; return 1; }
@@ -970,7 +1015,7 @@ attach_to_bridge() {
   # inventory failure is an operational error: fail closed before any bridge
   # or interface mutation rather than treating it as an internal/not-found
   # result.
-  if is_internal_vap "$IF"; then
+  if is_internal_vap "$IF" "$_inventory_file"; then
     warn -c cli,vlan "$LABEL ($IF) looks internal; skipping"
     return 1
   else
@@ -1123,8 +1168,10 @@ iface_bound() {
 find_if_by_ssid() {
   local BAND TARGET TARGET_NORM TARGET_LOWER FALLBACK_IFACE FALLBACK_LABEL
   local FALLBACK_COUNT inventory_rc SSID_BASE IF_BASE SSID_NORM IFN SSID slot
+  local inventory_file
   BAND="$1"
   TARGET="$2"
+  inventory_file="${3:-}"
 
   TARGET_NORM=$(normalize_ssid "$TARGET")
   [ -z "$TARGET_NORM" ] && return 1
@@ -1132,7 +1179,7 @@ find_if_by_ssid() {
   TARGET_LOWER=$(to_lower "$TARGET_NORM")
 
   case "$BAND" in ''|*[!0-9]*) return 1 ;; esac
-  if merv_nvram_inventory_read; then
+  if merv_manager_inventory_prepare "$inventory_file"; then
     :
   else
     inventory_rc=$?
@@ -1205,8 +1252,9 @@ find_if_by_ssid() {
 find_if_by_ssid_any() {
   local ssid TARGET_NORM TARGET_LOWER EXACT_MATCHES EXACT_COUNT FALLBACK_IFACE
   local FALLBACK_LABELS FALLBACK_COUNT inventory_file entry key raw base iface
-  local inv_rc internal_rc
+  local inv_rc internal_rc _match_kind
   ssid="$1"
+  inventory_file="${2:-}"
   TARGET_NORM=$(normalize_ssid "$ssid")
   [ -z "$TARGET_NORM" ] && return 1
   [ "$TARGET_NORM" = "unused-placeholder" ] && return 1
@@ -1215,7 +1263,7 @@ find_if_by_ssid_any() {
   # Resolve every candidate from one bounded, validated inventory.  A failed
   # inventory read is distinct from a valid inventory with no matching SSID;
   # callers use status 2 to fail closed before topology mutation.
-  if merv_nvram_inventory_read; then
+  if merv_manager_inventory_prepare "$inventory_file"; then
     :
   else
     inv_rc=$?
@@ -1246,10 +1294,23 @@ find_if_by_ssid_any() {
           *) continue ;;
         esac
 
+        # Normalize and compare the SSID before resolving its ifname or
+        # classifying the interface.  Large inventories contain many
+        # unrelated wl* records; they must not pay those lookups or invoke
+        # VAP classification when they cannot match this target.
+        ssid_norm=$(normalize_ssid "$raw")
+        if [ "$ssid_norm" = "$TARGET_NORM" ]; then
+          _match_kind=exact
+        elif [ -n "$ssid_norm" ] && [ "$(to_lower "$ssid_norm")" = "$TARGET_LOWER" ]; then
+          _match_kind=case
+        else
+          continue
+        fi
+
         iface=$(merv_nvram_inventory_value "${base}_ifname" 2>/dev/null)
         iface=$(normalize_iface "$iface")
         [ -n "$iface" ] || continue
-        if is_internal_vap "$iface"; then
+        if is_internal_vap "$iface" "$inventory_file"; then
           continue
         else
           internal_rc=$?
@@ -1259,14 +1320,12 @@ find_if_by_ssid_any() {
           fi
         fi
 
-        ssid_norm=$(normalize_ssid "$raw")
-
-        if [ "$ssid_norm" = "$TARGET_NORM" ]; then
+        if [ "$_match_kind" = exact ]; then
           # Collect exact match (don't return early — there may be more bands)
           EXACT_MATCHES="${EXACT_MATCHES}${EXACT_MATCHES:+
 }${iface}"
           EXACT_COUNT=$((EXACT_COUNT + 1))
-        elif [ -n "$ssid_norm" ] && [ "$(to_lower "$ssid_norm")" = "$TARGET_LOWER" ]; then
+        else
           if [ "$FALLBACK_COUNT" -eq 0 ]; then
             FALLBACK_IFACE="$iface"
             FALLBACK_LABELS="$ssid_norm -> $iface"
@@ -1308,8 +1367,9 @@ find_if_by_ssid_any() {
 ssid_in_nvram() {
   local _needle _inventory_file _entry _key _raw _value _inv_rc
   _needle="$1"
+  _inventory_file="${2:-}"
   [ -n "$_needle" ] || return 1
-  if merv_nvram_inventory_read; then
+  if merv_manager_inventory_prepare "$_inventory_file"; then
     :
   else
     _inv_rc=$?
@@ -1342,6 +1402,7 @@ boot_wait_for_configured_ssids() {
   [ "$MERV_MANAGER_MODE" = "boot" ] || return 0
 
   timeout="${1:-30}"
+  _boot_inventory_file="${2:-}"
   case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
 
   # Build list of configured SSIDs from settings.json (filtered by node assignment)
@@ -1370,12 +1431,22 @@ $i|$ssid"
 
   info -c cli,vlan "Boot SSID wait: validating configured SSIDs vs nvram, then waiting up to ${timeout}s for interfaces..."
 
+  # Validate once for the phase.  All readiness and resolver lookups below
+  # reuse only this published, safe inventory path.
+  if merv_manager_inventory_prepare "$_boot_inventory_file"; then
+    _boot_inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  else
+    _sin_rc=$?
+    error -c cli,vlan "Boot SSID wait: cannot validate configured SSIDs because NVRAM inventory is unavailable; aborting before topology mutation (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_sin_rc})"
+    return 1
+  fi
+
   # Partition SSIDs: in nvram (wait for interface) vs missing (likely typo)
   missing_nvram=""
   waitlist=""
   while IFS='|' read -r idx ssid; do
     [ -n "$idx" ] || continue
-    if ssid_in_nvram "$ssid"; then
+    if ssid_in_nvram "$ssid" "$_boot_inventory_file"; then
       waitlist="${waitlist}
 $idx|$ssid"
     else
@@ -1417,7 +1488,7 @@ EOF
 
       # find_if_by_ssid_any may return multiple lines (dual-band identical SSIDs)
       # Mark ready if ANY of the resolved interfaces is present in the kernel
-      _resolved="$(find_if_by_ssid_any "$ssid")"
+      _resolved="$(find_if_by_ssid_any "$ssid" "$_boot_inventory_file")"
       _find_rc=$?
       if [ "$_find_rc" -eq 2 ]; then
         error -c cli,vlan "Boot SSID wait: NVRAM inventory became unavailable while resolving '$ssid'; aborting before topology mutation"
@@ -1476,9 +1547,10 @@ EOF
 nvram_base_for_ifname() {
   local ifn line key val base inventory_file inv_rc
   ifn="$1"
+  inventory_file="${2:-}"
   [ -n "$ifn" ] || return 1
 
-  if merv_nvram_inventory_read; then
+  if merv_manager_inventory_prepare "$inventory_file"; then
     :
   else
     inv_rc=$?
@@ -1509,6 +1581,7 @@ nvram_base_for_ifname() {
 
 set_ap_isolation() {
   IFN="$1"; VAL="$2"  # 0 or 1
+  _apiso_inventory_file="${3:-}"
   case "$VAL" in
     0|1)
       if [ "$DRY_RUN" = "yes" ]; then
@@ -1522,7 +1595,7 @@ set_ap_isolation() {
         info -c cli,vlan "Set AP isolation=$VAL for $IFN"
         # Persist in NVRAM for specific bands/slots (wl0, wl0.1, etc.)
         if [ "$PERSISTENT" = "yes" ]; then
-          base="$(nvram_base_for_ifname "$IFN")"
+          base="$(nvram_base_for_ifname "$IFN" "$_apiso_inventory_file")"
           _base_rc=$?
           if [ "$_base_rc" -eq 2 ]; then
             error -c cli,vlan "Persistent AP isolation: cannot map '$IFN' because NVRAM inventory is unavailable"
@@ -1550,6 +1623,7 @@ set_ap_isolation() {
 bind_configured_ssids() {
   local _bc_inventory_file _bc_inv_rc _find_if_rc _seen_unconfigured _internal_rc
   local _bc_key _bc_raw _bc_iface
+  _bc_inventory_file="${1:-}"
   # Pre-scan: build the list of configured + filter-allowed slot numbers in a
   # single pass. The bind loop below iterates only this list, avoiding the
   # double JSON read (get_ssid_slot_value + get_vlan_slot_value) for empty or
@@ -1588,7 +1662,7 @@ bind_configured_ssids() {
   # Inventory validation is a hard precondition for this mutating function.
   # Do it once before the first attach and retain the explicit failure class;
   # an empty valid inventory is handled as ordinary SSID-not-found below.
-  if merv_nvram_inventory_read; then
+  if merv_manager_inventory_prepare "$_bc_inventory_file"; then
     :
   else
     _bc_inv_rc=$?
@@ -1615,7 +1689,7 @@ bind_configured_ssids() {
 
     validate_vlan_id "$vlan" || continue
     # Find ALL interfaces for this SSID (handles dual-band identical SSIDs)
-    IFN="$(find_if_by_ssid_any "$ssid")"
+    IFN="$(find_if_by_ssid_any "$ssid" "$_bc_inventory_file")"
     _find_if_rc=$?
     if [ "$_find_if_rc" -eq 2 ]; then
       error -c cli,vlan "bind_configured_ssids: NVRAM inventory became unavailable while resolving '$ssid'; aborting before bridge mutation"
@@ -1637,10 +1711,10 @@ bind_configured_ssids() {
         if is_native_radio "$_ifn" && [ "$vlan" != "none" ] && [ "$ENABLE_NATIVE_SSID" != "1" ]; then
           warn -c cli,vlan "Refusing to tag native radio $_ifn with VLAN $vlan. Firmware may reject this."
           info -c cli,vlan "Use Guest Networks instead, or force via ENABLE_NATIVE_SSID=1. Falling back to untagged."
-          attach_to_bridge "$_ifn" "none" "SSID_$(printf "%02d" $i) (Native Radio Fallback)"
+          attach_to_bridge "$_ifn" "none" "SSID_$(printf "%02d" $i) (Native Radio Fallback)" "$_bc_inventory_file"
           continue
         fi
-        attach_to_bridge "$_ifn" "$vlan" "SSID_$(printf "%02d" $i)"
+        attach_to_bridge "$_ifn" "$vlan" "SSID_$(printf "%02d" $i)" "$_bc_inventory_file"
       done <<_SSID_EOF_
 $IFN
 _SSID_EOF_
@@ -1665,7 +1739,14 @@ _SSID_EOF_
     esac
     _seen_unconfigured="$_seen_unconfigured $iface"
     iface_exists "$iface" || continue
-    if is_internal_vap "$iface"; then
+    # A configured interface was already marked in BOUND_SET above.  Keep the
+    # membership guard before classification so bound radios do not pay an
+    # unnecessary inventory lookup or alter classifier semantics.
+    case "$BOUND_SET" in
+      *" $iface "*) continue ;;
+    esac
+
+    if is_internal_vap "$iface" "$_bc_inventory_file"; then
       continue
     else
       _internal_rc=$?
@@ -1676,11 +1757,7 @@ _SSID_EOF_
     fi
     is_wl_iface "$iface" || continue
 
-    case "$BOUND_SET" in
-      *" $iface "*) continue ;;
-    esac
-
-    attach_to_bridge "$iface" "none" "Unconfigured IF $iface"
+    attach_to_bridge "$iface" "none" "Unconfigured IF $iface" "$_bc_inventory_file"
   done < "$_bc_inventory_file"
 }
 
@@ -1692,6 +1769,7 @@ resolve_and_attach() {
   SSID="$2"
   VLAN="$3"
   LABEL="$4"
+  _resolve_inventory_file="${5:-}"
 
   validate_vlan_id "$VLAN"
 
@@ -1704,14 +1782,14 @@ resolve_and_attach() {
   # Try up to 5 times to allow interfaces to appear
   for _ in 1 2 3 4 5; do
     if [ "$BAND" = "auto" ] || [ "$BAND" = "any" ] || [ -z "$BAND" ]; then
-      IFN="$(find_if_by_ssid_any "$SSID")"
+      IFN="$(find_if_by_ssid_any "$SSID" "$_resolve_inventory_file")"
       _resolve_if_rc=$?
       if [ "$_resolve_if_rc" -eq 2 ]; then
         error -c cli,vlan "$LABEL: NVRAM inventory unavailable while resolving '$SSID'; aborting before interface attachment"
         return 1
       fi
     else
-      IFN="$(find_if_by_ssid "$BAND" "$SSID")"
+      IFN="$(find_if_by_ssid "$BAND" "$SSID" "$_resolve_inventory_file")"
       _resolve_if_rc=$?
       if [ "$_resolve_if_rc" -eq 2 ]; then
         error -c cli,vlan "$LABEL: NVRAM inventory unavailable while resolving '$SSID'; aborting before interface attachment"
@@ -1737,10 +1815,10 @@ resolve_and_attach() {
     # Broadcom firmware routing. Fall back to untagged unless overridden.
     if is_native_radio "$_ifn" && [ "$VLAN" != "none" ] && [ "$ENABLE_NATIVE_SSID" != "1" ]; then
       warn -c cli,vlan "Refusing to tag native radio $_ifn with VLAN $VLAN. Firmware may reject this."
-      attach_to_bridge "$_ifn" "none" "$LABEL ($SSID - Native Fallback)"
+      attach_to_bridge "$_ifn" "none" "$LABEL ($SSID - Native Fallback)" "$_resolve_inventory_file"
       continue
     fi
-    attach_to_bridge "$_ifn" "$VLAN" "$LABEL ($SSID)"
+    attach_to_bridge "$_ifn" "$VLAN" "$LABEL ($SSID)" "$_resolve_inventory_file"
   done <<_RAA_EOF_
 $IFN
 _RAA_EOF_
@@ -2585,10 +2663,11 @@ main() {
     error -c cli,vlan "NVRAM inventory preflight failed; aborting before topology mutation (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_main_nvram_rc})"
     return 1
   fi
+  _main_inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
 
   # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
   # This only runs when invoked with "boot" argument from services-start
-  if ! boot_wait_for_configured_ssids 30; then
+  if ! boot_wait_for_configured_ssids 30 "$_main_inventory_file"; then
     error -c cli,vlan "Boot SSID readiness failed because NVRAM inventory could not be validated"
     return 1
   fi
@@ -2706,20 +2785,28 @@ main() {
   # This includes restoring unconfigured SSIDs to br0
   WATCHDOG_QUEUE_LOG=0
   export WATCHDOG_QUEUE_LOG
-  if ! bind_configured_ssids; then
+  if ! bind_configured_ssids "$_main_inventory_file"; then
     error -c cli,vlan "SSID binding failed; aborting before AP isolation and final topology changes"
     return 1
   fi
 
   # Configuration phase 3: Apply AP isolation policies across all SSIDs
   # Iterate through configured SSIDs and apply APISO settings (filtered by node assignment)
+  _apiso_inventory_file="$_main_inventory_file"
+  if merv_manager_inventory_prepare "$_apiso_inventory_file"; then
+    _apiso_inventory_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  else
+    _apiso_nvram_rc=$?
+    error -c cli,vlan "AP isolation: NVRAM inventory unavailable; aborting before policy updates (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_apiso_nvram_rc})"
+    return 1
+  fi
   i=1
   while [ $i -le "$MAX_SSIDS" ]; do
     ssid=$(get_ssid_slot_value "$i" "$SETTINGS_FILE")
     apiso=$(get_apiso_slot_value "$i" "$SETTINGS_FILE")
     # Apply AP isolation if SSID is configured and APISO value is set
     if [ -n "$ssid" ] && [ "$ssid" != "unused-placeholder" ] && [ -n "$apiso" ]; then
-      _apiso_iflist=$(find_if_by_ssid_any "$ssid")
+      _apiso_iflist=$(find_if_by_ssid_any "$ssid" "$_apiso_inventory_file")
       _apiso_find_rc=$?
       if [ "$_apiso_find_rc" -eq 2 ]; then
         error -c cli,vlan "AP isolation: NVRAM inventory unavailable while resolving '$ssid'; aborting"
@@ -2729,7 +2816,7 @@ main() {
         _apiso_failed=0
         while IFS= read -r _apiso_ifn; do
           [ -n "$_apiso_ifn" ] || continue
-          set_ap_isolation "$_apiso_ifn" "$apiso" || _apiso_failed=1
+          set_ap_isolation "$_apiso_ifn" "$apiso" "$_apiso_inventory_file" || _apiso_failed=1
         done <<_APISO_EOF_
 $_apiso_iflist
 _APISO_EOF_

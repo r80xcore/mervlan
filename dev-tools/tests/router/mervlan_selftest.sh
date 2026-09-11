@@ -938,6 +938,32 @@ merv_owner_lock_quarantine_hook() {
   merv_owner_v2_write_atomic "$_soqr_lock" "$$" "$_soqr_start" replacement-owner 1 1
 }
 
+# Deterministic owner-observation fixture.  The production gates are inert
+# unless their named fault is selected and this hook exists.  Each branch
+# replaces only this isolated selftest lock path so the real classifier sees
+# the same filesystem boundary it would on a router.
+merv_owner_lock_state_hook() {
+  _sosh_point="${1:-}"; _sosh_lock="${2:-}"
+  case "${MERV_OWNER_LOCK_STATE_HOOK_MODE:-}:$_sosh_point" in
+    disappearance-before:before-readable|disappearance-during:during-read)
+      rm -f "$_sosh_lock/owner" 2>/dev/null || return 1
+      rmdir "$_sosh_lock" 2>/dev/null
+      ;;
+    obstruction-before:before-readable|obstruction-during:during-read)
+      rm -rf "$_sosh_lock" 2>/dev/null || return 1
+      : > "$_sosh_lock"
+      ;;
+    replacement-before:before-readable|replacement-during:during-read)
+      rm -rf "$_sosh_lock" 2>/dev/null || return 1
+      mkdir "$_sosh_lock" || return 1
+      _sosh_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+      merv_owner_v2_write_atomic "$_sosh_lock" "$$" "$_sosh_start" \
+        "state-${_sosh_point}" 1 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 merv_dhcp_state_lock_quarantine_hook() {
   _sdqr_lock="$1"
   _sdqr_backup="${_sdqr_lock}.race-original"
@@ -1058,10 +1084,163 @@ test_owner_state_timestamp_release_probe() {
   fi
 }
 
+test_owner_state_owner_disappearance() {
+  selftest_reset || return 1
+  _tosod_root="$SELFTEST_ROOT/owner-state-owner-disappearance"
+  _tosod_lock="$_tosod_root/claim.lock"
+  _tosod_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+  mkdir -p "$_tosod_root" || return 1
+
+  _tosod_prepare() {
+    rm -rf "$_tosod_lock" 2>/dev/null || return 1
+    mkdir "$_tosod_lock" || return 1
+    merv_owner_v2_write_atomic "$_tosod_lock" "$$" "$_tosod_start" state-original 1 1
+  }
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = absent ] && [ ! -e "$_tosod_lock" ] &&
+    pass "owner disappearance before readability is authoritatively absent" ||
+    fail "owner disappearance before readability is not authoritatively absent"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  if merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-disappearance-before &&
+     merv_owner_lock_owner_matches "$_tosod_lock" "$MERV_LOCK_NONCE"; then
+    _tosod_nonce="$MERV_LOCK_NONCE"
+    pass "owner acquisition retries after disappearance before readability"
+  else
+    _tosod_nonce=''
+    fail "owner acquisition does not retry after disappearance before readability"
+  fi
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ -n "$_tosod_nonce" ] &&
+    assert_ok "owner acquisition release follows pre-read disappearance" \
+      merv_owner_lock_release "$_tosod_lock" "$_tosod_nonce"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=obstruction-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = unknown ] && [ -f "$_tosod_lock" ] &&
+    pass "owner readability obstruction remains unknown and preserved" ||
+    fail "owner readability obstruction was reclassified or mutated"
+  assert_rc 1 "owner readability obstruction blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-readability-obstruction
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_FAULT=state-owner-unreadable
+  export MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tosod_lock" 2>/dev/null &&
+    [ "$_tosod_state" = unknown ] &&
+    [ "$MERV_OWNER_V2_NONCE" = state-original ] &&
+    pass "unreadable retained owner remains unknown and preserved" ||
+    fail "unreadable retained owner was reclassified or mutated"
+  MERV_OWNER_LOCK_FAULT=state-owner-unreadable
+  export MERV_OWNER_LOCK_FAULT
+  assert_rc 1 "unreadable retained owner blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-unreadable-retained
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  assert_ok "unreadable retained owner releases only by exact nonce" \
+    merv_owner_lock_release "$_tosod_lock" state-original
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=replacement-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tosod_lock" 2>/dev/null &&
+    [ "$_tosod_state" = live ] &&
+    [ "$MERV_OWNER_V2_NONCE" = state-before-readable ] &&
+    pass "owner replacement before readability remains live and authoritative" ||
+    fail "owner replacement before readability was reclassified or lost"
+  assert_rc 1 "owner replacement before readability blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-readability-replacement
+  assert_ok "owner replacement before readability releases by its exact nonce" \
+    merv_owner_lock_release "$_tosod_lock" state-before-readable
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = absent ] && [ ! -e "$_tosod_lock" ] &&
+    pass "owner disappearance during read is authoritatively absent" ||
+    fail "owner disappearance during read is not authoritatively absent"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  if merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-disappearance-during &&
+     merv_owner_lock_owner_matches "$_tosod_lock" "$MERV_LOCK_NONCE"; then
+    _tosod_nonce="$MERV_LOCK_NONCE"
+    pass "owner acquisition retries after disappearance during read"
+  else
+    _tosod_nonce=''
+    fail "owner acquisition does not retry after disappearance during read"
+  fi
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ -n "$_tosod_nonce" ] &&
+    assert_ok "owner acquisition release follows in-read disappearance" \
+      merv_owner_lock_release "$_tosod_lock" "$_tosod_nonce"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=obstruction-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = malformed ] && [ -f "$_tosod_lock" ] &&
+    pass "owner read obstruction remains malformed and preserved" ||
+    fail "owner read obstruction was reclassified or mutated"
+  assert_rc 1 "owner read obstruction blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-read-obstruction
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=replacement-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tosod_lock" 2>/dev/null &&
+    [ "$_tosod_state" = live ] &&
+    [ "$MERV_OWNER_V2_NONCE" = state-during-read ] &&
+    pass "owner replacement during read remains live and authoritative" ||
+    fail "owner replacement during read was reclassified or lost"
+  assert_rc 1 "owner replacement during read blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-read-replacement
+  assert_ok "owner replacement during read releases by its exact nonce" \
+    merv_owner_lock_release "$_tosod_lock" state-during-read
+}
+
 test_owner_lock_contract() {
   selftest_reset || return 1
   test_owner_state_release_probe || return 1
   test_owner_state_timestamp_release_probe || return 1
+  test_owner_state_owner_disappearance || return 1
   selftest_reset || return 1
   _tol_root="$SELFTEST_ROOT/owner-lock"
   _tol_lock="$_tol_root/claim"
@@ -2397,15 +2576,28 @@ observation_reset() {
   MERV_OBSERVATION_ROOT="$SELFTEST_ROOT/observation"
   MERV_OBSERVATION_PROC_ROOT="/proc"
   MERV_OBSERVATION_CONFIG_LOCKDIR="$SELFTEST_ROOT/observation-config-locks"
+  # Keep the maintenance-blocking case's explicit selftest lock, but give all
+  # other observation fixtures a private, verifiably idle Update namespace.
+  case "${MERV_UPDATE_MAINTENANCE_LOCK:-}" in
+    "$SELFTEST_ROOT"/*) : ;;
+    *) MERV_UPDATE_MAINTENANCE_LOCK="$SELFTEST_ROOT/observation-maintenance.lock" ;;
+  esac
+  MERV_STATE_ROOT="$SELFTEST_ROOT/observation-update-state"
+  MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+  MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
   OBS_TEST_LOG="$SELFTEST_ROOT/observation.log"
   OBS_TEST_SNAPSHOT="$SELFTEST_ROOT/bin/observation-snapshot"
   OBS_TEST_COLLECTION="$SELFTEST_ROOT/bin/observation-collection"
   export MERV_OBSERVATION_ROOT MERV_OBSERVATION_PROC_ROOT
   export MERV_OBSERVATION_CONFIG_LOCKDIR
+  export MERV_UPDATE_MAINTENANCE_LOCK MERV_STATE_ROOT
+  export MERV_UPDATE_JOURNAL MERV_UPDATE_QUIESCE_FILE
   export OBS_TEST_LOG OBS_TEST_SNAPSHOT OBS_TEST_COLLECTION
   rm -rf "$MERV_OBSERVATION_ROOT" "$MERV_OBSERVATION_CONFIG_LOCKDIR" 2>/dev/null || return 1
+  rm -rf "$MERV_STATE_ROOT" 2>/dev/null || return 1
   rm -f "$OBS_TEST_LOG" "$SELFTEST_ROOT"/obs-* 2>/dev/null || return 1
-  mkdir -p "$MERV_OBSERVATION_CONFIG_LOCKDIR" || return 1
+  mkdir -p "$MERV_OBSERVATION_CONFIG_LOCKDIR" "$MERV_STATE_ROOT" \
+    "${MERV_UPDATE_MAINTENANCE_LOCK%/*}" || return 1
   {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' 'printf "snapshot\n" >> "$OBS_TEST_LOG"'
@@ -2619,6 +2811,7 @@ test_observation_lock() {
   # interruption/EXIT cleanup before releasing its own action/observation
   # lock.  Keep this as a source contract for the four production paths so a
   # future cleanup edit cannot silently reintroduce early lock release.
+  _tol_is_node=$(json_get_flag IS_NODE 0 "$SETTINGS_FILE" 2>/dev/null)
   for _tol_route in \
     'collect_clients.sh|cleanup_collect|merv_lock_release.*COLLECT_LOCK|client collection' \
     'execute_nodes.sh|execute_nodes_progress_cleanup|merv_owner_lock_release.*EXEC_NODES_LOCK|execute' \
@@ -2630,7 +2823,22 @@ test_observation_lock() {
     _tol_route_rest=${_tol_route_rest#*|}
     _tol_route_release=${_tol_route_rest%%|*}
     _tol_route_label=${_tol_route_rest#*|}
-    _tol_route_body=$(sed -n "/^${_tol_route_fn}() {/,/^}/p" "$MERV_BASE/functions/$_tol_route_file" 2>/dev/null)
+    _tol_route_source="$MERV_BASE/functions/$_tol_route_file"
+    if [ ! -f "$_tol_route_source" ]; then
+      case "$_tol_route_file:${_tol_is_node:-0}" in
+        post_apply_worker.sh:*)
+          fail "$_tol_route_label source is required on every role"; _tol_ok=0
+          ;;
+        *:1)
+          pass "$_tol_route_label cleanup source omitted on node"
+          ;;
+        *)
+          fail "$_tol_route_label cleanup source missing on MAIN/local"; _tol_ok=0
+          ;;
+      esac
+      continue
+    fi
+    _tol_route_body=$(sed -n "/^${_tol_route_fn}() {/,/^}/p" "$_tol_route_source" 2>/dev/null)
     case "$_tol_route_file:$_tol_route_fn" in
       post_apply_worker.sh:obs_worker_cleanup) _tol_route_abort=$(printf '%s\n' "$_tol_route_body" | grep -n 'obs_abort_active_pool' | head -1 | cut -d: -f1) ;;
       *) _tol_route_abort=$(printf '%s\n' "$_tol_route_body" | grep -n 'mnj_pool_abort_active' | head -1 | cut -d: -f1) ;;
@@ -4648,15 +4856,30 @@ test_apply_observation_contract() {
   esac
 
   _tao_wrap="$MERV_BASE/functions/mervlan_boot_wrap.sh"
-  _tao_shield_clear=$(grep -n 'rm -f "$LOCKDIR/merv_boot_shield.active"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_enter=$(grep -nF 'if _merv_boot_watchdog_transient_lock_enter; then' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_temp=$(grep -nF '_merv_boot_watchdog_temp_begin "$_boot_marker" retire' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_move=$(grep -nF 'mv "$_boot_marker" "$_boot_marker_tomb"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_leave=$(grep -nF '_merv_boot_watchdog_transient_lock_leave' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_restore_guard=$(grep -nF '[ ! -e "$_boot_marker" ] && [ ! -L "$_boot_marker" ]' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_restore=$(grep -nF 'mv "$_boot_marker_tomb" "$_boot_marker"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_tomb_cleanup=$(grep -nF 'rm -f "$_boot_marker_tomb"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
   _tao_boot_wait=$(grep -n 'run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
   if grep -Fq 'if [ "$MERV_MANAGER_MODE" = "boot" ]' "$_tao_manager" &&
      grep -Fq 'request snapshot collect' "$_tao_manager" &&
-     [ -n "$_tao_shield_clear" ] && [ -n "$_tao_boot_wait" ] &&
-     [ "$_tao_shield_clear" -lt "$_tao_boot_wait" ]; then
-    pass "Boot queues observation, tears down the shield, then runs the worker"
+     [ -n "$_tao_retire_enter" ] && [ -n "$_tao_retire_temp" ] &&
+     [ -n "$_tao_retire_move" ] && [ -n "$_tao_retire_leave" ] &&
+     [ -n "$_tao_retire_restore_guard" ] && [ -n "$_tao_retire_restore" ] &&
+     [ -n "$_tao_retire_tomb_cleanup" ] && [ -n "$_tao_boot_wait" ] &&
+     [ "$_tao_retire_enter" -lt "$_tao_retire_temp" ] &&
+     [ "$_tao_retire_temp" -lt "$_tao_retire_move" ] &&
+     [ "$_tao_retire_move" -lt "$_tao_retire_leave" ] &&
+     [ "$_tao_retire_leave" -lt "$_tao_retire_restore_guard" ] &&
+     [ "$_tao_retire_restore_guard" -lt "$_tao_retire_restore" ] &&
+     [ "$_tao_retire_leave" -lt "$_tao_retire_tomb_cleanup" ] &&
+     [ "$_tao_retire_tomb_cleanup" -lt "$_tao_boot_wait" ]; then
+    pass "Boot atomically retires the exact shield marker before observation"
   else
-    fail "Boot queues observation, tears down the shield, then runs the worker"
+    fail "Boot atomically retires the exact shield marker before observation"
     _tao_ok=0
   fi
 
@@ -5643,6 +5866,7 @@ MERV_WAN_IP
 
 test_shell_syntax() {
   _tss_bad=0
+  _tss_is_node=$(json_get_flag IS_NODE 0 "$SETTINGS_FILE" 2>/dev/null)
   if grep -q 'grep -c "\^-s ".*|| :' "$MERV_BASE/functions/mervlan_boot.sh"; then
     pass "MAC Shield status zero-count fallback stays numeric"
   else
@@ -5672,7 +5896,18 @@ test_shell_syntax() {
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
     "$MERV_BASE/settings/mac_shield_snapshot.sh" \
     "$MERV_BASE/templates/mervlan_templates.sh"; do
-    [ -f "$_tss_file" ] || { fail "shell syntax target missing: ${_tss_file##*/}"; _tss_bad=1; continue; }
+    if [ ! -f "$_tss_file" ]; then
+      case "${_tss_file##*/}:${_tss_is_node:-0}" in
+        mervlan_backup.sh:1|mervlan_recover.sh:1|update_mervlan.sh:1)
+          pass "shell syntax ${_tss_file##*/} omitted on node"
+          ;;
+        *)
+          fail "shell syntax target missing: ${_tss_file##*/}"
+          _tss_bad=1
+          ;;
+      esac
+      continue
+    fi
     if sh -n "$_tss_file"; then pass "shell syntax ${_tss_file##*/}"; else fail "shell syntax ${_tss_file##*/}"; _tss_bad=1; fi
   done
   if [ -f "$MERV_BASE/functions/sync_nodes.sh" ]; then

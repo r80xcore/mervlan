@@ -424,6 +424,36 @@ merv_dhcp_state_lock_incomplete_age() {
   return 0
 }
 
+# Select a unique sibling destination for a retained stale claim.  The
+# identity nonce carries a current-shell sequence, so repeated reclaims by one
+# process in the same second cannot reuse an earlier evidence path.  The
+# bounded collision loop also handles a pre-existing obstruction without
+# allowing mv to reinterpret the destination as a directory target.
+merv_dhcp_state_lock_incomplete_quarantine_destination() {
+  local _mdiq_lock="${1:-}" _mdiq_kind="${2:-}" _mdiq_epoch="${3:-}"
+  local _mdiq_try=0 _mdiq_max=8 _mdiq_dest
+  [ -n "$_mdiq_lock" ] && [ -n "$_mdiq_kind" ] || return 1
+  case "$_mdiq_kind" in
+    incomplete|incomplete-stale|stale) ;;
+    *) return 1 ;;
+  esac
+  case "$_mdiq_epoch" in ''|*[!0-9]*) return 1 ;; esac
+
+  while [ "$_mdiq_try" -lt "$_mdiq_max" ]; do
+    # Call directly so MERV_IDENTITY_NONCE_SEQ advances in this shell; using
+    # command substitution would run the nonce generator in a child shell.
+    merv_identity_nonce_next || return 1
+    _mdiq_dest="${_mdiq_lock}.${_mdiq_kind}.${_mdiq_epoch}.${MERV_IDENTITY_NONCE}"
+    if ! ls -ld "$_mdiq_dest" >/dev/null 2>&1 && [ ! -L "$_mdiq_dest" ]; then
+      MERV_DHCP_STATE_LOCK_INCOMPLETE_QUARANTINE="$_mdiq_dest"
+      return 0
+    fi
+    _mdiq_try=$((_mdiq_try + 1))
+  done
+  MERV_DHCP_STATE_LOCK_INCOMPLETE_QUARANTINE=""
+  return 1
+}
+
 _merv_dhcp_state_lock_owner_valid() {
   _mdlov_pid="${1:-}"; _mdlov_start="${2:-}"
   _mdlov_created="${3:-}"; _mdlov_nonce="${4:-}"
@@ -497,8 +527,14 @@ merv_dhcp_state_lock_acquire() {
         MERV_DHCP_STATE_LOCK_NONCE="$_mdla_nonce"
         return 0
       fi
-      _mdla_quarantine="${_mdla_lock}.incomplete.${_mdla_created}.$$"
-      mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null || :
+      if merv_dhcp_state_lock_incomplete_quarantine_destination \
+        "$_mdla_lock" incomplete "$_mdla_created"; then
+        _mdla_quarantine="$MERV_DHCP_STATE_LOCK_INCOMPLETE_QUARANTINE"
+        # The destination was checked as an absent sibling immediately before
+        # this exact claim move.  A failed rename leaves the canonical claim
+        # in place for fail-closed reconciliation.
+        mv "$_mdla_lock" "$_mdla_quarantine" 2>/dev/null || :
+      fi
       return 2
     fi
 
@@ -525,7 +561,12 @@ merv_dhcp_state_lock_acquire() {
       elif [ "$MERV_DHCP_STATE_LOCK_INCOMPLETE_AGE" -ge "$_mdla_incomplete_stale" ]; then
         _mdla_now=$(merv_dhcp_state_lock_now 2>/dev/null || printf '')
         if [ -n "$_mdla_now" ]; then
-          _mdla_quarantine="${_mdla_lock}.incomplete-stale.${_mdla_now}.$$.$_mdla_attempt"
+          if ! merv_dhcp_state_lock_incomplete_quarantine_destination \
+            "$_mdla_lock" incomplete-stale "$_mdla_now"; then
+            _merv_dhcp_log warn "DHCP state-lock quarantine destination unavailable; refusing reclaim"
+            return 2
+          fi
+          _mdla_quarantine="$MERV_DHCP_STATE_LOCK_INCOMPLETE_QUARANTINE"
           _mdla_pid_present=0; _mdla_start_present=0
           _mdla_created_present=0; _mdla_nonce_present=0
           [ -e "$_mdla_lock/pid" ] && _mdla_pid_present=1
@@ -575,7 +616,12 @@ merv_dhcp_state_lock_acquire() {
       _merv_dhcp_log warn "DHCP state lock reclaim timestamp is unavailable; refusing ownership"
       return 2
     fi
-    _mdla_quarantine="${_mdla_lock}.stale.${_mdla_now}.$$.$_mdla_attempt"
+    if ! merv_dhcp_state_lock_incomplete_quarantine_destination \
+      "$_mdla_lock" stale "$_mdla_now"; then
+      _merv_dhcp_log warn "DHCP state-lock quarantine destination unavailable; refusing reclaim"
+      return 2
+    fi
+    _mdla_quarantine="$MERV_DHCP_STATE_LOCK_INCOMPLETE_QUARANTINE"
     if merv_dhcp_state_lock_quarantine "$_mdla_lock" "$_mdla_quarantine" \
        "$_mdla_pid" "$_mdla_start" "$_mdla_created" "$_mdla_owner_nonce" 1 1 1 1; then
       _merv_dhcp_log warn "quarantined dead or reused-PID DHCP state lock"
