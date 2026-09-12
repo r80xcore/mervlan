@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: lib_json.sh || version="0.56"                         #
+#                - File: lib_json.sh || version="0.58"                         #
 # ============================================================================ #
 # - Purpose:    Provide shared JSON helpers for MerVLAN settings files.        #
 #               Only touch values, never key names or other structure.         #
@@ -466,7 +466,9 @@ json_get_section2_value() {
 
 json_set_section2_value() {
     # json_set_section2_value <section1> <section2> <key> <value> [file]
-    # Update a key inside a two-level nested section without touching other keys.
+    # Update or insert a key inside an existing two-level nested section
+    # without touching unrelated keys. A missing section is a caller error;
+    # silently returning success would make settings migrations unreliable.
     section1="$1"
     section2="$2"
     key="$3"
@@ -488,7 +490,7 @@ json_set_section2_value() {
             gsub(/[^{}]/, "", t)
             return gsub(/\{/, "&", t) - gsub(/\}/, "&", t)
         }
-        BEGIN { in1=0; in2=0; depth=0; depth1=0; depth2=0; replaced=0 }
+        BEGIN { in1=0; in2=0; depth=0; depth1=0; depth2=0; replaced=0; pending="" }
         {
             line=$0
 
@@ -500,25 +502,52 @@ json_set_section2_value() {
             if (in1 && !in2 && line ~ ("\""sec2"\"[[:space:]]*:[[:space:]]*\{")) {
                 in2=1
                 depth2=depth + count_braces(line)
+                print line
+                depth += count_braces($0)
+                next
             }
 
-            if (in2 && !replaced) {
-                if (line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
+            if (in2) {
+                new_depth=depth + count_braces($0)
+                if (!replaced && line ~ ("\""key"\"[[:space:]]*:[[:space:]]*\"")) {
                     gsub("\""key"\"[[:space:]]*:[[:space:]]*\"[^\"]*\"", "\""key"\": \""val"\"", line)
                     replaced=1
                 }
+                if (new_depth < depth2) {
+                    if (!replaced) {
+                        if (pending != "") {
+                            if (pending !~ /,[[:space:]]*$/) sub(/[[:space:]]*$/, ",", pending)
+                            print pending
+                            pending=""
+                        }
+                        printf "      \"%s\": \"%s\"\n", key, val
+                        replaced=1
+                    } else if (pending != "") {
+                        print pending
+                        pending=""
+                    }
+                    print line
+                    depth=new_depth
+                    in2=0
+                    if (in1 && depth < depth1) in1=0
+                    next
+                }
+                if (replaced) {
+                    if (pending != "") { print pending; pending="" }
+                    print line
+                } else {
+                    if (pending != "") print pending
+                    pending=line
+                }
+                depth=new_depth
+                next
             }
 
             print line
-
             depth += count_braces($0)
-            if (in2 && depth < depth2) {
-                in2=0
-            }
-            if (in1 && depth < depth1) {
-                in1=0
-            }
+            if (in1 && depth < depth1) in1=0
         }
+        END { if (pending != "") print pending; if (!replaced) exit 1 }
     ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
 
     mv "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
@@ -966,11 +995,133 @@ merv_node_list() {
     done
 }
 
+# Resolve the effective access-VLAN policy for one logical Ethernet port.
+# Nodes are intentionally strict: an absent node override is known-native
+# (none), never an implicit fallback to the MAIN router's port policy.
+# Output is one normalized value: none, trunk, or numeric 2..4094.
+merv_effective_eth_vlan() {
+    _meev_index="$1"
+    _meev_file="${2:-${SETTINGS_FILE:-}}"
+    _meev_node="${3:-${NODE_ID:-none}}"
+    _meev_key=""
+    _meev_value=""
+    _meev_lower=""
+
+    case "$_meev_index" in ''|*[!0-9]*|0) return 1 ;; esac
+    case "$_meev_node" in
+        ''|none|NONE|main|MAIN)
+            _meev_key="ETH${_meev_index}_VLAN"
+            _meev_value="$(json_get_section2_value "VLAN" "Ethernet_ports" "$_meev_key" "$_meev_file" 2>/dev/null)"
+            [ -n "$_meev_value" ] || _meev_value="$(json_get_scalar "$_meev_key" "$_meev_file" 2>/dev/null)"
+            ;;
+        1|2|3|4|5|6|7|8|9|10)
+            _meev_key="NODE${_meev_node}_ETH${_meev_index}_VLAN"
+            # json_get_scalar deliberately supports the current nested
+            # Node_overrides shape and the old flat compatibility shape.
+            _meev_value="$(json_get_scalar "$_meev_key" "$_meev_file" 2>/dev/null)"
+            ;;
+        *) return 1 ;;
+    esac
+
+    _meev_value="$(printf '%s' "$_meev_value" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    _meev_lower="$(printf '%s' "$_meev_value" | tr '[:upper:]' '[:lower:]')"
+    case "$_meev_lower" in
+        ''|none|asus) printf '%s\n' none; return 0 ;;
+        trunk) printf '%s\n' trunk; return 0 ;;
+    esac
+
+    case "$_meev_value" in *[!0-9]*) return 1 ;; esac
+    if [ "$_meev_value" -ge 2 ] 2>/dev/null && [ "$_meev_value" -le 4094 ] 2>/dev/null; then
+        printf '%s\n' "$_meev_value"
+        return 0
+    fi
+    return 1
+}
+
+# Node role is persisted explicitly so a configured legacy node never changes
+# its WAN transport merely because it is upgraded.  Missing is therefore the
+# compatibility value `standalone`; only the UI's new-node draft uses AiMesh.
+merv_node_role() {
+    _mnr_slot="$1"
+    _mnr_file="${2:-${SETTINGS_FILE:-}}"
+    case "$_mnr_slot" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+    _mnr_value=$(json_get_section_value "Nodes" "NODE${_mnr_slot}_ROLE" "$_mnr_file" 2>/dev/null)
+    [ -n "$_mnr_value" ] || _mnr_value=$(json_get_scalar "NODE${_mnr_slot}_ROLE" "$_mnr_file" 2>/dev/null)
+    _mnr_value=$(printf '%s' "$_mnr_value" | tr '[:upper:]' '[:lower:]' | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$_mnr_value" in
+        '') printf '%s\n' standalone; return 0 ;;
+        aimesh|standalone) printf '%s\n' "$_mnr_value"; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Read a configured WAN Native mode without applying any topology policy.
+# Numeric values are normalized while ASUS/default aliases are always `none`.
+merv_configured_wan_native_value() {
+    _mcnv_target="${1:-none}"
+    _mcnv_file="${2:-${SETTINGS_FILE:-}}"
+    case "$_mcnv_target" in
+        none|0|MAIN|main|'') _mcnv_key=WAN_NATIVE_MAIN ;;
+        1|2|3|4|5|6|7|8|9|10) _mcnv_key="WAN_NATIVE_NODE${_mcnv_target}" ;;
+        *) return 1 ;;
+    esac
+    _mcnv_value=$(json_get_section2_value "VLAN" "WAN_Native" "$_mcnv_key" "$_mcnv_file" 2>/dev/null)
+    [ -n "$_mcnv_value" ] || _mcnv_value=$(json_get_scalar "$_mcnv_key" "$_mcnv_file" 2>/dev/null)
+    _mcnv_value=$(printf '%s' "$_mcnv_value" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$(printf '%s' "$_mcnv_value" | tr '[:upper:]' '[:lower:]')" in
+        ''|none|asus) printf '%s\n' none; return 0 ;;
+    esac
+    case "$_mcnv_value" in *[!0-9]*) return 1 ;; esac
+    [ "$_mcnv_value" -ge 2 ] 2>/dev/null && [ "$_mcnv_value" -le 4094 ] 2>/dev/null || return 1
+    printf '%s\n' "$_mcnv_value"
+}
+
+# Effective node WAN Native policy.  AiMesh inherits MAIN at runtime while
+# retaining its own configured value untouched for a future Standalone switch.
+merv_effective_wan_native_value() {
+    _mewnv_target="${1:-none}"
+    _mewnv_file="${2:-${SETTINGS_FILE:-}}"
+    case "$_mewnv_target" in
+        none|0|MAIN|main|'') merv_configured_wan_native_value none "$_mewnv_file"; return $? ;;
+        1|2|3|4|5|6|7|8|9|10) ;;
+        *) return 1 ;;
+    esac
+    _mewnv_role=$(merv_node_role "$_mewnv_target" "$_mewnv_file") || return 1
+    case "$_mewnv_role" in
+        aimesh) merv_configured_wan_native_value none "$_mewnv_file" ;;
+        standalone) merv_configured_wan_native_value "$_mewnv_target" "$_mewnv_file" ;;
+        *) return 1 ;;
+    esac
+}
+
 # Return a stable, labelled digest for the canonical configured-node list.
 # BusyBox builds vary: some omit cksum while retaining md5sum or OpenSSL, so
 # callers must not make a security decision depend on one optional applet.
 merv_node_list_digest() {
     _mnld_nodes=$(merv_node_list 2>/dev/null) || return 1
+    # The observation/trust grant is reusable only while every setting that
+    # selects a management endpoint remains identical.  Keep the canonical
+    # ASUS identity, role, effective mode, native candidate, trust identity
+    # input, and SSH port together in the digest rather than keying it only to
+    # the visible NODE<n> address.
+    _mnld_nodes=$(while IFS=' ' read -r _mnld_slot _mnld_ip _mnld_extra || [ -n "$_mnld_slot" ]; do
+        [ -n "$_mnld_slot" ] || continue
+        [ -z "$_mnld_extra" ] || exit 1
+        _mnld_role=$(merv_node_role "$_mnld_slot" "${SETTINGS_FILE:-}" 2>/dev/null) || exit 1
+        _mnld_mode=$(merv_effective_wan_native_value "$_mnld_slot" "${SETTINGS_FILE:-}" 2>/dev/null) || exit 1
+        _mnld_native=$(json_get_section_value "Nodes" "NODE${_mnld_slot}_WAN_NATIVE_IP" "${SETTINGS_FILE:-}" 2>/dev/null)
+        [ -n "$_mnld_native" ] || _mnld_native=$(json_get_scalar "NODE${_mnld_slot}_WAN_NATIVE_IP" "${SETTINGS_FILE:-}" 2>/dev/null)
+        _mnld_mac=$(json_get_scalar "AUTO_NODE${_mnld_slot}_MAC" "${SETTINGS_FILE:-}" 2>/dev/null)
+        _mnld_port=$(json_get_section_value "General" "NODE_SSH_PORT" "${SETTINGS_FILE:-}" 2>/dev/null)
+        [ -n "$_mnld_port" ] || _mnld_port=$(json_get_scalar "NODE_SSH_PORT" "${SETTINGS_FILE:-}" 2>/dev/null)
+        [ -n "$_mnld_port" ] || _mnld_port=22
+        printf '%s %s role=%s effective=%s native=%s mac=%s port=%s\n' \
+            "$_mnld_slot" "$_mnld_ip" "$_mnld_role" "$_mnld_mode" \
+            "${_mnld_native:-none}" "${_mnld_mac:-none}" "$_mnld_port"
+    done <<EOF
+$_mnld_nodes
+EOF
+    ) || return 1
 
     if type cksum >/dev/null 2>&1; then
         _mnld_digest=$(printf '%s\n' "$_mnld_nodes" | cksum 2>/dev/null | awk '{print $1 "." $2}')
@@ -1005,7 +1156,8 @@ merv_settings_node_sync_digest() {
         _msnsd_hash=$(awk '
             $0 !~ /"AUTO_SYNC_SETTINGS"[[:space:]]*:/ &&
             $0 !~ /"HTML_CLIENT_REFRESH_MINUTES"[[:space:]]*:/ &&
-            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ { print }
+            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ &&
+            $0 !~ /"NODE_PARALLELISM"[[:space:]]*:/ { print }
         ' "$_msnsd_file" | md5sum 2>/dev/null | awk '{print $1}')
         case "$_msnsd_hash" in
             [0-9A-Fa-f][0-9A-Fa-f]*) printf 'md5:%s\n' "$_msnsd_hash"; return 0 ;;
@@ -1016,7 +1168,8 @@ merv_settings_node_sync_digest() {
         _msnsd_hash=$(awk '
             $0 !~ /"AUTO_SYNC_SETTINGS"[[:space:]]*:/ &&
             $0 !~ /"HTML_CLIENT_REFRESH_MINUTES"[[:space:]]*:/ &&
-            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ { print }
+            $0 !~ /"EXPERIMENTAL"[[:space:]]*:/ &&
+            $0 !~ /"NODE_PARALLELISM"[[:space:]]*:/ { print }
         ' "$_msnsd_file" | cksum 2>/dev/null | awk '{print $1 ":" $2}')
         case "$_msnsd_hash" in
             [0-9]*:[0-9]*) printf 'cksum:%s\n' "$_msnsd_hash"; return 0 ;;

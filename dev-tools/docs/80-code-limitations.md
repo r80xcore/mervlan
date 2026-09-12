@@ -23,11 +23,17 @@ development impact.
   process start identity before reclaiming state.
 - Configuration work must defer/coalesce observation work rather than race it.
 - Never report success from a missing PID, missing marker, or incomplete result.
+- Node-operation workers share a bounded pool of 1–5 workers, resolved from
+  MAIN-local `General.NODE_PARALLELISM` (default 2; malformed input resolves
+  to one). Complete trust preflight and parent result aggregation remain
+  serial; MAIN MAC Shield enforcement is authoritative before node push.
 
 ## Router and node boundaries
 
 - The main router owns merged client JSON and node orchestration.
 - Nodes use stable configured identity and publish local artifacts.
+- `General.NODE_PARALLELISM` is a MAIN-local scheduler setting; node-sync
+  change detection excludes it, and node-side behavior must not rely on it.
 - Sync only through the approved staged workflow; never hand-edit a node to
   repair a divergent installation.
 - `SSID_04` may intentionally be configured on a node where the SSID is absent;

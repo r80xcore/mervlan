@@ -1,4 +1,8 @@
-# MerVLAN Help & Usage Guide
+<p align="center">
+  <img src="images/mervlan_help.svg" alt="MerVLAN Welcome" />
+</p>
+
+#
 
 MerVLAN is a VLAN management addon for Asuswrt-Merlin. This guide covers setup, multi-node behavior, logs, CLI recovery, device support, and troubleshooting.
 
@@ -9,14 +13,15 @@ MerVLAN is a VLAN management addon for Asuswrt-Merlin. This guide covers setup, 
 1. [Getting Started With MerVLAN](#1-getting-started-with-mervlan)
 2. [SSID Configuration](#2-ssid-configuration)
 3. [LAN Port Configuration](#3-lan-port-configuration)
-4. [Applying Your Configuration](#4-applying-your-configuration)
-5. [SSH Key Install](#5-ssh-key-install)
-6. [Logs & Monitoring](#6-logs--monitoring)
-7. [Updating or Restoring MerVLAN](#updating-mervlan)
-8. [CLI Usage](#7-cli-usage)
-9. [Device Support](#8-device-support)
-10. [Get Help & Support](#9-get-help--support)
-11. [Wiki - Reference & Glossary](#10-wiki---reference--glossary)
+4. [WAN Native VLAN](#4-wan-native-vlan)
+5. [Applying Your Configuration](#5-applying-your-configuration)
+6. [SSH Key Install](#6-ssh-key-install)
+7. [Logs & Monitoring](#7-logs--monitoring)
+8. [Updating or Restoring MerVLAN](#8-updating-or-restoring-mervlan)
+9. [CLI Usage](#9-cli-usage)
+10. [Device Support](#10-device-support)
+11. [Get Help & Support](#11-get-help--support)
+12. [Wiki - Reference & Glossary](#12-wiki---reference--glossary)
 
 <h2 id="1-getting-started-with-mervlan">1. Getting Started With MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
@@ -119,18 +124,20 @@ Click <kbd>Apply</kbd> to save changes made in this window. While the save is ru
 
 ### Setup Checklist - Multi-Node (AiMesh or Standalone AP)
 
-1. **Install SSH Keys** - follow [SSH Key Install](#5-ssh-key-install).
+1. **Install SSH Keys** - follow [SSH Key Install](#6-ssh-key-install).
 2. **Add Your Nodes**
     - Enter each node's IP in the Nodes panel and rename it if desired.
+    - After an address is valid, select the node **Mode**: **AiMesh** for a
+      firmware-managed mesh node, or **Standalone** for an independent AP.
     - Click <kbd>Save</kbd> before syncing.
 3. **Sync Nodes** - click <kbd>Sync Nodes</kbd> to copy MerVLAN and detect node hardware.
 4. **Configure SSIDs** - map SSIDs to VLANs and assign them to the correct devices.
 5. **Configure LAN Ports** - use the numbered node selectors if a node needs wired VLANs.
-6. Click <kbd>Save</kbd>, then <kbd>Sync Nodes</kbd> again after changing the configuration.
+6. **Save and confirm synchronization** - when automatic node synchronization is enabled, a node-relevant Save records the change and starts settings-only synchronization. Click <kbd>Sync Nodes</kbd> to retry it immediately, confirm the result, or provision newly added node runtime files.
 7. **Apply** - click <kbd>Apply VLAN</kbd>, choose <kbd>Router + Nodes</kbd>, and watch the command output.
 
 > [!IMPORTANT]
-> After either setup works correctly with Dry Run off, open <kbd>Settings</kbd>, enable **Apply on Boot**, and click <kbd>Apply</kbd>. This makes the configuration survive a reboot and enables automatic health checks. See [Logs & Monitoring](#6-logs--monitoring) to verify the result.
+> After either setup works correctly with Dry Run off, open <kbd>Settings</kbd>, enable **Apply on Boot**, and click <kbd>Apply</kbd>. This makes the configuration survive a reboot and enables automatic health checks. See [Logs & Monitoring](#7-logs--monitoring) to verify the result.
 
 ### Important Tips
 
@@ -195,11 +202,14 @@ Controls which devices in your network manage each SSID.
 - Defaults to MAIN - single-router users can ignore this entirely
 
 > [!TIP]
-> **Tips:**
+> **SSID Assignment Tips**
 >
-> - Only select nodes that actually broadcast that SSID.
-> - If an SSID is only on a node, deselect MAIN to avoid unnecessary apply time.
-> - When in doubt, select all nodes that broadcast the SSID.
+> * **Select only broadcasting devices:** Assign each SSID only to the MAIN router and/or nodes where that SSID is actually enabled in ASUS. MAIN and nodes may safely use different SSID sets.
+> * **Node-only SSIDs:** Deselect **MAIN** when an SSID exists only on one or more mesh nodes. This avoids unnecessary processing and keeps MerVLAN's expected topology accurate.
+> * **Missing SSIDs are logged, not created:** If an assigned SSID is not present on a device, MerVLAN logs it as missing and does not create it automatically. MerVLAN cannot create SSIDs and will not attempt to do so. These must be created manually in the ASUS Web UI under **Guest Network** or under **Wireless → General** for base SSIDs.
+> * **Be careful with SSID-only VLANs:** A missing SSID can be harmless if its VLAN is still active through another SSID or interface on that device. However, if that SSID is the only expected member of its VLAN, the VLAN may remain missing and HEAL can repeatedly try to restore it.
+> * **Best practice:** Match the device selections to where ASUS is actually broadcasting each SSID. Selecting extra devices can create incorrect topology expectations and unnecessary HEAL activity.
+
 
 ### Example Setup
 
@@ -260,7 +270,7 @@ Trunk mode tags multiple VLANs on a single LAN port. Intended for connecting a m
 
 If your device's port labels don't match the physical ports, or if the WAN interface was incorrectly detected, use APMO to correct the hardware profile manually.
 
-Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) for instructions and the full list of pre-mapped devices.
+Open <kbd>APMO</kbd> from the main UI. See [Device Support](#10-device-support) for instructions and the full list of pre-mapped devices.
 
 ### Status Icons
 
@@ -293,11 +303,173 @@ Open <kbd>APMO</kbd> from the main UI. See [Device Support](#8-device-support) f
 > - Only LAN4 is isolated; the rest of the LAN is unaffected.
 
 > [!TIP]
-> Ready to apply? Continue to [Applying Your Configuration](#4-applying-your-configuration).
+> Next, configure [WAN Native VLAN](#4-wan-native-vlan) if needed, or continue to [Applying Your Configuration](#5-applying-your-configuration).
 
 ---
 
-<h2 id="4-applying-your-configuration">4. Applying Your Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="4-wan-native-vlan">4. WAN Native VLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+
+<a id="wan-native"></a>
+
+> [!WARNING]
+> It is **highly recommended** to disable **Apply on boot** while testing the *WAN Native VLAN* configuration.\
+> **Reason**: *Should the unit become unresponsive or misconfigured, a simple power cycle will safely **restore it**.*
+
+WAN Native VLAN moves the normal ASUS/native `br0` management network from the default untagged uplink path onto a **tagged VLAN**.
+
+MerVLAN does not inject or hijack traffic; it wraps the existing ASUS native `br0` uplink with a tagged VLAN layer. ASUS continues to use its normal `br0` management bridge, while MerVLAN changes the transport underneath it:
+
+| Mode | `br0` path | Uplink traffic on wire |
+| --- | --- | --- |
+| ASUS/default | `br0 → WAN/uplink` | Untagged/native |
+| WAN Native VLAN 190 | `br0 → WAN/uplink.190 → WAN/uplink` | Tagged VLAN 190 |
+
+Leave WAN Native as **ASUS** (the default) unless the upstream switch and DHCP server are prepared for the selected VLAN. MerVLAN does **NOT** assign static IP addresses; it uses the configured addresses to reconnect and verify devices during transitions.
+
+---
+
+### Preparation
+
+Before enabling numeric WAN Native on MAIN:
+
+> [!WARNING]
+> **Automatic LAN IP is strictly mandatory!**\
+> *WAN Native VLAN will not work unless the unit is set to receive its IP automatically.*
+
+1. Go to **LAN** → **LAN IP** in the ASUS GUI.
+2. Set **Get LAN IP Automatically?** to **Yes**.
+3. Configure fixed DHCP reservations on the upstream router/DHCP server for **both** management domains.
+
+<br>
+
+*The configuration presets below are **only examples!**:*
+
+**In OPNsense** *on setups using Dnsmasq DHCP, your static mappings might look like this:*
+
+| Purpose | Host | IP address | Hardware address | Description |
+| --- | --- | --- | --- | --- |
+| ASUS/default mgmt | `xt8-main-br0` | `192.168.186.200` | `02:11:22:33:44:55` | `XT8-Main ASUS/default` |
+| ASUS/default mgmt | `xt8-node1-br0` | `192.168.186.201` | `03:22:33:44:55:66` | `XT8-Node-1 ASUS/default` |
+| WAN Native VLAN 190 | `xt8-main-vlan190` | `192.168.190.200` | `02:11:22:33:44:55` | `XT8-Main WAN 190` |
+| WAN Native VLAN 190 | `xt8-node1-vlan190` | `192.168.190.201` | `02:11:22:33:44:55` | `XT8-Node-1 WAN 190` |
+
+<br>
+
+**If using MikroTik (RouterOS/SwOS)** *the switch port connected to your ASUS unit must match your chosen uplink mode:*
+
+| Uplink Mode | Tagged (T) | Untagged (U) / Native PVID | Frame Type / Ingress Policy |
+| --- | --- | --- | --- |
+| **SAFER** | `190`+`optional` | `1` *(default)* | Admit All |
+| **FULLY TAGGED** | `190`+`optional` | *(None / Blocked)* | 🔴Admit only VLAN-tagged |
+
+🔴 *Disable non-VLAN **after** MerVLAN config*
+
+> [!TIP]
+> **SAFER** Mode:
+> This is essentially a standard mixed/hybrid trunk, but it comes with **Hardware Advantages**. During normal operation, this untagged network sits **completely silent**. All management traffic flows over the tagged VLAN while enabling a fallback. This is beneficial for budget switches that struggle with continuous mixed traffic on the same port.
+>
+> **FULLY TAGGED** Mode:
+> Once your setup is tested and stable, this mode locks down the switch port to accept *only* tagged frames. It offers the cleanest and most secure trunk by eliminating untagged traffic entirely. The trade-off is the loss of the automatic safety net: if the router experiences an error and falls back to untagged `br0`, the switch will drop the connection until you manually re-enable untagged traffic on that port.
+>
+> **Alternative: Switch-Side Hybrid Trunk**:
+> You can skip MerVLAN's WAN Native feature entirely (leaving it set to **ASUS**). Instead, handle the routing directly on your switch by configuring a standard mixed/hybrid trunk: set your management network as the **Untagged (U) / PVID** and pass all other MerVLAN networks as **Tagged (T)**.
+> *(Keep in mind: Unlike the SAFER mode above, this forces your switch to constantly handle active mixed traffic, which may cause instability on cheaper hardware).*
+
+<br>
+
+### WAN Native VLAN Configuration
+
+1. *Enter your reserved IP addresses into the MerVLAN interface:*
+2. Click **Edit** next to the VLAN ID to open the IP settings.
+3. Click **Save** to store your changes, or **Cancel** to discard.
+
+*(Note: If your mode is set to **ASUS**, you can leave these fields empty).*
+
+| Domain | MAIN | NODE1 |
+| --- | --- | --- |
+| ASUS/default network | `192.168.186.200` | `192.168.186.201` |
+| WAN Native VLAN 190 | `192.168.190.200` | `192.168.190.201` |
+
+* **MAIN:** A numeric WAN Native VLAN requires the WAN Native DHCP reservation. The ASUS/default recovery reservation is optional while tagged, but must be configured before MerVLAN can switch MAIN back to ASUS/default.
+* **Nodes:** The "Node Configuration" address is default. Enter the node's WAN Native DHCP reservation.
+
+> Keeping the original ASUS/default DHCP reservation is **highly recommended** for recovery, but fully tagged systems that intentionally have no untagged/default network may leave it unconfigured. MerVLAN will then refuse a return to ASUS/default before making any bridge change. See **Uplink Modes & Recovery** below for the switch-side implications.
+
+---
+
+### Uplink Modes & Recovery
+
+There are two practical ways to configure your upstream switch:
+
+| Switch traffic | SAFER / recommended | FULLY TAGGED |
+| --- | --- | --- |
+| Untagged/native | Allowed | Blocked by switch |
+| WAN Native VLAN 190 | Tagged — active `br0` management | Tagged — active `br0` management |
+| Other MerVLAN VLANs | Tagged as required | Tagged as required |
+| Recovery | Switch-side fallback available | Manual recovery required |
+
+**1. SAFER / Recommended**
+The switch carries the original untagged/native network alongside the new tagged WAN Native VLAN. If WAN Native validation fails, MerVLAN restores the ASUS/default `br0` path. Because the switch still accepts untagged traffic, your fallback path remains instantly available.
+
+**2. FULLY TAGGED**
+Once WAN Native is stable, you can configure the ASUS uplink as **tagged-only** (e.g., "Admit only VLAN-tagged frames"). While running normally, the old untagged path isn't needed.
+
+**The Catch (Recovery):** If the tagged path fails, ASUS might restore the ASUS/default untagged `br0` path—but your upstream switch will now block it. To recover, you must manually do one of the following:
+
+* Temporarily re-enable the untagged/native management network on the upstream switch port.
+* Connect a PC directly to an ASUS LAN port and assign it a static IP in the ASUS/default management subnet.
+
+*Recovery PC Example:*
+
+| Device | Recovery address |
+| --- | --- |
+| ASUS/default router | `192.168.186.200/24` |
+| Temporary PC address | `192.168.186.10/24` |
+
+---
+
+### AiMesh MAIN and Nodes
+
+Live qualification shows that mixing ASUS/default and WAN Native management domains breaks AiMesh visibility.
+
+| MAIN | NODE1 | Observed result |
+| --- | --- | --- |
+| ASUS/default | WAN Native VLAN 190 | NODE1 shown disconnected |
+| WAN Native VLAN 190 | WAN Native VLAN 190 | NODE1 shown healthy |
+
+**Requirement:** AiMesh MAIN and nodes must remain in the same native/L2 management domain.
+
+Set the node **Mode** in **Node Configuration** once its IP address is valid.
+The WAN Native popup mirrors the same setting. Choose the mode before changing
+management VLANs:
+
+- **AiMesh:** the node inherits MAIN's effective WAN Native value. When MAIN is
+  numeric, the node still needs its own reservation for that tagged management
+  network; when MAIN is ASUS/default, the node returns to ASUS/default too.
+- **Standalone:** the node keeps and uses its own WAN Native value. Use this
+  only for an independently managed AP with prepared upstream addressing.
+
+Existing nodes without an explicit role keep the conservative **Standalone**
+behavior until you choose AiMesh. A live test with different MAIN and
+Standalone-node native VLANs requires separate standalone hardware and remains
+an advanced hardware-qualification scenario, not a general AiMesh recipe.
+
+---
+
+### VLAN Requirements
+
+* The selected WAN Native VLAN must already be **tagged and carried on the ASUS uplink** before enabling it.
+* **Do not** use the same VLAN ID for WAN Native and another managed SSID, LAN, or trunk VLAN on the *same device*.
+* Reusing the same VLAN ID on a *different device* is allowed.
+* Keep the ASUS/default management endpoint configured while WAN Native is in use.
+* Fully tagged operation is optional and should only be used after WAN Native is proven stable.
+
+> [!TIP]
+> Ready to apply? Continue to [Applying Your Configuration](#5-applying-your-configuration).
+
+---
+
+<h2 id="5-applying-your-configuration">5. Applying Your Configuration <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
 
 Once configured, it's time to push your VLANs live.
 
@@ -329,7 +501,7 @@ Single router: no mode selection - applies immediately.
 3. Click <kbd>Apply VLAN</kbd> - choose an apply mode if nodes are configured, then watch the command output.
 
 > [!TIP]
-> If you are configuring nodes, complete [SSH Key Install](#5-ssh-key-install) before applying.
+> If you are configuring nodes, complete [SSH Key Install](#6-ssh-key-install) before applying.
 
 ### What Happens During Apply
 
@@ -364,11 +536,12 @@ By default, VLANs do **not** survive a router reboot. After confirming that a re
 | VLANs lost after reboot        | Open Settings, enable **Apply on Boot**, and click <kbd>Apply</kbd>.                                      |
 
 > [!TIP]
-> Want to monitor results? Continue to [Logs & Monitoring](#6-logs--monitoring).
+> Want to monitor results? Continue to [Logs & Monitoring](#7-logs--monitoring).
 
 ---
 
-<h2 id="5-ssh-key-install">5. SSH Key Install <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="6-ssh-key-install">6. SSH Key Install <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="5-ssh-key-install"></a>
 
 SSH keys are required for multi-node setups. MerVLAN uses them to connect from the main router to each node. AiMesh nodes receive authorized keys from the main router during boot, while standalone APs require the key to be installed on each device.
 
@@ -429,11 +602,12 @@ After keys are installed and any required node reboots are done:
 | Key already exists message | This is normal. MerVLAN reuses its existing key pair. |
 
 > [!TIP]
-> Keys installed? Return to [Applying Your Configuration](#4-applying-your-configuration).
+> Keys installed? Return to [Applying Your Configuration](#5-applying-your-configuration).
 
 ---
 
-<h2 id="6-logs--monitoring">6. Logs & Monitoring <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="7-logs--monitoring">7. Logs & Monitoring <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="6-logs--monitoring"></a>
 
 MerVLAN provides real-time command output and runtime logs for its operations.
 
@@ -476,6 +650,11 @@ When Apply on Boot is enabled, MerVLAN checks VLAN health every five minutes and
 
 The panel below the command output groups detected VLAN clients by device and VLAN. Use its refresh button to update the visible list. You can also edit friendly names, show inactive or relayed observations, and rebuild MAC Shield after moving a device back to `br0`.
 
+Refresh publishes a new list only after MAIN and every required node collector
+finish successfully. If a collector fails or times out, MerVLAN reports that
+failure and preserves the last confirmed client list instead of replacing it
+with a partial result.
+
 ### Quick Troubleshooting
 
 | Symptom | What to check |
@@ -487,11 +666,12 @@ The panel below the command output groups detected VLAN clients by device and VL
 | Recovery runs repeatedly | Check the VLAN Manager log for missing bridges, interfaces returning to `br0`, or wireless-event warnings. |
 
 > [!TIP]
-> Need more help? See [Get Help & Support](#9-get-help--support).
+> Need more help? See [Get Help & Support](#11-get-help--support).
 
 ---
 
-<h2 id="updating-mervlan">7. Updating or Restoring MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="8-updating-or-restoring-mervlan">8. Updating or Restoring MerVLAN <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="updating-mervlan"></a>
 
 > [!NOTE]
 > By default, updates preserve your settings, SSH keys, MAC Shield data, local backups, and existing logs. You can optionally clear old logs before an update; the new update is still logged from beginning to end.
@@ -572,29 +752,171 @@ For manual update, backup, restore, and undo commands, see [Update, Backup, and 
 
 ---
 
-<h2 id="7-cli-usage">8. CLI Usage <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="9-cli-usage">9. CLI Usage <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="7-cli-usage"></a>
 
-These commands are useful when working over SSH on the main router. Most users should use the web UI first; CLI commands are mainly for recovery, manual updates, testing, and advanced troubleshooting.
+These commands are useful when working over SSH on the main router. Most users do not need the CLI apart from the initial installation or uninstallation process. CLI commands are mainly for recovery, manual updates, testing, and advanced troubleshooting.
 
 > [!IMPORTANT]
 > **Run commands from the addon directory unless shown otherwise:**
 >
 > `cd /jffs/addons/mervlan`
 
-Development/test branches include router-capable developer tools. They are not
-part of the production `main` branch. After development `Sync Nodes`, the
-router-capable scripts are available under the addon-local `dev-tools/` tree:
 
-```sh
-sh dev-tools/tests/router/mervlan_selftest.sh <case>
-sh dev-tools/safety/mervlan_live_test_guard.sh status
-```
+> [!NOTE]
+> **Development & Testing Workflows**
+>
+> Development/test branches include router-capable developer tools. They are not part of the production `main` branch. After installation or update, development tools are available from within the addon's `dev-tools/` tree:
+>
+> ```sh
+> sh dev-tools/tests/router/mervlan_selftest.sh <case>
+> ```
+>
+> ```sh
+> sh dev-tools/safety/mervlan_live_test_guard.sh status
+> ```
+>
+> Keep router/AP evidence below `/tmp/mervlan_tmp/evidence/<test-run-id>/`. Download it to the development computer, verify the local copy, and delete the remote evidence directory only after verification succeeds. See the development branch's `dev-tools/docs/90-testing-and-evidence.md` for the complete workflow.
 
-Keep router/AP evidence below
-`/tmp/mervlan_tmp/evidence/<test-run-id>/`. Download it to the development
-computer, verify the local copy, and delete the remote evidence directory only
-after verification succeeds. See the development branch's
-`dev-tools/docs/90-testing-and-evidence.md` for the complete workflow.
+<a id="install-reinstall-and-uninstall-commands"></a>
+
+### Install, Reinstall, and Uninstall Commands
+
+#### Install
+
+For a **first online install**, run these two commands separately after SSHing
+into the router. The first retrieves the installer; the second opens its
+guided installation flow.
+
+1. Download the installer on the router:
+
+   ```sh
+   mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/install.sh" -o /jffs/addons/mervlan/install.sh && chmod 0755 /jffs/addons/mervlan/install.sh
+   ```
+
+2. Start the guided installer on the router:
+
+   ```sh
+   /bin/sh /jffs/addons/mervlan/install.sh full
+   ```
+
+3. In the wizard, choose the required channel. Choose **Custom branch** only
+   when installing a named test branch.
+
+<br>
+
+The installer supports both the **main** branch and **dev** branch with easy selection, but for the installation of a **custom** branch, you must manually replace `main` in the install script URL with that branch name, then choose **Custom branch** in the wizard and enter
+the same name. Here is an example for a custom branch named `pre_v0.53.28-dev`:
+
+1. Replace `main` with `pre_v0.53.28-dev` in the URL:
+    ```sh
+    mkdir -p /jffs/addons/mervlan && /usr/sbin/curl -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/pre_v0.53.28-dev/install.sh" -o /jffs/addons/mervlan/install.sh && chmod 0755 /jffs/addons/mervlan/install.sh
+    ```
+
+2. Start the guided installer on the router:
+
+   ```sh
+   /bin/sh /jffs/addons/mervlan/install.sh full
+   ```
+
+| Command | What it does |
+| --- | --- |
+| `sh install.sh full` | Start the guided installer. Choose Stable, Development, or a validated Custom Branch; then review node SSH settings and preserve or replace an existing installation. |
+| `sh install.sh full --test-run` | Run the installer in isolated test paths without changing the active installation. It can optionally create a temporary **MerVLAN Test** page and removes the test files afterward. |
+| `sh install.sh full dev` | Compatibility alias that opens the guided installer with Development preselected. |
+| `sh install.sh credentials` | Change the SSH username and port used for configured nodes. |
+
+Stable installation uses the latest published release. If that cannot be resolved, the installer tries the newest stable version tag and then uses `main` as a fallback. **Custom Branch** is intended for directed testing: the installer validates the branch name and that branch's readable MerVLAN version before downloading it. Installer warnings and errors are saved in `/tmp/mervlan-installer-last.log` until the next full installer run.
+
+If test mode creates the temporary Web UI page, refresh any already-open Merlin page after the test finishes so the removed test tab disappears from its menu.
+
+#### Install from a Local Tarball
+
+This installation method is useful when the router cannot access GitHub or you
+deliberately want an offline installation. Replace `<branch>` with the
+branch you need, for example `main`, `dev`, or `pre_v0.53.28-dev`. Run each numbered command
+individually; do not paste the entire workflow as one terminal block. Replace
+`admin@<ROUTER_IP>` with your actual SSH username and router IP.
+
+1. **On a Windows PC in PowerShell**, download the branch archive:
+
+   ```powershell
+   Invoke-WebRequest -Uri "https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/<branch>" -OutFile "$HOME\Downloads\mervlan-local.tar.gz"
+   ```
+
+   **On Linux or macOS**, download the same archive:
+
+   ```sh
+   curl -fL --retry 3 "https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/<branch>" -o "$HOME/Downloads/mervlan-local.tar.gz"
+   ```
+
+2. **On the computer**, create a temporary staging directory on MAIN:
+
+   ```sh
+   ssh admin@<ROUTER_IP> "mkdir -p /tmp/mervlan_staging"
+   ```
+
+3. **On Windows PowerShell**, upload the archive with legacy SCP:
+
+   ```powershell
+   scp.exe -O "$HOME\Downloads\mervlan-local.tar.gz" admin@<ROUTER_IP>:/tmp/mervlan_staging/
+   ```
+
+   **On Linux or macOS**, upload it with:
+
+   ```sh
+   scp -O "$HOME/Downloads/mervlan-local.tar.gz" admin@<ROUTER_IP>:/tmp/mervlan_staging/
+   ```
+
+4. **After SSHing into MAIN**, validate and extract the staged archive:
+
+   ```sh
+   cd /tmp/mervlan_staging && tar -tzf mervlan-local.tar.gz >/dev/null && tar -xzf mervlan-local.tar.gz
+   ```
+
+5. **Still on MAIN**, identify the extracted directory:
+
+   ```sh
+   ls -d /tmp/mervlan_staging/mervlan-*/
+   ```
+
+6. **Still on MAIN**, replace `<extracted-directory>` with the directory
+   printed in the preceding step, then start the offline installer:
+
+   ```sh
+   TMP_DIR=/tmp/mervlan_staging sh /tmp/mervlan_staging/<extracted-directory>/install.sh tarball
+   ```
+
+7. **Optional cleanup:** delete the staged tarball and extracted files. They
+   are cleared at reboot, but deleting them now frees RAM:
+
+   ```sh
+   cd /jffs/addons/mervlan && rm -rf /tmp/mervlan_staging
+   ```
+
+`full` is the online installer and downloads its selected source from GitHub.
+Use `tarball` only when the complete source archive has already been staged
+locally.
+
+#### Refresh the Current Installation
+
+| Command | What it does |
+| --- | --- |
+| `sh uninstall.sh reinstall && sh install.sh reinstall` | Refresh the web UI and published runtime files from the currently installed source while preserving logs and service state. This is the recommended manual refresh command. |
+| `sh install.sh reinstall` | Rebuild the published files without removing the existing publication first. Use this to finish the refresh if the install half was interrupted. |
+
+These commands are useful after editing local web or public files. They do not download an update, create an update backup, synchronize nodes, or apply settings. Use Update or Restore when changing the installed version or recovering stored data. Use the normal Save, Sync Nodes, and Apply VLAN controls for configuration changes.
+
+#### Uninstall
+
+| Command | What it does |
+| --- | --- |
+| `sh uninstall.sh` | Remove the web UI and service hooks while preserving the addon files, settings, and stored data. |
+| `sh uninstall.sh full` | Prompts before removing MerVLAN files, settings, stored data, and reachable node installations; it also asks whether to delete retained update/manual backups. |
+| `sh uninstall.sh full --yes --delete-backups` | Non-interactive full uninstall for a controlled automation run. It explicitly confirms both complete removal and backup deletion. |
+
+> [!CAUTION]
+> A full uninstall permanently removes MerVLAN data. Choosing backup deletion also permanently removes every saved backup. The non-interactive form requires both explicit flags; it is intended only for controlled uninstallation. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
 
 <a id="update-backup-and-restore-commands"></a>
 
@@ -608,8 +930,76 @@ after verification succeeds. See the development branch's
 | `sh functions/update_mervlan.sh dev` | Install the current `dev` branch version. |
 | `sh functions/update_mervlan.sh update dev --logs=keep` | Update from `dev` and retain existing logs. This is the default log policy. |
 | `sh functions/update_mervlan.sh update dev --logs=clear` | Update from `dev` and clear older logs after the update lock is acquired. The new update is still logged. |
+| `sh functions/update_mervlan.sh local /absolute/path/archive.tar.gz --logs=keep` | Install a local recovery/test archive through the normal Update transaction without downloading from GitHub. |
 | `sh functions/update_mervlan.sh refs/heads/BRANCH` | Install a named custom branch. Replace `BRANCH` with the required branch name. |
 | `sh functions/update_mervlan.sh refs/tags/v0.53.15` | Install a tagged release. Replace the example with the required tag. |
+
+Local archives are an advanced recovery path. The path must be absolute, a
+nonempty regular file, and not a symlink. MerVLAN copies it into an
+updater-owned temporary archive, then rejects corrupt archives, absolute or
+traversal members, multiple roots, and every symlink/hardlink before
+extraction. The original archive is never modified. A safe archive still has
+to contain a complete MerVLAN package; it follows the same backup, activation,
+rollback, node, and log-policy lifecycle as a remote update.
+
+##### Update from a Local Tarball
+
+Use this flow only when MerVLAN is already installed. It performs the normal
+Update transaction, including backup, validation, rollback, and configured
+node synchronization. For a new or offline installation, use
+[Install from a Local Tarball](#install-from-a-local-tarball) instead.
+
+Replace `<branch>` with the branch you need, for example
+`pre_v0.53.28-dev`. Run each numbered command individually; do not paste the
+whole workflow as one terminal block.
+
+1. **On a Windows PC in PowerShell**, download the branch archive:
+
+   ```powershell
+   Invoke-WebRequest -Uri "https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/<branch>" -OutFile "$HOME\Downloads\mervlan-local.tar.gz"
+   ```
+
+   **On Linux or macOS**, download the same archive:
+
+   ```sh
+   curl -fL --retry 3 "https://codeload.github.com/r80xcore/mervlan/tar.gz/refs/heads/<branch>" -o "$HOME/Downloads/mervlan-local.tar.gz"
+   ```
+
+2. **On the computer**, create a temporary staging directory on MAIN:
+
+   ```sh
+   ssh admin@<ROUTER_IP> "mkdir -p /tmp/mervlan_local_update"
+   ```
+
+3. **On Windows PowerShell**, upload the archive with legacy SCP:
+
+   ```powershell
+   scp.exe -O "$HOME\Downloads\mervlan-local.tar.gz" admin@<ROUTER_IP>:/tmp/mervlan_local_update/
+   ```
+
+   **On Linux or macOS**, upload it with:
+
+   ```sh
+   scp -O "$HOME/Downloads/mervlan-local.tar.gz" admin@<ROUTER_IP>:/tmp/mervlan_local_update/
+   ```
+
+4. **After SSHing into MAIN**, validate the archive and start the local
+   update transaction:
+
+   ```sh
+   cd /jffs/addons/mervlan && tar -tzf /tmp/mervlan_local_update/mervlan-local.tar.gz >/dev/null && sh functions/update_mervlan.sh local /tmp/mervlan_local_update/mervlan-local.tar.gz --logs=keep
+   ```
+
+5. **Optional cleanup:** delete the staged tarball. It is cleared at reboot,
+   but deleting it now frees RAM:
+
+   ```sh
+   cd /jffs/addons/mervlan && rm -rf /tmp/mervlan_local_update
+   ```
+
+Until optional cleanup, the archive remains caller-owned at its staging path.
+The updater reads it, copies it into its own temporary workspace, and never
+modifies the original.
 
 #### Emergency Update Repair
 
@@ -626,15 +1016,7 @@ The Web UI's **Repair update components before update** option runs the same rep
 If the Web UI repair cannot start because the installed event handler or its lock/action support is damaged, bootstrap the standalone repair script over SSH first. For `main`:
 
 ```sh
-mkdir -p /jffs/addons/mervlan/functions && \
-tmp="/tmp/update_mervlan_repair.sh.$$" && \
-/usr/sbin/curl -fsL --retry 3 --connect-timeout 15 \
-"https://raw.githubusercontent.com/r80xcore/mervlan/main/functions/update_mervlan_repair.sh" \
--o "$tmp" && \
-sh -n "$tmp" && \
-chmod 0755 "$tmp" && \
-mv -f "$tmp" "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" && \
-sh "/jffs/addons/mervlan/functions/update_mervlan_repair.sh" main
+mkdir -p /jffs/addons/mervlan/functions && tmp="/tmp/update_mervlan_repair.sh.$$" && /usr/sbin/curl -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/main/functions/update_mervlan_repair.sh" -o "$tmp" && sh -n "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" /jffs/addons/mervlan/functions/update_mervlan_repair.sh && sh /jffs/addons/mervlan/functions/update_mervlan_repair.sh main
 ```
 
 For `dev`, replace the `main` URL segment and final `main` argument with `dev`. The bootstrap installs the rescue command before running it, so it remains available for future recovery.
@@ -661,50 +1043,6 @@ For `dev`, replace the `main` URL segment and final `main` argument with `dev`. 
 
 > [!CAUTION]
 > Commands ending in `yes` skip the interactive confirmation. Check the selected backup name carefully before using them.
-
-<a id="install-reinstall-and-uninstall-commands"></a>
-
-### Install, Reinstall, and Uninstall Commands
-
-#### Install
-
-| Command | What it does |
-| --- | --- |
-| `sh install.sh full` | Start the guided installer. Choose Stable or Development, review node SSH settings, and preserve or replace an existing installation. |
-| `sh install.sh full --test-run` | Run the installer in isolated test paths without changing the active installation. It can optionally create a temporary **MerVLAN Test** page and removes the test files afterward. |
-| `sh install.sh full dev` | Compatibility alias that opens the guided installer with Development preselected. |
-| `sh install.sh credentials` | Change the SSH username and port used for configured nodes. |
-
-Stable installation uses the latest published release. If that cannot be resolved, the installer tries the newest stable version tag and then uses `main` as a fallback. Installer warnings and errors are saved in `/tmp/mervlan-installer-last.log` until the next full installer run.
-
-If test mode creates the temporary Web UI page, refresh any already-open Merlin page after the test finishes so the removed test tab disappears from its menu.
-
-#### Refresh the Current Installation
-
-| Command | What it does |
-| --- | --- |
-| `sh uninstall.sh reinstall && sh install.sh reinstall` | Refresh the web UI and published runtime files from the currently installed source while preserving logs and service state. This is the recommended manual refresh command. |
-| `sh install.sh reinstall` | Rebuild the published files without removing the existing publication first. Use this to finish the refresh if the install half was interrupted. |
-
-These commands are useful after editing local web or public files. They do not download an update, create an update backup, synchronize nodes, or apply settings. Use Update or Restore when changing the installed version or recovering stored data. Use the normal Save, Sync Nodes, and Apply VLAN controls for configuration changes.
-
-#### Advanced Installation
-
-| Command | What it does |
-| --- | --- |
-| `TMP_DIR=/tmp/mervlan_staging sh install.sh download` | Download and retain the MerVLAN archive without installing it. |
-| `TMP_DIR=/tmp/mervlan_staging sh install.sh tarball` | Install from the archive retained in the selected staging directory. |
-
-#### Uninstall
-
-| Command | What it does |
-| --- | --- |
-| `sh uninstall.sh` | Remove the web UI and service hooks while preserving the addon files, settings, and stored data. |
-| `sh uninstall.sh full` | Completely remove MerVLAN, including its files, settings, stored data, and reachable node installations. Saved update and manual backups are kept. |
-| `sh uninstall.sh full && rm -rf /jffs/addons/mervlan_backups` | Run a full uninstall, then permanently delete all saved update and manual backups. |
-
-> [!CAUTION]
-> A full uninstall permanently removes MerVLAN data. Adding the backup-removal command also permanently deletes every saved backup. To refresh the current web UI without changing service state, use the recommended reinstall command instead.
 
 ### Service and Boot Control
 
@@ -763,36 +1101,41 @@ These commands are useful after editing local web or public files. They do not d
 
 ---
 
-<h2 id="8-device-support">9. Device Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="10-device-support">10. Device Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="8-device-support"></a>
 
 MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merlin routers. Each profile maps physical LAN ports to the correct kernel interfaces (ethX) and identifies the WAN port.
 
 ### Supported Devices
 
-| Model          | Ports  | Notes                                                                  |
-| -------------- | ---------- | ---------------------------------------------------------------------- |
-| GT-AX11000     | 4          |                                                                        |
-| GT-AX11000 Pro | 5          |                                                                        |
-| GT-AX6000      | 5          |                                                                        |
-| GT-AXE16000    | 6          |                                                                        |
-| RT-AC86U       | 4          |                                                                        |
-| RT-AX5400      | 4          |                                                                        |
-| RT-AX56U       | 4          |                                                                        |
-| RT-AX58U       | 4          |                                                                        |
-| RT-AX82U       | 4          |                                                                        |
-| RT-AX86S       | 4          |                                                                        |
-| RT-AX86U       | 5          |                                                                        |
-| RT-AX86U Pro   | 5          |                                                                        |
-| RT-AX88U*      | 5          | LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging |
-| RT-AX88U Pro   | 5          |                                                                        |
-| RT-AX92U       | 4          |                                                                        |
-| RT-AX95Q       | 3          |                                                                        |
-| RT-AXE95Q      | 3          |                                                                        |
-| RT-BE88U       | 8          |                                                                        |
-| RT-BE92U*      | 1          | LAN1–LAN4 share one VLAN bridge — no per-port isolation                |
-| RT-ET8         | 3          |                                                                        |
-| TUF-AX3000_V2  | 4          |                                                                        |
-| XT12           | 3          |                                                                        |
+| Model | Ports | Notes |
+| --- | --- | --- |
+| DSL-AX82U | 3 | |
+| GT-AX6000 | 5 | |
+| GT-AX11000 | 5 | |
+| GT-AX11000 Pro | 5 | |
+| GT-AXE16000 | 6 | |
+| GT-BE98 | 3 | LAN1–LAN4 share the 2.5G LAN1 interface; LAN5 and LAN6 are separate |
+| RT-AC86U | 4 | |
+| RT-AX56U | 4 | |
+| RT-AX58U | 4 | |
+| RT-AX68U | 4 | |
+| RT-AX82U | 4 | |
+| RT-AX86S | 4 | |
+| RT-AX86U | 5 | |
+| RT-AX86U Pro | 5 | |
+| RT-AX88U* | 5 | LAN1–LAN4 map individually; LAN5–LAN8 are grouped as LAN5 for tagging |
+| RT-AX88U Pro | 5 | |
+| RT-AX92U | 4 | |
+| RT-AX95Q | 3 | |
+| RT-AX5400 | 4 | |
+| RT-AXE95Q | 3 | |
+| RT-BE88U | 8 | |
+| RT-BE86U | 4 | LAN1 is a 2.5G LAN port, WAN is a 10G port |
+| RT-BE92U* | 1 | LAN1–LAN4 share one VLAN bridge — no per-port isolation |
+| RT-ET8 | 3 | |
+| TUF-AX3000_V2 | 4 | |
+| XT12 | 3 | |
 
 These devices are auto-detected on startup - no manual configuration needed. More profiles are added with each release.
 
@@ -846,11 +1189,12 @@ The interactive mapper identifies the physical LAN-port order and prepares a Git
 3. Follow the prompts for each physical LAN port.
 4. Submit the pre-filled GitHub issue link produced at the end.
 
-The report is stored under `/tmp/mervlan_tmp/results` and is lost on reboot. See [Get Help & Support](#9-get-help--support) if you need assistance.
+The report is stored under `/tmp/mervlan_tmp/results` and is lost on reboot. See [Get Help & Support](#11-get-help--support) if you need assistance.
 
 ---
 
-<h2 id="9-get-help--support">10. Get Help & Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="11-get-help--support">11. Get Help & Support <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="9-get-help--support"></a>
 
 Need help? Found a bug? Have a feature idea? The MerVLAN community is active and happy to assist.
 
@@ -898,9 +1242,10 @@ testing, and deployment constraints.
 
 ---
 
-<h2 id="10-wiki---reference--glossary">11. Wiki - Reference & Glossary <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<h2 id="12-wiki---reference--glossary">12. Wiki - Reference & Glossary <sub><sup><a href="#index">. . . [back to index]</a></sup></sub></h2>
+<a id="10-wiki---reference--glossary"></a>
 
-This section explains technical terms used throughout the guide. Manual and recovery commands are collected in [CLI Usage](#7-cli-usage).
+This section explains technical terms used throughout the guide. Manual and recovery commands are collected in [CLI Usage](#9-cli-usage).
 
 ### Glossary
 

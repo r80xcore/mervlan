@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: uninstall.sh || version: 0.47                      #
+#                   - File: uninstall.sh || version: 0.48                      #
 # ============================================================================ #
 # - Purpose:    Disable the MerVLAN addon and clean up necessary files.        #
 #                                                                              #
@@ -25,8 +25,78 @@
 MERV_BASE="/jffs/addons/mervlan"
 ADDON="Merlin_VLAN_Manager"
 LOGTAG="VLAN"
-ACTION="${1:-standard}"
+if [ "$#" -gt 0 ]; then
+    ACTION="$1"
+    shift
+else
+    ACTION="standard"
+fi
 . /usr/sbin/helper.sh
+
+FULL_DELETE_BACKUPS=0
+FULL_UNINSTALL_ASSUME_YES=0
+FULL_DELETE_BACKUPS_REQUESTED=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --yes) FULL_UNINSTALL_ASSUME_YES=1 ;;
+        --delete-backups) FULL_DELETE_BACKUPS_REQUESTED=1 ;;
+        *)
+            echo "[uninstall] ERROR: unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+if [ "$ACTION" != "full" ] &&
+   { [ "$FULL_UNINSTALL_ASSUME_YES" = "1" ] || [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ]; }; then
+    echo "[uninstall] ERROR: --yes and --delete-backups are valid only with 'full'" >&2
+    exit 2
+fi
+if [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ] && [ "$FULL_UNINSTALL_ASSUME_YES" != "1" ]; then
+    echo "[uninstall] ERROR: --delete-backups requires explicit full-uninstall --yes confirmation" >&2
+    exit 2
+fi
+
+confirm_full_uninstall() {
+    [ "$ACTION" = "full" ] || return 0
+    if [ "$FULL_UNINSTALL_ASSUME_YES" = "1" ]; then
+        FULL_DELETE_BACKUPS="$FULL_DELETE_BACKUPS_REQUESTED"
+        echo "[uninstall] Full uninstall confirmed by explicit --yes"
+        if [ "$FULL_DELETE_BACKUPS" = "1" ]; then
+            echo "[uninstall] Retained-backup deletion confirmed by explicit --delete-backups"
+        else
+            echo "[uninstall] Retained MerVLAN backups will be kept"
+        fi
+        return 0
+    fi
+    echo ""
+    echo "WARNING: Full uninstall removes MerVLAN from this router and every verified configured node."
+    echo "It removes settings, keys, runtime data, hooks, and durable MerVLAN state."
+    printf 'Type UNINSTALL to continue: '
+    IFS= read -r _cfu_confirm || _cfu_confirm=""
+    [ "$_cfu_confirm" = "UNINSTALL" ] || {
+        echo "[uninstall] Full uninstall cancelled. No changes were made."
+        return 1
+    }
+    printf 'Also permanently delete retained MerVLAN update/manual backups? [y/N]: '
+    IFS= read -r _cfu_backups || _cfu_backups=""
+    case "$_cfu_backups" in y|Y|yes|YES) FULL_DELETE_BACKUPS=1 ;; esac
+    return 0
+}
+
+mervlan_metadata_remove_all() {
+    _mmra_file="${_am_settings_path:-/jffs/addons/custom_settings.txt}"
+    [ -f "$_mmra_file" ] || return 0
+    for _mmra_key in \
+        mervlan_page mervlan_state mervlan_version \
+        merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version
+    do
+        sed -i "\\~^$_mmra_key ~d" "$_mmra_file" 2>/dev/null || return 1
+    done
+    return 0
+}
 
 # ---- merv: portable `command -v` replacement ----
 if ! type merv_has >/dev/null 2>&1; then
@@ -95,6 +165,12 @@ uninstall_maintenance_admit() {
     }
     if ! merv_maintenance_direct_admit; then
         echo "[uninstall] ERROR: another MerVLAN maintenance operation is live or unverifiable; refusing uninstall" >&2
+        return 1
+    fi
+    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
+       ! merv_maintenance_direct_export_uninstall_context; then
+        merv_maintenance_direct_release >/dev/null 2>&1 || :
+        echo "[uninstall] ERROR: could not export authenticated maintenance context to uninstall children" >&2
         return 1
     fi
     MERV_MAINTENANCE_ENTRY_ADMITTED=1
@@ -791,14 +867,27 @@ remove_nodes_full_install_legacy() {
 }
 
 remove_nodes_full_install() {
+    local _rnf_cleanup_cmd _rnf_remove_paths
     _rnf_nodes="$(merv_node_list 2>/dev/null || printf '')"
     [ -n "$_rnf_nodes" ] || return 0
     [ -f "$SSH_KEY" ] || return 1
+    _rnf_remove_paths="/jffs/addons/mervlan /tmp/mervlan_tmp /www/user/mervlan /www/user/merlin_vlan_manager /jffs/addons/mervlan_state"
+    if [ "${FULL_DELETE_BACKUPS:-0}" = "1" ]; then
+        _rnf_remove_paths="$_rnf_remove_paths /jffs/addons/mervlan_backups"
+    fi
+    # This command is sent only after the complete, strict SSH preflight.  It
+    # removes the node's own MerVLAN control plane and no other addon's
+    # metadata; hooks are disabled while the node runtime still exists.
+    _rnf_cleanup_cmd='if [ -x /jffs/addons/mervlan/functions/mervlan_boot.sh ]; then /bin/sh /jffs/addons/mervlan/functions/mervlan_boot.sh nodedisable >/dev/null 2>&1 || exit 1; fi; for _rnf_settings in /jffs/addons/custom_settings.txt; do [ -f "$_rnf_settings" ] || continue; for _rnf_key in mervlan_page mervlan_state mervlan_version merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version; do sed -i "\\~^$_rnf_key ~d" "$_rnf_settings" || exit 1; done; done; rm -rf '
+    # The command runs on the verified node, not MAIN. Mark it local so the
+    # node does not try to repeat MAIN-owned SSH trust preflight/propagation.
+    _rnf_cleanup_cmd="MERV_NODE_CONTEXT=1; export MERV_NODE_CONTEXT; $_rnf_cleanup_cmd"
+    _rnf_cleanup_cmd="$_rnf_cleanup_cmd$_rnf_remove_paths"
     _rnf_ok=1
     while IFS=' ' read -r _rnf_id _rnf_ip _rnf_extra || [ -n "$_rnf_id" ]; do
         [ -n "$_rnf_id" ] || continue
         [ -z "$_rnf_extra" ] || { _rnf_ok=0; continue; }
-        if merv_ssh_exec "$_rnf_id" "$_rnf_ip" "rm -rf /jffs/addons/mervlan /tmp/mervlan_tmp" >/dev/null 2>&1; then
+        if merv_ssh_exec "$_rnf_id" "$_rnf_ip" "$_rnf_cleanup_cmd" >/dev/null 2>&1; then
             logger -t "$LOGTAG" "Node cleanup success: $_rnf_ip"
         else
             logger -t "$LOGTAG" "WARNING: verified node cleanup failed for $_rnf_ip"
@@ -826,7 +915,11 @@ preflight_full_uninstall_nodes() {
         [ -n "$_puf_id" ] || continue
         [ -z "$_puf_extra" ] || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
         _puf_mac="$(json_get_flag "AUTO_NODE${_puf_id}_MAC" "" "$SETTINGS_FILE" 2>/dev/null)"
-        [ -n "$_puf_mac" ] || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
+        # Older node entries may predate AUTO_NODE<n>_MAC.  The shared SSH
+        # preflight treats `none` as the explicit legacy identity and binds
+        # trust to the configured ASUS/recovery endpoint instead; do not
+        # reject that supported, still verified path before it reaches it.
+        [ -n "$_puf_mac" ] || _puf_mac="none"
         printf '%s %s %s\n' "$_puf_id" "$_puf_ip" "$_puf_mac" >> "$_puf_file" || { rm -f "$_puf_file"; MERV_NODE_SSH_PORT="$_puf_old_port"; return 1; }
     done <<EOF
 $_puf_nodes
@@ -843,6 +936,7 @@ EOF
     return 0
 }
 
+confirm_full_uninstall || exit 0
 uninstall_maintenance_admit || exit 1
 trap 'uninstall_maintenance_exit_handler' EXIT
 
@@ -918,7 +1012,13 @@ am_page="$(am_settings_get mervlan_page)"
 
 # Discover the ASP slot by title when the stored page reference is empty
 if [ -z "$am_page" ]; then
-    am_page="$(ls /www/user/user*.asp 2>/dev/null | xargs -r grep -l 'VLAN Manager' 2>/dev/null | xargs -r -n1 basename | head -n1)"
+    for _asp_candidate in /www/user/user*.asp; do
+        [ -f "$_asp_candidate" ] || continue
+        if grep -q 'VLAN Manager' "$_asp_candidate" 2>/dev/null; then
+            am_page="${_asp_candidate##*/}"
+            break
+        fi
+    done
 fi
 
 logger -t "$LOGTAG" "Uninstalling $ADDON page '$am_page'"
@@ -970,15 +1070,25 @@ rm -rf /www/user/merlin_vlan_manager 2>/dev/null
 
 # Remove service-event and addon hooks via setupdisable for real uninstalls.
 # Reinstall only rebuilds public/runtime publication; its caller owns hooks.
+UNINSTALL_HOOKS_OK=1
 if [ "$ACTION" != "reinstall" ]; then
     if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
         echo "[uninstall] Removing service-event hooks"
-        # Log outcome of setupdisable while skipping node sync for performance
-        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >/dev/null 2>&1; then
-            echo "[uninstall] Service-event hooks removed"
+        _uninstall_hook_log="${TMPDIR:-/tmp}/mervlan-uninstall-hooks.$$"
+        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupdisable >"$_uninstall_hook_log" 2>&1; then
+            if grep -q '/jffs/addons/mervlan/functions/service-event-handler.sh' /jffs/scripts/service-event 2>/dev/null ||
+               grep -q '/jffs/addons/mervlan/functions/mervlan_boot_wrap.sh install' /jffs/scripts/services-start 2>/dev/null; then
+                echo "[uninstall] ERROR: MerVLAN hook content remains after setupdisable" >&2
+                UNINSTALL_HOOKS_OK=0
+            else
+                echo "[uninstall] Service-event hooks removed"
+            fi
         else
-            echo "[uninstall] WARNING: setupdisable failed" >&2
+            echo "[uninstall] ERROR: setupdisable failed" >&2
+            [ ! -s "$_uninstall_hook_log" ] || sed -n '1,80p' "$_uninstall_hook_log" >&2
+            UNINSTALL_HOOKS_OK=0
         fi
+        rm -f "$_uninstall_hook_log" 2>/dev/null || :
 
         # Handle node cleanup if nodes are configured
         if has_configured_nodes; then
@@ -993,7 +1103,12 @@ if [ "$ACTION" != "reinstall" ]; then
             fi
         fi
     else
-        echo "[uninstall] WARNING: mervlan_boot.sh not executable or missing; skipping setupdisable" >&2
+        echo "[uninstall] ERROR: mervlan_boot.sh not executable or missing; cannot remove service hooks safely" >&2
+        UNINSTALL_HOOKS_OK=0
+    fi
+    if [ "$UNINSTALL_HOOKS_OK" != "1" ]; then
+        echo "[uninstall] Uninstall stopped: addon files were retained because local service hooks could not be verified removed" >&2
+        exit 1
     fi
 else
     echo "[uninstall] Reinstall cleanup complete; service hooks retained for caller reconciliation"
@@ -1003,12 +1118,10 @@ fi
 # 5. Mark addon disabled / cleanup settings
 ########################################
 if [ "$ACTION" != "reinstall" ]; then
-    am_settings_set mervlan_state "disabled"
-    am_settings_set mervlan_page ""
-    am_settings_set mervlan_version ""
-    am_settings_set merlin_vlan_manager_state "disabled"
-    am_settings_set merlin_vlan_manager_page ""
-    am_settings_set merlin_vlan_manager_version ""
+    if ! mervlan_metadata_remove_all; then
+        echo "[uninstall] ERROR: could not remove only MerVLAN addon metadata" >&2
+        exit 1
+    fi
 fi
 
 if [ "$ACTION" = "reinstall" ]; then
@@ -1036,6 +1149,15 @@ if [ "$ACTION" = "full" ]; then
             /jffs/addons/mervlan_state) rm -rf "$MERV_STATE_ROOT" 2>/dev/null || FULL_NODE_CLEANUP_OK=0 ;;
             *) echo "[uninstall] Preserving non-default durable state root: $MERV_STATE_ROOT" ;;
         esac
+    fi
+    if [ "$FULL_DELETE_BACKUPS" = "1" ]; then
+        rm -rf /jffs/addons/mervlan_backups 2>/dev/null || {
+            echo "[uninstall] ERROR: could not remove retained MerVLAN backups" >&2
+            exit 1
+        }
+        echo "[uninstall] Retained MerVLAN backups removed"
+    else
+        echo "[uninstall] Retained MerVLAN backups were kept"
     fi
     echo "[uninstall] All addon files and data removed"
 fi

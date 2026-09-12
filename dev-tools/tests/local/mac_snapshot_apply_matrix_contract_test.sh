@@ -7,10 +7,12 @@ set -u
 BASE_DIR=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd) || exit 1
 TEST_ROOT="/tmp/mervlan_tmp/selftest.mac-snapshot-apply-matrix.$$"
 umask 077
-mkdir -p "$TEST_ROOT/locks" "$TEST_ROOT/db" || exit 1
+mkdir -p "$TEST_ROOT/locks" "$TEST_ROOT/db" "$TEST_ROOT/tmp" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 
 export MERV_BASE="$BASE_DIR"
+export VAR_SETTINGS_LOADED=1
+export TMPDIR="$TEST_ROOT/tmp"
 export LOCKDIR="$TEST_ROOT/locks"
 export RESULTDIR="$TEST_ROOT/results"
 export MERV_STATE_ROOT="$TEST_ROOT/state"
@@ -25,6 +27,7 @@ export SSH_KEY="$TEST_ROOT/db/ssh.key"
 . "$BASE_DIR/settings/lib_identity.sh" || exit 1
 . "$BASE_DIR/settings/lib_owner_lock.sh" || exit 1
 . "$BASE_DIR/settings/lib_mervqt.sh" || exit 1
+merv_is_valid_node_id() { case "$1" in 1|2|3|4|5|6|7|8|9|10) return 0 ;; *) return 1 ;; esac; }
 . "$BASE_DIR/settings/mac_shield_snapshot.sh" || exit 1
 
 info() { :; }

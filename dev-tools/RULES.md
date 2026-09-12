@@ -66,6 +66,12 @@ confirm callers and behavior before editing.
   `WSL/EnumerateDistros/Service/E_ACCESSDENIED`, while the same approved,
   read-only host probe successfully used the registered Ubuntu WSL2 distro.
   Retry WSL probes/tests through that path before treating WSL as inaccessible.
+- Lab observation (2026-09-08): a registered Ubuntu 26.04 WSL2 VHD mounted
+  cleanly but its root filesystem had lost `/etc`, `/bin/sh`, and `/bin/mount`;
+  the resulting `getpwuid(0)` and mount/path-translation cascade required a
+  verified VHD export followed by a clean same-release rebuild. Follow the
+  worst-case runbook in `docs/90-testing-and-evidence.md`; never restore damaged
+  system directories over the clean distro.
 - Use PowerShell and native OpenSSH for Windows-side deployment, SSH, and
   evidence transfer workflows.
 - Never run disruptive Apply, Restore, Update, or recovery actions without the

@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_client_meta.sh || version="0.12"                    #
+#               - File: mac_client_meta.sh || version="0.13"                    #
 # ============================================================================ #
 # Purpose: Materialize the two client-metadata databases from settings.json and
 #   re-enforce them, then refresh the client inventory so the UI reflects the
@@ -54,23 +54,55 @@ fi
 if ! type merv_action_progress_init >/dev/null 2>&1; then
   merv_action_progress_init() { :; }
   merv_action_progress_phase() { :; }
+  merv_action_progress_update() { :; }
   merv_action_progress_complete() { :; }
   merv_action_progress_fail() { :; }
 fi
 
 DRY_RUN="no"
-merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macclientmeta_vlanmgr" "Save Client Metadata" \
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macclientmeta_vlanmgr" "Applying Client Metadata" \
   "Preparing client metadata..."
+# This worker is the second half of one browser-owned metadata transaction.
+# Keep its progress above the completed settings-persistence phase so the
+# shared panel never appears to restart from zero at the handoff.
+merv_action_progress_update prepare 0 4 60 "Preparing client metadata..."
 if merv_update_mutation_blocked; then
   merv_action_progress_fail "Client metadata save refused while Update maintenance is active"
   exit 75
 fi
+META_POOL_ABORT_FAILED=0
+meta_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    return $?
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 1 ;; *) return 0 ;; esac
+}
+meta_abort_node_pool() {
+  meta_pool_state_unresolved || return 0
+  if ! type mnj_pool_abort_active >/dev/null 2>&1; then
+    META_POOL_ABORT_FAILED=1
+    error -c cli,vlan "Client Metadata cleanup could not reconcile active node workers; retaining locks and recovery state"
+    return 1
+  fi
+  if ! mnj_pool_abort_active failed client-metadata-exit; then
+    META_POOL_ABORT_FAILED=1
+    error -c cli,vlan "Client Metadata cleanup could not stop and reconcile active node workers; retaining locks and recovery state"
+    return 1
+  fi
+  if ! meta_pool_state_unresolved; then META_POOL_ABORT_FAILED=0; return 0; fi
+  META_POOL_ABORT_FAILED=1
+  error -c cli,vlan "Client Metadata cleanup left active node workers unresolved; retaining locks and recovery state"
+  return 1
+}
+
 META_SIGNAL_HANDLING=0
 meta_handle_signal() {
   _meta_signal_status="$1"
   [ "${META_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_meta_signal_status"
   META_SIGNAL_HANDLING=1
   trap - INT TERM
+  meta_abort_node_pool || :
   if type merv_action_progress_fail >/dev/null 2>&1; then
     merv_action_progress_fail "Client metadata save interrupted; no success result was published"
   fi
@@ -92,6 +124,10 @@ merv_action_lock_export_child_context || exit 75
 META_ACTION_LOCK_RELEASED=0
 meta_release_action_lock() {
   _meta_action_exit_rc=$?
+  if ! meta_abort_node_pool; then
+    [ "$_meta_action_exit_rc" -eq 0 ] && _meta_action_exit_rc=1
+    return "$_meta_action_exit_rc"
+  fi
   if [ "${META_ACTION_LOCK_RELEASED:-0}" -eq 0 ]; then
     if merv_action_lock_leave "$META_ACTION_LOCK_PATH" "$META_ACTION_LOCK_NONCE" "$META_ACTION_LOCK_START" "$META_ACTION_LOCK_MODE" >/dev/null 2>&1; then
       META_ACTION_LOCK_RELEASED=1
@@ -125,6 +161,10 @@ if type merv_lock_acquire >/dev/null 2>&1; then
     META_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
     meta_release_lock() {
       _meta_exit_rc=$?
+      if ! meta_abort_node_pool; then
+        [ "$_meta_exit_rc" -eq 0 ] && _meta_exit_rc=1
+        return "$_meta_exit_rc"
+      fi
       if [ "${META_LOCK_ACQUIRED:-0}" -eq 1 ]; then
         if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
           META_LOCK_ACQUIRED=0
@@ -150,7 +190,7 @@ fi
 # ------------------------------------------------------------- Read settings --
 RAW_OVERRIDES=$(json_get_section_value "ClientMeta" "MAC_SHIELD_OVERRIDES" "$SETTINGS_FILE" 2>/dev/null)
 RAW_NAMES=$(json_get_section_value "ClientMeta" "CLIENT_NAME_OVERRIDES" "$SETTINGS_FILE" 2>/dev/null)
-merv_action_progress_phase "Writing MAC override and display-name databases..."
+merv_action_progress_update persist 1 4 68 "Writing MAC override database..."
 
 # ----------------------------------------------- Materialize MAC override DB --
 # Split comma-separated MACs, lowercase + validate, dedupe. An empty result is
@@ -209,6 +249,7 @@ if [ -n "$RAW_NAMES" ]; then
     printf '%s\t%s\n' "$_pm" "$_pn"
   done | sort -t "$(printf '\t')" -k1,1 -u > "$NAME_TMP"
 fi
+merv_action_progress_update persist 2 4 75 "Writing client display-name database..."
 _name_count=$(awk 'NF' "$NAME_TMP" 2>/dev/null | wc -l | tr -d ' ')
 if mv "$NAME_TMP" "$MERV_CLIENT_NAME_DB" 2>/dev/null; then
   chmod 600 "$MERV_CLIENT_NAME_DB" 2>/dev/null || :
@@ -223,12 +264,13 @@ fi
 # Reload the local MERV_MAC shield from the best available db so the new
 # override set takes effect immediately (overridden MACs lose their DROP rule).
 _shield_reload=skip
-merv_action_progress_phase "Reloading MAC shield and synchronizing overrides..."
+merv_action_progress_update shield 3 4 82 "Checking MAC Shield enforcement..."
 if type ebt_mac_shield_init_and_apply >/dev/null 2>&1; then
   _best=$(merv_mac_best_db 2>/dev/null)
   if [ -n "$_best" ]; then
     if ebt_mac_shield_init_and_apply "$_best"; then
       _shield_reload=ok
+      merv_action_progress_update shield 3 4 88 "MAC Shield reloaded; preparing node synchronization..."
       info -c cli,vlan "Client Metadata: local MAC shield reloaded"
     else
       _shield_reload=failed
@@ -236,9 +278,14 @@ if type ebt_mac_shield_init_and_apply >/dev/null 2>&1; then
       error -c cli,vlan "Client Metadata: override DB persisted but local MAC shield reload failed; node push and inventory refresh are suppressed pending recovery"
     fi
   else
-    _shield_reload=unavailable
-    _meta_partial=1
-    error -c cli,vlan "Client Metadata: override DB persisted but no MAC shield database is available for required reload"
+    # A shield database is created only by the explicit MAC Shield rebuild.
+    # With no active/checkpoint database there is nothing to re-enforce yet,
+    # so metadata persistence remains successful and the override set is
+    # safely staged for that next rebuild.  Do not manufacture a baseline
+    # here: that would turn a metadata edit into an unexpected shield reset.
+    _shield_reload=staged
+    merv_action_progress_update shield 3 4 88 "MAC Shield has no active database; staging overrides..."
+    warn -c cli,vlan "Client Metadata: no MAC shield database exists; metadata saved and override state is staged until the next MAC Shield rebuild"
   fi
 else
   _shield_reload=unavailable
@@ -254,6 +301,7 @@ _nodes_pushed=0
 if [ "$_shield_reload" = "ok" ] && [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ]; then
   _nodes=$(merv_mac_node_list 2>/dev/null)
   if [ -n "$_nodes" ]; then
+    merv_action_progress_update nodes 3 4 91 "Synchronizing MAC Shield overrides to configured nodes..."
     MERV_MAC_LAST_PUSH_TOTAL=0
     MERV_MAC_LAST_PUSH_OK=0
     MERV_MAC_LAST_PUSH_FAILED=0
@@ -268,6 +316,9 @@ fi
 # Release the metadata writer lock before entering the observation coordinator:
 # global ordering is observation lock before operation-specific locks.
 if [ "$META_LOCK_ACQUIRED" -eq 1 ]; then
+  if ! meta_abort_node_pool; then
+    exit 1
+  fi
   if merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" 2>/dev/null; then
     META_LOCK_ACQUIRED=0
   else
@@ -279,14 +330,18 @@ fi
 # Rebuild through the one generation coordinator. Foreground execution ensures
 # the freshly-published JSON satisfies the UI freshness poll.
 _collect=skip
-if [ "$_shield_reload" = "ok" ]; then
-  merv_action_progress_phase "Refreshing client inventory..."
-fi
-if [ "$_shield_reload" = "ok" ] && [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
+case "$_shield_reload" in
+  ok|staged)
+  merv_action_progress_update collect 4 4 94 "Refreshing client inventory..."
+  ;;
+esac
+if { [ "$_shield_reload" = "ok" ] || [ "$_shield_reload" = "staged" ]; } && \
+   [ -x "$MERV_BASE/functions/post_apply_worker.sh" ]; then
   if MERV_OBS_NO_AUTOSTART=1 sh "$MERV_BASE/functions/post_apply_worker.sh" \
        request collect >/dev/null 2>&1 &&
      sh "$MERV_BASE/functions/post_apply_worker.sh" run >/dev/null 2>&1; then
     _collect=ok
+    merv_action_progress_update complete 1 1 98 "Finalizing client metadata..."
   else
     _collect=failed
     warn -c cli,vlan "Client Metadata: coordinated refresh failed; generation remains pending"
@@ -302,6 +357,11 @@ fi
 if [ "${_meta_partial:-0}" -ne 0 ]; then
   merv_action_progress_fail "Client metadata persisted, but MAC shield enforcement or follow-up work requires recovery"
   exit 2
+fi
+if [ "$_shield_reload" = "staged" ]; then
+  info -c cli,vlan "Client Metadata: save complete; MAC shield override state will apply after the next rebuild"
+  merv_action_progress_complete "Client metadata saved; MAC Shield has no active database"
+  exit 0
 fi
 info -c cli,vlan "Client Metadata: save complete"
 merv_action_progress_complete "Client metadata saved"

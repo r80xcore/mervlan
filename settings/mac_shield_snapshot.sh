@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.32"                #
+#               - File: mac_shield_snapshot.sh || version="0.37"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -28,6 +28,7 @@
 #   lib_ssid_filter.sh     — get_ssid_slot_value, get_vlan_slot_value
 #   lib_ssh.sh             — merv_ssh_exec, merv_ssh_precheck, ssh_keys_effectively_installed,
 #                            _merv_timeout_run, merv_has, MERV_SSH_TIMEOUT
+#   lib_node_jobs.sh       — bounded 1–5 node pool and validated terminal results
 #   var_settings.sh        — MERV_MAC_DB_ACTIVE, MERV_MAC_DB_JFFS,
 #                            MERV_MAC_MAX_AGE_SEC, SETTINGS_FILE, MAX_SSIDS
 #   log_settings.sh        — info, warn
@@ -45,6 +46,11 @@ fi
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+# The shared bounded node pool is the only parallelism boundary for remote
+# observation and Shield propagation.  Keep this optional at source time so
+# older fixture callers can still load the library; the MAIN path below fails
+# closed (as an incomplete observation/push) when the pool is unavailable.
+[ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh" 2>/dev/null || true
 
 # ============================================================================
 # Snapshot behaviour flags (caller-overridable via env)
@@ -59,6 +65,687 @@ fi
 : "${MERV_MAC_SNAPSHOT_FORCE_RELOAD:=0}"
 : "${MERV_MAC_SNAPSHOT_ALLOW_EMPTY:=0}"
 : "${MERV_NVRAM_READ_TIMEOUT:=10}"
+
+# ============================================================================
+# Bounded NVRAM inventory
+# ----------------------------------------------------------------------------
+# A number of manager and Shield paths need the same small subset of NVRAM
+# state.  Reading that subset through separate `nvram get`/`nvram show`
+# invocations makes a firmware-side NVRAM stall multiply across every guard
+# tick.  Keep one validated inventory per process scope instead.  The cache is
+# deliberately file-backed: POSIX command substitutions run functions in a
+# child shell, so an in-memory cache assignment made there cannot be observed
+# by the parent or by the next guard tick.
+#
+# The cache contains only validated wl*_ssid/wl*_ifname records and an
+# explicit valid/error state.  A successful empty inventory is therefore
+# distinguishable from a failed read, and a failed read is memoized for the
+# current process so a guard loop never retries a hanging NVRAM command.
+# ============================================================================
+
+# Clear process-visible inventory state before an identity or cache-path
+# validation failure can leave a previous successful snapshot looking current.
+# This only resets shell variables; cache artifacts are removed only by the
+# explicit invalidate/disable paths after their root has passed validation.
+merv_nvram_inventory_clear_state() {
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+}
+
+merv_nvram_inventory_set_error() {
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=error
+  MERV_NVRAM_INVENTORY_REASON="${1:-read-failed}"
+  MERV_NVRAM_INVENTORY_RC="${2:-65}"
+  return 2
+}
+
+# The inventory file is intentionally narrower than the complete NVRAM key
+# grammar.  Keep this check exact; a shell glob such as wl[0-9]* also accepts
+# wl0garbage_ssid and would let an unrelated key reach manager callers.
+merv_nvram_inventory_target_key_valid() {
+  local _mnitk_key="${1:-}" _mnitk_base _mnitk_digits
+  local _mnitk_radio _mnitk_slot
+  case "$_mnitk_key" in
+    wl*_ssid) _mnitk_base=${_mnitk_key%_ssid} ;;
+    wl*_ifname) _mnitk_base=${_mnitk_key%_ifname} ;;
+    *) return 1 ;;
+  esac
+  case "$_mnitk_base" in
+    wl[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  _mnitk_digits=${_mnitk_base#wl}
+  case "$_mnitk_digits" in
+    *.*)
+      _mnitk_radio=${_mnitk_digits%%.*}
+      _mnitk_slot=${_mnitk_digits#*.}
+      case "$_mnitk_radio" in ''|*[!0-9]*) return 1 ;; esac
+      case "$_mnitk_slot" in ''|*[!0-9]*|*.*) return 1 ;; esac
+      ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+merv_nvram_inventory_artifacts_safe() {
+  local _mnias_path="$1" _mnias_file
+  for _mnias_file in "$_mnias_path.state" "$_mnias_path.data" \
+    "$_mnias_path.raw" "$_mnias_path.filtered.tmp" "$_mnias_path.state.tmp"; do
+    [ ! -L "$_mnias_file" ] || return 1
+  done
+  return 0
+}
+
+# Validate an already-filtered cache before accepting a cached success marker.
+# This keeps a replacement/edited regular cache file from bypassing the same
+# key, value, duplicate, record, byte, and control-character checks used for
+# fresh nvram output.
+merv_nvram_inventory_validate_records() {
+  local _mnivr_file="$1" _mnivr_max_bytes _mnivr_max_records _mnivr_bytes
+  local _mnivr_max_line _mnivr_max_value
+  [ -n "$_mnivr_file" ] || return 1
+  [ -f "$_mnivr_file" ] && [ ! -L "$_mnivr_file" ] || return 1
+  merv_nvram_inventory_process_start "${_mnivr_file%/*}" >/dev/null 2>&1 || return 1
+  _mnivr_max_bytes="${MERV_NVRAM_INVENTORY_MAX_SELECTED_BYTES:-32768}"
+  case "$_mnivr_max_bytes" in ''|*[!0-9]*) _mnivr_max_bytes=32768 ;; esac
+  [ "$_mnivr_max_bytes" -gt 0 ] 2>/dev/null || _mnivr_max_bytes=32768
+  _mnivr_bytes=$(
+    exec 3< "$_mnivr_file" 2>/dev/null || exit 1
+    [ ! -L "$_mnivr_file" ] || { exec 3<&-; exit 1; }
+    wc -c <&3
+    exec 3<&-
+  ) || return 1
+  case "$_mnivr_bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_mnivr_bytes" -le "$_mnivr_max_bytes" ] 2>/dev/null || return 1
+  _mnivr_max_records="${MERV_NVRAM_INVENTORY_MAX_SELECTED_RECORDS:-128}"
+  case "$_mnivr_max_records" in ''|*[!0-9]*) _mnivr_max_records=128 ;; esac
+  [ "$_mnivr_max_records" -gt 0 ] 2>/dev/null || _mnivr_max_records=128
+  _mnivr_max_line="${MERV_NVRAM_INVENTORY_MAX_SELECTED_LINE_BYTES:-256}"
+  case "$_mnivr_max_line" in ''|*[!0-9]*) _mnivr_max_line=256 ;; esac
+  [ "$_mnivr_max_line" -gt 0 ] 2>/dev/null || _mnivr_max_line=256
+  _mnivr_max_value="${MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES:-128}"
+  case "$_mnivr_max_value" in ''|*[!0-9]*) _mnivr_max_value=128 ;; esac
+  [ "$_mnivr_max_value" -gt 0 ] 2>/dev/null || _mnivr_max_value=128
+  (
+    exec 3< "$_mnivr_file" 2>/dev/null || exit 1
+    [ ! -L "$_mnivr_file" ] || { exec 3<&-; exit 1; }
+    awk -v max_records="$_mnivr_max_records" \
+      -v max_line="$_mnivr_max_line" -v max_value="$_mnivr_max_value" '
+      {
+        if (length($0) > max_line || length($0) > 1024 ||
+            $0 ~ /^[[:space:]]*$/ || index($0, "=") == 0) {
+          bad=1; next
+        }
+        eq=index($0, "=")
+        key=substr($0, 1, eq-1)
+        val=substr($0, eq+1)
+        if (length(val) > max_value ||
+            key !~ /^wl[0-9]+(\.[0-9]+)?_(ssid|ifname)$/ ||
+            val ~ /[[:cntrl:]]/ || seen[key]++ || ++records > max_records) {
+          bad=1; next
+        }
+        if (key ~ /_ifname$/) {
+          clean=val
+          sub(/^[[:space:]]+/, "", clean)
+          sub(/[[:space:]]+$/, "", clean)
+          if (clean ~ /^\".*\"$/)
+            clean=substr(clean, 2, length(clean)-2)
+          if (clean != "" && clean !~ /^[A-Za-z0-9_.:-]+$/)
+            bad=1
+        }
+      }
+      END { exit bad ? 65 : 0 }
+    ' <&3
+    _mnivr_rc=$?
+    exec 3<&-
+    exit "$_mnivr_rc"
+  )
+}
+
+merv_nvram_inventory_process_start() {
+  local _mnips_start _mnips_root _mnips_path _mnips_rest _mnips_part _mnips_stat
+  if [ -n "${1:-}" ]; then
+    _mnips_root="$1"
+    case "$_mnips_root" in
+      /tmp|/tmp/*) ;;
+      *)
+        MERV_NVRAM_INVENTORY_FILE=""
+        MERV_NVRAM_INVENTORY_STATUS=""
+        MERV_NVRAM_INVENTORY_REASON=""
+        MERV_NVRAM_INVENTORY_RC=""
+        return 1
+        ;;
+    esac
+    [ -d /tmp ] && [ ! -L /tmp ] || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+    [ "$_mnips_root" = /tmp ] || {
+      _mnips_path=/tmp
+      _mnips_rest=${_mnips_root#/tmp/}
+      while [ -n "$_mnips_rest" ]; do
+        case "$_mnips_rest" in
+          */*)
+            _mnips_part=${_mnips_rest%%/*}
+            _mnips_rest=${_mnips_rest#*/}
+            ;;
+          *)
+            _mnips_part=$_mnips_rest
+            _mnips_rest=
+            ;;
+        esac
+        [ -n "$_mnips_part" ] || continue
+        case "$_mnips_part" in
+          .|..|*[!A-Za-z0-9._-]*)
+            MERV_NVRAM_INVENTORY_FILE=""
+            MERV_NVRAM_INVENTORY_STATUS=""
+            MERV_NVRAM_INVENTORY_REASON=""
+            MERV_NVRAM_INVENTORY_RC=""
+            return 1
+            ;;
+        esac
+        _mnips_path="$_mnips_path/$_mnips_part"
+        [ ! -L "$_mnips_path" ] || {
+          MERV_NVRAM_INVENTORY_FILE=""
+          MERV_NVRAM_INVENTORY_STATUS=""
+          MERV_NVRAM_INVENTORY_REASON=""
+          MERV_NVRAM_INVENTORY_RC=""
+          return 1
+        }
+        if [ -e "$_mnips_path" ] && [ ! -d "$_mnips_path" ]; then
+          MERV_NVRAM_INVENTORY_FILE=""
+          MERV_NVRAM_INVENTORY_STATUS=""
+          MERV_NVRAM_INVENTORY_REASON=""
+          MERV_NVRAM_INVENTORY_RC=""
+          return 1
+        fi
+      done
+    }
+  fi
+
+  if type merv_identity_current_start >/dev/null 2>&1; then
+    _mnips_start=$(merv_identity_current_start 2>/dev/null) || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+  else
+    # Keep the standalone inventory contract usable by lightweight callers
+    # that do not load lib_identity, while retaining the same strict /proc
+    # start-time proof.  Missing/malformed identity remains a hard failure.
+    _mnips_stat=$(cat "/proc/$$/stat" 2>/dev/null) || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+    case "$_mnips_stat" in
+      *") "*) _mnips_stat=${_mnips_stat##*) } ;;
+      *)
+        MERV_NVRAM_INVENTORY_FILE=""
+        MERV_NVRAM_INVENTORY_STATUS=""
+        MERV_NVRAM_INVENTORY_REASON=""
+        MERV_NVRAM_INVENTORY_RC=""
+        return 1
+        ;;
+    esac
+    _mnips_start=$(printf '%s\n' "$_mnips_stat" | awk '{print $20}') || {
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+    }
+  fi
+  case "$_mnips_start" in
+    ''|*[!0-9]*|0)
+      MERV_NVRAM_INVENTORY_FILE=""
+      MERV_NVRAM_INVENTORY_STATUS=""
+      MERV_NVRAM_INVENTORY_REASON=""
+      MERV_NVRAM_INVENTORY_RC=""
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$_mnips_start"
+}
+
+merv_nvram_inventory_path() {
+  local _mnip_root _mnip_scope _mnip_start
+  _mnip_root="${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}"
+  # Inventory state is volatile.  Permit /tmp descendants only; invalid or
+  # inherited paths fall back to the normal MerVLAN temporary root.
+  case "$_mnip_root" in
+    /tmp|/tmp/*) ;;
+    *) _mnip_root="/tmp/mervlan_tmp" ;;
+  esac
+  case "$_mnip_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mnip_root="/tmp/mervlan_tmp" ;;
+  esac
+  _mnip_scope="${MERV_NVRAM_INVENTORY_SCOPE:-pid}"
+  case "$_mnip_scope" in
+    ''|*[!A-Za-z0-9._-]*) _mnip_scope=pid ;;
+  esac
+  [ "${#_mnip_scope}" -le 64 ] || _mnip_scope=pid
+  _mnip_start=$(merv_nvram_inventory_process_start "$_mnip_root") || {
+    MERV_NVRAM_INVENTORY_FILE=""
+    MERV_NVRAM_INVENTORY_STATUS=""
+    MERV_NVRAM_INVENTORY_REASON=""
+    MERV_NVRAM_INVENTORY_RC=""
+    return 1
+  }
+  printf '%s/nvram_inventory.%s.%s.%s\n' \
+    "$_mnip_root" "$_mnip_scope" "$$" "$_mnip_start"
+}
+
+merv_nvram_inventory_publish_state() {
+  local _mnips_path="$1" _mnips_state="$2" _mnips_tmp _mnips_root
+  _mnips_root=${_mnips_path%/*}
+  merv_nvram_inventory_process_start "$_mnips_root" >/dev/null 2>&1 || return 1
+  _mnips_tmp="${_mnips_path}.state.tmp"
+  [ ! -L "$_mnips_tmp" ] || return 1
+  [ ! -L "${_mnips_path}.state" ] || return 1
+  [ ! -e "$_mnips_tmp" ] || rm -f "$_mnips_tmp" 2>/dev/null || return 1
+  (
+    set -C
+    printf '%s\n' "$_mnips_state" > "$_mnips_tmp" 2>/dev/null
+  ) || return 1
+  chmod 600 "$_mnips_tmp" 2>/dev/null || {
+    rm -f "$_mnips_tmp" 2>/dev/null
+    return 1
+  }
+  [ ! -L "${_mnips_path}.state" ] || {
+    rm -f "$_mnips_tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$_mnips_tmp" "${_mnips_path}.state" 2>/dev/null || {
+    rm -f "$_mnips_tmp" 2>/dev/null
+    return 1
+  }
+}
+
+merv_nvram_inventory_mark_error() {
+  local _mnie_path="$1" _mnie_rc="$2" _mnie_reason="$3"
+  local _mnie_start _mnie_pid _mnie_state
+  _mnie_start=$(merv_nvram_inventory_process_start "${_mnie_path%/*}") || {
+    MERV_NVRAM_INVENTORY_FILE=""
+    MERV_NVRAM_INVENTORY_STATUS=error
+    MERV_NVRAM_INVENTORY_REASON=identity-unavailable
+    MERV_NVRAM_INVENTORY_RC=65
+    return 2
+  }
+  _mnie_pid="$$"
+  case "$_mnie_rc" in ''|*[!0-9]*) _mnie_rc=1 ;; esac
+  case "$_mnie_reason" in
+    ''|*[!A-Za-z0-9._-]*) _mnie_reason=read-failed ;;
+  esac
+  _mnie_state="error|$_mnie_pid|$_mnie_start|$_mnie_rc|$_mnie_reason"
+  rm -f "${_mnie_path}.data" "${_mnie_path}.raw" \
+    "${_mnie_path}.filtered.tmp" 2>/dev/null
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=error
+  MERV_NVRAM_INVENTORY_REASON="$_mnie_reason"
+  MERV_NVRAM_INVENTORY_RC="$_mnie_rc"
+  if ! merv_nvram_inventory_publish_state "$_mnie_path" "$_mnie_state"; then
+    MERV_NVRAM_INVENTORY_REASON=cache-state-publish-failed
+  fi
+  return 2
+}
+
+merv_nvram_inventory_invalidate() {
+  local _mnii_path _mnii_root _mnii_file _mnii_failed=0
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+  _mnii_root="${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}"
+  case "$_mnii_root" in
+    /tmp|/tmp/*) ;;
+    *) _mnii_root=/tmp/mervlan_tmp ;;
+  esac
+  case "$_mnii_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mnii_root=/tmp/mervlan_tmp ;;
+  esac
+  merv_nvram_inventory_process_start "$_mnii_root" >/dev/null 2>&1 || return 1
+  if [ ! -e "$_mnii_root" ] && [ ! -L "$_mnii_root" ]; then
+    MERV_NVRAM_INVENTORY_FILE=""
+    MERV_NVRAM_INVENTORY_STATUS=""
+    MERV_NVRAM_INVENTORY_REASON=""
+    MERV_NVRAM_INVENTORY_RC=""
+    return 0
+  fi
+  _mnii_path=$(merv_nvram_inventory_path 2>/dev/null) || return 1
+  merv_nvram_inventory_process_start "${_mnii_path%/*}" >/dev/null 2>&1 || return 1
+  for _mnii_file in "$_mnii_path" "${_mnii_path}.state" "${_mnii_path}.data" \
+    "${_mnii_path}.raw" "${_mnii_path}.filtered.tmp" "${_mnii_path}.state.tmp"; do
+    rm -f "$_mnii_file" 2>/dev/null || _mnii_failed=1
+  done
+  for _mnii_file in "$_mnii_path" "${_mnii_path}.state" "${_mnii_path}.data" \
+    "${_mnii_path}.raw" "${_mnii_path}.filtered.tmp" "${_mnii_path}.state.tmp"; do
+    if [ -e "$_mnii_file" ] || [ -L "$_mnii_file" ]; then
+      _mnii_failed=1
+    fi
+  done
+  [ "$_mnii_failed" -eq 0 ] || return 1
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+  return 0
+}
+
+# merv_nvram_inventory_read
+#   Return 0 for a valid inventory (including an empty valid inventory).
+#   Return 2 for an unavailable, malformed, or otherwise untrusted read.
+#   MERV_NVRAM_INVENTORY_FILE points at the validated record file on success.
+merv_nvram_inventory_read() {
+  local _mnir_path _mnir_state _mnir_data _mnir_raw _mnir_filtered
+  local _mnir_kind _mnir_pid _mnir_start _mnir_rc _mnir_reason
+  local _mnir_current_start _mnir_timeout _mnir_bytes _mnir_max_bytes
+  local _mnir_max_records _mnir_max_lines _mnir_max_line _mnir_max_selected_bytes
+  local _mnir_max_selected_records _mnir_max_selected_line _mnir_max_selected_value
+  local _mnir_selected_bytes _mnir_root
+
+  # Start each read from a neutral state so a path/identity failure cannot
+  # expose a previous valid file to manager or Shield callers.
+  MERV_NVRAM_INVENTORY_FILE=""
+  MERV_NVRAM_INVENTORY_STATUS=""
+  MERV_NVRAM_INVENTORY_REASON=""
+  MERV_NVRAM_INVENTORY_RC=""
+  _mnir_path=$(merv_nvram_inventory_path 2>/dev/null) || {
+    merv_nvram_inventory_set_error cache-path-untrusted 65
+    return $?
+  }
+  _mnir_state="${_mnir_path}.state"
+  _mnir_data="${_mnir_path}.data"
+  merv_nvram_inventory_artifacts_safe "$_mnir_path" || {
+    merv_nvram_inventory_set_error cache-path-untrusted 65
+    return $?
+  }
+  _mnir_current_start=$(merv_nvram_inventory_process_start) || {
+    merv_nvram_inventory_set_error identity-unavailable 65
+    return $?
+  }
+
+  # State is published atomically, but still parse every field as untrusted
+  # text before accepting it.  A matching cached error is intentionally
+  # returned without retrying the underlying NVRAM command.
+  if [ -f "$_mnir_state" ] && [ ! -L "$_mnir_state" ]; then
+    _mnir_kind=""; _mnir_pid=""; _mnir_start=""; _mnir_rc=""; _mnir_reason=""
+    [ ! -L "$_mnir_state" ] || {
+      merv_nvram_inventory_set_error cache-path-untrusted 65
+      return $?
+    }
+    IFS='|' read -r _mnir_kind _mnir_pid _mnir_start _mnir_rc _mnir_reason < "$_mnir_state" || :
+    case "$_mnir_kind" in
+      valid)
+        if [ "$_mnir_pid" = "$$" ] && [ "$_mnir_start" = "$_mnir_current_start" ] &&
+           [ "$_mnir_rc" = 0 ] && [ "$_mnir_reason" = ok ] &&
+           [ -f "$_mnir_data" ] && [ ! -L "$_mnir_data" ] &&
+           merv_nvram_inventory_validate_records "$_mnir_data"; then
+          MERV_NVRAM_INVENTORY_FILE="$_mnir_data"
+          MERV_NVRAM_INVENTORY_STATUS=valid
+          MERV_NVRAM_INVENTORY_REASON=ok
+          MERV_NVRAM_INVENTORY_RC=0
+          return 0
+        fi
+        ;;
+      error)
+        if [ "$_mnir_pid" = "$$" ] && [ "$_mnir_start" = "$_mnir_current_start" ]; then
+          case "$_mnir_rc" in ''|*[!0-9]*) _mnir_rc=1 ;; esac
+          case "$_mnir_reason" in ''|*[!A-Za-z0-9._-]*) _mnir_reason=read-failed ;; esac
+          MERV_NVRAM_INVENTORY_FILE=""
+          MERV_NVRAM_INVENTORY_STATUS=error
+          MERV_NVRAM_INVENTORY_REASON="$_mnir_reason"
+          MERV_NVRAM_INVENTORY_RC="$_mnir_rc"
+          return 2
+        fi
+        ;;
+    esac
+    # The path is process-scoped.  A stale or malformed marker can be
+    # discarded and rebuilt, but never treated as a successful empty result.
+    rm -f "$_mnir_state" "$_mnir_data" 2>/dev/null || return 2
+  fi
+
+  _mnir_root=${_mnir_path%/*}
+  mkdir -p "$_mnir_root" 2>/dev/null || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 cache-root-unavailable
+    return $?
+  }
+  merv_nvram_inventory_process_start "$_mnir_root" >/dev/null 2>&1 || {
+    merv_nvram_inventory_set_error cache-root-untrusted 65
+    return $?
+  }
+  _mnir_raw="${_mnir_path}.raw"
+  _mnir_filtered="${_mnir_path}.filtered.tmp"
+  merv_nvram_inventory_artifacts_safe "$_mnir_path" || {
+    merv_nvram_inventory_set_error cache-path-untrusted 65
+    return $?
+  }
+  rm -f "$_mnir_raw" "$_mnir_filtered" "$_mnir_data" 2>/dev/null || {
+    merv_nvram_inventory_set_error cache-artifact-remove-failed 1
+    return $?
+  }
+
+  _mnir_timeout="${MERV_NVRAM_READ_TIMEOUT:-10}"
+  case "$_mnir_timeout" in ''|*[!0-9]*) _mnir_timeout=10 ;; esac
+  [ "$_mnir_timeout" -gt 0 ] 2>/dev/null || _mnir_timeout=10
+  MERV_NVRAM_READ_TIMEOUT="$_mnir_timeout"
+  if ! type _merv_timeout_run >/dev/null 2>&1; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 127 timeout-helper-unavailable
+    return $?
+  fi
+  (
+    set -C
+    exec 3> "$_mnir_raw" 2>/dev/null || exit 126
+    [ ! -L "$_mnir_raw" ] || { exec 3>&-; exit 127; }
+    _merv_timeout_run "$MERV_NVRAM_READ_TIMEOUT" nvram show >&3 2>/dev/null
+    _mnir_rc=$?
+    exec 3>&-
+    exit "$_mnir_rc"
+  )
+  _mnir_rc=$?
+  if [ "$_mnir_rc" -ne 0 ]; then
+    case "$_mnir_rc" in
+      124) _mnir_reason=timeout ;;
+      125) _mnir_reason=timeout-cleanup-failed ;;
+      *) _mnir_reason=read-failed ;;
+    esac
+    merv_nvram_inventory_mark_error "$_mnir_path" "$_mnir_rc" "$_mnir_reason"
+    return $?
+  fi
+
+  _mnir_max_bytes="${MERV_NVRAM_INVENTORY_MAX_RAW_BYTES:-${MERV_NVRAM_INVENTORY_MAX_BYTES:-1048576}}"
+  case "$_mnir_max_bytes" in ''|*[!0-9]*) _mnir_max_bytes=1048576 ;; esac
+  [ "$_mnir_max_bytes" -gt 0 ] 2>/dev/null || _mnir_max_bytes=1048576
+  [ -f "$_mnir_raw" ] && [ ! -L "$_mnir_raw" ] || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 cache-input-untrusted
+    return $?
+  }
+  _mnir_bytes=$(
+    exec 3< "$_mnir_raw" 2>/dev/null || exit 1
+    [ ! -L "$_mnir_raw" ] || { exec 3<&-; exit 1; }
+    wc -c <&3
+    exec 3<&-
+  ) || _mnir_bytes=""
+  case "$_mnir_bytes" in ''|*[!0-9]*)
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-size-unreadable
+    return $? ;;
+  esac
+  if ! [ "$_mnir_bytes" -le "$_mnir_max_bytes" ] 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-too-large
+    return $?
+  fi
+
+  _mnir_max_records="${MERV_NVRAM_INVENTORY_MAX_RAW_RECORDS:-${MERV_NVRAM_INVENTORY_MAX_RECORDS:-32768}}"
+  case "$_mnir_max_records" in ''|*[!0-9]*) _mnir_max_records=32768 ;; esac
+  [ "$_mnir_max_records" -gt 0 ] 2>/dev/null || _mnir_max_records=32768
+  _mnir_max_lines="${MERV_NVRAM_INVENTORY_MAX_RAW_LINES:-32768}"
+  case "$_mnir_max_lines" in ''|*[!0-9]*) _mnir_max_lines=32768 ;; esac
+  [ "$_mnir_max_lines" -gt 0 ] 2>/dev/null || _mnir_max_lines=32768
+  _mnir_max_line="${MERV_NVRAM_INVENTORY_MAX_RAW_LINE_BYTES:-8192}"
+  case "$_mnir_max_line" in ''|*[!0-9]*) _mnir_max_line=8192 ;; esac
+  [ "$_mnir_max_line" -gt 0 ] 2>/dev/null || _mnir_max_line=8192
+  _mnir_max_selected_bytes="${MERV_NVRAM_INVENTORY_MAX_SELECTED_BYTES:-32768}"
+  case "$_mnir_max_selected_bytes" in ''|*[!0-9]*) _mnir_max_selected_bytes=32768 ;; esac
+  [ "$_mnir_max_selected_bytes" -gt 0 ] 2>/dev/null || _mnir_max_selected_bytes=32768
+  _mnir_max_selected_records="${MERV_NVRAM_INVENTORY_MAX_SELECTED_RECORDS:-128}"
+  case "$_mnir_max_selected_records" in ''|*[!0-9]*) _mnir_max_selected_records=128 ;; esac
+  [ "$_mnir_max_selected_records" -gt 0 ] 2>/dev/null || _mnir_max_selected_records=128
+  _mnir_max_selected_line="${MERV_NVRAM_INVENTORY_MAX_SELECTED_LINE_BYTES:-256}"
+  case "$_mnir_max_selected_line" in ''|*[!0-9]*) _mnir_max_selected_line=256 ;; esac
+  [ "$_mnir_max_selected_line" -gt 0 ] 2>/dev/null || _mnir_max_selected_line=256
+  _mnir_max_selected_value="${MERV_NVRAM_INVENTORY_MAX_SELECTED_VALUE_BYTES:-128}"
+  case "$_mnir_max_selected_value" in ''|*[!0-9]*) _mnir_max_selected_value=128 ;; esac
+  [ "$_mnir_max_selected_value" -gt 0 ] 2>/dev/null || _mnir_max_selected_value=128
+  [ -f "$_mnir_raw" ] && [ ! -L "$_mnir_raw" ] || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 cache-input-untrusted
+    return $?
+  }
+  (
+    set -C
+    [ ! -e "$_mnir_filtered" ] || exit 126
+    exec 3< "$_mnir_raw" 2>/dev/null || exit 127
+    [ ! -L "$_mnir_raw" ] || { exec 3<&-; exit 127; }
+    awk -v max_raw_records="$_mnir_max_records" \
+      -v max_raw_lines="$_mnir_max_lines" \
+      -v max_raw_line="$_mnir_max_line" \
+      -v max_selected_records="$_mnir_max_selected_records" \
+      -v max_selected_line="$_mnir_max_selected_line" \
+      -v max_selected_value="$_mnir_max_selected_value" '
+    {
+      if (NR > max_raw_lines) { bad=1; next }
+      if (length($0) > max_raw_line) { bad=1; next }
+      if ($0 ~ /^[[:space:]]*$/) next
+      if (index($0, "=") > 0) records++
+      if (records > max_raw_records) { bad=1; next }
+      if (index($0, "=") == 0) {
+        # Broadcom nvram applets append a human-readable size summary.
+        if ($0 ~ /^size:[[:space:]]*/) next
+        # Only an exact selected key without its separator is malformed;
+        # near-match namespaces remain unrelated input and are ignored.
+        if ($0 ~ /^wl[0-9]+(\.[0-9]+)?_(ssid|ifname)$/) bad=1
+        next
+      }
+      eq=index($0, "=")
+      key=substr($0, 1, eq-1)
+      val=substr($0, eq+1)
+      if (key !~ /^wl[0-9]+(\.[0-9]+)?_(ssid|ifname)$/) {
+        # NVRAM contains unrelated keys with colons, slashes, and other
+        # firmware-specific punctuation.  They are not inventory targets.
+        next
+      }
+      if (length($0) > max_selected_line || length(val) > max_selected_value ||
+          val ~ /[[:cntrl:]]/ || seen[key]++ || ++selected_records > max_selected_records) {
+        bad=1; next
+      }
+      if (key ~ /_ifname$/) {
+        clean=val
+        sub(/^[[:space:]]+/, "", clean)
+        sub(/[[:space:]]+$/, "", clean)
+        if (clean ~ /^\".*\"$/)
+          clean=substr(clean, 2, length(clean)-2)
+        if (clean != "" && clean !~ /^[A-Za-z0-9_.:-]+$/) { bad=1; next }
+      }
+      print key "=" val
+    }
+    END { exit bad ? 65 : 0 }
+    ' <&3 > "$_mnir_filtered" 2>/dev/null
+    _mnir_rc=$?
+    exec 3<&-
+    exit "$_mnir_rc"
+  )
+  _mnir_rc=$?
+  if [ "$_mnir_rc" -ne 0 ]; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-malformed
+    return $?
+  fi
+
+  [ -f "$_mnir_filtered" ] && [ ! -L "$_mnir_filtered" ] || {
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 cache-input-untrusted
+    return $?
+  }
+  _mnir_selected_bytes=$(
+    exec 3< "$_mnir_filtered" 2>/dev/null || exit 1
+    [ ! -L "$_mnir_filtered" ] || { exec 3<&-; exit 1; }
+    wc -c <&3
+    exec 3<&-
+  ) || _mnir_selected_bytes=""
+  case "$_mnir_selected_bytes" in ''|*[!0-9]*)
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-size-unreadable
+    return $? ;;
+  esac
+  if ! [ "$_mnir_selected_bytes" -le "$_mnir_max_selected_bytes" ] 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 65 inventory-selected-too-large
+    return $?
+  fi
+
+  if ! mv -f "$_mnir_filtered" "$_mnir_data" 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 inventory-cache-write-failed
+    return $?
+  fi
+  if ! chmod 600 "$_mnir_data" 2>/dev/null; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 inventory-cache-mode-failed
+    return $?
+  fi
+  rm -f "$_mnir_raw" 2>/dev/null || :
+  _mnir_start="$_mnir_current_start"
+  if ! merv_nvram_inventory_publish_state "$_mnir_path" \
+       "valid|$$|$_mnir_start|0|ok"; then
+    merv_nvram_inventory_mark_error "$_mnir_path" 1 inventory-state-write-failed
+    return $?
+  fi
+  MERV_NVRAM_INVENTORY_FILE="$_mnir_data"
+  MERV_NVRAM_INVENTORY_STATUS=valid
+  MERV_NVRAM_INVENTORY_REASON=ok
+  MERV_NVRAM_INVENTORY_RC=0
+  return 0
+}
+
+# merv_nvram_inventory_value <key>
+# Print one validated value from the current inventory.  This is intentionally
+# a file read rather than `nvram get`: all manager/Shield lookups then share
+# the one bounded inventory read and retain its failure classification.
+merv_nvram_inventory_value() {
+  local _mniv_key="$1" _mniv_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  local _mniv_name _mniv_value _mniv_found=0 _mniv_result=""
+  merv_nvram_inventory_target_key_valid "$_mniv_key" || return 1
+  if [ -z "$_mniv_file" ]; then
+    _mniv_file=$(merv_nvram_inventory_path 2>/dev/null) || return 1
+    _mniv_file="${_mniv_file}.data"
+  fi
+  [ -f "$_mniv_file" ] && [ ! -L "$_mniv_file" ] || return 1
+  exec 3< "$_mniv_file" 2>/dev/null || return 1
+  [ ! -L "$_mniv_file" ] || {
+    exec 3<&-
+    return 1
+  }
+  while IFS='=' read -r _mniv_name _mniv_value; do
+    merv_nvram_inventory_target_key_valid "$_mniv_name" || {
+      exec 3<&-
+      return 1
+    }
+    [ "$_mniv_name" = "$_mniv_key" ] || continue
+    [ "$_mniv_found" -eq 0 ] || {
+      exec 3<&-
+      return 1
+    }
+    _mniv_found=1
+    _mniv_result="$_mniv_value"
+  done <&3
+  exec 3<&-
+  [ "$_mniv_found" -eq 1 ] || return 1
+  printf '%s\n' "$_mniv_result"
+  return 0
+}
 
 # ============================================================================
 # Snapshot status output globals
@@ -107,6 +794,38 @@ _merv_mac_logv() {
 }
 
 # ============================================================================
+# _merv_mac_refresh_progress <phase> <percent> <message>
+# Publish detailed progress only for an explicitly requested manual
+# macrefresh_vlanmgr action. Periodic/background snapshots remain silent.
+# ============================================================================
+_merv_mac_refresh_progress() {
+  local _mmrp_phase="$1"
+  local _mmrp_percent="$2"
+  local _mmrp_message="$3"
+
+  [ "${MERV_MAC_REFRESH_PROGRESS:-0}" = "1" ] || return 0
+
+  case "${MERV_PROGRESS_TOKEN:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+
+  type merv_progress_update >/dev/null 2>&1 || return 0
+
+  merv_progress_update \
+    "$MERV_PROGRESS_TOKEN" \
+    macrefresh_vlanmgr \
+    "Rebuild MAC Shield" \
+    running \
+    determinate \
+    "$_mmrp_phase" \
+    0 \
+    0 \
+    "$_mmrp_percent" \
+    "$_mmrp_message" \
+    "" >/dev/null 2>&1 || :
+}
+
+# ============================================================================
 # merv_mac_boot_init
 # Called once in boot mode before first manager apply.
 #   - If /tmp db is missing and JFFS checkpoint exists: copy to /tmp
@@ -148,7 +867,8 @@ merv_mac_boot_init() {
 #   - Output is deduplicated: same iface appearing in multiple slots emitted once
 # ============================================================================
 merv_mac_build_expected_iface_vid() {
-  local max_ssids i ssid vlan nvram_ssids key rawval val base iface
+  local max_ssids i ssid vlan key rawval val base iface
+  local nvram_file ifname_key ifname_raw
 
   # Use merv_cap_ssids to get a safe, cap-bounded slot count.
   # Falls back to 12 if MAX_SSIDS is 0/unset, and never exceeds Limits.MAX_SSID_CAP.
@@ -160,15 +880,15 @@ merv_mac_build_expected_iface_vid() {
   fi
 
   # Single cached NVRAM read across all slot iterations. Some ASUS firmware
-  # builds can leave `nvram show` asleep indefinitely; fail this snapshot
-  # generation instead of holding the observation worker forever.
-  nvram_ssids=$(_merv_timeout_run "$MERV_NVRAM_READ_TIMEOUT" nvram show 2>/dev/null)
-  _mmb_nvram_rc=$?
-  if [ "$_mmb_nvram_rc" -ne 0 ]; then
-    _merv_mac_log warn "MERV_MAC: timed out reading NVRAM SSID inventory (rc=$_mmb_nvram_rc)"
+  # builds can leave `nvram show` asleep indefinitely; the inventory helper
+  # bounds and memoizes that failure instead of repeating it per guard tick.
+  merv_nvram_inventory_read || {
+    _mmb_nvram_rc=$?
+    _merv_mac_log warn "MERV_MAC: NVRAM SSID inventory unavailable (reason=${MERV_NVRAM_INVENTORY_REASON:-read-failed}, rc=${MERV_NVRAM_INVENTORY_RC:-$_mmb_nvram_rc})"
     return 1
-  fi
-  nvram_ssids=$(printf '%s\n' "$nvram_ssids" | grep -E '^wl[0-9][0-9]*(\.([0-9]+))?_ssid=')
+  }
+  nvram_file="${MERV_NVRAM_INVENTORY_FILE:-}"
+  [ -f "$nvram_file" ] && [ ! -L "$nvram_file" ] || return 1
 
   i=1
   while [ "$i" -le "$max_ssids" ]; do
@@ -184,7 +904,12 @@ merv_mac_build_expected_iface_vid() {
     mervqt_valid_vid "$vlan" || continue
 
     # Scan cached NVRAM for wl subinterfaces matching this SSID
+    [ -f "$nvram_file" ] && [ ! -L "$nvram_file" ] || return 1
     while IFS='=' read -r key rawval; do
+      case "$key" in
+        wl[0-9]*_ssid) ;;
+        *) continue ;;
+      esac
       # Strip quotes and surrounding whitespace from NVRAM value
       val=$(printf '%s' "$rawval" \
         | sed "s/^[[:space:]]*['\"]//;s/['\"][[:space:]]*\$//;s/^[[:space:]]*//;s/[[:space:]]*\$//")
@@ -203,9 +928,19 @@ merv_mac_build_expected_iface_vid() {
         esac
       fi
 
-      # Resolve ifname from NVRAM; fall back to base key name if empty
-      iface=$(nvram get "${base}_ifname" 2>/dev/null \
-        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      # Resolve ifname from the same validated inventory; fall back to the
+      # base key name when firmware omitted the optional mapping, matching the
+      # historical builder's fallback without another unbounded NVRAM call.
+      ifname_key="${base}_ifname"
+      ifname_raw=""
+      [ -f "$nvram_file" ] && [ ! -L "$nvram_file" ] || return 1
+      while IFS='=' read -r _mmb_name _mmb_value; do
+        [ "$_mmb_name" = "$ifname_key" ] || continue
+        ifname_raw="$_mmb_value"
+        break
+      done < "$nvram_file"
+      iface=$(printf '%s' "$ifname_raw" \
+        | sed 's/^[[:space:]]*[\"]//;s/[\"][[:space:]]*$//;s/^[[:space:]]*//;s/[[:space:]]*$//')
       [ -n "$iface" ] || iface="$base"
 
       # Emit only wl subinterfaces (strict check)
@@ -217,11 +952,40 @@ merv_mac_build_expected_iface_vid() {
         esac
       fi
 
-    done <<_NVRAM_
-$nvram_ssids
-_NVRAM_
+    done < "$nvram_file"
 
-  done | awk '!seen[$1]++'
+  done | awk '
+    NF == 0 { next }
+    NF != 2 || $1 !~ /^wl[0-9]+\.[0-9]+$/ ||
+      $2 !~ /^[0-9]+$/ || $2 < 2 || $2 > 4094 { bad=1; next }
+    !seen[$1]++ { print }
+    END { exit bad ? 65 : 0 }
+  '
+}
+
+merv_iface_vid_pairs_validate() {
+  local _mipv_pairs="$1" _mipv_iface _mipv_vid _mipv_extra
+  while IFS=' ' read -r _mipv_iface _mipv_vid _mipv_extra; do
+    [ -n "$_mipv_iface" ] || {
+      [ -z "$_mipv_vid" ] && [ -z "$_mipv_extra" ] && continue
+      return 1
+    }
+    [ -n "$_mipv_vid" ] && [ -z "$_mipv_extra" ] || return 1
+    if type mervqt_valid_wl_subif >/dev/null 2>&1; then
+      mervqt_valid_wl_subif "$_mipv_iface" || return 1
+    else
+      case "$_mipv_iface" in wl[0-9]*.*) ;; *) return 1 ;; esac
+    fi
+    if type mervqt_valid_vid >/dev/null 2>&1; then
+      mervqt_valid_vid "$_mipv_vid" || return 1
+    else
+      case "$_mipv_vid" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$_mipv_vid" -ge 2 ] 2>/dev/null && [ "$_mipv_vid" -le 4094 ] 2>/dev/null || return 1
+    fi
+  done <<_MERV_IFACE_VID_PAIRS_
+$_mipv_pairs
+_MERV_IFACE_VID_PAIRS_
+  return 0
 }
 
 # ============================================================================
@@ -232,9 +996,10 @@ _NVRAM_
 # either the cache is invalidated (merv_iface_vid_cache_invalidate) or
 # disabled (merv_iface_vid_cache_disable).
 #
-# Cache scope: in-memory shell variable. Process-local. Subshells (pipelines)
-# do NOT mutate the parent's cache, so callers that consume output via a pipe
-# still benefit because the parent shell populates the cache before the pipe.
+# Cache scope: the derived iface/VID output remains an in-memory optimization,
+# while the underlying NVRAM inventory is file-backed and process-scoped.  The
+# latter is required because subshells (pipelines/command substitutions) do
+# NOT mutate the parent's shell variables.
 #
 # Callers that MUST see fresh state (final security check, snapshot
 # preconditions) should call merv_mac_build_expected_iface_vid directly and
@@ -242,28 +1007,190 @@ _NVRAM_
 # ============================================================================
 _MERV_IFACE_VID_CACHE=""
 _MERV_IFACE_VID_CACHE_ON=0
+_MERV_IFACE_VID_CACHE_STATUS="unset"
+
+merv_iface_vid_cache_path() {
+  local _mivcp_path
+  _mivcp_path=$(merv_nvram_inventory_path 2>/dev/null) || {
+    merv_nvram_inventory_clear_state
+    return 1
+  }
+  printf '%s.iface\n' "$_mivcp_path"
+}
+
+merv_iface_vid_cache_remove_files() {
+  local _mivrf_path="$1" _mivrf_file _mivrf_failed=0
+  [ -n "$_mivrf_path" ] || return 1
+  merv_nvram_inventory_process_start "${_mivrf_path%/*}" >/dev/null 2>&1 || {
+    merv_nvram_inventory_clear_state
+    return 1
+  }
+  for _mivrf_file in "${_mivrf_path}.data" "${_mivrf_path}.state" \
+    "${_mivrf_path}.tmp" "${_mivrf_path}.state.tmp"; do
+    rm -f "$_mivrf_file" 2>/dev/null || _mivrf_failed=1
+  done
+  for _mivrf_file in "${_mivrf_path}.data" "${_mivrf_path}.state" \
+    "${_mivrf_path}.tmp" "${_mivrf_path}.state.tmp"; do
+    if [ -e "$_mivrf_file" ] || [ -L "$_mivrf_file" ]; then
+      _mivrf_failed=1
+    fi
+  done
+  [ "$_mivrf_failed" -eq 0 ]
+}
 
 merv_iface_vid_cache_enable() {
+  local _mivce_path
+  merv_nvram_inventory_clear_state
   _MERV_IFACE_VID_CACHE_ON=1
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="unset"
+  _mivce_path=$(merv_iface_vid_cache_path 2>/dev/null) || {
+    _MERV_IFACE_VID_CACHE_ON=0
+    _MERV_IFACE_VID_CACHE_STATUS=error
+    return 1
+  }
+  if ! merv_iface_vid_cache_remove_files "$_mivce_path"; then
+    _MERV_IFACE_VID_CACHE_ON=0
+    _MERV_IFACE_VID_CACHE_STATUS=error
+    return 1
+  fi
+  return 0
 }
 
 merv_iface_vid_cache_invalidate() {
+  local _mivci_path
+  merv_nvram_inventory_clear_state
+  _MERV_IFACE_VID_CACHE_ON=1
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="error"
+  _mivci_path=$(merv_iface_vid_cache_path 2>/dev/null) || return 1
+  merv_iface_vid_cache_remove_files "$_mivci_path" || return 1
+  type merv_nvram_inventory_invalidate >/dev/null 2>&1 || return 1
+  merv_nvram_inventory_invalidate || return 1
+  _MERV_IFACE_VID_CACHE_STATUS="unset"
+  return 0
 }
 
 merv_iface_vid_cache_disable() {
+  local _mivcd_path
+  merv_nvram_inventory_clear_state
   _MERV_IFACE_VID_CACHE_ON=0
   _MERV_IFACE_VID_CACHE=""
+  _MERV_IFACE_VID_CACHE_STATUS="error"
+  _mivcd_path=$(merv_iface_vid_cache_path 2>/dev/null) || return 1
+  merv_iface_vid_cache_remove_files "$_mivcd_path" || return 1
+  type merv_nvram_inventory_invalidate >/dev/null 2>&1 || return 1
+  merv_nvram_inventory_invalidate || return 1
+  _MERV_IFACE_VID_CACHE_STATUS="unset"
+  return 0
 }
 
 merv_iface_vid_list() {
+  local _mivl_path _mivl_state _mivl_data _mivl_start _mivl_tmp
+  local _mivl_kind _mivl_pid _mivl_cached_start _mivl_rc _mivl_reason
   if [ "${_MERV_IFACE_VID_CACHE_ON:-0}" = "1" ]; then
-    if [ -z "$_MERV_IFACE_VID_CACHE" ]; then
-      _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null)
+    case "${_MERV_IFACE_VID_CACHE_STATUS:-unset}" in
+      valid)
+        [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+        return 0
+        ;;
+      error) return 1 ;;
+    esac
+
+    # merv_iface_vid_list is commonly consumed through command substitution
+    # by the QT verifier.  Rehydrate the derived cache from a process-scoped
+    # file before rebuilding so that the parent/child shell boundary cannot
+    # turn one inventory read into one read per guard tick.
+    _mivl_path=$(merv_iface_vid_cache_path 2>/dev/null) || {
+      merv_nvram_inventory_clear_state
+      _MERV_IFACE_VID_CACHE=""
+      _MERV_IFACE_VID_CACHE_STATUS=error
+      return 1
+    }
+    _mivl_state="${_mivl_path}.state"
+    _mivl_data="${_mivl_path}.data"
+    _mivl_start=$(merv_nvram_inventory_process_start) || {
+      merv_nvram_inventory_clear_state
+      _MERV_IFACE_VID_CACHE=""
+      _MERV_IFACE_VID_CACHE_STATUS=error
+      return 1
+    }
+    if [ -n "$_mivl_path" ] && [ -f "$_mivl_state" ] && [ ! -L "$_mivl_state" ]; then
+      _mivl_kind=""; _mivl_pid=""; _mivl_cached_start=""; _mivl_rc=""; _mivl_reason=""
+      [ ! -L "$_mivl_state" ] || {
+        _MERV_IFACE_VID_CACHE=""
+        _MERV_IFACE_VID_CACHE_STATUS=error
+        return 1
+      }
+      IFS='|' read -r _mivl_kind _mivl_pid _mivl_cached_start _mivl_rc _mivl_reason < "$_mivl_state" || :
+      if [ "$_mivl_pid" = "$$" ] && [ "$_mivl_cached_start" = "$_mivl_start" ]; then
+        case "$_mivl_kind" in
+          valid)
+            if [ "$_mivl_rc" = 0 ] && [ "$_mivl_reason" = ok ] &&
+               [ -f "$_mivl_data" ] && [ ! -L "$_mivl_data" ]; then
+              [ ! -L "$_mivl_data" ] || {
+                _MERV_IFACE_VID_CACHE=""
+                _MERV_IFACE_VID_CACHE_STATUS=error
+                return 1
+              }
+              _MERV_IFACE_VID_CACHE=$(cat "$_mivl_data" 2>/dev/null) || return 1
+              merv_iface_vid_pairs_validate "$_MERV_IFACE_VID_CACHE" || {
+                _MERV_IFACE_VID_CACHE=""
+                _MERV_IFACE_VID_CACHE_STATUS=error
+                return 1
+              }
+              _MERV_IFACE_VID_CACHE_STATUS=valid
+              [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+              return 0
+            fi
+            ;;
+          error)
+            _MERV_IFACE_VID_CACHE=""
+            _MERV_IFACE_VID_CACHE_STATUS=error
+            return 1
+            ;;
+        esac
+      fi
+      rm -f "$_mivl_state" "$_mivl_data" 2>/dev/null || return 1
     fi
-    [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
-    return 0
+
+    if _MERV_IFACE_VID_CACHE=$(merv_mac_build_expected_iface_vid 2>/dev/null) &&
+       merv_iface_vid_pairs_validate "$_MERV_IFACE_VID_CACHE"; then
+      if ! merv_nvram_inventory_process_start "${_mivl_path%/*}" >/dev/null 2>&1; then
+        _MERV_IFACE_VID_CACHE=""
+        _MERV_IFACE_VID_CACHE_STATUS=error
+        return 1
+      fi
+      if [ -n "$_mivl_path" ]; then
+        _mivl_tmp="${_mivl_path}.tmp"
+        [ ! -L "$_mivl_tmp" ] || return 1
+        [ ! -e "$_mivl_tmp" ] || rm -f "$_mivl_tmp" 2>/dev/null || return 1
+        [ ! -L "$_mivl_data" ] || return 1
+        (
+          set -C
+          printf '%s\n' "$_MERV_IFACE_VID_CACHE" > "$_mivl_tmp" 2>/dev/null
+        ) || return 1
+        [ ! -L "$_mivl_tmp" ] || {
+          rm -f "$_mivl_tmp" 2>/dev/null
+          return 1
+        }
+        chmod 600 "$_mivl_tmp" 2>/dev/null || { rm -f "$_mivl_tmp" 2>/dev/null; return 1; }
+        mv -f "$_mivl_tmp" "$_mivl_data" 2>/dev/null || { rm -f "$_mivl_tmp" 2>/dev/null; return 1; }
+        merv_nvram_inventory_publish_state "$_mivl_path" \
+          "valid|$$|$_mivl_start|0|ok" || return 1
+      fi
+      _MERV_IFACE_VID_CACHE_STATUS="valid"
+      [ -n "$_MERV_IFACE_VID_CACHE" ] && printf '%s\n' "$_MERV_IFACE_VID_CACHE"
+      return 0
+    else
+      _MERV_IFACE_VID_CACHE=""
+      _MERV_IFACE_VID_CACHE_STATUS="error"
+      if [ -n "$_mivl_path" ]; then
+        merv_nvram_inventory_publish_state "$_mivl_path" \
+          "error|$$|$_mivl_start|1|derived-rows-invalid" || :
+      fi
+      return 1
+    fi
   fi
   merv_mac_build_expected_iface_vid 2>/dev/null
 }
@@ -283,7 +1210,11 @@ merv_iface_vid_list() {
 merv_mac_snapshot_preconditions_ok() {
   local pairs iface vid ok=1 checked=0
 
-  pairs=$(merv_mac_build_expected_iface_vid)
+  pairs=$(merv_iface_vid_list)
+  if [ $? -ne 0 ]; then
+    warn -c vlan "MAC precondition: expected managed VAP state is unknown"
+    return 1
+  fi
   [ -n "$pairs" ] || return 0
 
   while IFS=' ' read -r iface vid; do
@@ -320,6 +1251,100 @@ _PAIRS_
 }
 
 # ============================================================================
+# merv_mac_append_own_candidate <mac> <output>
+# Add one exact local interface identity and its exact IEEE U/L-bit pair.
+# ============================================================================
+merv_mac_append_own_candidate() {
+  local _mmaoc_mac _mmaoc_out="$2" _mmaoc_pair
+  _mmaoc_mac=$(mervqt_mac_lower "$1" 2>/dev/null || printf '')
+  mervqt_valid_mac "$_mmaoc_mac" || return 0
+
+  printf '%s\n' "$_mmaoc_mac" >> "$_mmaoc_out" || return 1
+  _mmaoc_pair=$(printf '%s\n' "$_mmaoc_mac" | awk -F: '
+    BEGIN { OFS=":"; h="0123456789abcdef" }
+    function hv(c){ return index(h,c)-1 }
+    function hd(n){ return substr(h,n+1,1) }
+    {
+      v=hv(substr($1,1,1))*16 + hv(substr($1,2,1))
+      if (int(v/2)%2) v-=2; else v+=2
+      $1=hd(int(v/16)) hd(v%16)
+      print
+    }')
+  [ -n "$_mmaoc_pair" ] && printf '%s\n' "$_mmaoc_pair" >> "$_mmaoc_out"
+  return 0
+}
+
+# ============================================================================
+# merv_mac_build_own_exclude <output>
+# Build the exact local interface/VAP exclusion set once per collector call.
+# ============================================================================
+merv_mac_build_own_exclude() {
+  local _mmboc_out="$1" _mmboc_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}"
+  local _mmboc_tmp="${_mmboc_out}.tmp.$$" _mmboc_path _mmboc_br_path
+  local _mmboc_br _mmboc_mac _mmboc_iface
+  local _mmboc_rc=0
+
+  : > "$_mmboc_tmp" || return 1
+
+  # Kernel interface addresses are the primary authoritative source.
+  for _mmboc_path in "$_mmboc_root"/*/address; do
+    [ -f "$_mmboc_path" ] || continue
+    _mmboc_mac=$(cat "$_mmboc_path" 2>/dev/null || printf '')
+    merv_mac_append_own_candidate "$_mmboc_mac" "$_mmboc_tmp" || _mmboc_rc=1
+  done
+
+  # Bridge-local FDB entries cover firmware identities not exposed consistently
+  # through sysfs on every ASUS/Broadcom build.
+  if type brctl >/dev/null 2>&1; then
+    for _mmboc_br_path in "$_mmboc_root"/br[0-9]*/brif; do
+      [ -d "$_mmboc_br_path" ] || continue
+      _mmboc_br="${_mmboc_br_path%/brif}"
+      _mmboc_br="${_mmboc_br##*/}"
+      brctl showmacs "$_mmboc_br" 2>/dev/null |
+        while IFS=' ' read -r _mmboc_pno _mmboc_mac _mmboc_local _mmboc_rest; do
+          [ "$_mmboc_local" = yes ] || continue
+          merv_mac_append_own_candidate "$_mmboc_mac" "$_mmboc_tmp" || :
+        done
+    done
+  fi
+
+  # Broadcom VAP commands can expose an identity that differs from sysfs.
+  # Query them once while building the cached set.
+  if type wl >/dev/null 2>&1; then
+    for _mmboc_path in "$_mmboc_root"/wl[0-9]*.*; do
+      [ -d "$_mmboc_path" ] || continue
+      _mmboc_iface="${_mmboc_path##*/}"
+      {
+        cat "$_mmboc_path/address" 2>/dev/null
+        wl -i "$_mmboc_iface" cur_etheraddr 2>/dev/null
+        wl -i "$_mmboc_iface" perm_etheraddr 2>/dev/null
+        wl -i "$_mmboc_iface" bssid 2>/dev/null
+      } | awk '{
+        for (i=1;i<=NF;i++) {
+          m=tolower($i)
+          if (m ~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/) print m
+        }
+      }' | while IFS= read -r _mmboc_mac; do
+        merv_mac_append_own_candidate "$_mmboc_mac" "$_mmboc_tmp" || :
+      done
+    done
+  fi
+
+  sort -u "$_mmboc_tmp" > "$_mmboc_out" 2>/dev/null || {
+    cp "$_mmboc_tmp" "$_mmboc_out" 2>/dev/null || _mmboc_rc=1
+  }
+  rm -f "$_mmboc_tmp" 2>/dev/null || _mmboc_rc=1
+  return "$_mmboc_rc"
+}
+
+merv_mac_is_own_interface() {
+  local _mmio_mac="$1" _mmio_file="$2"
+  [ -f "$_mmio_file" ] || return 1
+  _mmio_mac=$(mervqt_mac_lower "$_mmio_mac" 2>/dev/null || printf '')
+  awk -v m="$_mmio_mac" '$0 == m { found=1; exit } END { exit found ? 0 : 1 }' "$_mmio_file"
+}
+
+# ============================================================================
 # merv_mac_build_snapshot <tmpfile>
 # Scan all VLAN bridges (br<VID>) for wl*.* members, run wl assoclist on
 # each, write client records to <tmpfile>.
@@ -328,12 +1353,18 @@ _PAIRS_
 # ============================================================================
 merv_mac_build_snapshot() {
   local tmpfile="$1"
-  local br_path br_name vid iface_path iface mac now rep_iface
+  local br_path br_name vid iface_path iface mac now rep_iface _fdb_path _fdb_pno _fdb_iface
+  local _mmbs_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}" _mmbs_own_file _mmbs_count
 
   now=$(date +%s)
   : > "$tmpfile" || return 1
+  _mmbs_own_file="${tmpfile}.own.$$"
+  merv_mac_build_own_exclude "$_mmbs_own_file" || {
+    rm -f "$_mmbs_own_file" 2>/dev/null || :
+    return 1
+  }
 
-  for br_path in /sys/class/net/br[1-9]*/brif; do
+  for br_path in "$_mmbs_root"/br[1-9]*/brif; do
     [ -d "$br_path" ] || continue
     br_name="${br_path%/brif}"
     br_name="${br_name##*/}"
@@ -352,20 +1383,15 @@ merv_mac_build_snapshot() {
         [ -n "$mac" ] || continue
         mac=$(mervqt_mac_lower "$mac")
         mervqt_valid_mac "$mac" || continue
+        merv_mac_is_own_interface "$mac" "$_mmbs_own_file" && continue
         printf '%s %s %s %s\n' "$now" "$mac" "$iface" "$vid"
       done
     done
 
-    # Supplement assoclist with the bridge forwarding database. `brctl showmacs`
-    # reports every MAC the bridge has forwarded, so it captures clients that
-    # have momentarily aged out of `wl assoclist` (power-save / sleeping
-    # devices) or very recently disassociated — closing the protection gap for
-    # those MACs. Only non-local entries (is local? = no) are clients; local
-    # entries are the router's own port MACs and are excluded. Records are
-    # attributed to the bridge's representative wireless subinterface (metadata
-    # only — the ebtables rule keys on MAC + --logical-in br0, never on iface)
-    # and only when the bridge has at least one wireless member, keeping
-    # wired-only VLANs out of this version's wireless snapshot scope.
+    # Supplement assoclist with the bridge forwarding database, but only for
+    # MACs actually learned on a wireless VAP port. A VLAN bridge also learns
+    # upstream/trunk MACs on eth*.VID; treating every non-local FDB entry as a
+    # wireless client can shield the upstream gateway itself on native br0.
     if [ -n "$rep_iface" ] && merv_has brctl; then
       brctl showmacs "$br_name" 2>/dev/null | while read -r _pno mac _islocal _rest; do
         case "$mac" in
@@ -373,14 +1399,33 @@ merv_mac_build_snapshot() {
           *) continue ;;
         esac
         [ "$_islocal" = "no" ] || continue
+
+        _fdb_iface=""
+        for _fdb_path in "$_mmbs_root/$br_name/brif/"*; do
+          [ -e "$_fdb_path/port_no" ] || continue
+          _fdb_pno=$(cat "$_fdb_path/port_no" 2>/dev/null) || continue
+          _fdb_pno=$((_fdb_pno))
+          [ "$_fdb_pno" -eq "$_pno" ] 2>/dev/null || continue
+          _fdb_iface="${_fdb_path##*/}"
+          break
+        done
+
+        [ -n "$_fdb_iface" ] || continue
+
+        # Only FDB entries actually learned on a wireless VAP belong in MERV_MAC.
+        mervqt_valid_wl_subif "$_fdb_iface" || continue
+
         mac=$(mervqt_mac_lower "$mac")
         mervqt_valid_mac "$mac" || continue
-        printf '%s %s %s %s\n' "$now" "$mac" "$rep_iface" "$vid"
+        merv_mac_is_own_interface "$mac" "$_mmbs_own_file" && continue
+        printf '%s %s %s %s\n' "$now" "$mac" "$_fdb_iface" "$vid"
       done
     fi
   done >> "$tmpfile"
 
-  wc -l < "$tmpfile" 2>/dev/null | tr -d ' '
+  _mmbs_count=$(wc -l < "$tmpfile" 2>/dev/null | tr -d ' ')
+  rm -f "$_mmbs_own_file" 2>/dev/null || :
+  printf '%s\n' "$_mmbs_count"
 }
 
 # ============================================================================
@@ -412,6 +1457,26 @@ merv_mac_node_list() {
       '$1>=1 && $1<=max && $2 != "none" && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1, $2 }'
 }
 
+# Shield is not allowed to observe, merge, enforce, or push while a generic
+# node-operation pool still has any unresolved ownership metadata.  Prefer the
+# shared predicate; retain a strict local fallback for legacy fixture callers
+# that intentionally omit lib_node_jobs.sh.
+merv_mac_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _mmpsu_rc=$?
+    case "$_mmpsu_rc" in 0) return 0 ;; 1) return 1 ;; *) return 0 ;; esac
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) ;; *) return 0 ;; esac
+  [ -n "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] && return 0
+  [ -n "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] && return 0
+  return 1
+}
+
 # ============================================================================
 # merv_mac_collect_from_node <node_id> <node_ip>
 # Run a self-contained remote collector over one SSH connection and emit
@@ -426,8 +1491,73 @@ merv_mac_collect_from_node() {
   local nid="$1" nip="$2" out now rcmd m i v
   now=$(date +%s)
 
-  rcmd=$(cat <<'REMOTE'
-for b in /sys/class/net/br[1-9]*/brif; do
+rcmd=$(cat <<'REMOTE'
+_remote_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}"
+
+_remote_append_own_candidate() {
+  local _roac_mac _roac_pair
+  _roac_mac=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+  case "$_roac_mac" in
+    [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "$_roac_mac"
+  _roac_pair=$(printf '%s\n' "$_roac_mac" | awk -F: '
+    BEGIN { OFS=":"; h="0123456789abcdef" }
+    function hv(c){ return index(h,c)-1 }
+    function hd(n){ return substr(h,n+1,1) }
+    {
+      v=hv(substr($1,1,1))*16 + hv(substr($1,2,1))
+      if (int(v/2)%2) v-=2; else v+=2
+      $1=hd(int(v/16)) hd(v%16)
+      print
+    }')
+  [ -n "$_roac_pair" ] && printf '%s\n' "$_roac_pair"
+}
+
+_remote_build_own_macs() {
+  _remote_own_macs=$(
+    {
+      for _rop in "$_remote_root"/*/address; do
+        [ -f "$_rop" ] || continue
+        cat "$_rop" 2>/dev/null
+      done
+      if type brctl >/dev/null 2>&1; then
+        for _robp in "$_remote_root"/br[0-9]*/brif; do
+          [ -d "$_robp" ] || continue
+          _rob="${_robp%/brif}"; _rob="${_rob##*/}"
+          brctl showmacs "$_rob" 2>/dev/null | awk '$3=="yes"{print $2}'
+        done
+      fi
+      if type wl >/dev/null 2>&1; then
+        for _rop in "$_remote_root"/wl[0-9]*.*; do
+          [ -d "$_rop" ] || continue
+          _roi="${_rop##*/}"
+          cat "$_rop/address" 2>/dev/null
+          wl -i "$_roi" cur_etheraddr 2>/dev/null
+          wl -i "$_roi" perm_etheraddr 2>/dev/null
+          wl -i "$_roi" bssid 2>/dev/null
+        done
+      fi
+    } | awk '{
+      for (i=1;i<=NF;i++) {
+        m=tolower($i)
+        if (m ~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/) print m
+      }
+    }' | while IFS= read -r _romac; do
+      _remote_append_own_candidate "$_romac"
+    done | sort -u
+  )
+}
+
+_remote_mac_is_own() {
+  printf '%s\n' "$_remote_own_macs" |
+    awk -v m="$1" '$0 == m { found=1; exit } END { exit found ? 0 : 1 }'
+}
+
+_remote_build_own_macs
+
+for b in "$_remote_root"/br[1-9]*/brif; do
   [ -d "$b" ] || continue
   n=${b%/brif}; n=${n##*/}; v=${n#br}
   case "$v" in ''|*[!0-9]*) continue ;; esac
@@ -439,15 +1569,43 @@ for b in /sys/class/net/br[1-9]*/brif; do
     wl -i "$i" assoclist 2>/dev/null | while read -r k m; do
       [ "$k" = assoclist ] || continue
       [ -n "$m" ] || continue
+      m=$(printf '%s' "$m" | tr 'A-F' 'a-f')
+      case "$m" in
+        [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+        *) continue ;;
+      esac
+      _remote_mac_is_own "$m" && continue
       echo "$m $i $v"
     done
   done
   [ -n "$rep" ] || continue
-  merv_has brctl || continue
+  type brctl >/dev/null 2>&1 || continue
   brctl showmacs "$n" 2>/dev/null | while read -r po m loc rest; do
-    case "$m" in [0-9a-fA-F][0-9a-fA-F]:*) ;; *) continue ;; esac
+    case "$m" in
+      [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+      *) continue ;;
+    esac
     [ "$loc" = no ] || continue
-    echo "$m $rep $v"
+    m=$(printf '%s' "$m" | tr 'A-F' 'a-f')
+    _remote_mac_is_own "$m" && continue
+
+    src=""
+    for pd in "$b"/*; do
+      [ -e "$pd/port_no" ] || continue
+      pn=$(cat "$pd/port_no" 2>/dev/null) || continue
+      pn=$((pn))
+      [ "$pn" -eq "$po" ] 2>/dev/null || continue
+      src=${pd##*/}
+      break
+    done
+
+    # Ignore uplink/trunk FDB entries. Only wireless VAP-learned MACs are clients.
+    case "$src" in
+      wl*.*|ra*.*|ath*.*) ;;
+      *) continue ;;
+    esac
+
+    echo "$m $src $v"
   done
 done
 REMOTE
@@ -467,90 +1625,185 @@ REMOTE
 }
 
 # ============================================================================
-# merv_mac_push_db_to_nodes "<node_id node_ip\n...>"
-# Stream the merged active db to each node (atomic tmp+mv over one SSH stream)
-# and reload that node's MERV_MAC ebtables chain from the pushed db. Called only
-# after the merged db's structural fingerprint changes, so stable networks
-# generate no pushes. Fully guarded: silently no-ops when the SSH toolchain,
-# keys, or db file are unavailable.
-#
-# Push-outcome counters: this function mutates the MERV_MAC_LAST_PUSH_* status
-# globals directly. The caller (merv_mac_snapshot) MUST initialize them to zero
-# before invoking. The node loop is here-doc fed (not pipe fed) so the counter
-# increments run in the current shell and survive — a pipe-fed `while read`
-# would lose them to a subshell.
+# merv_mac_collect_node_job <node_id> <node_ip>
+# Pool worker wrapper.  A worker owns only its isolated payload; the parent
+# validates the terminal result and every record before merging it into the
+# authoritative snapshot file.
 # ============================================================================
-merv_mac_push_db_to_nodes() {
-  local nodes="$1"
-  local nid nip port user _ovr_src
+merv_mac_collect_node_job() {
+  [ -n "${MERV_NODE_JOB_DIR:-}" ] || return 2
+  _mmcnj_payload="$MERV_NODE_JOB_DIR/payload"
+  : > "$_mmcnj_payload" || return 2
+  merv_mac_collect_from_node "$1" "$2" > "$_mmcnj_payload"
+}
 
-  ssh_keys_effectively_installed                   || return 1
-  [ -n "${SSH_KEY:-}" ] && [ -f "${SSH_KEY}" ]       || return 1
-  merv_has "${MERV_SSH_CLIENT:-dbclient}"          || return 1
+# Validate and normalize one worker payload in the parent shell.  Invalid
+# records make that node observation incomplete; no valid subset is merged.
+# MERV_MAC_PAYLOAD_COUNT is intentionally parent-owned state.
+merv_mac_validate_node_payload() {
+  _mmvnp_payload="$1" _mmvnp_out="$2"
+  [ -f "$_mmvnp_payload" ] || return 1
+  : > "$_mmvnp_out" || return 1
+  MERV_MAC_PAYLOAD_COUNT=0
+  _mmvnp_valid=1
+  while IFS=' ' read -r _mmvnp_ts _mmvnp_mac _mmvnp_iface _mmvnp_vid _mmvnp_extra ||
+        [ -n "$_mmvnp_ts$_mmvnp_mac$_mmvnp_iface$_mmvnp_vid$_mmvnp_extra" ]; do
+    [ -n "$_mmvnp_ts$_mmvnp_mac$_mmvnp_iface$_mmvnp_vid$_mmvnp_extra" ] || continue
+    case "$_mmvnp_ts" in ''|*[!0-9]*) _mmvnp_valid=0; continue ;; esac
+    [ -z "$_mmvnp_extra" ] || { _mmvnp_valid=0; continue; }
+    _mmvnp_mac=$(mervqt_mac_lower "$_mmvnp_mac" 2>/dev/null || printf '')
+    mervqt_valid_mac "$_mmvnp_mac" || { _mmvnp_valid=0; continue; }
+    mervqt_valid_wl_subif "$_mmvnp_iface" || { _mmvnp_valid=0; continue; }
+    mervqt_valid_vid "$_mmvnp_vid" || { _mmvnp_valid=0; continue; }
+    printf '%s %s %s %s\n' "$_mmvnp_ts" "$_mmvnp_mac" "$_mmvnp_iface" "$_mmvnp_vid" >> "$_mmvnp_out" || return 1
+    MERV_MAC_PAYLOAD_COUNT=$((MERV_MAC_PAYLOAD_COUNT + 1))
+  done < "$_mmvnp_payload"
+  [ "$_mmvnp_valid" -eq 1 ] || { rm -f "$_mmvnp_out" 2>/dev/null; return 1; }
+  return 0
+}
+
+# Parent-only progress hook for either MAC node-pool phase.  Workers never
+# mutate counters or public progress; they publish only isolated terminal
+# state and payload files.
+merv_mac_node_pool_progress() {
+  _mmnpp_root="$1" _mmnpp_phase="$2"
+  _mmnpp_total=${MERV_MAC_NODE_POOL_TOTAL:-0}; _mmnpp_done=0
+  case "$_mmnpp_phase" in collect) _mmnpp_ui_phase=node_collect; _mmnpp_percent=45; _mmnpp_label="Collecting MAC clients from nodes" ;; push) _mmnpp_ui_phase=push; _mmnpp_percent=86; _mmnpp_label="Pushing MAC Shield to nodes" ;; *) return 0 ;; esac
+  case "$_mmnpp_total" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$_mmnpp_total" -gt 0 ] 2>/dev/null || return 0
+  for _mmnpp_dir in "$_mmnpp_root"/node_*; do
+    [ -d "$_mmnpp_dir" ] || continue
+    _mmnpp_node=${_mmnpp_dir##*/node_}
+    if type mnj_result_validate >/dev/null 2>&1 &&
+       mnj_result_validate "$_mmnpp_dir/result" "$_mmnpp_node" "$_mmnpp_phase"; then
+      _mmnpp_done=$((_mmnpp_done + 1))
+    fi
+  done
+  _merv_mac_refresh_progress "$_mmnpp_ui_phase" "$_mmnpp_percent" "$_mmnpp_label — ${_mmnpp_done} of ${_mmnpp_total} complete."
+}
+
+# Pool worker for one node's atomic DB/override stream and remote Shield reload.
+# All SSH scratch state is redirected by mnj_worker to this node's isolated job
+# directory; the worker never mutates parent counters or public progress.
+merv_mac_push_node() {
+  _mmpp_nid="$1" _mmpp_configured_ip="$2"
+  _mmpp_nip=$(merv_node_resolve_endpoint "$_mmpp_nid" "$_mmpp_configured_ip" 2>/dev/null) || {
+    _merv_mac_log warn "MERV_MAC: node ${_mmpp_nid} endpoint resolution failed — db not pushed"
+    return 1
+  }
+  [ -n "$_mmpp_nip" ] || return 1
+
+  if ! merv_ssh_precheck "$_mmpp_nid" "$_mmpp_nip" >/dev/null 2>&1; then
+    _merv_mac_log warn "MERV_MAC: node ${_mmpp_nip} precheck failed — db not pushed"
+    return 1
+  fi
+  if ! merv_ssh_exec "$_mmpp_nid" "$_mmpp_nip" "mkdir -p '${MERV_MAC_DB_ACTIVE%/*}' '${MERV_MAC_OVERRIDE_DB%/*}'" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! merv_ssh_stream_file "$_mmpp_nid" "$_mmpp_nip" "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_ACTIVE"; then
+    _merv_mac_log warn "MERV_MAC: ✗ db push failed to node ${_mmpp_nip}"
+    return 1
+  fi
+
+  # Push overrides before reload.  An empty override file clears stale node
+  # state; a failed override stream remains best-effort as in the serial path.
+  _mmpp_ovr_src="${MERV_MAC_OVERRIDE_DB:-/dev/null}"
+  [ -f "$_mmpp_ovr_src" ] || _mmpp_ovr_src="/dev/null"
+  if ! merv_ssh_stream_file "$_mmpp_nid" "$_mmpp_nip" "$_mmpp_ovr_src" "$MERV_MAC_OVERRIDE_DB"; then
+    _merv_mac_log warn "MERV_MAC: override db push failed to node ${_mmpp_nip} (reloading anyway)"
+  fi
+  if ! merv_ssh_exec "$_mmpp_nid" "$_mmpp_nip" \
+       "MERV_BASE='$MERV_BASE'; MERV_NODE_CONTEXT=1; "'. "$MERV_BASE/settings/var_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null; ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"' \
+       >/dev/null 2>&1; then
+    _merv_mac_log warn "MERV_MAC: db pushed but shield reload failed on node ${_mmpp_nip}"
+    return 1
+  fi
+  _merv_mac_logv info "MERV_MAC: ✓ db pushed + shield reloaded on node ${_mmpp_nip}"
+  return 0
+}
+
+merv_mac_push_node_job() {
+  [ -n "${MERV_NODE_JOB_DIR:-}" ] || return 2
+  merv_mac_push_node "$1" "$2"
+}
+
+# merv_mac_push_db_to_nodes "<node_id node_ip\n...>"
+# Complete-set trust preflight remains serial.  The shared bounded pool then
+# owns one isolated DB/override push+reload worker per node; this parent
+# validates terminal results and aggregates counters/progress serially.
+merv_mac_push_db_to_nodes() {
+  _mmdp_nodes="$1"
+  MERV_MAC_LAST_PUSH_TOTAL=0
+  MERV_MAC_LAST_PUSH_OK=0
+  MERV_MAC_LAST_PUSH_FAILED=0
+  if merv_mac_pool_state_unresolved; then
+    MERV_MAC_LAST_REASON="node_pool_unresolved"
+    _merv_mac_log warn "MERV_MAC: node push blocked — prior node-operation pool state is unresolved"
+    return 1
+  fi
+  ssh_keys_effectively_installed || return 1
+  [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ] || return 1
+  merv_has "${MERV_SSH_CLIENT:-dbclient}" || return 1
   [ -f "$MERV_MAC_DB_ACTIVE" ] || return 0
 
-  # merv_mac_snapshot has already performed the complete-set gate before
-  # observing or mutating state. Reuse that result only when the canonical node
-  # list is unchanged; direct callers still get their own fail-closed gate.
   _mmdp_preflight_ok=0
   if [ -n "${MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST:-}" ] && type merv_node_list_digest >/dev/null 2>&1; then
     _mmdp_current_digest=$(merv_node_list_digest 2>/dev/null || printf '')
     [ "$_mmdp_current_digest" = "$MERV_MAC_SNAPSHOT_PREFLIGHT_DIGEST" ] && _mmdp_preflight_ok=1
   fi
   if [ "$_mmdp_preflight_ok" -ne 1 ]; then
-    if type merv_ssh_preflight_node_lines >/dev/null 2>&1; then
-      merv_ssh_preflight_node_lines "$nodes" "$SETTINGS_FILE" || return 1
-    else
-      return 1
-    fi
+    type merv_ssh_preflight_node_lines >/dev/null 2>&1 || return 1
+    merv_ssh_preflight_node_lines "$_mmdp_nodes" "$SETTINGS_FILE" || return 1
   fi
 
-  while read -r nid nip; do
-    [ -n "$nip" ] || continue
-    MERV_MAC_LAST_PUSH_TOTAL=$(( MERV_MAC_LAST_PUSH_TOTAL + 1 ))
+  _mmdp_now=$(date +%s 2>/dev/null || printf '%s' "$$")
+  _mmdp_root="$TMPDIR/node_jobs/mac_push.$$.$_mmdp_now"
+  _mmdp_nodes_file="$_mmdp_root/nodes"
+  mkdir -p "$_mmdp_root" || return 1
+  printf '%s\n' "$_mmdp_nodes" > "$_mmdp_nodes_file" || { rm -rf "$_mmdp_root" 2>/dev/null; return 1; }
+  MERV_MAC_NODE_POOL_TOTAL=$(printf '%s\n' "$_mmdp_nodes" | awk 'NF { n++ } END { print n + 0 }')
+  MNJ_POOL_PROGRESS_HOOK=merv_mac_node_pool_progress
+  if type mnj_pool_run >/dev/null 2>&1; then
+    mnj_pool_run "$_mmdp_root" push "${MERV_NODE_PARALLELISM:-}" "${MERV_MAC_NODE_PUSH_MAX_SEC:-720}" "$_mmdp_nodes_file" merv_mac_push_node_job
+    _mmdp_pool_rc=$?
+  else
+    _mmdp_pool_rc=2
+  fi
+  MNJ_POOL_PROGRESS_HOOK=""
+  # A setup/identity error can make the pool return before draining slots.
+  # Reconcile pending and published workers through the shared identity-safe
+  # abort path before reading results or removing the private root.
+  if [ "${_mmdp_pool_rc:-2}" -ne 0 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+    mnj_pool_abort_active failed parent-pool-error || :
+  fi
 
-    if ! merv_ssh_precheck "$nid" "$nip" >/dev/null 2>&1; then
-      _merv_mac_log warn "MERV_MAC: node ${nip} precheck failed — db not pushed"
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
-      continue
-    fi
-
-    # Stream the db through the verified SSH contract and install atomically.
-    if ! merv_ssh_exec "$nid" "$nip" "mkdir -p '${MERV_MAC_DB_ACTIVE%/*}' '${MERV_MAC_OVERRIDE_DB%/*}'" >/dev/null 2>&1; then
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 )); continue
-    fi
-    if merv_ssh_stream_file "$nid" "$nip" "$MERV_MAC_DB_ACTIVE" "$MERV_MAC_DB_ACTIVE"; then
-
-      # Push the override DB BEFORE the reload so the node enforces with the
-      # current override set. The override DB is cluster-wide: an empty file is
-      # meaningful (it clears any stale overrides left on the node). Stream
-      # /dev/null when no override DB exists locally. Best-effort: a failed
-      # override push is logged but does not abort the reload.
-      _ovr_src="$MERV_MAC_OVERRIDE_DB"
-      [ -f "$_ovr_src" ] || _ovr_src="/dev/null"
-      if ! merv_ssh_stream_file "$nid" "$nip" "$_ovr_src" "$MERV_MAC_OVERRIDE_DB"; then
-        _merv_mac_log warn "MERV_MAC: override db push failed to node ${nip} (reloading anyway)"
-      fi
-
-      # Reload the node's shield from the freshly pushed db (no remote snapshot).
-      # init_and_apply (init → flush → apply) so a node whose chain was lost to a
-      # reboot/teardown is repaired rather than silently no-op'd.
-      if merv_ssh_exec "$nid" "$nip" \
-           "MERV_BASE='$MERV_BASE'; MERV_NODE_CONTEXT=1; "'. "$MERV_BASE/settings/var_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/log_settings.sh" 2>/dev/null; . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null; ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"' \
-           >/dev/null 2>&1; then
-        _merv_mac_logv info "MERV_MAC: ✓ db pushed + shield reloaded on node ${nip}"
-        MERV_MAC_LAST_PUSH_OK=$(( MERV_MAC_LAST_PUSH_OK + 1 ))
-      else
-        _merv_mac_log warn "MERV_MAC: db pushed but shield reload failed on node ${nip}"
-        MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
-      fi
+  MERV_MAC_LAST_PUSH_TOTAL=0
+  MERV_MAC_LAST_PUSH_OK=0
+  MERV_MAC_LAST_PUSH_FAILED=0
+  while IFS=' ' read -r _mmdp_nid _mmdp_nip _mmdp_extra || [ -n "$_mmdp_nid" ]; do
+    [ -n "$_mmdp_nip" ] || continue
+    MERV_MAC_LAST_PUSH_TOTAL=$((MERV_MAC_LAST_PUSH_TOTAL + 1))
+    if [ -z "$_mmdp_extra" ] && type mnj_result_validate >/dev/null 2>&1 &&
+       mnj_result_validate "$_mmdp_root/node_${_mmdp_nid}/result" "$_mmdp_nid" push &&
+       [ "$MNJ_RESULT_STATE" = ok ]; then
+      MERV_MAC_LAST_PUSH_OK=$((MERV_MAC_LAST_PUSH_OK + 1))
     else
-      _merv_mac_log warn "MERV_MAC: ✗ db push failed to node ${nip}"
-      MERV_MAC_LAST_PUSH_FAILED=$(( MERV_MAC_LAST_PUSH_FAILED + 1 ))
+      MERV_MAC_LAST_PUSH_FAILED=$((MERV_MAC_LAST_PUSH_FAILED + 1))
+      _merv_mac_log warn "MERV_MAC: node ${_mmdp_nip} push/reload failed"
     fi
-  done <<_PUSH_
-$nodes
-_PUSH_
+  done <<_MMDP_NODES_
+$_mmdp_nodes
+_MMDP_NODES_
+  # An identity failure leaves MNJ_POOL_ACTIVE set and its private tree
+  # retained for a safe retry; never remove a directory that may still contain
+  # an authenticated child.
+  if ! merv_mac_pool_state_unresolved; then
+    rm -rf "$_mmdp_root" 2>/dev/null || :
+  else
+    _mmdp_pool_rc=1
+    _merv_mac_log warn "MERV_MAC: retaining node push workspace while worker identity cleanup is pending"
+  fi
+  [ "$MERV_MAC_LAST_PUSH_FAILED" -eq 0 ] && [ "$_mmdp_pool_rc" -eq 0 ]
 }
 
 # ============================================================================
@@ -794,6 +2047,23 @@ _merv_mac_set_counts() {
 merv_mac_snapshot() {
   [ "${DRY_RUN:-no}" = "yes" ] && return 0
 
+  # An unresolved pool is a hard stop.  In particular, do this before the
+  # Shield lock, local collection, database merge, or any replacement pool
+  # setup so retained worker metadata/workspaces remain authoritative.
+  if merv_mac_pool_state_unresolved; then
+    MERV_MAC_LAST_STATUS="pool_unresolved"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+    MERV_MAC_LAST_LOCAL_COUNT=0; MERV_MAC_LAST_NODE_COUNT=0
+    MERV_MAC_LAST_TOTAL_COUNT=0; MERV_MAC_LAST_DB_COUNT=0
+    MERV_MAC_LAST_CHANGED=0
+    MERV_MAC_LAST_NODES_TOTAL=0; MERV_MAC_LAST_NODES_OK=0; MERV_MAC_LAST_NODES_FAILED=0
+    MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
+    _merv_mac_log warn "MERV_MAC: snapshot blocked — prior node-operation pool state is unresolved"
+    return 1
+  fi
+
+  _merv_mac_refresh_progress preflight 15 \
+    "Verifying MAC Shield interfaces and node access..."
+
   # --- Snapshot mutual-exclusion (unified lock primitives) -----------------
   # A single mac_snapshot.lock serializes every MAC snapshot path: the cron
   # tick (heal_event.sh), the post-apply async snapshot (mervlan_manager.sh)
@@ -859,7 +2129,8 @@ merv_mac_snapshot() {
   # be fully probed is a hard preflight failure, not an incomplete observation
   # that can be silently merged.
   local _nodes="" _nodes_total=0 _nodes_ok=0 _nodes_failed=0 _node_total=0
-  local _node_collect_incomplete=0
+  local _node_collect_incomplete=0 _node_pool_root="" _node_pool_nodes="" _node_pool_rc=2
+  local _nid _nip _node_extra _node_dir _node_candidate _node_combined _rc _node_result_ok
   if [ "${MERV_MAC_NODE_SYNC:-1}" = "1" ] && merv_mac_is_main; then
     _nodes=$(merv_mac_node_list)
     if [ -n "$_nodes" ]; then
@@ -883,8 +2154,15 @@ merv_mac_snapshot() {
 
   local snap_tmp="${MERV_MAC_DB_ACTIVE}.snap.$$"
   local client_count
+
+  _merv_mac_refresh_progress local_collect 25 \
+    "Collecting MAC clients from MAIN..."
+
   client_count=$(merv_mac_build_snapshot "$snap_tmp")
-  _merv_mac_logv info "MERV_MAC: local snapshot captured ${client_count:-0} record(s)"
+
+  _merv_mac_refresh_progress local_collect 35 \
+    "MAIN collection complete — ${client_count:-0} record(s)."
+    _merv_mac_logv info "MERV_MAC: local snapshot captured ${client_count:-0} record(s)"
 
   # --- Cluster collection --------------------------------------------------
   # When running on the main with node sync enabled, gather client MACs from
@@ -900,29 +2178,94 @@ merv_mac_snapshot() {
         _node_collect_incomplete=1
         _merv_mac_log warn "MERV_MAC: node sync on with configured node(s) but SSH keys unavailable — cluster observation incomplete"
       else
-        local _nid _nip _node_recs _rc
-        while read -r _nid _nip; do
-          [ -n "$_nip" ] || continue
-          _nodes_total=$(( _nodes_total + 1 ))
-          if _node_recs=$(merv_mac_collect_from_node "$_nid" "$_nip"); then
-            _nodes_ok=$(( _nodes_ok + 1 ))
-            if [ -n "$_node_recs" ]; then
-              printf '%s\n' "$_node_recs" >> "$snap_tmp"
-              _rc=$(printf '%s\n' "$_node_recs" | wc -l | tr -d ' ')
-              _node_total=$(( _node_total + _rc ))
-              _merv_mac_logv info "MERV_MAC: node ${_nip} — ${_rc} record(s)"
-            else
-              _merv_mac_logv info "MERV_MAC: node ${_nip} — 0 records"
-            fi
+        # Remote observations run through the shared bounded pool.  Workers
+        # write only their isolated payload/result; this parent validates and
+        # merges each complete node payload serially.
+        _node_pool_root="$TMPDIR/node_jobs/mac_collect.$$.$(date +%s 2>/dev/null || printf '%s' "$$")"
+        _node_pool_nodes="$_node_pool_root/nodes"
+        if ! mkdir -p "$_node_pool_root" || ! printf '%s\n' "$_nodes" > "$_node_pool_nodes"; then
+          _node_collect_incomplete=1
+          _merv_mac_log warn "MERV_MAC: could not create isolated node collection workspace"
+        else
+          MERV_MAC_NODE_POOL_TOTAL=$(printf '%s\n' "$_nodes" | awk 'NF { n++ } END { print n + 0 }')
+          MNJ_POOL_PROGRESS_HOOK=merv_mac_node_pool_progress
+          if type mnj_pool_run >/dev/null 2>&1; then
+            mnj_pool_run "$_node_pool_root" collect "${MERV_NODE_PARALLELISM:-}" "${MERV_MAC_NODE_COLLECT_MAX_SEC:-180}" "$_node_pool_nodes" merv_mac_collect_node_job
+            _node_pool_rc=$?
           else
-            _nodes_failed=$(( _nodes_failed + 1 ))
-            _merv_mac_logv warn "MERV_MAC: node ${_nip} — SSH/collector failed"
+            _node_pool_rc=2
           fi
-        done <<_NODES_
+          MNJ_POOL_PROGRESS_HOOK=""
+          if [ "${_node_pool_rc:-2}" -ne 0 ] && type mnj_pool_abort_active >/dev/null 2>&1; then
+            mnj_pool_abort_active failed parent-pool-error || :
+          fi
+          [ "${_node_pool_rc:-2}" -eq 0 ] || _node_collect_incomplete=1
+
+          while IFS=' ' read -r _nid _nip _node_extra || [ -n "$_nid" ]; do
+            [ -n "$_nip" ] || continue
+            _nodes_total=$(( _nodes_total + 1 ))
+            _node_dir="$_node_pool_root/node_${_nid}"
+            _node_candidate="$_node_pool_root/candidate_${_nid}"
+            _node_combined="${snap_tmp}.node_${_nid}.$$"
+            _node_result_ok=0
+            if [ -z "$_node_extra" ] && type mnj_result_validate >/dev/null 2>&1 &&
+               mnj_result_validate "$_node_dir/result" "$_nid" collect &&
+               [ "$MNJ_RESULT_STATE" = ok ] &&
+               merv_mac_validate_node_payload "$_node_dir/payload" "$_node_candidate"; then
+              _node_result_ok=1
+            fi
+            if [ "$_node_result_ok" -eq 1 ]; then
+              _rc=$(wc -l < "$_node_candidate" 2>/dev/null | tr -d ' ')
+              _rc=${_rc:-0}
+              # Publish the parent snapshot append atomically so a disk/write
+              # failure cannot leave a partial subset from an otherwise failed
+              # node observation.
+              if cat "$snap_tmp" "$_node_candidate" > "$_node_combined" &&
+                 mv "$_node_combined" "$snap_tmp" 2>/dev/null; then
+                _nodes_ok=$((_nodes_ok + 1))
+              else
+                rm -f "$_node_combined" 2>/dev/null || :
+                _node_result_ok=0
+              fi
+              if [ "$_node_result_ok" -eq 1 ]; then
+                _node_total=$((_node_total + _rc))
+                _merv_mac_logv info "MERV_MAC: node ${_nip} — ${_rc} record(s)"
+                _merv_mac_refresh_progress node_collect 45 "NODE${_nid} collection complete — ${_rc} record(s)."
+              fi
+            fi
+            if [ "$_node_result_ok" -ne 1 ]; then
+              _nodes_failed=$((_nodes_failed + 1))
+              _node_collect_incomplete=1
+              _merv_mac_logv warn "MERV_MAC: node ${_nip} — SSH/collector/payload validation failed"
+            fi
+            rm -f "$_node_candidate" 2>/dev/null || :
+            rm -f "$_node_combined" 2>/dev/null || :
+          done <<_NODES_
 $_nodes
 _NODES_
+        fi
+        if ! merv_mac_pool_state_unresolved; then
+          rm -rf "${_node_pool_root:-}" 2>/dev/null || :
+          _node_pool_root=""
+          _node_pool_nodes=""
+        else
+          _node_collect_incomplete=1
+          _merv_mac_log warn "MERV_MAC: retaining node collection workspace while worker identity cleanup is pending"
+        fi
       fi
     fi
+  fi
+
+  # A pool setup/identity failure may retain active ownership even after the
+  # parent has collected what it can.  Do not merge/build or proceed to local
+  # enforcement while that generic state remains unresolved.
+  if merv_mac_pool_state_unresolved; then
+    MERV_MAC_LAST_STATUS="pool_unresolved"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+    _merv_mac_log warn "MERV_MAC: snapshot blocked — node-operation cleanup remains unresolved"
+    rm -f "$snap_tmp" 2>/dev/null || :
+    # Keep the Shield lock owned while generic worker state is unresolved;
+    # releasing it would permit a competing snapshot to race retained workers.
+    return 1
   fi
 
   # --- Derive effective reset ----------------------------------------------
@@ -944,6 +2287,8 @@ _NODES_
 
   local total_count
   total_count=$(wc -l < "$snap_tmp" 2>/dev/null | tr -d ' ')
+  _merv_mac_refresh_progress merge 55 \
+    "Combining ${total_count:-0} observed MAC record(s)..."
 
   # --- Empty snapshot handling ---------------------------------------------
   if [ "${total_count:-0}" -eq 0 ]; then
@@ -977,6 +2322,25 @@ _NODES_
             _snap_owned=0
           fi
           return 1
+        fi
+        # The empty active database is still an authoritative Shield state.
+        # Propagate it only after MAIN enforcement succeeds, using the same
+        # bounded push/reload pool as non-empty snapshots.  Push failures remain
+        # reflected in the push counters and per-node warnings, matching the
+        # existing normal-path best-effort propagation contract.
+        if [ -n "$_nodes" ]; then
+          _merv_mac_refresh_progress push 82 \
+            "Pushing empty MAC Shield database and rules to nodes..."
+          if ! merv_mac_push_db_to_nodes "$_nodes"; then
+            if merv_mac_pool_state_unresolved; then
+              MERV_MAC_LAST_STATUS="push_failed"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+              _merv_mac_log warn "MERV_MAC: empty Shield push blocked — node-operation cleanup remains unresolved"
+              rm -f "$snap_tmp" 2>/dev/null || :
+              # Retain Shield ownership and the push workspace until the
+              # generic pool can be reconciled by its owning parent.
+              return 1
+            fi
+          fi
         fi
         MERV_MAC_LAST_STATUS="empty"; MERV_MAC_LAST_REASON="reset_no_clients"
         _merv_mac_set_counts
@@ -1016,6 +2380,8 @@ _NODES_
   # Compare structural fingerprint (mac+iface+vid only, timestamps excluded).
   # Raw md5 would always differ because timestamps refresh on every snapshot.
   local _pre_fp _post_fp
+  _merv_mac_refresh_progress merge 65 \
+  "Rebuilding MAC Shield database..."
   _pre_fp=$(awk '{print $2, $3, $4}' "$MERV_MAC_DB_ACTIVE" 2>/dev/null | sort | md5sum 2>/dev/null | cut -d' ' -f1)
   merv_mac_merge_db "$snap_tmp" "$_effective_reset" || {
     MERV_MAC_LAST_STATUS="merge_failed"
@@ -1045,7 +2411,10 @@ _NODES_
   # Reload fires for a real change OR an explicit force-reload. Push to nodes
   # whenever we reload, so every unit's shield is reapplied/repaired.
   if [ "$MERV_MAC_LAST_CHANGED" = "1" ] || [ "$_snap_force_reload" = "1" ]; then
-    if ! ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"; then
+  _merv_mac_refresh_progress apply 75 \
+    "Replacing MAC Shield rules on MAIN..."
+
+  if ! ebt_mac_shield_init_and_apply "$MERV_MAC_DB_ACTIVE"; then
       MERV_MAC_LAST_STATUS="apply_failed"
       MERV_MAC_LAST_REASON="local_enforcement_failed"
       _merv_mac_set_counts
@@ -1057,8 +2426,19 @@ _NODES_
       return 1
     fi
     if [ -n "$_nodes" ]; then
-  MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
-      merv_mac_push_db_to_nodes "$_nodes"
+    _merv_mac_refresh_progress push 82 \
+    "Pushing MAC Shield database and rules to nodes..."
+
+    MERV_MAC_LAST_PUSH_TOTAL=0; MERV_MAC_LAST_PUSH_OK=0; MERV_MAC_LAST_PUSH_FAILED=0
+      if ! merv_mac_push_db_to_nodes "$_nodes"; then
+        if merv_mac_pool_state_unresolved; then
+          MERV_MAC_LAST_STATUS="push_failed"; MERV_MAC_LAST_REASON="node_pool_unresolved"
+          _merv_mac_log warn "MERV_MAC: Shield push blocked — node-operation cleanup remains unresolved"
+          # Retain Shield ownership and the push workspace until the generic
+          # pool can be reconciled by its owning parent.
+          return 1
+        fi
+      fi
     fi
   else
     _merv_mac_logv info "MERV_MAC: MAC set unchanged — ebtables rules not rebuilt"

@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.70"                     #
+#                  - File: heal_event.sh || version="0.71"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -35,6 +35,7 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 [ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
+[ -n "${LIB_SETTINGS_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
@@ -128,32 +129,34 @@ sanitize_epoch() {
 
 # ============================================================================ #
 # any_vlan_configured                                                          #
-# Scan settings.json for any numeric VLAN assignments (2–4094) on Ethernet     #
-# ports or SSIDs. Returns 0 if at least one valid VLAN is found, 1 if none.    #
-# Used as early guard to skip processing if no VLANs are configured.           #
+# Scan settings.json for any numeric VLAN assignments (2–4094) on logical      #
+# Ethernet ports or SSIDs. Returns 0 if found, 1 for known-empty, and 2 when   #
+# configuration state is unknown. Used as the early Heal guard.                #
 # ============================================================================ #
 any_vlan_configured() {
   # Ensure MAX_SSIDS is numeric; fallback to 12 if unset
-  local max_ssids
+  local max_ssids idx i vlan token
   max_ssids=$(sanitize_epoch "$MAX_SSIDS")
   [ "$max_ssids" -ge 1 ] 2>/dev/null || max_ssids=12
 
-  # Check Ethernet port VLANs (VLAN.Ethernet_ports.ETHx_VLAN)
-  local idx=1 vlan token
-  for eth in $ETH_PORTS; do
-    # Use nested structure first, fallback to flat
-    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
-    fi
+  # Check logical Ethernet policy independently from the physical ETH_PORTS map.
+  idx=1
+  while [ "$idx" -le 8 ]; do
+    vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
+      error -c vlan "Heal: Ethernet policy is unknown for logical port $idx"
+      return 2
+    }
     vlan=$(trim_spaces "$vlan")
     token=$(to_lower "$vlan")
-    # Ignore unconfigured, trunk, or non-numeric entries
     case "$token" in
-      ''|none) ;;                      # not configured
-      trunk) ;;                        # not a specific VLAN ID
-      # Valid VLAN ID range is 2–4094 (excluding default VLAN 1)
-      *) if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then return 0; fi ;;
+      none|trunk) ;;
+      *)
+        if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+          return 0
+        fi
+        error -c vlan "Heal: invalid Ethernet policy for logical port $idx"
+        return 2
+        ;;
     esac
     idx=$((idx+1))
   done
@@ -167,7 +170,7 @@ any_vlan_configured() {
     # Check for fatal filter condition after first accessor call
     if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
       error -c vlan "Heal: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
-      return 1
+      return 2
     fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
@@ -185,11 +188,21 @@ any_vlan_configured() {
 # execution, and initialize cooldown/debounce mechanisms.                      #
 # ============================================================================ #
 
-# Fast path: if settings define no numeric VLANs, do nothing
-if ! any_vlan_configured; then
-  info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
-  exit 0
-fi
+# Fast path: distinguish known-empty settings from unknown configuration state.
+_any_vlan_rc=0
+any_vlan_configured || _any_vlan_rc=$?
+case "$_any_vlan_rc" in
+  0)
+    ;;
+  1)
+    info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
+    exit 0
+    ;;
+  *)
+    error -c vlan "Heal: VLAN configuration state is unknown; refusing to run"
+    exit 1
+    ;;
+esac
 
 # Skip if vlan manager already busy (avoid holding our lock needlessly).
 # Uses the shared lock-state helper so a CRASHED manager (lock dir left behind
@@ -484,7 +497,10 @@ check_wl_iface_placements() {
   local pairs iface vid ok
 
   ok=1
-  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null) || return 0
+  pairs=$(merv_iface_vid_list 2>/dev/null) || {
+    error -c vlan "Placement: expected managed VAP state is unknown"
+    return 1
+  }
   [ -n "$pairs" ] || return 0
 
   while IFS=' ' read -r iface vid; do
@@ -511,6 +527,33 @@ _PAIRS_
   [ "$ok" -eq 1 ]
 }
 
+# A live VLAN bridge alone is not evidence that its configured physical
+# access port is on that bridge. Resolve node-aware Ethernet policy and prove
+# exclusive bridge membership for every numeric managed port.
+check_managed_eth_placements() {
+  local pairs iface vid bad
+
+  pairs=$(merv_managed_eth_iface_vid_list "$SETTINGS_FILE" "${MERV_NODE_ID:-none}" 2>/dev/null) || {
+    error -c vlan "Placement: expected managed Ethernet state is unknown"
+    return 1
+  }
+  [ -n "$pairs" ] || return 0
+  bad=0
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+    if [ ! -d "/sys/class/net/$iface" ]; then
+      warn -c vlan "Placement: managed Ethernet $iface is absent"
+      bad=1
+    elif ! merv_exact_bridge_membership "$iface" "$vid"; then
+      warn -c vlan "Placement: managed Ethernet $iface is not exclusively in br${vid}"
+      bad=1
+    fi
+  done <<_ETH_PAIRS_
+$pairs
+_ETH_PAIRS_
+  [ "$bad" -eq 0 ]
+}
+
 # ============================================================================ #
 # evict_wl_from_br0                                                            #
 # Pre-eviction guard: immediately removes wl subinterfaces from br0 before    #
@@ -530,7 +573,8 @@ evict_wl_from_br0() {
   # Only these can leak to br0; firmware-owned AiMesh SSIDs must be left alone.
   managed_ifaces=""
   if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
-    managed_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+    pairs=$(merv_iface_vid_list 2>/dev/null) || return 1
+    managed_ifaces=$(printf '%s\n' "$pairs" | awk '{print $1}')
   fi
   # Nothing to evict if no MERVLAN-managed wl interfaces are configured.
   [ -n "$managed_ifaces" ] || return 0
@@ -636,7 +680,7 @@ expected_vlans_from_settings() {
   #  - VLAN.Ethernet_ports (ETHx_VLAN) - Access port VLANs  
   #  - VLAN.Trunks (TAGGED/UNTAGGED_TRUNKx) - Trunk VLANs
   # using section-aware JSON helpers for nested structure.
-  local vids tmp i idx vlan
+  local vids tmp i idx vlan token
 
   # SSID VLAN pool from VLAN.Pool section (filtered by node assignment)
   i=1
@@ -657,20 +701,29 @@ $vlan"
     i=$((i+1))
   done
 
-  # Access-port VLANs from VLAN.Ethernet_ports section
+  # Access-port VLANs from logical ETH1..ETH8 policy slots. Do not infer
+  # physical interface names here; placement is proven separately.
   idx=1
-  for eth in $ETH_PORTS; do
-    # Use json_get_section2_value for VLAN->Ethernet_ports->ETHx_VLAN nested structure
-    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
-    # Fallback to old flat structure for backwards compatibility
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
-    fi
+  while [ "$idx" -le 8 ]; do
+    vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
+      error -c vlan "expected_vlans_from_settings: Ethernet policy is unknown for port $idx"
+      return 1
+    }
     vlan=$(trim_spaces "$vlan")
-    if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
-      vids="$vids
+    token=$(to_lower "$vlan")
+    case "$token" in
+      none|trunk)
+        ;;
+      *)
+        if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+          vids="$vids
 $vlan"
-    fi
+        else
+          error -c vlan "expected_vlans_from_settings: invalid Ethernet policy for port $idx"
+          return 1
+        fi
+        ;;
+    esac
     idx=$((idx+1))
   done
 
@@ -743,10 +796,29 @@ $untagged"
 # mismatch to persist across 2 checks with delay to avoid false positives      #
 # during transient rc states.                                                  #
 # ============================================================================ #
+check_wan_native_health() {
+  # The WAN helper's health mode is strictly observational: it validates the
+  # expected br0 native transport (and configured MAIN DHCP state) without
+  # creating an upper, touching bridge membership, or signalling DHCP. Heal
+  # itself continues to hand all mutation to the normal manager owner.
+  _cwnh_helper="$MERV_BASE/functions/mervlan_wan.sh"
+  [ -x "$_cwnh_helper" ] || {
+    warn -c vlan "WAN Native health: helper is unavailable or not executable"
+    return 1
+  }
+  sh "$_cwnh_helper" health >/dev/null 2>&1 || {
+    warn -c vlan "WAN Native health mismatch detected"
+    return 1
+  }
+  return 0
+}
+
 check_vlan_config() {
   local exp cur exp_str cur_str missing extra mismatch_count
 
-  exp=$(expected_vlans_from_settings)
+  check_wan_native_health || return 1
+
+  exp=$(expected_vlans_from_settings) || return 1
   if [ -z "$exp" ]; then
     info -c vlan "VLAN check OK: no VLANs configured in settings"
     return 0
@@ -764,6 +836,10 @@ check_vlan_config() {
       warn -c vlan "wl subinterfaces already misplaced at check entry — skipping monitoring window"
       return 1
     fi
+  fi
+  if ! check_managed_eth_placements; then
+    warn -c vlan "managed Ethernet already misplaced at check entry — skipping monitoring window"
+    return 1
   fi
 
   # Multi-check validation with full monitoring window
@@ -854,13 +930,20 @@ check_vlan_config() {
     fi
   fi
 
+  if ! check_managed_eth_placements; then
+    warn -c vlan "VLAN bridges present but managed Ethernet access port is misplaced"
+    return 1
+  fi
+
   return 0
 }
 
 check_vlan_config_fast() {
   local exp cur exp_str cur_str missing extra
 
-  exp=$(expected_vlans_from_settings)
+  check_wan_native_health || return 1
+
+  exp=$(expected_vlans_from_settings) || return 1
   if [ -z "$exp" ]; then
     return 0
   fi
@@ -870,7 +953,8 @@ check_vlan_config_fast() {
   cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
 
   if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
-    return 0
+    check_managed_eth_placements
+    return $?
   fi
 
   missing=""
@@ -1099,6 +1183,14 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # This is deliberately only a cheap persistent due check.  The separately
+  # owned worker takes the global action lock before any SSH work, so this
+  # health lock is never retained across a node synchronization.
+  if [ -x "$MERV_BASE/functions/settings_reconcile.sh" ] &&
+      { { type merv_settings_reconcile_active >/dev/null 2>&1 && merv_settings_reconcile_active; } || \
+        [ -e "${MERV_SETTINGS_RECONCILE_FILE:-$MERV_STATE_ROOT/settings_reconcile.state}" ]; }; then
+    sh "$MERV_BASE/functions/settings_reconcile.sh" due >/dev/null 2>&1 || :
+  fi
   if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ] &&
      type merv_node_reconcile_active >/dev/null 2>&1 && merv_node_reconcile_active; then
     sh "$MERV_BASE/functions/mervlan_boot.sh" reconcile-pending >/dev/null 2>&1 ||

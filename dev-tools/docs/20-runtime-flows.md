@@ -24,6 +24,53 @@ manager run performs the same request and waits through `post_apply_worker.sh
 run-wait`. Combined runs pass `--no-collect` to the local manager so collection
 is not duplicated.
 
+### WAN Native transport
+
+`functions/mervlan_wan.sh` is the sole runtime owner of the optional native
+WAN/uplink transport. `mervlan_manager.sh` retains lifecycle ownership only:
+it performs read-only preflight, preserves the actual live `br0` uplink VLAN
+member during generic cleanup, invokes WAN convergence before ordinary VLAN
+creation, reapplies it after ASUS rc/trunk work, and includes WAN verification
+in the final fail-closed gate.
+
+The persisted keys live under `VLAN.WAN_Native` as `WAN_NATIVE_MAIN`,
+`MAIN_WAN_NATIVE_IP`, `MAIN_ASUS_IP`, and `WAN_NATIVE_NODE1..NODE10`.
+The two MAIN endpoints are explicit IPv4-only expectations for the numeric and
+ASUS/default DHCP domains respectively. Any MAIN domain transition requires
+ASUS LAN DHCP and acquisition of the target-domain endpoint before commit.
+`PERSISTENT_DEBUG_LOGGING` is an independent troubleshooting switch: it is
+disabled by default and, when explicitly enabled, records only selected WAN
+Native lifecycle boundaries in a bounded JFFS diagnostic stream. It never
+enables boot/heal, resumes a transaction, or participates in recovery logic.
+The node endpoint resolver does not consume either MAIN-only endpoint. The
+current supported ASUS/default restoration boundary is `br0 -> WAN_IF` on the
+positively detected physical uplink; unknown firmware-owned tagged-native
+topology is rejected rather than inferred. A numeric value (2-4094) may replace an existing native `br0` uplink
+path with `WAN_IF.VID`, but must fail closed if there is no existing native
+path to replace. The selected VID is exclusive on that device and cannot also
+be used by a managed SSID, access port, or trunk membership.
+
+Transitions are convergent from live topology rather than a remembered prior
+setting: create/validate the replacement upper first, perform a short
+break-before-make bridge swap, preserve the `br0` MAC, verify exact membership,
+and roll back to the captured prior path on failure. Returning to ASUS removes
+only an active MerVLAN tagged-native upper; otherwise it is a no-op.
+
+For either MAIN transport-domain transition, DHCP lifecycle is part of that same rollback
+transaction. MerVLAN authenticates the existing ASUS `udhcpc` by PID, process
+start identity, and allowlisted `br0` argv; sends `SIGUSR2` to release and
+waits for the old address to disappear. A released client may either exit or
+remain alive. A live client is authenticated again immediately before one
+`SIGTERM`, and a replacement is started only after the old process is gone and
+no `udhcpc` remains on `br0`. A proven-dead PID file may be removed only when
+it still names that dead client. On any failure, `br0` is restored to its
+original L2 member first; a released-but-live exact client is then renewed on
+that original domain. There is no SIGKILL fallback and no concurrent DHCP
+client launch. The helper `health` mode is read-only and provides strict L2
+verification for fast/full heal checks; MAIN additionally verifies its explicit
+expected DHCP address and default route when configured. Heal detects a mismatch
+but hands any mutation back to the normal manager owner.
+
 ## Save Settings
 
 `index.html` validates and prepares the settings payload, then submits it

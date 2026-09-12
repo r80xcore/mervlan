@@ -16,7 +16,7 @@ avoid sourcing the same library repeatedly.
 | `lib_action_progress.sh` | Atomic WebUI progress initialization, phase updates, completion, and failure. |
 | `lib_action_runtime.sh` | Runtime markers used to suppress redundant page refreshes during Apply. |
 | `lib_action_ack.sh` | Correlated service-action acknowledgements and safe messages. |
-| `lib_node_jobs.sh` | Isolated bounded node workers, result validation, reconciliation, and retention. |
+| `lib_node_jobs.sh` | Shared 1–5-worker node-operation pool, isolated workers, result validation, reconciliation, and retention. |
 | `lib_ssh.sh` | Node validation, bounded SSH, and connection helpers. |
 | `lib_ssid_filter.sh` | Configured SSID filtering and node-aware SSID identity. |
 | `mac_shield_snapshot.sh` | Snapshot generation, MAC Shield database state, and observation identity. |
@@ -45,6 +45,23 @@ avoid sourcing the same library repeatedly.
   and validate them; never source them as shell code.
 - Preserve the library's loaded-marker convention and avoid hidden duplicate
   implementations in individual entry-point scripts.
+
+## Node-job pool
+
+`lib_node_jobs.sh` resolves the effective width for each `mnj_pool_run` call
+from the MAIN-local `General.NODE_PARALLELISM` setting. Values 1 through 5 are
+supported; a missing legacy setting defaults to 2. The optional
+`MERV_NODE_PARALLELISM` environment value is a runtime override. Malformed
+runtime or persisted input resolves to one worker, and the Save path rejects
+values outside the supported range. Save and node-sync change detection treat
+the setting as MAIN/WebUI-local. Sync, Execute, client collection, and MAC
+Shield node collect/push share this pool; MAIN-local work does not consume a
+remote slot.
+
+The pool owns worker scheduling and isolated terminal results only. Complete
+node trust preflight occurs serially before node work, and each MAIN parent
+validates and aggregates worker artifacts serially. MAC Shield applies the
+authoritative database on MAIN before propagating it through the node pool.
 
 ## Choosing the right layer
 

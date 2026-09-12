@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# - File: post_apply_worker.sh || version="0.2"
+# - File: post_apply_worker.sh || version="0.5"
 # - Purpose: Serialize and coalesce post-apply MAC snapshots/client collection.
 # ============================================================================
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -75,6 +75,33 @@ obs_resume_progress_phase() {
   type merv_progress_phase >/dev/null 2>&1 || return 0
   merv_progress_phase "$_orpp_token" sshtrustresume_vlanmgr \
     "Resuming MerVLAN action" "$_orpp_phase" "$_orpp_message" >/dev/null 2>&1 || :
+}
+
+obs_mac_refresh_progress() {
+  _omrp_phase="$1"
+  _omrp_percent="$2"
+  _omrp_message="$3"
+
+  [ "${MERV_MAC_REFRESH_PROGRESS:-0}" = "1" ] || return 0
+
+  case "${MERV_PROGRESS_TOKEN:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+
+  type merv_progress_update >/dev/null 2>&1 || return 0
+
+  merv_progress_update \
+    "$MERV_PROGRESS_TOKEN" \
+    macrefresh_vlanmgr \
+    "Rebuild MAC Shield" \
+    running \
+    determinate \
+    "$_omrp_phase" \
+    0 \
+    0 \
+    "$_omrp_percent" \
+    "$_omrp_message" \
+    "" >/dev/null 2>&1 || :
 }
 
 # The collection loader is frontend-owned.  Give its nested SSH trust probe a
@@ -198,16 +225,39 @@ obs_lock_release() {
 }
 
 obs_config_observable() {
+  OBS_BLOCKER_REASON=""
   for _oco_lock in "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock" "$OBS_CONFIG_LOCKDIR/vlan_event.lock"; do
     if type merv_lock_state >/dev/null 2>&1; then
-      case "$(merv_lock_state "$_oco_lock")" in active|unknown) return 1 ;; esac
+      case "$(merv_lock_state "$_oco_lock")" in
+        active|unknown)
+          case "$_oco_lock" in
+            "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock") OBS_BLOCKER_REASON="VLAN manager" ;;
+            "$OBS_CONFIG_LOCKDIR/vlan_event.lock") OBS_BLOCKER_REASON="VLAN event" ;;
+            *) OBS_BLOCKER_REASON="configuration mutation" ;;
+          esac
+          return 1
+          ;;
+      esac
     elif [ -d "$_oco_lock" ]; then
+      case "$_oco_lock" in
+        "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock") OBS_BLOCKER_REASON="VLAN manager" ;;
+        "$OBS_CONFIG_LOCKDIR/vlan_event.lock") OBS_BLOCKER_REASON="VLAN event" ;;
+        *) OBS_BLOCKER_REASON="configuration mutation" ;;
+      esac
       return 1
     fi
   done
   for _oco_owner in "$MERV_DHCP_HOLD_STATE_ROOT/owners/"*; do
     [ -d "$_oco_owner" ] && [ -f "$_oco_owner/ready" ] || continue
-    case "$(cat "$_oco_owner/phase" 2>/dev/null)" in mutating|handoff_wait) return 1 ;; esac
+    _oco_phase=$(cat "$_oco_owner/phase" 2>/dev/null)
+    case "$_oco_phase" in
+      mutating|handoff_wait)
+        _oco_owner_type=$(cat "$_oco_owner/owner_type" 2>/dev/null)
+        [ -n "$_oco_owner_type" ] || _oco_owner_type=unknown
+        OBS_BLOCKER_REASON="DHCP owner: $_oco_owner_type ($_oco_phase)"
+        return 1
+        ;;
+    esac
   done
   return 0
 }
@@ -220,6 +270,29 @@ obs_record_fault() {
     printf 'generation=%s\n' "$_orf_generation"
     printf 'epoch=%s\n' "$(date +%s 2>/dev/null || printf 0)"
   } > "$_orf_file" 2>/dev/null || :
+}
+
+# Collection has an all-or-nothing public-generation contract.  A failed
+# request deliberately leaves the last known-good client file in place, so a
+# progress-backed browser action also needs an explicit terminal failure rather
+# than inferring success from the still-readable old file.
+obs_collection_failure_notice() {
+  _ocfn_generation="$1"
+  case "${MERV_PROGRESS_TOKEN:-}" in
+    ''|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  if type merv_progress_fail >/dev/null 2>&1; then
+    merv_progress_fail "$MERV_PROGRESS_TOKEN" collectclients_vlanmgr \
+      "Collect VLAN clients" phase \
+      "Client refresh failed; showing the last known client data." \
+      client-collection-failed >/dev/null 2>&1 || :
+  fi
+  if type action_ack_error >/dev/null 2>&1; then
+    action_ack_error "$MERV_PROGRESS_TOKEN" collectclients_vlanmgr \
+      "{\"reason\":\"client-collection-failed\",\"generation\":$_ocfn_generation}" \
+      "Client refresh failed; showing the last known client data." '[]' \
+      client-collection-failed >/dev/null 2>&1 || :
+  fi
 }
 
 obs_snapshot_run() {
@@ -282,6 +355,96 @@ obs_complete_generation() {
   _ocg_rc=$?
   obs_lock_release "$OBS_REQUEST_LOCK" "$_ocg_nonce" || return 2
   return "$_ocg_rc"
+}
+
+# Observation owns the MAC Shield snapshot, which may in turn own the shared
+# node pool.  Reconcile that pool before releasing the observation owner lock;
+# otherwise a TERM/INT during Shield collection could leave node workers alive
+# while a later observation starts.
+obs_abort_active_pool() {
+  _oap_unresolved=0
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _oap_state_rc=$?
+    case "$_oap_state_rc" in
+      0) _oap_unresolved=1 ;;
+      1) ;;
+      *) return 1 ;;
+    esac
+  else
+    case "${MNJ_POOL_ACTIVE:-0}" in ''|0) ;; *) _oap_unresolved=1 ;; esac
+    [ -n "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] && _oap_unresolved=1
+    [ -n "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] && _oap_unresolved=1
+  fi
+  [ "$_oap_unresolved" -eq 1 ] || return 0
+  type mnj_pool_abort_active >/dev/null 2>&1 || return 1
+  mnj_pool_abort_active failed observation-signal || return 1
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _oap_state_rc=$?
+    [ "$_oap_state_rc" -eq 1 ] && return 0
+    return 1
+  else
+    case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 0 ;; *) return 1 ;; esac
+  fi
+}
+
+obs_pool_state_clean() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    _opsc_rc=$?
+    [ "$_opsc_rc" -eq 1 ] && return 0
+    return 1
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) ;; *) return 1 ;; esac
+  [ -z "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] || return 1
+  [ -z "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] || return 1
+  [ -z "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] || return 1
+  return 0
+}
+
+obs_worker_cleanup() {
+  _ow_cleanup_rc=$?
+  _ow_pool_abort_failed=0
+  if ! obs_abort_active_pool; then
+    _ow_pool_abort_failed=1
+    _ow_cleanup_rc=1
+    obs_log error "observation worker cleanup retained ownership because node workers could not be reconciled"
+  fi
+  if [ "$_ow_pool_abort_failed" -eq 0 ] && obs_pool_state_clean &&
+     [ -n "${MNJ_POOL_ROOT:-}" ] && type mnj_root_valid >/dev/null 2>&1 &&
+     mnj_root_valid "$MNJ_POOL_ROOT"; then
+    if ! rm -rf "$MNJ_POOL_ROOT" 2>/dev/null; then
+      _ow_cleanup_rc=1
+      obs_log error "observation worker cleanup could not remove its private node-job workspace"
+    fi
+  fi
+  if [ "$_ow_pool_abort_failed" -eq 0 ]; then
+    if ! obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" 2>/dev/null; then
+      _ow_cleanup_rc=1
+      obs_log error "observation worker lock cleanup failed"
+    fi
+  fi
+  return "$_ow_cleanup_rc"
+}
+
+OBS_SIGNAL_HANDLING=0
+obs_handle_signal() {
+  _obs_signal_status="$1"
+  [ "${OBS_SIGNAL_HANDLING:-0}" -eq 0 ] || exit "$_obs_signal_status"
+  OBS_SIGNAL_HANDLING=1
+  trap - INT TERM
+  obs_log error "observation interrupted (rc=$_obs_signal_status); reconciling Shield/node workers"
+  obs_abort_active_pool ||
+    obs_log error "observation interruption could not reconcile every node worker"
+  exit "$_obs_signal_status"
 }
 
 obs_collection_trust_gate() {
@@ -390,16 +553,32 @@ obs_run() {
     return 0
   }
   _ow_nonce="$OBS_LOCK_NONCE"
-  trap 'if ! obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" 2>/dev/null; then obs_log error "observation worker lock cleanup failed"; fi' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'obs_worker_cleanup' EXIT
+  trap 'obs_handle_signal 130' INT
+  trap 'obs_handle_signal 143' TERM
   while :; do
     obs_state_load
     [ "$OBS_SC" -lt "$OBS_SR" ] || [ "$OBS_CC" -lt "$OBS_CR" ] || break
+    if [ "$OBS_SC" -lt "$OBS_SR" ]; then
+      if [ "$OBS_CC" -lt "$OBS_CR" ]; then
+        _ow_pending_work="MAC snapshot + client collection pending"
+      else
+        _ow_pending_work="MAC snapshot pending"
+      fi
+    elif [ "$OBS_CC" -lt "$OBS_CR" ]; then
+      _ow_pending_work="client collection pending"
+    else
+      _ow_pending_work="observation work pending"
+    fi
     if ! obs_config_observable; then
+      [ -n "$OBS_BLOCKER_REASON" ] || OBS_BLOCKER_REASON="configuration mutation"
       obs_resume_progress_phase deferred "Waiting for active configuration work before refreshing clients..."
-      obs_log info "configuration mutation active; generations remain pending"
+      obs_log info "queued: $_ow_pending_work; blocked by $OBS_BLOCKER_REASON"
       return 75
+    fi
+    if [ "${MERV_OBS_WAIT_RETRY:-0}" = 1 ]; then
+      obs_log info "blocker cleared; resuming queued work"
+      unset MERV_OBS_WAIT_RETRY
     fi
     if [ "$OBS_SC" -lt "$OBS_SR" ]; then
       obs_resume_progress_phase snapshot "Refreshing queued MAC Shield snapshot..."
@@ -423,12 +602,17 @@ obs_run() {
       continue
     fi
     if [ "$OBS_CC" -lt "$OBS_CR" ]; then
-      obs_resume_progress_phase collect "Refreshing client inventory..."
-      _ow_generation="$OBS_CR"
+    obs_resume_progress_phase collect "Refreshing client inventory..."
+    obs_mac_refresh_progress refresh 92 \
+      "Refreshing client inventory..."
+    _ow_generation="$OBS_CR"
       if obs_collection_run; then
-        obs_complete_generation collection "$_ow_generation" || return 2
+    obs_complete_generation collection "$_ow_generation" || return 2
+    obs_mac_refresh_progress finish 97 \
+      "Client inventory refreshed; finishing..."
       else
         obs_record_fault collection "$_ow_generation"
+        obs_collection_failure_notice "$_ow_generation"
         return 1
       fi
     fi
@@ -439,6 +623,7 @@ obs_run() {
 obs_run_wait() {
   _orw_max="${1:-120}"
   case "$_orw_max" in ''|*[!0-9]*) return 2 ;; esac
+  _orw_was_deferred=0
   _orw_started=$(date +%s 2>/dev/null || printf '0')
   case "$_orw_started" in ''|*[!0-9]*) return 2 ;; esac
   _orw_deadline=$((_orw_started + _orw_max))
@@ -446,9 +631,17 @@ obs_run_wait() {
   _orw_snapshot_target="$OBS_SR"
   _orw_collection_target="$OBS_CR"
   while :; do
-    "$0" run
+    if [ "$_orw_was_deferred" -eq 1 ]; then
+      MERV_OBS_WAIT_RETRY=1 "$0" run
+    else
+      "$0" run
+    fi
     _orw_rc=$?
-    case "$_orw_rc" in 0|75) ;; *) return "$_orw_rc" ;; esac
+    case "$_orw_rc" in
+      0) ;;
+      75) _orw_was_deferred=1 ;;
+      *) return "$_orw_rc" ;;
+    esac
     obs_state_load
     if [ "$OBS_SC" -ge "$_orw_snapshot_target" ] &&
        [ "$OBS_CC" -ge "$_orw_collection_target" ]; then

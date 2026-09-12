@@ -107,12 +107,14 @@ parse_manifest() {
         printf '%s %s\n' "$_mode" "$_path" >>"$PATHS_FILE" || return 1
     done <"$_manifest"
     [ "$_seen" -eq 1 ] && [ -s "$PATHS_FILE" ] || return 1
-    for _required in install.sh uninstall.sh functions/update_mervlan.sh functions/mervlan_boot.sh functions/update_mervlan_repair.sh functions/update_mervlan_repair.manifest; do
+    for _required in install.sh uninstall.sh functions/update_mervlan.sh functions/mervlan_boot.sh functions/mervlan_wan.sh functions/update_mervlan_repair.sh functions/update_mervlan_repair.manifest; do
         grep -Fq " $_required" "$PATHS_FILE" || return 1
     done
+    grep -Fqx '0755 functions/mervlan_wan.sh' "$PATHS_FILE" || return 1
 }
 
 validate_stage() {
+    grep -Fqx '0755 functions/mervlan_wan.sh' "$PATHS_FILE" || return 1
     while IFS=' ' read -r _mode _path; do
         _file="$STAGE_DIR/$_path"
         [ -f "$_file" ] && [ -s "$_file" ] || return 1
@@ -120,6 +122,7 @@ validate_stage() {
         case "$_mode:$_actual" in 0755:-rwxr-xr-x|0644:-rw-r--r--) ;; *) return 1;; esac
         case "$_path" in *.sh) sh -n "$_file" >/dev/null 2>&1 || return 1;; esac
     done <"$PATHS_FILE"
+    [ -x "$STAGE_DIR/functions/mervlan_wan.sh" ] || return 1
 }
 
 rollback() {

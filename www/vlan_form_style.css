@@ -2663,3 +2663,174 @@ i.icon_help {
 .button_gen.danger:hover {
         background:#96281B;
 }
+
+/* WAN Native is configured in its popup; this is its plain table summary. */
+.no-vlanfield.wan-native-value {
+        display:inline-block;
+        min-width:90px;
+        color:#FFCC00;
+        font-family:Lucida Console, monospace;
+        font-size:12px;
+        line-height:23px;
+        text-align:center;
+        vertical-align:middle;
+}
+
+.wan-native-edit-btn {
+        display:inline-block;
+        width:var(--wan-native-edit-width, 50px);
+        min-width:var(--wan-native-edit-width, 50px);
+        max-width:var(--wan-native-edit-width, 50px);
+        margin:0 5px 0 0;
+        padding:0;
+        font-size:.82em;
+        line-height:1.6;
+        white-space:nowrap;
+        vertical-align:middle;
+}
+
+.wan-native-status-cell {
+        white-space:nowrap;
+        min-width:76px;
+        text-align:center;
+}
+
+/* Reuse .modal/.modal--anchored plus anchorModalToForm(), rather than
+   positioning this dialog against the surrounding ASUS browser page. */
+.wan-native-popup.modal {
+        z-index:1101;
+        max-width:430px;
+        width:min(430px, calc(100vw - 28px));
+        padding:15px 18px;
+        border-color:#569ac7;
+}
+
+.wan-native-popup__target,
+.wan-native-popup__intro,
+.wan-native-popup__hint {
+        margin:0 0 8px;
+        color:#d7e0e5;
+        font-size:.88em;
+        line-height:1.45;
+}
+
+.wan-native-popup__requirement {
+        margin:0;
+        padding:7px 9px;
+        color:#fff1c2;
+        background:rgba(230,162,60,.16);
+        border-left:3px solid #e6a23c;
+        border-radius:3px;
+        font-size:.86em;
+        line-height:1.4;
+}
+
+.wan-native-popup__body {
+        display:grid;
+        gap:10px;
+        margin-bottom:10px;
+}
+
+.wan-native-popup__body label {
+        display:grid;
+        gap:4px;
+        font-size:.9em;
+}
+
+.wan-native-popup__body input {
+        width:100%;
+        min-width:0;
+        min-height:30px;
+        box-sizing:border-box;
+}
+
+/* Keep the role and WAN Native editors inside the existing MerVLAN dark form
+   system without changing their draft, validation, or Save behavior. */
+.node-role-control {
+        display:inline-block;
+        width:100%;
+        min-width:0 !important;
+        height:23px;
+        min-height:23px;
+	/* Native select text is vertically centered within the compact control. */
+	padding:0 7px;
+	line-height:21px;
+        color:#d7e0e5 !important;
+        font-size:.86em;
+}
+
+.node-role-control,
+.wan-native-popup__body input,
+.wan-native-popup__body select {
+        box-sizing:border-box;
+        background:#596E74;
+        color:#FFFFFF;
+        border:1px solid #929EA1;
+        border-radius:4px;
+        font:inherit;
+        transition:border-color .2s ease, box-shadow .2s ease;
+}
+
+.wan-native-popup__body input,
+.wan-native-popup__body select {
+	padding:4px 7px;
+}
+
+.wan-native-popup__body input,
+.wan-native-popup__body select {
+        min-height:30px;
+}
+
+.node-role-control:focus-visible,
+.wan-native-popup__body input:focus-visible,
+.wan-native-popup__body select:focus-visible {
+        outline:none;
+        border-color:#77A5C6;
+        box-shadow:0 0 0 2px rgba(119,165,198,.25);
+}
+
+.node-role-control:disabled,
+.wan-native-popup__body input:disabled,
+.wan-native-popup__body select:disabled {
+        background:#3a4e55;
+        color:#aebdc3;
+        border-color:#4d595d;
+        cursor:not-allowed;
+        opacity:.72;
+}
+
+.node-role-control option,
+.wan-native-popup__body select option {
+        background:#576D73;
+        color:#FFFFFF;
+}
+
+.wan-native-popup__body input::placeholder { color:#c1ccd8; opacity:.72; }
+.wan-native-popup__error:not(:empty) {
+        padding:6px 8px;
+        border:1px solid rgba(255,138,138,.55);
+        border-radius:4px;
+        background:rgba(255,82,82,.10);
+}
+
+.wan-native-popup__readonly {
+        display:grid;
+        gap:3px;
+        padding:7px 9px;
+        color:#d7e0e5;
+        background:#243136;
+        border:1px solid #4d595d;
+        border-radius:4px;
+        font-size:.9em;
+}
+
+.wan-native-popup__readonly strong { color:#fff; font-weight:600; }
+.wan-native-popup__readonly small { color:#b9c8d1; }
+.wan-native-popup__error { min-height:1.3em; margin-top:2px; color:#ff9b8f; font-size:.84em; }
+.wan-native-popup__actions { justify-content:flex-end; gap:8px; margin-top:8px; }
+.wan-native-popup__help { border:0; padding:3px 0; background:transparent; color:#8fc7f0; cursor:pointer; font-size:.85em; }
+
+@media (max-width:480px) {
+        .wan-native-popup.modal { width:calc(100vw - 20px); padding:13px; }
+        .wan-native-edit-btn { margin-left:4px; padding:0 7px; }
+}

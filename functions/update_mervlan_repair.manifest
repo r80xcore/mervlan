@@ -9,6 +9,8 @@ format=1
 0644 docs/diagrams/topology-3_standalone-ap.svg
 0644 docs/diagrams/topology-4_node-to-main.svg
 0644 docs/HELP.md
+0644 docs/images/mervlan_help.svg
+0644 docs/images/mervlan_manager.svg
 0644 LICENSE
 0644 mervlan.asp
 0644 README.md
@@ -37,8 +39,10 @@ format=1
 0755 functions/mervlan_node_runner.sh
 0755 functions/mervlan_recover.sh
 0755 functions/mervlan_trunk.sh
+0755 functions/mervlan_wan.sh
 0755 functions/post_apply_worker.sh
 0755 functions/save_settings.sh
+0755 functions/settings_reconcile.sh
 0755 functions/service-event-handler.sh
 0755 functions/ssh_hostkey_probe.sh
 0755 functions/ssh_trust_action.sh
@@ -55,9 +59,11 @@ format=1
 0644 settings/lib_debug.sh
 0644 settings/lib_identity.sh
 0644 settings/lib_json.sh
+0644 settings/lib_maintenance_recovery.sh
 0644 settings/lib_mervqt.sh
 0644 settings/lib_node_jobs.sh
 0644 settings/lib_node_reconcile.sh
+0644 settings/lib_settings_reconcile.sh
 0644 settings/lib_owner_lock.sh
 0644 settings/lib_progress.sh
 0644 settings/lib_radio.sh

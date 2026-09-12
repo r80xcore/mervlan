@@ -25,6 +25,16 @@ grep -Fq 'save_candidate_is_empty_object' "$SAVE_FILE" || fail 'formatted-empty 
 grep -Fq 'json_get_section_value "General"' "$SAVE_FILE" || fail 'General setter verification absent'
 grep -Fq 'json_get_section2_value "Hardware_Override"' "$SAVE_FILE" || fail 'Hardware_Override setter verification absent'
 grep -Fq 'json_set_section2_value "Hardware_Override" "$_ovr_target" "$_ovr_json_key" "$oval" "${_save_candidate}"' "$SAVE_FILE" || fail 'Hardware Override setter is not staged'
+grep -Fq 'MAIN_WAN_NATIVE_IP' "$SAVE_FILE" || fail 'MAIN WAN Native endpoint is not staged as a structured setting'
+grep -Fq 'MAIN_WAN_NATIVE_IP' "$UI_FILE" || fail 'MAIN WAN Native endpoint is not serialized by the UI'
+grep -Fq 'MAIN_ASUS_IP' "$SAVE_FILE" || fail 'MAIN ASUS endpoint is not staged as a structured setting'
+grep -Fq 'MAIN_ASUS_IP' "$UI_FILE" || fail 'MAIN ASUS endpoint is not serialized by the UI'
+grep -Fq 'out.vlanmgr_MAIN_WAN_NATIVE_IP' "$UI_FILE" || fail 'MAIN WAN Native endpoint is not submitted in normal save payload'
+grep -Fq 'out.vlanmgr_MAIN_ASUS_IP' "$UI_FILE" || fail 'MAIN ASUS endpoint is not submitted in normal save payload'
+grep -Fq 'wan_native)' "$SAVE_FILE" || fail 'narrow WAN Native save scope is absent'
+grep -Fq 'MAIN_ASUS_IP" || $1 == "PERSISTENT_DEBUG_LOGGING"' "$SAVE_FILE" || fail 'narrow WAN Native scope is not restricted to transport keys'
+grep -Fq 'PERSISTENT_DEBUG_LOGGING' "$SAVE_FILE" || fail 'persistent WAN debug setting is not staged as a structured setting'
+grep -Fq 'PERSISTENT_DEBUG_LOGGING' "$UI_FILE" || fail 'persistent WAN debug setting is not serialized by the UI'
 grep -Fq 'json_set_section_value "ClientMeta" "$cmkey" "$cmval" "${_save_candidate}"' "$SAVE_FILE" || fail 'ClientMeta setter is not staged'
 grep -Fq 'json_validate_file "${_save_candidate}"' "$SAVE_FILE" || fail 'candidate validation missing'
 grep -Fq 'mv -f "${_save_candidate}" "${SETTINGS_FILE}"' "$SAVE_FILE" || fail 'single authoritative candidate commit missing'
@@ -32,13 +42,25 @@ grep -Fq 'elif [ -L "${PUBLIC_SETTINGS_FILE}" ]; then' "$SAVE_FILE" || fail 'pub
 grep -Fq '_save_public_status="failed"' "$SAVE_FILE" || fail 'public publication failure is not represented'
 grep -Fq 'public-settings-publication-failed' "$SAVE_FILE" || fail 'public publication failure acknowledgement missing'
 
-# Normal Save draft clearing follows persistence, acknowledgement, and reload.
+# Normal Save retains the draft until acknowledgement, then clears it before
+# reloading the authoritative settings so the final visible form is populated.
+# A structured partial acknowledgement can still prove MAIN persistence (for
+# example public publication failed while durable node convergence is pending),
+# so it must not be flattened into a false failed Save.
 save_line=$(grep -n "Clearing form fields" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 ack_line=$(grep -n "waitForVerifiedActionResult" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 reload_line=$(grep -n "const reloaded = await loadSettings()" "$UI_FILE" | tail -n 1 | cut -d: -f1)
 [ "$save_line" -gt "$ack_line" ] || fail 'normal Save clears draft before acknowledgement'
-[ "$save_line" -gt "$reload_line" ] || fail 'normal Save clears draft before verified reload'
-grep -Fq "Save reload failed" "$UI_FILE" || fail 'reload failure does not retain draft'
+[ "$save_line" -lt "$reload_line" ] || fail 'normal Save does not clear draft before authoritative reload'
+grep -Fq "function normalizeSettingsSaveAcknowledgement(verifiedAck)" "$UI_FILE" || fail 'structured Save acknowledgement parser missing'
+grep -Fq "function unwrapVerifiedActionAcknowledgement(verifiedAck)" "$UI_FILE" || fail 'verified Save wrapper unwrapping helper missing'
+grep -Fq "const result = acknowledgement ? acknowledgement.result : {};" "$UI_FILE" || fail 'Save acknowledgement does not explicitly unwrap the action payload'
+grep -Fq "wrapperStatus !== acknowledgementStatus" "$UI_FILE" || fail 'Save acknowledgement accepts mismatched verified-wrapper state'
+grep -Fq "String(result.local_saved || '') !== '1'" "$UI_FILE" || fail 'Save acknowledgement no longer requires authoritative MAIN persistence'
+grep -Fq "publicSettings: result.public_settings === 'failed' ? 'failed' : 'ok'" "$UI_FILE" || fail 'public publication failure is not kept separate from node convergence'
+grep -Fq "nodeSyncStatus: result.node_sync ? String(result.node_sync) : 'ok'" "$UI_FILE" || fail 'node convergence status is not preserved from structured acknowledgement'
+reject_line=$(grep -n "if (!acknowledged.ok)" "$UI_FILE" | tail -n 1 | cut -d: -f1)
+[ "$reject_line" -lt "$save_line" ] || fail 'unconfirmed MAIN Save can reach draft clearing'
 grep -Fq "Client metadata apply did not reach a terminal refresh; keeping the editor draft." "$UI_FILE" || fail 'ClientMeta timeout does not retain draft'
 
 printf 'SETTINGS_SAVE_TRANSACTION_CONTRACT_OK\n'

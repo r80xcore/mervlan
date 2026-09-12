@@ -10,6 +10,7 @@
 : "${MERVLAN_RECOVERY_BACKUP_ROOT:=/jffs/addons/mervlan_backups}"
 : "${MERVLAN_RECOVERY_ACTIVE_ROOT:=/jffs/addons/mervlan}"
 : "${MERVLAN_RECOVERY_TMP_ROOT:=/tmp/mervlan_recovery}"
+: "${MERVLAN_RECOVERY_STATE_ROOT:=/jffs/addons/mervlan_state}"
 : "${MERVLAN_RECOVERY_TEST_MODE:=0}"
 
 RECOVERY_WORK="$MERVLAN_RECOVERY_TMP_ROOT/restore.$$"
@@ -27,6 +28,12 @@ RECOVERY_OWNER_TMP_SEQ="${RECOVERY_OWNER_TMP_SEQ:-0}"
 RECOVERY_PRESERVE_JFFS=0
 RECOVERY_REPLACED=0
 RECOVERY_ROLLING_BACK=0
+RECOVERY_RECOVERY_REQUIRED=0
+RECOVERY_DURABLE_RECOVERY_OWNED=0
+RECOVERY_EXISTING_DURABLE_RECOVERY=0
+RECOVERY_EXISTING_UPDATE_RECOVERY=0
+RECOVERY_STATE_HELPER="${MERVLAN_RECOVERY_STATE_HELPER:-$MERVLAN_RECOVERY_BACKUP_ROOT/recovery_state.sh}"
+RECOVERY_UPDATE_STATE_HELPER="${MERVLAN_RECOVERY_UPDATE_STATE_HELPER:-$MERVLAN_RECOVERY_BACKUP_ROOT/update_state.sh}"
 
 recovery_log() { printf '[MerVLAN recovery] %s\n' "$*"; }
 recovery_error() { printf '[MerVLAN recovery] ERROR: %s\n' "$*" >&2; }
@@ -285,16 +292,102 @@ recovery_path_safe() {
   esac
 }
 
+recovery_load_durable_state() {
+  MERV_MAINTENANCE_RECOVERY_ROOT="$MERVLAN_RECOVERY_BACKUP_ROOT"
+  MERV_MAINTENANCE_RECOVERY_MARKER="$MERVLAN_RECOVERY_BACKUP_ROOT/.mervlan.recovery"
+  [ -r "$RECOVERY_STATE_HELPER" ] || return 1
+  [ -n "${LIB_MAINTENANCE_RECOVERY_LOADED:-}" ] || . "$RECOVERY_STATE_HELPER" || return 1
+}
+
+# Recovery may run after the active tree was damaged, so use the atomically
+# published copy beside the backup archive rather than trusting that tree.
+recovery_load_update_state() {
+  MERV_STATE_ROOT="$MERVLAN_RECOVERY_STATE_ROOT"
+  MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+  MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
+  [ -r "$RECOVERY_UPDATE_STATE_HELPER" ] || return 1
+  [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$RECOVERY_UPDATE_STATE_HELPER" || return 1
+}
+
+# Return 0 for a valid unresolved Update, 1 for no Update recovery requirement,
+# and 2 for malformed durable Update state.  The latter must never be guessed
+# away by an emergency Recovery invocation.
+recovery_update_recovery_status() {
+  merv_update_quiesce_state
+  case "${MERV_UPDATE_QUIESCE_STATE:-absent}" in
+    malformed) return 2 ;;
+    active) return 0 ;;
+  esac
+  merv_update_journal_state
+  case "${MERV_UPDATE_JOURNAL_STATE:-absent}" in
+    malformed) return 2 ;;
+    active)
+      if merv_update_journal_requires_safe_boot; then return 0; fi
+      ;;
+  esac
+  return 1
+}
+
+# An Update journal is durable transaction truth.  On a successful explicit
+# Recovery, retire only its exact recorded JFFS stages before clearing that
+# journal; never glob unrelated interrupted transactions.
+recovery_drop_update_recorded_stages() {
+  for recovery_update_stage in \
+    "$(merv_update_journal_get jffs_stage_path none)" \
+    "$(merv_update_journal_get jffs_old_path none)"; do
+    case "$recovery_update_stage" in
+      none|'') continue ;;
+      "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.new.*|"$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*)
+        [ -e "$recovery_update_stage" ] && rm -rf "$recovery_update_stage" 2>/dev/null || :
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+recovery_begin_durable_recovery() {
+  merv_maintenance_recovery_write recovery prepared "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE" || return 1
+  RECOVERY_DURABLE_RECOVERY_OWNED=1
+}
+
+recovery_mark_durable_recovery_displaced() {
+  [ "$RECOVERY_DURABLE_RECOVERY_OWNED" = "1" ] || return 0
+  merv_maintenance_recovery_matches recovery "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE" || return 1
+  merv_maintenance_recovery_write recovery displaced "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE"
+}
+
+recovery_clear_durable_recovery() {
+  [ "$RECOVERY_DURABLE_RECOVERY_OWNED" = "1" ] || return 0
+  merv_maintenance_recovery_matches recovery "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE" || return 1
+  merv_maintenance_recovery_clear || return 1
+  RECOVERY_DURABLE_RECOVERY_OWNED=0
+}
+
+recovery_activation_started() {
+  [ "$RECOVERY_REPLACED" = "1" ] && return 0
+  case "$RECOVERY_JFFS_OLD" in
+    "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*) [ -d "$RECOVERY_JFFS_OLD" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  RECOVERY_REPLACED=1
+  return 0
+}
+
 recovery_cleanup() {
   recovery_cleanup_rc=$?
   recovery_cleanup_failed=0
-  if recovery_path_safe "$RECOVERY_WORK" && [ -d "$RECOVERY_WORK" ]; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" = "1" ]; then
+    RECOVERY_PRESERVE_JFFS=1
+    recovery_cleanup_failed=1
+    recovery_error "Recovery cleanup preserved work, recovery trees, and owner lock because rollback recovery remains incomplete"
+  elif recovery_path_safe "$RECOVERY_WORK" && [ -d "$RECOVERY_WORK" ]; then
     if ! rm -rf "$RECOVERY_WORK" 2>/dev/null; then
       recovery_error "Could not remove recovery workspace $RECOVERY_WORK"
       recovery_cleanup_failed=1
     fi
   fi
-  if [ "$RECOVERY_PRESERVE_JFFS" != "1" ]; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" != "1" ] && [ "$RECOVERY_PRESERVE_JFFS" != "1" ]; then
     case "$RECOVERY_JFFS_STAGE" in
       "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.new.*)
         if ! rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
@@ -304,7 +397,14 @@ recovery_cleanup() {
         ;;
     esac
   fi
-  if [ "$RECOVERY_PRESERVE_JFFS" != "1" ] && [ "$RECOVERY_REPLACED" = "0" ]; then
+  if [ "$RECOVERY_DURABLE_RECOVERY_OWNED" = "1" ] && \
+     merv_maintenance_recovery_read && \
+     [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+     [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+     [ ! -e "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
+    recovery_clear_durable_recovery || recovery_cleanup_failed=1
+  fi
+  if [ "$RECOVERY_RECOVERY_REQUIRED" != "1" ] && [ "$RECOVERY_PRESERVE_JFFS" != "1" ] && [ "$RECOVERY_REPLACED" = "0" ]; then
     case "$RECOVERY_JFFS_OLD" in
       "$MERVLAN_RECOVERY_BACKUP_ROOT"/.mervlan.old.*)
         if ! rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null; then
@@ -314,7 +414,7 @@ recovery_cleanup() {
         ;;
     esac
   fi
-  if ! recovery_release_lock; then
+  if [ "$RECOVERY_RECOVERY_REQUIRED" != "1" ] && ! recovery_release_lock; then
     recovery_error "Recovery cleanup could not release its owner lock"
     recovery_cleanup_failed=1
   fi
@@ -322,7 +422,43 @@ recovery_cleanup() {
   return "$recovery_cleanup_rc"
 }
 
+recovery_mark_rollback_required() {
+  RECOVERY_RECOVERY_REQUIRED=1
+  RECOVERY_PRESERVE_JFFS=1
+  if [ "$RECOVERY_DURABLE_RECOVERY_OWNED" = "1" ] && \
+     ! recovery_mark_durable_recovery_displaced; then
+    recovery_error "CRITICAL: durable Recovery metadata could not record the interrupted activation"
+  fi
+}
+
 recovery_reconcile_stale_stages() {
+  if type recovery_update_recovery_status >/dev/null 2>&1; then
+    recovery_update_recovery_status
+    recovery_update_state_rc=$?
+    case "$recovery_update_state_rc" in
+      0) recovery_log "An unresolved Update recovery record protects recovery trees."; return 0 ;;
+      1) ;;
+      *) recovery_error "Durable Update recovery metadata is malformed or unreadable; preserving recovery trees."; return 1 ;;
+    esac
+  fi
+  merv_maintenance_recovery_read
+  recovery_state_rc=$?
+  case "$recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
+    0:active)
+      if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+         [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+         [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
+         recovery_tree_valid "$MERVLAN_RECOVERY_ACTIVE_ROOT"; then
+        rm -rf "$MERV_MAINTENANCE_RECOVERY_STAGE" 2>/dev/null && \
+          merv_maintenance_recovery_clear || return 1
+      else
+        recovery_log "Durable ${MERV_MAINTENANCE_RECOVERY_KIND} recovery state is unresolved; preserving all recovery trees."
+        return 0
+      fi
+      ;;
+    1:absent) ;;
+    *) recovery_error "Durable maintenance-recovery metadata is malformed or unreadable; preserving recovery trees."; return 1 ;;
+  esac
   if ! recovery_tree_valid "$MERVLAN_RECOVERY_ACTIVE_ROOT"; then
     recovery_log "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees."
     return 0
@@ -483,34 +619,38 @@ recovery_rollback() {
   [ "$RECOVERY_ROLLING_BACK" = "0" ] || return 1
   RECOVERY_ROLLING_BACK=1
   recovery_error "Recovery activation failed; restoring the installation saved in RAM."
-  case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') return 1 ;; esac
-  rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || return 1
+  case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') recovery_mark_rollback_required; return 1 ;; esac
+  rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null || { recovery_mark_rollback_required; return 1; }
   if [ -d "$MERVLAN_RECOVERY_ACTIVE_ROOT" ] && ! mv "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
-    RECOVERY_PRESERVE_JFFS=1
+    recovery_mark_rollback_required
     return 1
   fi
   if [ -d "$RECOVERY_JFFS_OLD" ]; then
-    mv "$RECOVERY_JFFS_OLD" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || return 1
+    mv "$RECOVERY_JFFS_OLD" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || { recovery_mark_rollback_required; return 1; }
   else
-    recovery_copy_tree "$RECOVERY_ORIGINAL" "$MERVLAN_RECOVERY_ACTIVE_ROOT" || return 1
+    recovery_copy_tree "$RECOVERY_ORIGINAL" "$MERVLAN_RECOVERY_ACTIVE_ROOT" || { recovery_mark_rollback_required; return 1; }
   fi
   if ! rm -rf "$RECOVERY_JFFS_STAGE" 2>/dev/null; then
-    RECOVERY_PRESERVE_JFFS=1
+    recovery_mark_rollback_required
     return 1
   fi
   if ! recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT")"; then
-    RECOVERY_PRESERVE_JFFS=1
+    recovery_mark_rollback_required
     return 1
   fi
   RECOVERY_REPLACED=0
+  if ! recovery_clear_durable_recovery; then
+    recovery_mark_rollback_required
+    return 1
+  fi
   return 0
 }
 
 recovery_on_signal() {
   recovery_signal="$1"
   trap - INT TERM
-  if ! recovery_rollback; then
-    RECOVERY_PRESERVE_JFFS=1
+  if recovery_activation_started && ! recovery_rollback; then
+    recovery_mark_rollback_required
     recovery_error "Interrupted recovery rollback failed; recovery trees were preserved."
   fi
   recovery_cleanup
@@ -522,17 +662,40 @@ recovery_restore() {
   recovery_confirm="$2"
   recovery_archive_id_valid "$recovery_id" || { recovery_error "Invalid backup identifier."; return 1; }
   recovery_archive="$MERVLAN_RECOVERY_BACKUP_ROOT/$recovery_id"
+  recovery_load_durable_state || { recovery_error "Durable maintenance-recovery state is unavailable; refusing destructive recovery."; return 1; }
+  recovery_load_update_state || { recovery_error "Durable Update recovery state is unavailable; refusing destructive recovery."; return 1; }
+  recovery_update_recovery_status
+  recovery_update_state_rc=$?
+  case "$recovery_update_state_rc" in
+    0) RECOVERY_EXISTING_UPDATE_RECOVERY=1 ;;
+    1) RECOVERY_EXISTING_UPDATE_RECOVERY=0 ;;
+    *) recovery_error "Durable Update recovery metadata is malformed or unreadable; inspect recovery state before retrying."; return 1 ;;
+  esac
+  merv_maintenance_recovery_read
+  recovery_state_rc=$?
+  case "$recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
+    0:active) RECOVERY_EXISTING_DURABLE_RECOVERY=1 ;;
+    1:absent) RECOVERY_EXISTING_DURABLE_RECOVERY=0 ;;
+    *) recovery_error "Durable maintenance-recovery metadata is malformed or unreadable; inspect recovery trees before retrying."; return 1 ;;
+  esac
   recovery_acquire_lock || return 1
-  if ! recovery_reconcile_stale_stages; then
-    recovery_error "Stale recovery trees could not be reconciled; restore is blocked."
-    return 1
-  fi
   mkdir -p "$RECOVERY_WORK" 2>/dev/null || { recovery_error "Could not create recovery workspace in /tmp."; return 1; }
   chmod 700 "$RECOVERY_WORK" 2>/dev/null || { recovery_error "Could not secure the recovery workspace."; return 1; }
   trap 'recovery_on_signal 130' INT
   trap 'recovery_on_signal 143' TERM
   recovery_log "Validating $recovery_id"
   recovery_validate_archive "$recovery_archive" || return 1
+  if ! recovery_reconcile_stale_stages; then
+    recovery_error "Stale recovery trees could not be reconciled; restore is blocked."
+    return 1
+  fi
+  merv_maintenance_recovery_read
+  recovery_state_rc=$?
+  case "$recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
+    1:absent) RECOVERY_EXISTING_DURABLE_RECOVERY=0 ;;
+    0:active) ;;
+    *) recovery_error "Durable maintenance-recovery metadata became malformed during validation."; return 1 ;;
+  esac
   recovery_target_boot=$(recovery_boot_state "$RECOVERY_TREE")
   if [ "$recovery_confirm" != "yes" ]; then
     printf 'Restore %s to %s? [y/N]: ' "$recovery_id" "$MERVLAN_RECOVERY_ACTIVE_ROOT"
@@ -575,8 +738,18 @@ recovery_restore() {
     fi
   fi
   case "$MERVLAN_RECOVERY_ACTIVE_ROOT" in /|/jffs|/jffs/addons|/tmp|'') recovery_error "Unsafe active path."; return 1 ;; esac
+  if [ "$RECOVERY_EXISTING_DURABLE_RECOVERY" = "0" ] && ! recovery_begin_durable_recovery; then
+    RECOVERY_PRESERVE_JFFS=1
+    recovery_error "Could not publish durable Recovery metadata before activation. No installation files were replaced."
+    return 1
+  fi
   if [ -d "$MERVLAN_RECOVERY_ACTIVE_ROOT" ]; then
     mv "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$RECOVERY_JFFS_OLD" 2>/dev/null || return 1
+  fi
+  if ! recovery_mark_durable_recovery_displaced; then
+    recovery_activation_started
+    if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
+    return 1
   fi
   RECOVERY_REPLACED=1
   mv "$RECOVERY_JFFS_STAGE" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || {
@@ -595,6 +768,23 @@ recovery_restore() {
   if ! rm -rf "$RECOVERY_JFFS_OLD" 2>/dev/null; then
     RECOVERY_PRESERVE_JFFS=1
     recovery_error "Recovery completed, but the displaced installation could not be removed."
+    return 1
+  fi
+  if [ "$RECOVERY_EXISTING_DURABLE_RECOVERY" = "1" ]; then
+    if ! merv_maintenance_recovery_drop_recorded_stages; then
+      recovery_mark_rollback_required
+      recovery_error "Recovery completed, but the previously protected transaction could not be retired."
+      return 1
+    fi
+  elif ! recovery_clear_durable_recovery; then
+    recovery_mark_rollback_required
+    recovery_error "Recovery completed, but durable Recovery metadata could not be cleared."
+    return 1
+  fi
+  if [ "$RECOVERY_EXISTING_UPDATE_RECOVERY" = "1" ] && \
+     { ! recovery_drop_update_recorded_stages || ! merv_update_quiesce_clear || ! merv_update_journal_clear; }; then
+    recovery_mark_rollback_required
+    recovery_error "Recovery completed, but the prior Update recovery record could not be cleared."
     return 1
   fi
   recovery_log "Main-router recovery completed successfully."

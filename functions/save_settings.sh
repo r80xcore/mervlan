@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.54"                     #
+#               - File: save_settings.sh || version="0.57"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -33,6 +33,9 @@ fi
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || :
+if [ -f "$MERV_BASE/settings/lib_settings_reconcile.sh" ]; then
+    . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || exit 75
+fi
 if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
     . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 fi
@@ -322,13 +325,13 @@ sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
 # ============================================================================ #
 # STEP 1.5: Extract and remove SAVE_SCOPE                                      #
 # The UI sends vlanmgr_SAVE_SCOPE to indicate which subset of keys are present  #
-# in this payload (normal/override/clientmeta/full). It must not be written    #
+# in this payload (normal/wan_native/override/clientmeta/full). It must not be written #
 # into settings.json. Remove it here before any further processing.            #
 # ============================================================================ #
 
 SAVE_SCOPE="$(awk -F'\t' '$1=="SAVE_SCOPE"{print $2; exit}' "${TMP_KV}")"
 case "$SAVE_SCOPE" in
-    normal|override|clientmeta|full) :;;
+    normal|wan_native|override|clientmeta|full) :;;
     *) SAVE_SCOPE="full" ;; # backward-compatible: old UI sends no SAVE_SCOPE
 esac
 info -c vlan "save_settings.sh: SAVE_SCOPE=$SAVE_SCOPE"
@@ -368,6 +371,13 @@ case "$SAVE_SCOPE" in
             $1 != "CLIENT_NAME_OVERRIDES" { print }
         ' "${TMP_KV}" > "${_tmp_kv_filtered}" && mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
         ;;
+    wan_native)
+        # Narrow supported transport-endpoint save used by controlled WAN
+        # transitions. It cannot synthesize absent trunk/SSID keys or trigger
+        # node sync from a partial payload.
+        awk -F'\t' '$1 ~ /^WAN_NATIVE_(MAIN|NODE([1-9]|10))$/ || $1 == "MAIN_WAN_NATIVE_IP" || $1 == "MAIN_ASUS_IP" || $1 == "PERSISTENT_DEBUG_LOGGING" { print }' \
+          "${TMP_KV}" > "${_tmp_kv_filtered}" && mv "${_tmp_kv_filtered}" "${TMP_KV}" || rm -f "${_tmp_kv_filtered}"
+        ;;
     override)
         # Keep only OVERRIDE_* keys.
         awk -F'\t' '$1 ~ /^OVERRIDE_/ { print }' "${TMP_KV}" > "${_tmp_kv_filtered}" && \
@@ -394,12 +404,14 @@ sort -k1,1 "${TMP_KV}" > "${TMP_SORTED}"
 # require synchronization after the save.
 _save_node_sync_before_digest=""
 case "$SAVE_SCOPE" in
-    normal|full)
+    normal|full|override)
         if [ -f "${SETTINGS_FILE}" ]; then
             _save_node_sync_before_digest=$(merv_settings_node_sync_digest "${SETTINGS_FILE}" 2>/dev/null) ||
                 _save_node_sync_before_digest="unavailable"
+            _save_auto_sync_before=$(json_get_flag "AUTO_SYNC_SETTINGS" "0" "${SETTINGS_FILE}" 2>/dev/null)
         else
             _save_node_sync_before_digest="missing"
+            _save_auto_sync_before="0"
         fi
         ;;
 esac
@@ -760,7 +772,8 @@ seed_general_section_if_missing() {
             '  "General": {' \
             '    "_description": "Global addon flags and behavior toggles",' \
             '    "AUTO_SYNC_SETTINGS": "1",' \
-            '    "HTML_CLIENT_REFRESH_MINUTES": "30"' \
+            '    "HTML_CLIENT_REFRESH_MINUTES": "30",' \
+            '    "NODE_PARALLELISM": "2"' \
             '  }' \
             '}' > "${_sg_seed_tmp}" 2>/dev/null &&
            mv "${_sg_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
@@ -777,7 +790,8 @@ seed_general_section_if_missing() {
                     print "  \"General\": {"
                     print "    \"_description\": \"Global addon flags and behavior toggles\","
                     print "    \"AUTO_SYNC_SETTINGS\": \"1\","
-                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\""
+                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\","
+                    print "    \"NODE_PARALLELISM\": \"2\""
                     print "  }"
                     print "}"
                     seeded=1
@@ -788,7 +802,8 @@ seed_general_section_if_missing() {
                     print "  \"General\": {"
                     print "    \"_description\": \"Global addon flags and behavior toggles\","
                     print "    \"AUTO_SYNC_SETTINGS\": \"1\","
-                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\""
+                    print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\","
+                    print "    \"NODE_PARALLELISM\": \"2\""
                     print "  },"
                     seeded=1
                 }
@@ -811,13 +826,245 @@ seed_general_setting_from_normal_kv() {
     [ "$_sg_observed" = "$_sg_value" ] || return 1
 }
 
-if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
-    if ! seed_general_setting_from_normal_kv "AUTO_SYNC_SETTINGS" || \
-       ! seed_general_setting_from_normal_kv "HTML_CLIENT_REFRESH_MINUTES"; then
-        error -c vlan "save_settings.sh: failed to seed General settings"
-        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
+if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "wan_native" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
+    # Every Settings-modal control stored under General must use the structured
+    # writer.  A scoped service Save contains only its changed controls; the
+    # helper is a no-op for omitted keys, so this does not overwrite them.
+    for _save_general_key in \
+        BOOT_ENABLED PAUSE ENABLE_STP DRY_RUN EXPERIMENTAL ENABLE_NATIVE_SSID \
+        AUTO_SYNC_SETTINGS HTML_CLIENT_REFRESH_MINUTES NODE_PARALLELISM; do
+        if ! seed_general_setting_from_normal_kv "$_save_general_key"; then
+            error -c vlan "save_settings.sh: failed to seed General setting $_save_general_key"
+            rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
+            exit 1
+        fi
+    done
+fi
+
+# NODE_PARALLELISM is a bounded MAIN-local scheduler control.  Unlike the
+# runtime resolver, the Save backend must reject an explicitly supplied value
+# outside 1..5 so malformed configuration cannot be persisted or propagated.
+validate_node_parallelism_kv() {
+    _vnpp_key="$1"
+    _vnpp_value="$2"
+    [ "$_vnpp_key" = "NODE_PARALLELISM" ] || return 0
+    case "$_vnpp_value" in
+        1|2|3|4|5) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+while IFS="$(printf '\t')" read -r _vnpp_key _vnpp_value; do
+    if ! validate_node_parallelism_kv "$_vnpp_key" "$_vnpp_value"; then
+        error -c vlan "save_settings.sh: invalid NODE_PARALLELISM='$_vnpp_value' (expected integer 1-5)"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
         exit 1
     fi
+done < "${TMP_SORTED}"
+
+# WAN Native values are normal-scope settings but live in VLAN.WAN_Native in
+# sectioned settings. Validate them before mutation and seed the subsection on
+# upgrades so the generic flat merger never appends these keys at document root.
+validate_wan_native_kv() {
+    _vwn_key="$1"
+    _vwn_value="$2"
+    case "$_vwn_key" in
+        PERSISTENT_DEBUG_LOGGING)
+            case "$_vwn_value" in
+                1|true|TRUE|yes|YES|on|ON|enabled|ENABLED) return 0 ;;
+                0|false|FALSE|no|NO|off|OFF|disabled|DISABLED|'') return 0 ;;
+                *) return 1 ;;
+            esac
+            ;;
+        WAN_NATIVE_MAIN|WAN_NATIVE_NODE[1-9]|WAN_NATIVE_NODE10) ;;
+        MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP)
+            case "$_vwn_value" in ''|none|NONE) return 0 ;; esac
+            printf '%s\n' "$_vwn_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+            return $?
+            ;;
+        WAN_NATIVE_*) return 1 ;;
+        *) return 0 ;;
+    esac
+    case "$_vwn_value" in
+        ''|none|NONE|asus|ASUS) return 0 ;;
+        *[!0-9]*) return 1 ;;
+    esac
+    [ "$_vwn_value" -ge 2 ] 2>/dev/null && [ "$_vwn_value" -le 4094 ] 2>/dev/null
+}
+
+while IFS="$(printf '\t')" read -r _vwn_key _vwn_value; do
+    case "$_vwn_key" in WAN_NATIVE_*|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|PERSISTENT_DEBUG_LOGGING)
+        if ! validate_wan_native_kv "$_vwn_key" "$_vwn_value"; then
+            error -c vlan "save_settings.sh: invalid WAN Native setting $_vwn_key=$_vwn_value (use none or VLAN 2-4094)"
+            rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+            exit 1
+        fi
+        ;;
+    esac
+done < "${TMP_SORTED}"
+
+seed_wan_native_section_if_missing() {
+    grep -q '"VLAN"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null || return 2
+    if grep -q '"WAN_Native"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null; then
+        # Schema upgrades previously had the subsection but not the explicit
+        # MAIN DHCP endpoint.  Seed a fail-closed default inside that existing
+        # subsection rather than letting the generic flat merger add a root key.
+        _vwn_main_ip="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_WAN_NATIVE_IP" "${_save_candidate}" 2>/dev/null)"
+        [ -n "$_vwn_main_ip" ] || json_set_section2_value "VLAN" "WAN_Native" "MAIN_WAN_NATIVE_IP" "none" "${_save_candidate}" || return 1
+        _vwn_main_asus_ip="$(json_get_section2_value "VLAN" "WAN_Native" "MAIN_ASUS_IP" "${_save_candidate}" 2>/dev/null)"
+        [ -n "$_vwn_main_asus_ip" ] || json_set_section2_value "VLAN" "WAN_Native" "MAIN_ASUS_IP" "none" "${_save_candidate}" || return 1
+        _vwn_persist="$(json_get_section2_value "VLAN" "WAN_Native" "PERSISTENT_DEBUG_LOGGING" "${_save_candidate}" 2>/dev/null)"
+        [ -n "$_vwn_persist" ] || json_set_section2_value "VLAN" "WAN_Native" "PERSISTENT_DEBUG_LOGGING" "0" "${_save_candidate}" || return 1
+        return 0
+    fi
+    _vwn_seed_tmp="${_save_candidate}.wanseed.${MERV_IDENTITY_NONCE}"
+    awk '
+        BEGIN { inserted=0 }
+        {
+            print
+            if (!inserted && $0 ~ /"VLAN"[[:space:]]*:[[:space:]]*{/) {
+                print "    \"WAN_Native\": {"
+                print "      \"_description\": \"Optional native VLAN tag for the WAN/uplink per device; none keeps ASUS untagged behavior\","
+                print "      \"WAN_NATIVE_MAIN\": \"none\","
+                print "      \"MAIN_WAN_NATIVE_IP\": \"none\","
+                print "      \"MAIN_ASUS_IP\": \"none\","
+                print "      \"PERSISTENT_DEBUG_LOGGING\": \"0\","
+                print "      \"WAN_NATIVE_NODE1\": \"none\","
+                print "      \"WAN_NATIVE_NODE2\": \"none\","
+                print "      \"WAN_NATIVE_NODE3\": \"none\","
+                print "      \"WAN_NATIVE_NODE4\": \"none\","
+                print "      \"WAN_NATIVE_NODE5\": \"none\","
+                print "      \"WAN_NATIVE_NODE6\": \"none\","
+                print "      \"WAN_NATIVE_NODE7\": \"none\","
+                print "      \"WAN_NATIVE_NODE8\": \"none\","
+                print "      \"WAN_NATIVE_NODE9\": \"none\","
+                print "      \"WAN_NATIVE_NODE10\": \"none\""
+                print "    },"
+                inserted=1
+            }
+        }
+        END { if (!inserted) exit 1 }
+    ' "${_save_candidate}" > "${_vwn_seed_tmp}" 2>/dev/null &&
+    json_validate_file "${_vwn_seed_tmp}" 2>/dev/null &&
+    mv "${_vwn_seed_tmp}" "${_save_candidate}" 2>/dev/null && return 0
+    rm -f "${_vwn_seed_tmp}" 2>/dev/null
+    return 1
+}
+
+if grep -q '"VLAN"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null; then
+    if ! seed_wan_native_section_if_missing; then
+        error -c vlan "save_settings.sh: failed to seed VLAN.WAN_Native settings section"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+    _vwn_filtered="${TMP_SORTED}.nowan.${MERV_IDENTITY_NONCE}"
+    : > "${_vwn_filtered}"
+    while IFS="$(printf '\t')" read -r _vwn_key _vwn_value; do
+        case "$_vwn_key" in
+            WAN_NATIVE_MAIN|WAN_NATIVE_NODE[1-9]|WAN_NATIVE_NODE10|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|PERSISTENT_DEBUG_LOGGING)
+                case "$_vwn_key" in
+                    PERSISTENT_DEBUG_LOGGING)
+                        case "$_vwn_value" in
+                            1|true|TRUE|yes|YES|on|ON|enabled|ENABLED) _vwn_value="1" ;;
+                            *) _vwn_value="0" ;;
+                        esac
+                        ;;
+                    *) case "$_vwn_value" in ''|NONE|asus|ASUS) _vwn_value="none" ;; esac ;;
+                esac
+                if ! json_set_section2_value "VLAN" "WAN_Native" "$_vwn_key" "$_vwn_value" "${_save_candidate}" ||
+                   [ "$(json_get_section2_value "VLAN" "WAN_Native" "$_vwn_key" "${_save_candidate}" 2>/dev/null)" != "$_vwn_value" ]; then
+                    rm -f "${_vwn_filtered}"
+                    error -c vlan "save_settings.sh: failed to stage $_vwn_key in VLAN.WAN_Native"
+                    exit 1
+                fi
+                ;;
+            *) printf '%s\t%s\n' "$_vwn_key" "$_vwn_value" >> "${_vwn_filtered}" ;;
+        esac
+    done < "${TMP_SORTED}"
+    mv "${_vwn_filtered}" "${TMP_SORTED}" || exit 1
+fi
+
+# The configured NODE<n> address remains the ASUS/recovery address.  Store the
+# optional WAN Native management address beside it in Nodes, not as a second
+# logical node.  Flat legacy files retain a flat key until their normal
+# structured migration; sectioned files never gain an accidental root key.
+validate_wan_native_endpoint_kv() {
+    _vwne_key="$1"; _vwne_value="$2"
+    case "$_vwne_key" in NODE[1-9]_WAN_NATIVE_IP|NODE10_WAN_NATIVE_IP|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP) ;; *) return 0 ;; esac
+    case "$_vwne_value" in ''|none|NONE) return 0 ;; esac
+    printf '%s\n' "$_vwne_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+}
+
+# A configured NODE<n> value is its ASUS/default management endpoint. Empty
+# and `none` are unconfigured forms; every other submitted value must be a
+# strict IPv4 address before the candidate can become authoritative.
+validate_node_endpoint_kv() {
+    _vne_key="$1"; _vne_value="$2"
+    case "$_vne_key" in NODE[1-9]|NODE10) ;; *) return 0 ;; esac
+    case "$_vne_value" in ''|none|NONE) return 0 ;; esac
+    printf '%s\n' "$_vne_value" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; exit 0 } { exit 1 }'
+}
+
+# Roles live with the durable node identity and are accepted by both normal
+# and WAN-Native save scopes.  Missing legacy keys are interpreted by the
+# shared reader as standalone; an explicitly supplied invalid value fails
+# before the candidate settings file can be published.
+validate_node_role_kv() {
+    _vnrole_key="$1"; _vnrole_value="$2"
+    case "$_vnrole_key" in NODE[1-9]_ROLE|NODE10_ROLE) ;; *) return 0 ;; esac
+    case "$_vnrole_value" in aimesh|standalone) return 0 ;; *) return 1 ;; esac
+}
+
+while IFS="$(printf '\t')" read -r _vwne_key _vwne_value; do
+    if ! validate_wan_native_endpoint_kv "$_vwne_key" "$_vwne_value"; then
+        error -c vlan "save_settings.sh: invalid WAN Native management endpoint $_vwne_key=$_vwne_value"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+while IFS="$(printf '\t')" read -r _vne_key _vne_value; do
+    if ! validate_node_endpoint_kv "$_vne_key" "$_vne_value"; then
+        error -c vlan "save_settings.sh: invalid node management address $_vne_key (use none or IPv4)"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+while IFS="$(printf '\t')" read -r _vnrole_key _vnrole_value; do
+    if ! validate_node_role_kv "$_vnrole_key" "$_vnrole_value"; then
+        error -c vlan "save_settings.sh: invalid node role $_vnrole_key=$_vnrole_value (use aimesh or standalone)"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+if grep -q '"Nodes"[[:space:]]*:[[:space:]]*{' "${_save_candidate}" 2>/dev/null; then
+    _vwne_filtered="${TMP_SORTED}.nowanendpoint.${MERV_IDENTITY_NONCE}"
+    : > "${_vwne_filtered}"
+    while IFS="$(printf '\t')" read -r _vwne_key _vwne_value; do
+        case "$_vwne_key" in
+            NODE[1-9]_WAN_NATIVE_IP|NODE10_WAN_NATIVE_IP)
+                case "$_vwne_value" in '') _vwne_value=none ;; esac
+                if ! json_set_section_value "Nodes" "$_vwne_key" "$_vwne_value" "${_save_candidate}" ||
+                   [ "$(json_get_section_value "Nodes" "$_vwne_key" "${_save_candidate}" 2>/dev/null)" != "$_vwne_value" ]; then
+                    rm -f "${_vwne_filtered}"
+                    error -c vlan "save_settings.sh: failed to stage $_vwne_key in Nodes"
+                    exit 1
+                fi
+                ;;
+            NODE[1-9]_ROLE|NODE10_ROLE)
+                if ! json_set_section_value "Nodes" "$_vwne_key" "$_vwne_value" "${_save_candidate}" ||
+                   [ "$(json_get_section_value "Nodes" "$_vwne_key" "${_save_candidate}" 2>/dev/null)" != "$_vwne_value" ]; then
+                    rm -f "${_vwne_filtered}"
+                    error -c vlan "save_settings.sh: failed to stage $_vwne_key in Nodes"
+                    exit 1
+                fi
+                ;;
+            *) printf '%s\t%s\n' "$_vwne_key" "$_vwne_value" >> "${_vwne_filtered}" ;;
+        esac
+    done < "${TMP_SORTED}"
+    mv "${_vwne_filtered}" "${TMP_SORTED}" || exit 1
 fi
 
 # ============================================================================ #
@@ -827,6 +1074,13 @@ fi
 
 if ! json_apply_kv_file "${TMP_SORTED}" "${_save_candidate}"; then
     error -c vlan "save_settings.sh: failed to stage settings update"
+    rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+    exit 1
+fi
+
+if type merv_node_validate_wan_native_management >/dev/null 2>&1 &&
+   ! merv_node_validate_wan_native_management "${_save_candidate}"; then
+    error -c vlan "save_settings.sh: ${MERV_SSH_LAST_DETAIL:-WAN Native node management endpoint validation failed}"
     rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
     exit 1
 fi
@@ -1086,6 +1340,13 @@ if [ -n "${_save_node_sync_before_digest}" ] && [ -f "${_save_candidate}" ]; the
         info -c vlan "save_settings.sh: only main-router/WebUI-local settings changed"
     fi
 fi
+_save_auto_sync_after=$(json_get_flag "AUTO_SYNC_SETTINGS" "0" "${_save_candidate}" 2>/dev/null)
+_save_auto_sync_changed=no
+case "$SAVE_SCOPE" in
+    normal|full)
+        [ "${_save_auto_sync_before:-0}" = "${_save_auto_sync_after:-0}" ] || _save_auto_sync_changed=yes
+        ;;
+esac
 
 # ============================================================================ #
 # STEP 4: Convert to pretty JSON format                                        #
@@ -1159,16 +1420,17 @@ else
 fi
 
 # ============================================================================ #
-# STEP 6: Auto-sync settings to configured nodes (if enabled)                 #
-# Defer auto-sync if SAVE_SCOPE is override (APMO handles sync after probe)   #
-# or clientmeta.                                                               #
+# STEP 6: Publish backend-owned node convergence, then optionally accelerate #
+# it with an immediate Sync.  A paused marker is still durable while automatic #
+# synchronization is disabled.                                                 #
 # ============================================================================ #
 
 _save_node_sync_status="skipped"
+_save_node_sync_generation=0
 if [ "$_save_public_status" != "ok" ]; then
     _save_node_sync_status="skipped-public-failure"
 fi
-if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] && [ "${SAVE_SCOPE:-full}" != "clientmeta" ]; then
+if [ "${SAVE_SCOPE:-full}" != "clientmeta" ] && [ "${SAVE_SCOPE:-full}" != "wan_native" ]; then
     _auto_sync_flag=$(json_get_flag "AUTO_SYNC_SETTINGS" "" "${SETTINGS_FILE}" 2>/dev/null)
     _nodes_configured=""
     for _n_idx in 1 2 3 4 5 6 7 8 9 10; do
@@ -1191,37 +1453,68 @@ if [ "$_save_public_status" = "ok" ] && [ "${SAVE_SCOPE:-full}" != "override" ] 
         fi
     fi
 
-    if [ "$_should_auto_sync" = "yes" ] && [ "${_save_node_sync_required:-yes}" = "yes" ]; then
-        if [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
-            # The WebUI Save action must finish its local persistence phase
-            # before a node-mutating operation starts.  The browser queues the
-            # settings-only action separately so it can own preflight,
-            # trust-review pause/resume, and terminal progress reporting.
+    if { [ -n "$_nodes_configured" ] && { [ "${_save_node_sync_required:-yes}" = "yes" ] || [ "$_save_auto_sync_changed" = yes ]; }; } || \
+       { [ -z "$_nodes_configured" ] && [ "${_save_node_sync_required:-yes}" = "yes" ]; }; then
+        # Authoritative local commit begins convergence ownership independently
+        # of public WebUI publication. The durable marker is the handoff to a
+        # browser/reconciliation-owned settings-only sync.
+        _save_reconcile_published="no"
+        _save_node_list_digest=""
+        if type merv_settings_reconcile_normalize_current >/dev/null 2>&1; then
+            if merv_settings_reconcile_normalize_current publish; then
+                _save_reconcile_published="yes"
+            fi
+        fi
+
+        # The acknowledgement exposes only the monotonic generation, never a
+        # digest or node list. It lets the WebUI observe the exact durable
+        # obligation it just created without becoming a second authority.
+        if [ "$_save_reconcile_published" = "yes" ] && merv_settings_reconcile_read; then
+            _save_node_sync_generation="$MERV_SETTINGS_RECONCILE_GENERATION"
+        fi
+
+        if [ "$_save_reconcile_published" != "yes" ]; then
+            _save_node_sync_status="failed"
+            warn -c vlan,cli "save_settings.sh: node settings intent could not be durably published; local settings saved"
+        elif [ -z "$_nodes_configured" ]; then
+            # A current empty target set is vacuously converged. In
+            # particular, final-node removal clears any older marker rather
+            # than reporting an imaginary pending generation.
+            _save_node_sync_status="skipped-no-nodes"
+        elif [ "$_save_public_status" != ok ]; then
+            if [ "$_should_auto_sync" = yes ]; then _save_node_sync_status="pending"; else _save_node_sync_status="paused"; fi
+            info -c vlan,cli "Node settings convergence is durable; public settings publication failed"
+        elif [ "$_should_auto_sync" != yes ]; then
+            _save_node_sync_status="paused"
+            info -c vlan,cli "Node settings convergence is paused while automatic synchronization is disabled"
+        elif [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
+            # A WebUI Save never owns the nested node mutation.  The browser
+            # or backend reconciler may start the separate settings-only
+            # action after this terminal Save acknowledgement, and the
+            # durable marker survives browser loss or a failed start.
             _save_node_sync_status="pending"
             info -c vlan,cli "Node settings auto-sync queued after local save"
         else
+            # Direct/CLI Save retains its historical immediate follow-up, but
+            # only after the durable intent exists.  A failed start therefore
+            # leaves the current generation available for reconciliation.
             info -c vlan,cli "Auto-syncing settings to nodes..."
-        # The nested sync is owned by this Save transaction. Do not reuse the
-        # Save progress token for the child action, otherwise the child could
-        # overwrite the Save progress/ack record.
-        if ! MERV_ACTION_LOCK_PARENT_HELD=1 MERV_PROGRESS_TOKEN="" \
-           sh "$MERV_BASE/functions/sync_nodes.sh" --settings-only; then
-            _save_node_sync_status="failed"
-            warn -c vlan,cli "⚠️ Node settings auto-sync completed with warnings; local settings saved"
-        else
-            _save_node_sync_status="ok"
-            info -c vlan,cli "✓ Node settings auto-sync complete"
-        fi
+            if ! MERV_ACTION_LOCK_PARENT_HELD=1 MERV_PROGRESS_TOKEN="" \
+               sh "$MERV_BASE/functions/sync_nodes.sh" --settings-only; then
+                _save_node_sync_status="failed"
+                warn -c vlan,cli "⚠️ Node settings auto-sync completed with warnings; local settings saved"
+            elif merv_settings_reconcile_read; then
+                _save_node_sync_status="deferred"
+                info -c vlan,cli "Node settings synchronization was deferred; current settings remain pending"
+            else
+                _save_node_sync_status="ok"
+                info -c vlan,cli "✓ Node settings auto-sync complete"
+            fi
         fi
     elif [ "$_should_auto_sync" = "yes" ]; then
         _save_node_sync_status="skipped-local-only"
         info -c vlan,cli "Skipping node settings auto-sync; only main-router/WebUI-local settings changed"
     fi
-fi
-
-if [ "${SAVE_SCOPE:-full}" = "override" ]; then
-    # APMO owns the ordered follow-up (probe, reload, optional node sync).
-    _save_node_sync_status="deferred-apmo"
 fi
 
 # Publish a correlated terminal result when the browser supplied a save token.
@@ -1234,23 +1527,24 @@ if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_partial >/dev/null 2>&1 
         _save_ack_partial=action_ack_stage_partial
         _save_ack_ok=action_ack_stage_ok
     fi
+    _save_ack_result="{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\",\"node_sync_generation\":\"$_save_node_sync_generation\"}"
     if [ "$_save_public_status" != "ok" ]; then
         "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            '{"local_saved":"1","public_settings":"failed","node_sync":"skipped"}' \
+            "{\"local_saved\":\"1\",\"public_settings\":\"failed\",\"node_sync\":\"$_save_node_sync_status\",\"node_sync_generation\":\"$_save_node_sync_generation\"}" \
             "Settings saved locally, but public settings publication failed: $_save_public_reason" \
             '["public-settings-publication-failed"]' >/dev/null 2>&1 || :
     elif [ "$_save_node_sync_status" = "failed" ]; then
         "$_save_ack_partial" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            '{"local_saved":"1","node_sync":"failed"}' \
+            "$_save_ack_result" \
             "Settings saved locally; node settings synchronization failed." \
             '["node-settings-sync-failed"]' >/dev/null 2>&1 || :
-    elif [ "$_save_node_sync_status" = "pending" ]; then
+    elif [ "$_save_node_sync_status" = "pending" ] || [ "$_save_node_sync_status" = "deferred" ] || [ "$_save_node_sync_status" = "paused" ]; then
         "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            '{"local_saved":"1","node_sync":"pending"}' \
-            "Settings saved successfully; node settings synchronization is queued." '[]' >/dev/null 2>&1 || :
+            "$_save_ack_result" \
+            "Settings saved successfully; node settings synchronization is ${_save_node_sync_status}." '[]' >/dev/null 2>&1 || :
     else
         "$_save_ack_ok" "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
-            "{\"local_saved\":\"1\",\"node_sync\":\"$_save_node_sync_status\"}" \
+            "$_save_ack_result" \
             "Settings saved successfully." '[]' >/dev/null 2>&1 || :
     fi
     if [ "$_save_public_status" != "ok" ]; then

@@ -1,3 +1,206 @@
+mervlan v0.53.28-dev
+
+Fixed: Boot and startup reliability
+- Resolved boot watchdog and manager-handoff races that could delay VLAN
+  configuration during startup until a later automatic Heal recovered it.
+- Bounded ASUS NVRAM discovery so a stalled `nvram show` cannot leave the
+  manager waiting indefinitely; inventory failure now aborts safely before
+  topology changes.
+- Strengthened watchdog publication and cleanup so interrupted or partially
+  published boot state can be recovered without deleting live or replacement
+  process state.
+- Corrected RC quiet-wait accounting so long protection or guard work cannot
+  stretch the watcher far beyond its intended observation window.
+- Rechecks disappearing DHCP state-lock paths authoritatively before treating
+  them as ambiguous, reducing false stale-lock warnings while preserving
+  fail-closed behavior.
+- Manager preflight now selects only the wireless NVRAM records MerVLAN uses
+  and tolerates normal ASUS/Broadcom key syntax and large inventories.
+
+Improved: SSID/NVRAM Apply performance and qualification safety
+- SSID readiness, interface resolution, bridge binding, and AP-isolation
+  mapping now reuse one validated NVRAM inventory per manager phase instead of
+  repeatedly executing the router-wide NVRAM scan; invalid or unavailable
+  inventory still aborts safely before topology mutation, and the
+  post-restart binding pass captures a fresh authoritative inventory.
+- Repeated stale DHCP state-lock recovery now uses unique, collision-checked
+  quarantine paths, while Update repair packaging includes the maintenance
+  recovery library required by the installed runtime.
+- Expanded owner-lock, boot-watchdog, manager-inventory, observation, client,
+  installer, MAC cleanup, and router-fake regression coverage to preserve the
+  current fail-closed contracts.
+
+New: Development-only Developer Tools
+- Added a dev-build-only Settings modal for read-only runtime diagnostics,
+  temporary MAIN recovery-cron controls, and selected router selftests with
+  correlated raw output. Stable builds and configured nodes reject this path.
+- The modal preserves an unsaved Settings draft only when returning with
+  Back to Settings; closing it discards that draft. Snapshot probes are
+  observational and report missing developer tools explicitly.
+
+New: Hardware Profile
+- Added a verified RT-BE86U hardware profile: LAN1 is a 2.5G LAN port, WAN is a
+  10G port. The ETH_PORTS assignment reflects the verified physical port
+  ordering.
+- Added a verified DSL-AX82U hardware profile: LAN1–3 map to `eth2 eth1 eth0`
+  and WAN maps to `eth3`.
+- Added a verified RT-AX68U hardware profile: LAN1–4 map to
+  `eth4 eth3 eth2 eth1` and WAN maps to `eth0`.
+  
+Improved: VLAN safety, node policy, and offline Update
+- Managed wired VLAN ports now use one device-aware expected state with exact
+  bridge placement and Layer-2 protection checks; unsafe or unknown state
+  remains fail-closed.
+- Nodes now have an explicit AiMesh or Standalone role. AiMesh nodes inherit
+  MAIN's WAN Native transport while keeping their own reservation; existing
+  nodes retain their independent behavior until explicitly changed.
+- Node role controls activate only after a valid node address is configured;
+  empty named slots remain unconfigured and are omitted from node settings.
+- Client refresh publishes a new inventory only when every required collector
+  succeeds, retaining the last known-good list after a failed collection.
+- Update can safely install a local archive after validating its path,
+  structure, and link entries before extraction.
+
+Fixed: Fail-closed health and maintenance recovery
+- Heal now derives logical Ethernet VLAN policy independently from the physical
+  `ETH_PORTS` mapping and refuses unknown policy or placement state instead of
+  treating it as a valid empty configuration.
+- The live-test guard validates its safe staged executable path and records the
+  durable disarm/expiry transition before removing recovery scheduling.
+- Backup/Restore, Update, and standalone Recovery retain their owner locks and
+  recovery artifacts when worker reconciliation or an activated rollback fails.
+  Update also retains its journal and maintenance-quiesce marker until the
+  failed transaction is fully recovered, including when fallback hooks succeed.
+
+Fixed: Installer, hook ownership, and upgrade-lock recovery
+- Owner-aware locks now distinguish an actually absent path from a legacy or
+  malformed non-directory obstruction, preventing the service-hook lock path
+  from spinning indefinitely on pre-owner-aware regular lock files.
+- setupenable/setupdisable reconcile known stale boot-file locks before use,
+  verify hook changes, and return failure when hook removal is incomplete.
+- Standalone uninstall now delegates its authenticated maintenance owner to
+  boot-hook children, reports hook diagnostics, refuses false success when
+  hooks remain, and avoids the BusyBox xargs/basename SIGPIPE discovery path.
+- Tarball selection binds branch/version metadata to the selected archive and
+  derives hyphenated/custom branch names from the archive top-level directory.
+- Installer archive probing no longer relies on wildcard `tar -O` extraction,
+  and the offline guide documents legacy `scp -O` for routers without SFTP.
+- The full installer now accepts a validated Custom Branch source for directed
+  testing, while preserving the stable and development channel behavior.
+- Installer publication now verifies Merlin's namespaced `mervlan_page`,
+  `mervlan_state`, and `mervlan_version` metadata writes. Full uninstall
+  removes only those MerVLAN/legacy metadata keys, asks for explicit consent,
+  and offers a separate retained-backup deletion choice.
+- Controlled lifecycle automation can use `uninstall.sh full --yes
+  --delete-backups`; the ordinary full-uninstall path remains explicitly
+  interactive.
+- Full uninstall now accepts the established endpoint-bound SSH trust path for
+  legacy node settings that predate a stored node MAC; it still refuses an
+  unverified node.
+- Full uninstall now removes the complete node-local MerVLAN control plane,
+  including hooks, public assets, durable state, and selected backup storage,
+  without touching other add-on metadata.
+- Verified full uninstall now marks the remote node cleanup as node-local, so
+  NODE1 does not incorrectly repeat MAIN-owned SSH trust preflight before its
+  own hooks and runtime are removed.
+- The official first-install bootstrap now recognizes its intentionally empty
+  pre-package state while continuing to refuse partial installs or any live
+  maintenance state; the Help guide documents both online custom-branch and
+  offline archive installation sequences, including the correct Raw GitHub
+  custom-branch URL form.
+- The same strict fresh-bootstrap admission now supports an explicitly staged
+  offline tarball install, so a valid first offline installation can provide
+  its owner-lock library without weakening partial-install safeguards.
+
+Fixed: WAN Native clean-state and trunk configuration
+- MAIN ASUS/default recovery IP is optional while using a numeric WAN Native
+  VLAN. The WAN Native reservation remains required, and a return to ASUS is
+  refused before mutation when no ASUS/default recovery reservation exists.
+- Fresh settings with MAIN_ASUS_IP=none no longer block unrelated Save actions.
+- Trunk VLAN selectors now include valid VLAN IDs from the current unsaved form
+  draft so first-time configuration does not require a save/reload cycle.
+
+New: Optional per-device WAN Native tagging
+- Added a target-aware WAN Native field above the LAN-port table for Main and
+  Node 1-10. Blank uses the dimmed ASUS default; VLAN IDs 2-4094 tag the
+  existing native br0 uplink transport without changing ASUS-facing bridge
+  semantics.
+- Added `mervlan_wan.sh` as the isolated owner of native WAN transport
+  validation, migration, rollback, stale-native cleanup, and verification.
+
+Safety: Fail-closed native uplink lifecycle
+- Generic manager cleanup preserves the actual live br0 uplink VLAN member, so
+  WAN Native can converge safely across ASUS -> tagged, tagged -> tagged, and
+  tagged -> ASUS transitions without deleting the active management path.
+- ASUS mode never forces the physical WAN into br0 when ASUS did not place it
+  there. Numeric WAN Native refuses to invent a new br0-over-WAN path when no
+  existing native uplink path is present.
+- WAN Native VLAN IDs are exclusive per device: conflicts with assigned SSIDs,
+  access ports, or trunks fail before bridge mutation. Final Apply verification
+  now includes the native WAN transport after ASUS rc and trunk work settle.
+
+Maintenance: Save, node, update, and regression coverage
+- Sectioned settings persist `WAN_NATIVE_MAIN` and `WAN_NATIVE_NODE1..NODE10`
+  under `VLAN.WAN_Native`, including migration of older sectioned settings.
+- Full Sync Nodes, Update, installer verification, and Emergency Repair include
+  the new runtime helper. Added isolated WAN Native transition/rollback/node
+  selftests and BusyBox-compatible shell coverage.
+
+Fixed: Post-implementation safety and convergence corrections
+- Restored the strict public L2 guard coordinator used by manager wait paths:
+  QT, MAC Shield, and active DHCP Hold restoration share one ebtables dump and
+  propagate any child failure instead of reporting a healthy guard state.
+- Node-relevant MAIN settings Saves now leave a backend-owned durable
+  convergence obligation even if the browser disappears or publication of the
+  WebUI settings artifact fails. APMO/Hardware Probe publishes the final
+  authoritative generation; disabled automatic sync is explicitly paused,
+  while SSH trust blocks remain durable without unattended retry.
+- Reconciliation normalizes only current validated settings and current node
+  topology. Malformed metadata is quarantined under normal serialized Sync
+  ownership; removing the final node clears obsolete intent, and deferred Sync
+  work no longer reports verified completion.
+- Fresh Install, Update, Repair, and Sync Nodes now agree that every
+  `settings/lib_*.sh` library is mode 0644. Supported pre-correction installs
+  remain valid upgrade sources even though final-package validation requires
+  the new reconciliation files.
+
+Improved: Settings synchronization and operation feedback
+- The Settings modal now reports MAIN persistence separately from the durable
+  automatic node-settings synchronization, including its verified terminal
+  state after the modal is reopened. A saved Dry Run preference no longer
+  turns this settings-only control-plane transfer into a simulation; an
+  explicit CLI `--dry-run` remains a simulation.
+- Hardware Profile refresh now writes a concise operator summary to the CLI
+  log and detailed detected model/interface information to the VLAN log.
+  Client Metadata actions show continuous staged progress and safely retain
+  saved overrides for the next MAC Shield rebuild when no shield database is
+  active.
+
+Improved: Configurable node-operation parallelism and lifecycle hardening
+- Added the MAIN-local `General.NODE_PARALLELISM` setting for bounded 1–5
+  worker concurrency. Missing legacy settings default to 2; malformed runtime
+  or persisted values resolve fail-closed to 1, while Save rejects values
+  outside the supported range and node-sync change detection ignores this
+  MAIN-local setting.
+- Sync Nodes, Execute prepare/launch/status, client collection, and MAC Shield
+  node collection/push now share the bounded node-job pool. Complete-node
+  trust preflight, MAIN-local work, and parent validation/aggregation remain
+  serial, with isolated worker artifacts and terminal results.
+- Unified timeout, missing-result, interruption, and parent-exit cleanup around
+  PID/start identity checks for wrappers and children. A pending launch claim
+  is recorded before identity lookup, closing the launch race without unsafe
+  PID-only signalling.
+- Failure-safe cleanup retains ownership metadata, worker workspaces, locks,
+  and update/backup recovery state whenever worker reconciliation is not
+  proven complete; unresolved pool state blocks replacement work and
+  publication until recovery is safe.
+
+Maintenance: Node-operation regression coverage
+- Added focused local contracts for setting resolution and Save validation,
+  bounded pool width and result lifecycle, pending-worker launch races,
+  collection deadlines and retention, MAC Shield pool isolation, parent-term
+  cleanup ordering, and temporary-workspace cleanup.
+
 mervlan v0.53.27-dev
 
 Fixed: Audit-remediation ownership and recovery contracts

@@ -30,6 +30,15 @@ v2 owner, unsafe trap, unsupported `stat`, and unvalidated lock-cleanup
 mechanics. Remaining matches must be named compatibility or specialized DHCP,
 node-job, Recovery, or observation policy rather than ignored.
 
+For the development-only Developer Tools modal, also run:
+
+```sh
+sh dev-tools/tests/local/developer_tools_contract_test.sh
+```
+
+This confirms dev-only gating, the isolated handler boundary, the closed
+selftest transport, and that frontend options still match the router dispatcher.
+
 ## 3. Router selftest
 
 The maintained suite is:

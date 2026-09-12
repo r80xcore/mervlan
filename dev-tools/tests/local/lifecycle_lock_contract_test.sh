@@ -54,6 +54,301 @@ _dhcp_rc=$?
 [ "$_dhcp_rc" -eq 2 ] && [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] &&
   pass dhcp-nonce-failure-cleans-empty-claim
 
+# Exercise the real DHCP state-lock acquisition primitive at the two
+# post-timestamp seams.  Each case uses a private state root and only replaces
+# the timestamp/quarantine dependency that represents the injected race.
+# The owner fields are deliberately not copied from production helpers: these
+# assertions observe the lock primitive's externally visible retry, warning,
+# and obstruction semantics.
+_dhcp_write_complete_claim() {
+  _dwcc_lock="$1"
+  _dwcc_pid="${2:-999999999}"
+  _dwcc_start="${3:-1}"
+  _dwcc_created="${4:-1}"
+  _dwcc_nonce="${5:-stale-owner}"
+  mkdir "$_dwcc_lock" || return 1
+  printf '%s\n' "$_dwcc_pid" > "$_dwcc_lock/pid" || return 1
+  printf '%s\n' "$_dwcc_start" > "$_dwcc_lock/proc_start_time" || return 1
+  printf '%s\n' "$_dwcc_created" > "$_dwcc_lock/created_epoch" || return 1
+  printf '%s\n' "$_dwcc_nonce" > "$_dwcc_lock/owner_nonce" || return 1
+}
+
+# Case A — timestamp lookup loses a release race.  The authoritative
+# non-following absence check must permit one retry and must not emit the
+# scary "age is unverifiable" warning for a lock that really disappeared.
+(
+  _CASE="$TEST_ROOT/dhcp-post-a"
+  mkdir -p "$_CASE" || exit 1
+  MERV_DHCP_HOLD_STATE_ROOT="$_CASE/state"
+  export MERV_DHCP_HOLD_STATE_ROOT
+  TRACE="$_CASE/trace.log"
+  OUTPUT="$_CASE/output.log"
+  : > "$TRACE"
+  info() { printf 'INFO:%s\n' "$*" >> "$TRACE"; }
+  warn() { printf 'WARN:%s\n' "$*" >> "$TRACE"; }
+  error() { printf 'ERROR:%s\n' "$*" >> "$TRACE"; }
+  usleep() { :; }
+  _DHCP_NONCE_SEQ=0
+  _merv_dhcp_nonce() {
+    _DHCP_NONCE_SEQ=$((_DHCP_NONCE_SEQ + 1))
+    MERV_DHCP_NONCE="post-a-$_DHCP_NONCE_SEQ"
+  }
+  merv_dhcp_state_lock_timestamp() {
+    rmdir "$1" 2>/dev/null || :
+    return 1
+  }
+  mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT" || exit 2
+  mkdir "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" || exit 3
+  merv_dhcp_state_lock_acquire > "$OUTPUT" 2>&1
+  _rc=$?
+  [ "$_rc" -eq 0 ] || exit 10
+  [ -f "$MERV_DHCP_HOLD_STATE_ROOT/state.lock/owner_nonce" ] || exit 11
+  [ ! -s "$TRACE" ] || exit 12
+  if [ -s "$OUTPUT" ] && grep -Eq 'age is unverifiable|refusing reclaim' "$OUTPUT"; then
+    exit 13
+  fi
+  _nonce=$(cat "$MERV_DHCP_HOLD_STATE_ROOT/state.lock/owner_nonce" 2>/dev/null || printf '')
+  merv_dhcp_state_lock_release "$_nonce" || exit 14
+  [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] || exit 15
+)
+_dhcp_case_a_rc=$?
+if [ "$_dhcp_case_a_rc" -eq 0 ]; then
+  pass dhcp-post-timestamp-disappearance-retries
+  pass dhcp-post-timestamp-disappearance-no-warning
+else
+  fail "dhcp-post-timestamp-disappearance (rc=$_dhcp_case_a_rc)"
+fi
+
+# Case B — a stale predecessor is replaced by a retained incomplete claim
+# during quarantine.  Acquisition must return rc=2, preserve the incomplete
+# lock, and emit one bounded warning rather than silently treating it as idle.
+(
+  _CASE="$TEST_ROOT/dhcp-post-b"
+  mkdir -p "$_CASE" || exit 1
+  MERV_DHCP_HOLD_STATE_ROOT="$_CASE/state"
+  export MERV_DHCP_HOLD_STATE_ROOT
+  TRACE="$_CASE/trace.log"
+  OUTPUT="$_CASE/output.log"
+  : > "$TRACE"
+  info() { printf 'INFO:%s\n' "$*" >> "$TRACE"; }
+  warn() { printf 'WARN:%s\n' "$*" >> "$TRACE"; }
+  error() { printf 'ERROR:%s\n' "$*" >> "$TRACE"; }
+  usleep() { :; }
+  _DHCP_NONCE_SEQ=0
+  _merv_dhcp_nonce() {
+    _DHCP_NONCE_SEQ=$((_DHCP_NONCE_SEQ + 1))
+    MERV_DHCP_NONCE="post-b-$_DHCP_NONCE_SEQ"
+  }
+  merv_dhcp_state_lock_quarantine_hook() {
+    rm -f "$1/owner_nonce" 2>/dev/null || return 1
+    return 0
+  }
+  mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT" || exit 2
+  _dhcp_write_complete_claim "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" || exit 3
+  MERV_DHCP_STATE_LOCK_FAULT=quarantine-window
+  export MERV_DHCP_STATE_LOCK_FAULT
+  merv_dhcp_state_lock_acquire > "$OUTPUT" 2>&1
+  _rc=$?
+  [ "$_rc" -eq 2 ] || exit 10
+  [ -d "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] || exit 11
+  [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/state.lock/owner_nonce" ] || exit 12
+  grep -q '^WARN:' "$TRACE" || exit 13
+)
+_dhcp_case_b_rc=$?
+if [ "$_dhcp_case_b_rc" -eq 0 ]; then
+  pass dhcp-post-state-retained-incomplete-rc2
+  pass dhcp-post-state-retained-incomplete-warns
+else
+  fail "dhcp-post-state-retained-incomplete (rc=$_dhcp_case_b_rc)"
+fi
+
+# Case C — the exact quarantine window installs a regular-file replacement.
+# The replacement must not be moved away as if it were the old directory, and
+# the waiter must remain blocked with the object intact.
+(
+  _CASE="$TEST_ROOT/dhcp-post-c"
+  mkdir -p "$_CASE" || exit 1
+  MERV_DHCP_HOLD_STATE_ROOT="$_CASE/state"
+  export MERV_DHCP_HOLD_STATE_ROOT
+  TRACE="$_CASE/trace.log"
+  : > "$TRACE"
+  info() { printf 'INFO:%s\n' "$*" >> "$TRACE"; }
+  warn() { printf 'WARN:%s\n' "$*" >> "$TRACE"; }
+  error() { printf 'ERROR:%s\n' "$*" >> "$TRACE"; }
+  usleep() { :; }
+  _DHCP_NONCE_SEQ=0
+  _merv_dhcp_nonce() {
+    _DHCP_NONCE_SEQ=$((_DHCP_NONCE_SEQ + 1))
+    MERV_DHCP_NONCE="post-c-$_DHCP_NONCE_SEQ"
+  }
+  merv_dhcp_state_lock_quarantine_hook() {
+    _lock="$1"
+    rm -f "$_lock/pid" "$_lock/proc_start_time" \
+      "$_lock/created_epoch" "$_lock/owner_nonce" 2>/dev/null || return 1
+    rmdir "$_lock" 2>/dev/null || return 1
+    printf 'replacement-regular-object\n' > "$_lock" || return 1
+    return 0
+  }
+  mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT" || exit 2
+  _dhcp_write_complete_claim "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" || exit 3
+  MERV_DHCP_STATE_LOCK_FAULT=quarantine-window
+  export MERV_DHCP_STATE_LOCK_FAULT
+  merv_dhcp_state_lock_acquire > "$_CASE/output.log" 2>&1
+  _rc=$?
+  [ "$_rc" -eq 2 ] || exit 10
+  [ -f "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] || exit 11
+  [ ! -L "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] || exit 12
+  grep -qx 'replacement-regular-object' "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" || exit 13
+)
+_dhcp_case_c_rc=$?
+if [ "$_dhcp_case_c_rc" -eq 0 ]; then
+  pass dhcp-post-state-regular-replacement-blocked
+else
+  fail "dhcp-post-state-regular-replacement (rc=$_dhcp_case_c_rc)"
+fi
+
+# Case D — the exact quarantine window installs a new canonical owner.  The
+# replacement owner remains authoritative at state.lock and the stale
+# predecessor is retained separately for bounded inspection.
+(
+  _CASE="$TEST_ROOT/dhcp-post-d"
+  mkdir -p "$_CASE" || exit 1
+  MERV_DHCP_HOLD_STATE_ROOT="$_CASE/state"
+  export MERV_DHCP_HOLD_STATE_ROOT
+  TRACE="$_CASE/trace.log"
+  : > "$TRACE"
+  info() { printf 'INFO:%s\n' "$*" >> "$TRACE"; }
+  warn() { printf 'WARN:%s\n' "$*" >> "$TRACE"; }
+  error() { printf 'ERROR:%s\n' "$*" >> "$TRACE"; }
+  usleep() { :; }
+  _DHCP_NONCE_SEQ=0
+  _merv_dhcp_nonce() {
+    _DHCP_NONCE_SEQ=$((_DHCP_NONCE_SEQ + 1))
+    MERV_DHCP_NONCE="post-d-$_DHCP_NONCE_SEQ"
+  }
+  merv_dhcp_state_lock_quarantine_hook() {
+    _lock="$1"
+    _backup="${_lock}.race-original"
+    rm -rf "$_backup" 2>/dev/null || return 1
+    mv "$_lock" "$_backup" || return 1
+    mkdir "$_lock" || return 1
+    _start=$(merv_proc_start_time "$$" "$MERV_DHCP_HOLD_PROC_ROOT" 2>/dev/null) || return 1
+    _now=$(merv_dhcp_state_lock_now 2>/dev/null) || return 1
+    printf '%s\n' "$$" > "$_lock/pid" || return 1
+    printf '%s\n' "$_start" > "$_lock/proc_start_time" || return 1
+    printf '%s\n' "$_now" > "$_lock/created_epoch" || return 1
+    printf 'replacement-owner\n' > "$_lock/owner_nonce" || return 1
+    return 0
+  }
+  mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT" || exit 2
+  _dhcp_write_complete_claim "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" || exit 3
+  MERV_DHCP_STATE_LOCK_FAULT=quarantine-window
+  export MERV_DHCP_STATE_LOCK_FAULT
+  merv_dhcp_state_lock_acquire > "$_CASE/output.log" 2>&1
+  _rc=$?
+  [ "$_rc" -eq 2 ] || exit 10
+  [ -d "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] || exit 11
+  [ "$(cat "$MERV_DHCP_HOLD_STATE_ROOT/state.lock/pid" 2>/dev/null)" = "$$" ] || exit 12
+  [ "$(cat "$MERV_DHCP_HOLD_STATE_ROOT/state.lock/owner_nonce" 2>/dev/null)" = replacement-owner ] || exit 13
+  [ -d "$MERV_DHCP_HOLD_STATE_ROOT/state.lock.race-original" ] || exit 14
+)
+_dhcp_case_d_rc=$?
+if [ "$_dhcp_case_d_rc" -eq 0 ]; then
+  pass dhcp-post-state-replacement-owner-blocked
+  pass dhcp-post-state-stale-predecessor-retained
+else
+  fail "dhcp-post-state-replacement-owner (rc=$_dhcp_case_d_rc)"
+fi
+
+# Case E — regular file, symlink to an existing directory, and dangling
+# symlink are all obstructions. None may be interpreted as authoritative
+# absence or replaced by a new owner claim.
+(
+  _CASE="$TEST_ROOT/dhcp-obstructions"
+  mkdir -p "$_CASE" || exit 1
+  info() { :; }
+  warn() { :; }
+  error() { :; }
+  usleep() { :; }
+  _merv_dhcp_nonce() { MERV_DHCP_NONCE=post-e; }
+  for _kind in regular symlink dangling; do
+    MERV_DHCP_HOLD_STATE_ROOT="$_CASE/$_kind/state"
+    export MERV_DHCP_HOLD_STATE_ROOT
+    mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT" || exit 2
+    _lock="$MERV_DHCP_HOLD_STATE_ROOT/state.lock"
+    case "$_kind" in
+      regular)
+        printf 'regular-obstruction\n' > "$_lock" || exit 3
+        ;;
+      symlink)
+        _target="$_CASE/symlink-target"
+        printf 'symlink-target\n' > "$_target" || exit 4
+        MSYS="${MSYS:-winsymlinks:lnk}" ln -s "$_target" "$_lock" 2>/dev/null || exit 200
+        [ -L "$_lock" ] || exit 201
+        ;;
+      dangling)
+        _target="$_CASE/dangling-target"
+        MSYS="${MSYS:-winsymlinks:lnk}" ln -s "$_target" "$_lock" 2>/dev/null || exit 200
+        [ -L "$_lock" ] || exit 201
+        ;;
+    esac
+    MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC=0
+    export MERV_DHCP_STATE_LOCK_INCOMPLETE_STALE_SEC
+    merv_dhcp_state_lock_acquire > "$_CASE/$_kind.output" 2>&1
+    _rc=$?
+    [ "$_rc" -eq 2 ] || exit 10
+    case "$_kind" in
+      regular) [ -f "$_lock" ] && [ ! -L "$_lock" ] || exit 11 ;;
+      symlink|dangling) [ -L "$_lock" ] || exit 12 ;;
+    esac
+  done
+)
+_dhcp_case_e_rc=$?
+if [ "$_dhcp_case_e_rc" -eq 0 ]; then
+  pass dhcp-obstruction-regular-fails-closed
+  pass dhcp-obstruction-symlink-fails-closed
+  pass dhcp-obstruction-dangling-symlink-fails-closed
+elif [ "$_dhcp_case_e_rc" -eq 200 ]; then
+  fail "dhcp-obstruction-symlink-support-unavailable"
+elif [ "$_dhcp_case_e_rc" -eq 201 ]; then
+  fail "dhcp-obstruction-symlink-not-an-object"
+else
+  fail "dhcp-obstruction-matrix (rc=$_dhcp_case_e_rc)"
+fi
+
+# Case F — an injected timestamp-helper failure while the directory remains
+# present is ambiguous. The primitive must return rc=2, retain the directory,
+# and warn; it must never synthesize a fresh age and reclaim it.
+(
+  _CASE="$TEST_ROOT/dhcp-timestamp-retained"
+  mkdir -p "$_CASE" || exit 1
+  MERV_DHCP_HOLD_STATE_ROOT="$_CASE/state"
+  export MERV_DHCP_HOLD_STATE_ROOT
+  TRACE="$_CASE/trace.log"
+  : > "$TRACE"
+  info() { printf 'INFO:%s\n' "$*" >> "$TRACE"; }
+  warn() { printf 'WARN:%s\n' "$*" >> "$TRACE"; }
+  error() { printf 'ERROR:%s\n' "$*" >> "$TRACE"; }
+  usleep() { :; }
+  _merv_dhcp_nonce() { MERV_DHCP_NONCE=post-f; }
+  merv_dhcp_state_lock_timestamp() { return 1; }
+  mkdir -p "$MERV_DHCP_HOLD_STATE_ROOT" || exit 2
+  mkdir "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" || exit 3
+  merv_dhcp_state_lock_acquire > "$_CASE/output.log" 2>&1
+  _rc=$?
+  [ "$_rc" -eq 2 ] || exit 10
+  [ -d "$MERV_DHCP_HOLD_STATE_ROOT/state.lock" ] || exit 11
+  grep -q '^WARN:' "$TRACE" || exit 12
+  grep -q 'age is unverifiable' "$TRACE" || exit 13
+)
+_dhcp_case_f_rc=$?
+if [ "$_dhcp_case_f_rc" -eq 0 ]; then
+  pass dhcp-timestamp-failure-retains-incomplete
+  pass dhcp-timestamp-failure-warns
+else
+  fail "dhcp-timestamp-failure-retained (rc=$_dhcp_case_f_rc)"
+fi
+
 # A generic owner release obstruction removes compatibility sidecars while
 # restoring the canonical owner record.  Observation idleness must therefore
 # consult owner-v2 state, not only pid/proc_start_time sidecars.

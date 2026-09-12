@@ -17,6 +17,13 @@ Use when editing or reviewing runtime shell files.
   authorized deployment, use router-side `/bin/sh -n`.
 - The Codex host may limit a foreground command to about one minute. If the broad self-test exceeds that limit, do not call it failed without a test result; run the narrow affected test first and capture a longer suite separately when justified.
 - Before depending on a router command or option, verify it read-only on the target: `nohup`, `timeout`, `mktemp`, `/proc`, `find`, `tar`, or similar.
+- Lab observation (2026-08-16, ASUSWRT-Merlin offline install): a modern desktop
+  OpenSSH `scp` attempted SFTP and the router failed with
+  `/opt/libexec/sftp-server: not found`; use capital `scp -O` when copying an
+  offline archive to such routers. The same target accepted normal BusyBox tar
+  extraction but failed wildcard member-to-stdout bootstrap extraction
+  (`tar ... -O "*/install.sh"`); extract the archive normally, or extract an
+  exact member without wildcard `-O`.
 - A validated ASUSWRT BusyBox observation found that `/bin/sh` did not provide
   the `command` builtin; probe required utilities by direct invocation and
   handle nonzero results instead of assuming `command -v` exists.

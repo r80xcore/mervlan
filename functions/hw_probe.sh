@@ -35,6 +35,8 @@ fi
 if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
     . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 fi
+[ -n "${LIB_SETTINGS_RECONCILE_LOADED:-}" ] || \
+    . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || :
 # =========================================== End of MerVLAN environment setup #
 
 # APMO may pass a verified request token as the first argument. The normal
@@ -181,7 +183,21 @@ else
   _OVR_TARGET="MAIN"
 fi
 
-info "Hardware override target: $_OVR_TARGET (IS_NODE=${_OVR_IS_NODE:-0}, NODE_ID=${_OVR_NODE_ID:-none})"
+# The CLI is an operator-facing action summary.  Keep the detailed probe
+# record in the VLAN log, where it remains available for troubleshooting.
+info -c cli "Refreshing hardware profile for $_OVR_TARGET..."
+info -c vlan "Hardware probe target: $_OVR_TARGET"
+
+# Only a verified APMO request is part of the serialized MAIN Save/probe
+# transaction. Boot and legacy tokenless probes retain their historical local
+# behavior and never create a MAIN-to-node synchronization obligation here.
+_hp_reconcile_capture=no
+_hp_reconcile_before=""
+if [ "$_OVR_IS_NODE" != "1" ] && [ -n "$ACTION_REQUEST_TOKEN" ] && \
+   type merv_settings_node_sync_digest >/dev/null 2>&1; then
+  _hp_reconcile_before=$(merv_settings_node_sync_digest "$SETTINGS_FILE" 2>/dev/null || printf '')
+  [ -n "$_hp_reconcile_before" ] && _hp_reconcile_capture=yes
+fi
 
 # Read override values for resolved target via two-level nested JSON helper
 _ovr_get() { json_get_section2_value "Hardware_Override" "$_OVR_TARGET" "$1" "$SETTINGS_FILE" 2>/dev/null; }
@@ -310,8 +326,11 @@ RT-AX95Q) MODEL="RT-AX95Q"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LA
 RT-AXE95Q) MODEL="RT-AXE95Q"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 RT-ET8)   MODEL="RT-ET8"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 RT-AX58U) MODEL="RT-AX58U"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
+RT-AX58U_V2) MODEL="RT-AX58U_V2"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; LAN_PORT_LABEL_OVERRIDES="1=LAN_1-4_(shared)"; MAX_ETH_PORTS=1; WAN_IF="eth0" ;;
 RT-AX56U) MODEL="RT-AX56U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+RT-AX68U) MODEL="RT-AX68U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 RT-AX82U) MODEL="RT-AX82U"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
+DSL-AX82U) MODEL="DSL-AX82U"; ETH_PORTS="eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth3" ;;
 RT-AX5400) MODEL="RT-AX5400"; ETH_PORTS="eth3 eth2 eth1 eth0"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
 RT-AX92U) MODEL="RT-AX92U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 RT-AC86U) MODEL="RT-AC86U"; ETH_PORTS="eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
@@ -326,6 +345,7 @@ RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PO
 RT-AX88U) MODEL="RT-AX88U"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-AX88U_PRO) MODEL="RT-AX88U_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 RT-BE88U) MODEL="RT-BE88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8"; MAX_ETH_PORTS=8; WAN_IF="eth0" ;;
+RT-BE86U) MODEL="RT-BE86U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; LAN_PORT_LABEL_OVERRIDES="1=LAN1_2.5G"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1"; LAN_PORT_LABELS="LAN1"; LAN_PORT_LABEL_OVERRIDES="1=LAN_1-4_(shared)"; MAX_ETH_PORTS=1; WAN_IF="eth0" ;;
 GT-AX11000) MODEL="GT-AX11000"; ETH_PORTS="eth4 eth3 eth2 eth1 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 GT-AX11000_PRO) MODEL="GT-AX11000_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
@@ -333,31 +353,19 @@ GT-AXE16000) MODEL="GT-AXE16000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN
 XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
 
 # === Models that needs port layout testing/verification ===
-#RT-AX68U) MODEL="RT-AX68U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #RT-AX3000) MODEL="RT-AX3000"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
-#RT-AX82U)   MODEL="RT-AX82U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #TUF-AX5400) MODEL="TUF-AX5400"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #TUF-AX3000) MODEL="TUF-AX3000"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
-#RT-AX92U) MODEL="RT-AX92U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #DSL-AC68U) MODEL="DSL-AC68U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
-#DSL-AX82U|DSL-AX5400) MODEL="DSL-AX82/5400"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
+#DSL-AX5400) MODEL="DSL-AX5400"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #RT-AC88U)  MODEL="RT-AC88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8"; MAX_ETH_PORTS=8; WAN_IF="eth0" ;;
 #RT-AC5300) MODEL="RT-AC5300"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #RT-AC3100) MODEL="RT-AC3100"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
 #TUF-AX5400) MODEL="TUF-AX5400"; ETH_PORTS="eth0 eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth4" ;;
-#GT-AX11000) MODEL="GT-AX11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 #GT-AXE11000) MODEL="GT-AXE11000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
-#XT12) MODEL="XT12"; ETH_PORTS="eth1 eth2 eth3"; LAN_PORT_LABELS="LAN1 LAN2 LAN3"; MAX_ETH_PORTS=3; WAN_IF="eth0" ;;
-#GT-AXE16000) MODEL="GT-AXE16000"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
-#RT-AX86U_PRO) MODEL="RT-AX86U_PRO"; ETH_PORTS="eth5 eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
-#RT-AX88U_PRO) MODEL="RT-AX88U_PRO"; ETH_PORTS="eth5 eth4 eth3 eth2 eth1"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 #RT-BE96U) MODEL="RT-BE96U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5"; MAX_ETH_PORTS=5; WAN_IF="eth0" ;;
 #GT-BE98_PRO) MODEL="GT-BE98_PRO"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
-#RT-BE86U) MODEL="RT-BE86U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
-#RT-BE88U) MODEL="RT-BE88U"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8 eth9"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8 LAN9"; MAX_ETH_PORTS=9; WAN_IF="eth0" ;;
 #RT-BE7200) MODEL="RT-BE7200"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6 eth7 eth8 eth9"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6 LAN7 LAN8 LAN9"; MAX_ETH_PORTS=9; WAN_IF="eth0" ;;
-#RT-BE92U) MODEL="RT-BE92U"; ETH_PORTS="eth1 eth2 eth3 eth4"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4"; MAX_ETH_PORTS=4; WAN_IF="eth0" ;;
-#GT-BE98) MODEL="GT-BE98"; ETH_PORTS="eth1 eth2 eth3 eth4 eth5 eth6"; LAN_PORT_LABELS="LAN1 LAN2 LAN3 LAN4 LAN5 LAN6"; MAX_ETH_PORTS=6; WAN_IF="eth0" ;;
 
 # === Custom Support Mapper ===
 # DEVICE_SUPPORT_MAPPER_PLACEHOLDER
@@ -483,7 +491,7 @@ fi
 # determine target JSON file (HW_SETTINGS_FILE is an alias to settings.json)
 HW_TARGET="${HW_SETTINGS_FILE:-${SETTINGS_FILE}}"
 
-info "Writing hardware profile into: $HW_TARGET (Hardware section)"
+info -c vlan "Writing hardware profile to settings.json (Hardware section)"
 
 # Ensure the store exists before attempting changes
 ensure_json_store "$HW_TARGET" || {
@@ -543,29 +551,40 @@ if [ "$_OVR_IS_NODE" != "1" ]; then
   done
 fi
 
+# The probe can change authoritative Hardware and MAIN MAX_ETH_PORTS_NODEn
+# values after an override Save. Publish only its final observed generation;
+# this makes the browser follow-up an accelerator, not a durability owner.
+if [ "$_hp_reconcile_capture" = yes ]; then
+  _hp_reconcile_after=$(merv_settings_node_sync_digest "$SETTINGS_FILE" 2>/dev/null || printf '')
+  if [ -n "$_hp_reconcile_after" ] && [ "$_hp_reconcile_before" != "$_hp_reconcile_after" ]; then
+    if type merv_settings_reconcile_normalize_current >/dev/null 2>&1; then
+      merv_settings_reconcile_normalize_current publish || \
+        warn "Hardware probe changed settings but could not publish node convergence intent"
+    else
+      warn "Hardware probe changed settings but reconciliation support is unavailable"
+    fi
+  fi
+fi
+
 # ============================================================================ #
 #                           REPORT & DEBUG OUTPUT                              #
 # Display detected hardware configuration and list all available ethernet      #
 # interfaces for troubleshooting.                                              #
 # ============================================================================ #
 
-# Log detected hardware configuration
-info "Hardware detection complete:"
-echo "  Model: $MODEL ($PRODUCTID)"
-echo "  Radios: $RADIOS"
-echo "  Radio indexes: $RADIO_INDEXES"
-echo "  Guest slots per radio: $GUEST_SLOTS"
-echo "  Max SSIDs: $MAX_SSIDS"
-echo "  Ethernet ports: $ETH_PORTS"
-echo "  Labels: $LAN_PORT_LABELS"
-echo "  Label overrides: ${LAN_PORT_LABEL_OVERRIDES:-none}"
-echo "  WAN interface: $WAN_IF"
-echo "  Output: $HW_TARGET (Hardware section in settings.json)"
-
-echo ""
-# Debug output: list all detected ethernet interfaces for verification
-echo "=== Debug: All detected interfaces ==="
-ls /sys/class/net/ | grep -E '^eth[0-9]' | sort
+# This script is normally launched by the service-event handler, whose stdout
+# is intentionally not the WebUI CLI stream.  Publish the operational report
+# explicitly to both supported user-visible log channels instead of relying on
+# background-action stdout.
+_hp_detected_eth=$(ls /sys/class/net/ 2>/dev/null | grep -E '^eth[0-9]' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+info -c vlan "Hardware detection complete"
+info -c vlan "Hardware model: $MODEL"
+info -c vlan "Hardware radios: $RADIOS (indexes: $RADIO_INDEXES; guest slots: $GUEST_SLOTS; max SSIDs: $MAX_SSIDS)"
+info -c vlan "Hardware Ethernet: ports: $ETH_PORTS; labels: $LAN_PORT_LABELS; WAN: $WAN_IF"
+info -c vlan "Hardware label overrides: ${LAN_PORT_LABEL_OVERRIDES:-none}"
+info -c vlan "Detected Ethernet interfaces: ${_hp_detected_eth:-none}"
+info -c vlan "Hardware profile stored in settings.json (Hardware section)"
+info -c cli "Hardware profile refreshed: $MODEL ($MAX_ETH_PORTS LAN ports; WAN $WAN_IF)"
 
 # ============================================================================ #
 #                 PUBLIC HARDWARE PROFILE CATALOG GENERATOR                   #
