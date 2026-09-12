@@ -45,8 +45,12 @@ extract_function() {
 }
 
 EXPECTED_FUNCTION="$TEST_ROOT/expected_vlans_from_settings.sh"
+ANY_FUNCTION="$TEST_ROOT/any_vlan_configured.sh"
 CHECK_FUNCTION="$TEST_ROOT/check_vlan_config.sh"
 FAST_FUNCTION="$TEST_ROOT/check_vlan_config_fast.sh"
+extract_function any_vlan_configured \
+    "$BASE_DIR/functions/heal_event.sh" "$ANY_FUNCTION" || \
+    fail 'could not extract production any_vlan_configured'
 extract_function expected_vlans_from_settings \
     "$BASE_DIR/functions/heal_event.sh" "$EXPECTED_FUNCTION" || \
     fail 'could not extract production expected_vlans_from_settings'
@@ -76,12 +80,19 @@ is_number() {
         *) return 0 ;;
     esac
 }
+to_lower() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+sanitize_epoch() {
+    _epoch_value=$(trim_spaces "$1")
+    is_number "$_epoch_value" || _epoch_value=0
+    printf '%s' "${_epoch_value:-0}"
+}
 error() { :; }
 get_vlan_slot_value() { printf '%s\n' none; }
 merv_effective_eth_vlan() { printf '%s\n' none; }
 json_get_section2_value() { printf '%s\n' ''; }
 json_get_flag() { printf '%s\n' ''; }
 
+. "$ANY_FUNCTION" || fail 'could not load production any-VLAN fixture'
 . "$EXPECTED_FUNCTION" || fail 'could not load production resolver fixture'
 . "$CHECK_FUNCTION" || fail 'could not load production VLAN checker fixture'
 . "$FAST_FUNCTION" || fail 'could not load production fast VLAN checker fixture'
@@ -115,6 +126,19 @@ assert_zero() {
     fi
 }
 
+assert_exact() {
+    _label="$1"
+    _expected="$2"
+    _rc="$3"
+    if [ "$_rc" -ne "$_expected" ]; then
+        printf 'FAILURE %s: returned rc=%s (expected %s)\n' \
+            "$_label" "$_rc" "$_expected"
+        FAILURES=$((FAILURES + 1))
+    else
+        printf 'PASS %s: returned rc=%s\n' "$_label" "$_rc"
+    fi
+}
+
 run_checker() {
     _label="$1"
     _checker="$2"
@@ -129,6 +153,15 @@ run_resolver() {
     _label="$1"
     set +u
     expected_vlans_from_settings >"$TEST_ROOT/${_label}.out" 2>&1
+    _rc=$?
+    set -u
+    printf '%s\n' "$_rc"
+}
+
+run_any() {
+    _label="$1"
+    set +u
+    any_vlan_configured >"$TEST_ROOT/${_label}.out" 2>&1
     _rc=$?
     set -u
     printf '%s\n' "$_rc"
@@ -166,6 +199,8 @@ ETH_PORTS='eth1'
 SSID_FILTER_FATAL=0
 merv_effective_eth_vlan() { return 1; }
 ACTUAL_VLANS=''
+_rc=$(run_any ethernet-resolver-failure-any)
+assert_exact 'any_vlan_configured Ethernet failure is unknown' 2 "$_rc"
 _rc=$(run_resolver ethernet-resolver-failure)
 assert_nonzero 'real expected_vlans_from_settings Ethernet failure' "$_rc"
 for _checker in check_vlan_config check_vlan_config_fast; do
@@ -177,7 +212,10 @@ done
 MAX_SSIDS=1
 ETH_PORTS=''
 SSID_FILTER_FATAL=1
+merv_effective_eth_vlan() { printf '%s\n' none; }
 get_vlan_slot_value() { printf '%s\n' none; }
+_rc=$(run_any ssid-filter-fatal-any)
+assert_exact 'any_vlan_configured SSID_FILTER_FATAL is unknown' 2 "$_rc"
 _rc=$(run_resolver ssid-filter-fatal-resolver-failure)
 assert_nonzero 'real expected_vlans_from_settings SSID_FILTER_FATAL failure' "$_rc"
 for _checker in check_vlan_config check_vlan_config_fast; do
@@ -185,11 +223,43 @@ for _checker in check_vlan_config check_vlan_config_fast; do
     assert_nonzero "SSID_FILTER_FATAL -> $_checker" "$_rc"
 done
 
-# Empty expected VLAN output is still a legitimate success when the resolver
-# itself succeeds.
+# A configured logical Ethernet policy must remain visible even when the
+# physical hardware map is unavailable. Placement uncertainty is checked later
+# and must not be hidden by an empty expected set.
 MAX_SSIDS=0
 ETH_PORTS=''
 SSID_FILTER_FATAL=0
+merv_effective_eth_vlan() {
+    if [ "$1" -eq 1 ]; then
+        printf '%s\n' 187
+    else
+        printf '%s\n' none
+    fi
+}
+get_vlan_slot_value() { printf '%s\n' none; }
+_rc=$(run_any configured-ethernet-without-hardware-any)
+assert_exact 'configured Ethernet without hardware map is known configured' 0 "$_rc"
+_rc=$(run_resolver configured-ethernet-without-hardware)
+assert_zero 'configured Ethernet without hardware map resolves' "$_rc"
+assert_output_contains 'configured Ethernet without hardware map output' \
+    "$TEST_ROOT/configured-ethernet-without-hardware.out" 187
+ACTUAL_VLANS=187
+check_managed_eth_placements() { return 1; }
+for _checker in check_vlan_config check_vlan_config_fast; do
+    _rc=$(run_checker "configured-ethernet-without-hardware-$_checker" "$_checker")
+    assert_nonzero "unknown Ethernet placement -> $_checker" "$_rc"
+done
+
+# Empty expected VLAN output is still a legitimate success when the resolver
+# itself succeeds and every logical policy is unconfigured.
+MAX_SSIDS=1
+ETH_PORTS=''
+SSID_FILTER_FATAL=0
+merv_effective_eth_vlan() { printf '%s\n' none; }
+get_vlan_slot_value() { printf '%s\n' none; }
+check_managed_eth_placements() { return 0; }
+_rc=$(run_any empty-resolver-any)
+assert_exact 'genuine empty configuration is known empty' 1 "$_rc"
 _rc=$(run_resolver empty-resolver-success)
 assert_zero 'real expected_vlans_from_settings successful empty' "$_rc"
 assert_output_empty 'successful empty resolver output' \
@@ -203,8 +273,11 @@ assert_zero 'successful empty resolver -> check_vlan_config_fast' "$_rc"
 MAX_SSIDS=1
 ETH_PORTS=''
 SSID_FILTER_FATAL=0
+merv_effective_eth_vlan() { printf '%s\n' none; }
 get_vlan_slot_value() { printf '%s\n' 100; }
 ACTUAL_VLANS=100
+_rc=$(run_any normal-set-any)
+assert_exact 'normal configured SSID policy is known configured' 0 "$_rc"
 _rc=$(run_resolver normal-set-resolver-success)
 assert_zero 'real expected_vlans_from_settings normal set' "$_rc"
 assert_output_contains 'normal resolver output' \
@@ -213,6 +286,32 @@ _rc=$(run_checker normal-set check_vlan_config)
 assert_zero 'normal VLAN set -> check_vlan_config' "$_rc"
 _rc=$(run_checker normal-set-fast check_vlan_config_fast)
 assert_zero 'normal VLAN set -> check_vlan_config_fast' "$_rc"
+
+# A normal physical map still permits the logical Ethernet policy and both
+# health checkers to succeed when exact placement proof succeeds.
+MAX_SSIDS=1
+ETH_PORTS='eth_real'
+SSID_FILTER_FATAL=0
+merv_effective_eth_vlan() {
+    if [ "$1" -eq 1 ]; then
+        printf '%s\n' 187
+    else
+        printf '%s\n' none
+    fi
+}
+get_vlan_slot_value() { printf '%s\n' none; }
+ACTUAL_VLANS=187
+check_managed_eth_placements() { return 0; }
+_rc=$(run_any normal-ethernet-any)
+assert_exact 'normal Ethernet policy is known configured' 0 "$_rc"
+_rc=$(run_resolver normal-ethernet-resolver-success)
+assert_zero 'normal Ethernet policy resolves' "$_rc"
+assert_output_contains 'normal Ethernet resolver output' \
+    "$TEST_ROOT/normal-ethernet-resolver-success.out" 187
+_rc=$(run_checker normal-ethernet check_vlan_config)
+assert_zero 'normal Ethernet policy -> check_vlan_config' "$_rc"
+_rc=$(run_checker normal-ethernet-fast check_vlan_config_fast)
+assert_zero 'normal Ethernet policy -> check_vlan_config_fast' "$_rc"
 
 if [ "$FAILURES" -ne 0 ]; then
     fail "$FAILURES resolver status contract case(s) failed"

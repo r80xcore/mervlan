@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.70"                     #
+#                  - File: heal_event.sh || version="0.71"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -129,32 +129,34 @@ sanitize_epoch() {
 
 # ============================================================================ #
 # any_vlan_configured                                                          #
-# Scan settings.json for any numeric VLAN assignments (2–4094) on Ethernet     #
-# ports or SSIDs. Returns 0 if at least one valid VLAN is found, 1 if none.    #
-# Used as early guard to skip processing if no VLANs are configured.           #
+# Scan settings.json for any numeric VLAN assignments (2–4094) on logical      #
+# Ethernet ports or SSIDs. Returns 0 if found, 1 for known-empty, and 2 when   #
+# configuration state is unknown. Used as the early Heal guard.                #
 # ============================================================================ #
 any_vlan_configured() {
   # Ensure MAX_SSIDS is numeric; fallback to 12 if unset
-  local max_ssids
+  local max_ssids idx i vlan token
   max_ssids=$(sanitize_epoch "$MAX_SSIDS")
   [ "$max_ssids" -ge 1 ] 2>/dev/null || max_ssids=12
 
-  # Check Ethernet port VLANs (VLAN.Ethernet_ports.ETHx_VLAN)
-  local idx=1 vlan token
-  for eth in $ETH_PORTS; do
-    # Use nested structure first, fallback to flat
-    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
-    fi
+  # Check logical Ethernet policy independently from the physical ETH_PORTS map.
+  idx=1
+  while [ "$idx" -le 8 ]; do
+    vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
+      error -c vlan "Heal: Ethernet policy is unknown for logical port $idx"
+      return 2
+    }
     vlan=$(trim_spaces "$vlan")
     token=$(to_lower "$vlan")
-    # Ignore unconfigured, trunk, or non-numeric entries
     case "$token" in
-      ''|none) ;;                      # not configured
-      trunk) ;;                        # not a specific VLAN ID
-      # Valid VLAN ID range is 2–4094 (excluding default VLAN 1)
-      *) if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then return 0; fi ;;
+      none|trunk) ;;
+      *)
+        if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+          return 0
+        fi
+        error -c vlan "Heal: invalid Ethernet policy for logical port $idx"
+        return 2
+        ;;
     esac
     idx=$((idx+1))
   done
@@ -168,7 +170,7 @@ any_vlan_configured() {
     # Check for fatal filter condition after first accessor call
     if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
       error -c vlan "Heal: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
-      return 1
+      return 2
     fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
@@ -186,11 +188,21 @@ any_vlan_configured() {
 # execution, and initialize cooldown/debounce mechanisms.                      #
 # ============================================================================ #
 
-# Fast path: if settings define no numeric VLANs, do nothing
-if ! any_vlan_configured; then
-  info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
-  exit 0
-fi
+# Fast path: distinguish known-empty settings from unknown configuration state.
+_any_vlan_rc=0
+any_vlan_configured || _any_vlan_rc=$?
+case "$_any_vlan_rc" in
+  0)
+    ;;
+  1)
+    info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
+    exit 0
+    ;;
+  *)
+    error -c vlan "Heal: VLAN configuration state is unknown; refusing to run"
+    exit 1
+    ;;
+esac
 
 # Skip if vlan manager already busy (avoid holding our lock needlessly).
 # Uses the shared lock-state helper so a CRASHED manager (lock dir left behind
@@ -668,7 +680,7 @@ expected_vlans_from_settings() {
   #  - VLAN.Ethernet_ports (ETHx_VLAN) - Access port VLANs  
   #  - VLAN.Trunks (TAGGED/UNTAGGED_TRUNKx) - Trunk VLANs
   # using section-aware JSON helpers for nested structure.
-  local vids tmp i idx vlan
+  local vids tmp i idx vlan token
 
   # SSID VLAN pool from VLAN.Pool section (filtered by node assignment)
   i=1
@@ -689,19 +701,29 @@ $vlan"
     i=$((i+1))
   done
 
-  # Access-port VLANs from VLAN.Ethernet_ports section
+  # Access-port VLANs from logical ETH1..ETH8 policy slots. Do not infer
+  # physical interface names here; placement is proven separately.
   idx=1
-  for eth in $ETH_PORTS; do
-    # Use json_get_section2_value for VLAN->Ethernet_ports->ETHx_VLAN nested structure
+  while [ "$idx" -le 8 ]; do
     vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
       error -c vlan "expected_vlans_from_settings: Ethernet policy is unknown for port $idx"
       return 1
     }
     vlan=$(trim_spaces "$vlan")
-    if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
-      vids="$vids
+    token=$(to_lower "$vlan")
+    case "$token" in
+      none|trunk)
+        ;;
+      *)
+        if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+          vids="$vids
 $vlan"
-    fi
+        else
+          error -c vlan "expected_vlans_from_settings: invalid Ethernet policy for port $idx"
+          return 1
+        fi
+        ;;
+    esac
     idx=$((idx+1))
   done
 

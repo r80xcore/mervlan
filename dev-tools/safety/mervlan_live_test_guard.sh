@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#         - File: mervlan_live_test_guard.sh || version="0.2"                  #
+#         - File: mervlan_live_test_guard.sh || version="0.3"                  #
 # ============================================================================ #
 # Persistent safety timer for deliberately disruptive live tests. ASUSWRT cru
 # invokes `expire` independently of the initiating SSH session.
@@ -80,10 +80,30 @@ guard_path_outside_addon() {
   esac
 }
 
+guard_validate_executable_path() {
+  _gve_path="$1"
+  guard_path_outside_addon "$_gve_path" || return 1
+  case "$_gve_path" in
+    /tmp/mervlan_tmp/*) ;;
+    *) return 1 ;;
+  esac
+  case "$_gve_path" in
+    "$GUARD_ROOT"/*) ;;
+    *) return 1 ;;
+  esac
+  case "$_gve_path" in
+    */) return 1 ;;
+    *..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 guard_cleanup_executable() {
-  rm -f "$GUARD_EXECUTABLE" "${GUARD_EXECUTABLE}.tmp.$$" 2>/dev/null || :
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || return 1
+  rm -f "$GUARD_EXECUTABLE" "${GUARD_EXECUTABLE}.tmp.$$" 2>/dev/null || return 1
   _gce_parent=${GUARD_EXECUTABLE%/*}
   [ "$_gce_parent" != "$GUARD_EXECUTABLE" ] && rmdir "$_gce_parent" 2>/dev/null || :
+  return 0
 }
 
 guard_remove_empty_state() {
@@ -93,7 +113,7 @@ guard_remove_empty_state() {
 }
 
 guard_stage_executable() {
-  guard_path_outside_addon "$GUARD_EXECUTABLE" || return 1
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || return 1
   [ -f "$LIVE_TEST_GUARD_SCRIPT" ] || return 1
   [ -L "$LIVE_TEST_GUARD_SCRIPT" ] && return 1
   _gse_parent=${GUARD_EXECUTABLE%/*}
@@ -125,6 +145,7 @@ guard_queue_recovery() {
 }
 
 guard_schedule() {
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || return 1
   guard_cru d "$GUARD_CRON" 2>/dev/null || :
   guard_cru a "$GUARD_CRON" "* * * * * sh $GUARD_EXECUTABLE expire" ||
     return 1
@@ -150,6 +171,10 @@ guard_arm() {
     *) guard_log error "unknown arm option: $_ga_mode"; return 1 ;;
   esac
 
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || {
+    guard_log error "refusing an unsafe staged executable path"
+    return 2
+  }
   mkdir -p "$GUARD_ROOT" "$GUARD_HISTORY" 2>/dev/null || return 2
   guard_stage_executable || {
     guard_cleanup_executable
@@ -181,8 +206,12 @@ guard_arm() {
 
   if ! guard_schedule; then
     rm -f "$GUARD_ARMED" 2>/dev/null || :
-    guard_unschedule || :
-    guard_cleanup_executable
+    if guard_unschedule; then
+      guard_cleanup_executable ||
+        guard_log error "staged executable cleanup failed after scheduler setup failure"
+    else
+      guard_log error "scheduler setup failed and cleanup is deferred; staged executable retained"
+    fi
     guard_remove_empty_state
     guard_log error "ASUSWRT cru scheduler is unavailable; guard was not armed"
     return 3
@@ -223,32 +252,59 @@ guard_status() {
 }
 
 guard_disarm() {
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || {
+    guard_log error "refusing an unsafe staged executable path"
+    return 1
+  }
   if [ ! -f "$GUARD_ARMED" ]; then
-    guard_unschedule || :
-    guard_cleanup_executable
+    if ! guard_unschedule; then
+      guard_log error "ASUSWRT cru scheduler could not be disarmed; staged executable retained"
+      return 1
+    fi
+    guard_cleanup_executable || {
+      guard_log error "staged executable cleanup failed after scheduler removal"
+      return 1
+    }
     guard_remove_empty_state
     printf 'armed=no\n'
     return 0
   fi
-  guard_unschedule || {
-    guard_log error "ASUSWRT cru scheduler could not be disarmed; guard remains armed"
+  mkdir -p "$GUARD_HISTORY" 2>/dev/null || {
+    guard_log error "could not prepare the disarmed guard history; guard remains armed"
     return 1
   }
   _gd_now=$(guard_now)
   mv "$GUARD_ARMED" "$GUARD_HISTORY/disarmed.${_gd_now}.$$" 2>/dev/null || {
-    guard_log error "could not record the disarmed guard state"
+    guard_log error "could not record the disarmed guard state; guard remains armed"
     return 1
   }
-  guard_cleanup_executable
+  guard_unschedule || {
+    guard_log error "guard was durably disarmed but scheduler cleanup failed; staged executable retained"
+    return 1
+  }
+  guard_cleanup_executable || {
+    guard_log error "staged executable cleanup failed after scheduler removal"
+    return 1
+  }
   guard_write_history disarmed "operator-requested=yes" || :
   printf 'armed=no\n'
   return 0
 }
 
 guard_expire() {
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || {
+    guard_log error "refusing an unsafe staged executable path"
+    return 2
+  }
   if [ ! -f "$GUARD_ARMED" ]; then
-    guard_unschedule || :
-    guard_cleanup_executable
+    if ! guard_unschedule; then
+      guard_log error "ASUSWRT cru scheduler cleanup is unavailable; staged executable retained"
+      return 2
+    fi
+    guard_cleanup_executable || {
+      guard_log error "staged executable cleanup failed after scheduler removal"
+      return 2
+    }
     guard_remove_empty_state
     return 0
   fi
@@ -259,13 +315,17 @@ guard_expire() {
   [ "$_ge_now" -ge "$_ge_deadline" ] || return 0
 
   mkdir -p "$GUARD_HISTORY" 2>/dev/null || return 2
-  guard_unschedule || {
-    guard_log error "ASUSWRT cru scheduler could not be disarmed at expiry; guard remains armed"
+  _ge_claim="$GUARD_HISTORY/expiring.${_ge_now}.$$"
+  mv "$GUARD_ARMED" "$_ge_claim" 2>/dev/null || {
+    guard_log error "could not claim the expired guard state; scheduler and staged executable remain installed"
     return 2
   }
-  _ge_claim="$GUARD_HISTORY/expiring.${_ge_now}.$$"
-  mv "$GUARD_ARMED" "$_ge_claim" 2>/dev/null || return 0
-  guard_cleanup_executable
+  if guard_unschedule; then
+    guard_cleanup_executable ||
+      guard_log error "staged executable cleanup failed after scheduler removal"
+  else
+    guard_log error "guard expiry state was claimed; scheduler cleanup deferred and staged executable retained"
+  fi
   guard_log warn "deadline expired; running known-good manager recovery"
 
   _ge_recovered=0
