@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# - File: post_apply_worker.sh || version="0.4"
+# - File: post_apply_worker.sh || version="0.5"
 # - Purpose: Serialize and coalesce post-apply MAC snapshots/client collection.
 # ============================================================================
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -225,16 +225,39 @@ obs_lock_release() {
 }
 
 obs_config_observable() {
+  OBS_BLOCKER_REASON=""
   for _oco_lock in "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock" "$OBS_CONFIG_LOCKDIR/vlan_event.lock"; do
     if type merv_lock_state >/dev/null 2>&1; then
-      case "$(merv_lock_state "$_oco_lock")" in active|unknown) return 1 ;; esac
+      case "$(merv_lock_state "$_oco_lock")" in
+        active|unknown)
+          case "$_oco_lock" in
+            "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock") OBS_BLOCKER_REASON="VLAN manager" ;;
+            "$OBS_CONFIG_LOCKDIR/vlan_event.lock") OBS_BLOCKER_REASON="VLAN event" ;;
+            *) OBS_BLOCKER_REASON="configuration mutation" ;;
+          esac
+          return 1
+          ;;
+      esac
     elif [ -d "$_oco_lock" ]; then
+      case "$_oco_lock" in
+        "$OBS_CONFIG_LOCKDIR/mervlan_manager.lock") OBS_BLOCKER_REASON="VLAN manager" ;;
+        "$OBS_CONFIG_LOCKDIR/vlan_event.lock") OBS_BLOCKER_REASON="VLAN event" ;;
+        *) OBS_BLOCKER_REASON="configuration mutation" ;;
+      esac
       return 1
     fi
   done
   for _oco_owner in "$MERV_DHCP_HOLD_STATE_ROOT/owners/"*; do
     [ -d "$_oco_owner" ] && [ -f "$_oco_owner/ready" ] || continue
-    case "$(cat "$_oco_owner/phase" 2>/dev/null)" in mutating|handoff_wait) return 1 ;; esac
+    _oco_phase=$(cat "$_oco_owner/phase" 2>/dev/null)
+    case "$_oco_phase" in
+      mutating|handoff_wait)
+        _oco_owner_type=$(cat "$_oco_owner/owner_type" 2>/dev/null)
+        [ -n "$_oco_owner_type" ] || _oco_owner_type=unknown
+        OBS_BLOCKER_REASON="DHCP owner: $_oco_owner_type ($_oco_phase)"
+        return 1
+        ;;
+    esac
   done
   return 0
 }
@@ -536,10 +559,26 @@ obs_run() {
   while :; do
     obs_state_load
     [ "$OBS_SC" -lt "$OBS_SR" ] || [ "$OBS_CC" -lt "$OBS_CR" ] || break
+    if [ "$OBS_SC" -lt "$OBS_SR" ]; then
+      if [ "$OBS_CC" -lt "$OBS_CR" ]; then
+        _ow_pending_work="MAC snapshot + client collection pending"
+      else
+        _ow_pending_work="MAC snapshot pending"
+      fi
+    elif [ "$OBS_CC" -lt "$OBS_CR" ]; then
+      _ow_pending_work="client collection pending"
+    else
+      _ow_pending_work="observation work pending"
+    fi
     if ! obs_config_observable; then
+      [ -n "$OBS_BLOCKER_REASON" ] || OBS_BLOCKER_REASON="configuration mutation"
       obs_resume_progress_phase deferred "Waiting for active configuration work before refreshing clients..."
-      obs_log info "configuration mutation active; generations remain pending"
+      obs_log info "queued: $_ow_pending_work; blocked by $OBS_BLOCKER_REASON"
       return 75
+    fi
+    if [ "${MERV_OBS_WAIT_RETRY:-0}" = 1 ]; then
+      obs_log info "blocker cleared; resuming queued work"
+      unset MERV_OBS_WAIT_RETRY
     fi
     if [ "$OBS_SC" -lt "$OBS_SR" ]; then
       obs_resume_progress_phase snapshot "Refreshing queued MAC Shield snapshot..."
@@ -584,6 +623,7 @@ obs_run() {
 obs_run_wait() {
   _orw_max="${1:-120}"
   case "$_orw_max" in ''|*[!0-9]*) return 2 ;; esac
+  _orw_was_deferred=0
   _orw_started=$(date +%s 2>/dev/null || printf '0')
   case "$_orw_started" in ''|*[!0-9]*) return 2 ;; esac
   _orw_deadline=$((_orw_started + _orw_max))
@@ -591,9 +631,17 @@ obs_run_wait() {
   _orw_snapshot_target="$OBS_SR"
   _orw_collection_target="$OBS_CR"
   while :; do
-    "$0" run
+    if [ "$_orw_was_deferred" -eq 1 ]; then
+      MERV_OBS_WAIT_RETRY=1 "$0" run
+    else
+      "$0" run
+    fi
     _orw_rc=$?
-    case "$_orw_rc" in 0|75) ;; *) return "$_orw_rc" ;; esac
+    case "$_orw_rc" in
+      0) ;;
+      75) _orw_was_deferred=1 ;;
+      *) return "$_orw_rc" ;;
+    esac
     obs_state_load
     if [ "$OBS_SC" -ge "$_orw_snapshot_target" ] &&
        [ "$OBS_CC" -ge "$_orw_collection_target" ]; then

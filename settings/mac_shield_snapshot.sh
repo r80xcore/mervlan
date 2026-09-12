@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.36"                #
+#               - File: mac_shield_snapshot.sh || version="0.37"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -1251,6 +1251,100 @@ _PAIRS_
 }
 
 # ============================================================================
+# merv_mac_append_own_candidate <mac> <output>
+# Add one exact local interface identity and its exact IEEE U/L-bit pair.
+# ============================================================================
+merv_mac_append_own_candidate() {
+  local _mmaoc_mac _mmaoc_out="$2" _mmaoc_pair
+  _mmaoc_mac=$(mervqt_mac_lower "$1" 2>/dev/null || printf '')
+  mervqt_valid_mac "$_mmaoc_mac" || return 0
+
+  printf '%s\n' "$_mmaoc_mac" >> "$_mmaoc_out" || return 1
+  _mmaoc_pair=$(printf '%s\n' "$_mmaoc_mac" | awk -F: '
+    BEGIN { OFS=":"; h="0123456789abcdef" }
+    function hv(c){ return index(h,c)-1 }
+    function hd(n){ return substr(h,n+1,1) }
+    {
+      v=hv(substr($1,1,1))*16 + hv(substr($1,2,1))
+      if (int(v/2)%2) v-=2; else v+=2
+      $1=hd(int(v/16)) hd(v%16)
+      print
+    }')
+  [ -n "$_mmaoc_pair" ] && printf '%s\n' "$_mmaoc_pair" >> "$_mmaoc_out"
+  return 0
+}
+
+# ============================================================================
+# merv_mac_build_own_exclude <output>
+# Build the exact local interface/VAP exclusion set once per collector call.
+# ============================================================================
+merv_mac_build_own_exclude() {
+  local _mmboc_out="$1" _mmboc_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}"
+  local _mmboc_tmp="${_mmboc_out}.tmp.$$" _mmboc_path _mmboc_br_path
+  local _mmboc_br _mmboc_mac _mmboc_iface
+  local _mmboc_rc=0
+
+  : > "$_mmboc_tmp" || return 1
+
+  # Kernel interface addresses are the primary authoritative source.
+  for _mmboc_path in "$_mmboc_root"/*/address; do
+    [ -f "$_mmboc_path" ] || continue
+    _mmboc_mac=$(cat "$_mmboc_path" 2>/dev/null || printf '')
+    merv_mac_append_own_candidate "$_mmboc_mac" "$_mmboc_tmp" || _mmboc_rc=1
+  done
+
+  # Bridge-local FDB entries cover firmware identities not exposed consistently
+  # through sysfs on every ASUS/Broadcom build.
+  if type brctl >/dev/null 2>&1; then
+    for _mmboc_br_path in "$_mmboc_root"/br[0-9]*/brif; do
+      [ -d "$_mmboc_br_path" ] || continue
+      _mmboc_br="${_mmboc_br_path%/brif}"
+      _mmboc_br="${_mmboc_br##*/}"
+      brctl showmacs "$_mmboc_br" 2>/dev/null |
+        while IFS=' ' read -r _mmboc_pno _mmboc_mac _mmboc_local _mmboc_rest; do
+          [ "$_mmboc_local" = yes ] || continue
+          merv_mac_append_own_candidate "$_mmboc_mac" "$_mmboc_tmp" || :
+        done
+    done
+  fi
+
+  # Broadcom VAP commands can expose an identity that differs from sysfs.
+  # Query them once while building the cached set.
+  if type wl >/dev/null 2>&1; then
+    for _mmboc_path in "$_mmboc_root"/wl[0-9]*.*; do
+      [ -d "$_mmboc_path" ] || continue
+      _mmboc_iface="${_mmboc_path##*/}"
+      {
+        cat "$_mmboc_path/address" 2>/dev/null
+        wl -i "$_mmboc_iface" cur_etheraddr 2>/dev/null
+        wl -i "$_mmboc_iface" perm_etheraddr 2>/dev/null
+        wl -i "$_mmboc_iface" bssid 2>/dev/null
+      } | awk '{
+        for (i=1;i<=NF;i++) {
+          m=tolower($i)
+          if (m ~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/) print m
+        }
+      }' | while IFS= read -r _mmboc_mac; do
+        merv_mac_append_own_candidate "$_mmboc_mac" "$_mmboc_tmp" || :
+      done
+    done
+  fi
+
+  sort -u "$_mmboc_tmp" > "$_mmboc_out" 2>/dev/null || {
+    cp "$_mmboc_tmp" "$_mmboc_out" 2>/dev/null || _mmboc_rc=1
+  }
+  rm -f "$_mmboc_tmp" 2>/dev/null || _mmboc_rc=1
+  return "$_mmboc_rc"
+}
+
+merv_mac_is_own_interface() {
+  local _mmio_mac="$1" _mmio_file="$2"
+  [ -f "$_mmio_file" ] || return 1
+  _mmio_mac=$(mervqt_mac_lower "$_mmio_mac" 2>/dev/null || printf '')
+  awk -v m="$_mmio_mac" '$0 == m { found=1; exit } END { exit found ? 0 : 1 }' "$_mmio_file"
+}
+
+# ============================================================================
 # merv_mac_build_snapshot <tmpfile>
 # Scan all VLAN bridges (br<VID>) for wl*.* members, run wl assoclist on
 # each, write client records to <tmpfile>.
@@ -1260,11 +1354,17 @@ _PAIRS_
 merv_mac_build_snapshot() {
   local tmpfile="$1"
   local br_path br_name vid iface_path iface mac now rep_iface _fdb_path _fdb_pno _fdb_iface
+  local _mmbs_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}" _mmbs_own_file _mmbs_count
 
   now=$(date +%s)
   : > "$tmpfile" || return 1
+  _mmbs_own_file="${tmpfile}.own.$$"
+  merv_mac_build_own_exclude "$_mmbs_own_file" || {
+    rm -f "$_mmbs_own_file" 2>/dev/null || :
+    return 1
+  }
 
-  for br_path in /sys/class/net/br[1-9]*/brif; do
+  for br_path in "$_mmbs_root"/br[1-9]*/brif; do
     [ -d "$br_path" ] || continue
     br_name="${br_path%/brif}"
     br_name="${br_name##*/}"
@@ -1283,6 +1383,7 @@ merv_mac_build_snapshot() {
         [ -n "$mac" ] || continue
         mac=$(mervqt_mac_lower "$mac")
         mervqt_valid_mac "$mac" || continue
+        merv_mac_is_own_interface "$mac" "$_mmbs_own_file" && continue
         printf '%s %s %s %s\n' "$now" "$mac" "$iface" "$vid"
       done
     done
@@ -1300,7 +1401,7 @@ merv_mac_build_snapshot() {
         [ "$_islocal" = "no" ] || continue
 
         _fdb_iface=""
-        for _fdb_path in "/sys/class/net/$br_name/brif/"*; do
+        for _fdb_path in "$_mmbs_root/$br_name/brif/"*; do
           [ -e "$_fdb_path/port_no" ] || continue
           _fdb_pno=$(cat "$_fdb_path/port_no" 2>/dev/null) || continue
           _fdb_pno=$((_fdb_pno))
@@ -1316,12 +1417,15 @@ merv_mac_build_snapshot() {
 
         mac=$(mervqt_mac_lower "$mac")
         mervqt_valid_mac "$mac" || continue
+        merv_mac_is_own_interface "$mac" "$_mmbs_own_file" && continue
         printf '%s %s %s %s\n' "$now" "$mac" "$_fdb_iface" "$vid"
       done
     fi
   done >> "$tmpfile"
 
-  wc -l < "$tmpfile" 2>/dev/null | tr -d ' '
+  _mmbs_count=$(wc -l < "$tmpfile" 2>/dev/null | tr -d ' ')
+  rm -f "$_mmbs_own_file" 2>/dev/null || :
+  printf '%s\n' "$_mmbs_count"
 }
 
 # ============================================================================
@@ -1387,8 +1491,73 @@ merv_mac_collect_from_node() {
   local nid="$1" nip="$2" out now rcmd m i v
   now=$(date +%s)
 
-  rcmd=$(cat <<'REMOTE'
-for b in /sys/class/net/br[1-9]*/brif; do
+rcmd=$(cat <<'REMOTE'
+_remote_root="${MERV_SYS_CLASS_NET_ROOT:-/sys/class/net}"
+
+_remote_append_own_candidate() {
+  local _roac_mac _roac_pair
+  _roac_mac=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+  case "$_roac_mac" in
+    [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "$_roac_mac"
+  _roac_pair=$(printf '%s\n' "$_roac_mac" | awk -F: '
+    BEGIN { OFS=":"; h="0123456789abcdef" }
+    function hv(c){ return index(h,c)-1 }
+    function hd(n){ return substr(h,n+1,1) }
+    {
+      v=hv(substr($1,1,1))*16 + hv(substr($1,2,1))
+      if (int(v/2)%2) v-=2; else v+=2
+      $1=hd(int(v/16)) hd(v%16)
+      print
+    }')
+  [ -n "$_roac_pair" ] && printf '%s\n' "$_roac_pair"
+}
+
+_remote_build_own_macs() {
+  _remote_own_macs=$(
+    {
+      for _rop in "$_remote_root"/*/address; do
+        [ -f "$_rop" ] || continue
+        cat "$_rop" 2>/dev/null
+      done
+      if type brctl >/dev/null 2>&1; then
+        for _robp in "$_remote_root"/br[0-9]*/brif; do
+          [ -d "$_robp" ] || continue
+          _rob="${_robp%/brif}"; _rob="${_rob##*/}"
+          brctl showmacs "$_rob" 2>/dev/null | awk '$3=="yes"{print $2}'
+        done
+      fi
+      if type wl >/dev/null 2>&1; then
+        for _rop in "$_remote_root"/wl[0-9]*.*; do
+          [ -d "$_rop" ] || continue
+          _roi="${_rop##*/}"
+          cat "$_rop/address" 2>/dev/null
+          wl -i "$_roi" cur_etheraddr 2>/dev/null
+          wl -i "$_roi" perm_etheraddr 2>/dev/null
+          wl -i "$_roi" bssid 2>/dev/null
+        done
+      fi
+    } | awk '{
+      for (i=1;i<=NF;i++) {
+        m=tolower($i)
+        if (m ~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/) print m
+      }
+    }' | while IFS= read -r _romac; do
+      _remote_append_own_candidate "$_romac"
+    done | sort -u
+  )
+}
+
+_remote_mac_is_own() {
+  printf '%s\n' "$_remote_own_macs" |
+    awk -v m="$1" '$0 == m { found=1; exit } END { exit found ? 0 : 1 }'
+}
+
+_remote_build_own_macs
+
+for b in "$_remote_root"/br[1-9]*/brif; do
   [ -d "$b" ] || continue
   n=${b%/brif}; n=${n##*/}; v=${n#br}
   case "$v" in ''|*[!0-9]*) continue ;; esac
@@ -1400,14 +1569,25 @@ for b in /sys/class/net/br[1-9]*/brif; do
     wl -i "$i" assoclist 2>/dev/null | while read -r k m; do
       [ "$k" = assoclist ] || continue
       [ -n "$m" ] || continue
+      m=$(printf '%s' "$m" | tr 'A-F' 'a-f')
+      case "$m" in
+        [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+        *) continue ;;
+      esac
+      _remote_mac_is_own "$m" && continue
       echo "$m $i $v"
     done
   done
   [ -n "$rep" ] || continue
   type brctl >/dev/null 2>&1 || continue
   brctl showmacs "$n" 2>/dev/null | while read -r po m loc rest; do
-    case "$m" in [0-9a-fA-F][0-9a-fA-F]:*) ;; *) continue ;; esac
+    case "$m" in
+      [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
+      *) continue ;;
+    esac
     [ "$loc" = no ] || continue
+    m=$(printf '%s' "$m" | tr 'A-F' 'a-f')
+    _remote_mac_is_own "$m" && continue
 
     src=""
     for pd in "$b"/*; do

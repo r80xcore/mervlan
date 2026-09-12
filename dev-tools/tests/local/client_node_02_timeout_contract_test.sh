@@ -139,7 +139,7 @@ RESULT_FILE="$TEST_RUNTIME/results/vlan_clients.json"
 [ -s "$RESULT_FILE" ] || fail 'previous public inventory disappeared after failure'
 CURRENT_HASH=$(cksum "$RESULT_FILE" | awk '{print $1 ":" $2}')
 [ "$CURRENT_HASH" = "$PREVIOUS_HASH" ] || fail 'failed generation replaced the previous public inventory'
-assert_contains "$TEST_TRACE" 'ssh_exec node=1 configured=192.0.2.11 timeout=45 rc=5' \
+assert_contains "$TEST_TRACE" 'ssh_exec node=1 configured=192.0.2.11 timeout=150 rc=5' \
     'NODE1 fixture did not produce SSH rc=5'
 assert_contains "$TEST_RUNTIME/results/client_collection_fault" 'phase=worker' \
     'failure diagnostic did not record the worker phase'

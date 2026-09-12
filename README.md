@@ -312,7 +312,7 @@ Thanks to everyone who ran the hardware mapper and submitted a device profile. T
 
 **Model collection from GitHub:**
 
-bieniu, pxdl, davittoncat, RikshaDriver, Mudcrab353, franzatkiermeyereu, mdraco11, tooty-1135, getBoolean, piratak, kashif789us, bigadron, MathNerd28, peternovakovster, MrKlausz, jameshavel-0805
+bieniu, pxdl, davittoncat, RikshaDriver, Mudcrab353, franzatkiermeyereu, mdraco11, tooty-1135, getBoolean, piratak, kashif789us, bigadron, MathNerd28, peternovakovster, MrKlausz, jameshavel-0805, AtlasVector
 
 
 **Model collection from SNBForums:**

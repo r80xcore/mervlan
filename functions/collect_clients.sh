@@ -59,13 +59,11 @@ fi
 # directories and clear any stale results from previous runs.                  #
 # ============================================================================ #
 
-# The ordinary SSH execution timeout is intentionally short (10 seconds), but
-# this one read-only command waits for a node-owned collection generation and
-# then reads its artifact.  Give that bounded request enough time to finish
-# without changing the timeout policy for any other caller.  The parent worker
-# timeout remains 90 seconds, so a lost node can never hold collection open
-# indefinitely.
-NODE_RESULT_SSH_TIMEOUT=45
+# Remote client collection may wait up to 120s for the node-owned observation
+# generation. Give that SSH session a 150s hard bound, while the enclosing
+# node worker gets 180s for endpoint/precheck, transport, artifact return, and
+# cleanup. Ordinary SSH callers retain the shared short timeout.
+NODE_RESULT_SSH_TIMEOUT=150
 # Retry controls for transient node boot/SSH delays
 RETRY_MAX="${COLLECT_RETRY_MAX:-2}"
 RETRY_DELAY="${COLLECT_RETRY_DELAY:-3}"
@@ -76,8 +74,8 @@ MAIN_TIMEOUT="${COLLECT_MAIN_TIMEOUT:-90}"
 case "$MAIN_TIMEOUT" in
   ''|*[!0-9]*|0) MAIN_TIMEOUT=90 ;;
 esac
-# Maximum time (seconds) to wait for all collection jobs to complete
-WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-90}"
+# Per-node collection worker deadline enclosing endpoint/precheck/SSH/result work.
+WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-180}"
 
 # Cleanup handler for temp files on exit/interrupt
 # Only the process that OWNS the collection lock may remove COLLECTDIR — a

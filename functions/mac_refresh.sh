@@ -68,7 +68,7 @@ fi
 
 merv_action_progress_update preflight 0 0 15 \
   "Starting MAC Shield observation worker..."
-if sh "$WORKER" run; then
+if sh "$WORKER" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
   _status=$(sh "$WORKER" status 2>/dev/null | tr '\n' ';' | sed 's/;*$//')
   info -c cli,vlan "MAC Refresh: complete - ${_status:-observation generations complete}"
   merv_action_progress_update finish 1 1 98 \
