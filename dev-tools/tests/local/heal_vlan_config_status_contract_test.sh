@@ -97,6 +97,16 @@ json_get_flag() { printf '%s\n' ''; }
 . "$CHECK_FUNCTION" || fail 'could not load production VLAN checker fixture'
 . "$FAST_FUNCTION" || fail 'could not load production fast VLAN checker fixture'
 
+# Timing is covered by heal_event_timing_contract_test.sh; keep this status
+# propagation fixture focused on resolver/checker return semantics.
+heal_protected_wait() { :; }
+
+if grep -Fq 'merv_qt_ensure_expected_rules' "$CHECK_FUNCTION"; then
+    fail 'check_vlan_config still duplicates QT reconciliation before settle'
+else
+    printf 'PASS: check_vlan_config delegates protected settle to heal_protected_wait\n'
+fi
+
 # The complete checker performs a monitoring window.  Keep it deterministic
 # and immediate while retaining the real production control flow.
 check_wan_native_health() { return 0; }

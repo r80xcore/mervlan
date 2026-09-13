@@ -46,6 +46,8 @@ New: Hardware Profile
   and WAN maps to `eth3`.
 - Added a verified RT-AX68U hardware profile: LAN1–4 map to
   `eth4 eth3 eth2 eth1` and WAN maps to `eth0`.
+- Added support for RT-AX58U_V2: LAN1–LAN4 share one VLAN-capable interface
+  and do not support per-port isolation.
   
 Improved: VLAN safety, node policy, and offline Update
 - Managed wired VLAN ports now use one device-aware expected state with exact
@@ -175,6 +177,12 @@ Improved: Settings synchronization and operation feedback
   Client Metadata actions show continuous staged progress and safely retain
   saved overrides for the next MAC Shield rebuild when no shield database is
   active.
+
+Fixed: Heal timing and protected-settle efficiency
+- Busy-to-idle RC transitions now refresh interface, VLAN, and NVRAM state
+  immediately before quiet timing begins, avoiding a stale-cache delay.
+- Removed the redundant pre-settle QT reconciliation; the strict protected
+  guard remains the single reconciliation point for each settle interval.
 
 Improved: Configurable node-operation parallelism and lifecycle hardening
 - Added the MAIN-local `General.NODE_PARALLELISM` setting for bounded 1–5

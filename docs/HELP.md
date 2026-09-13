@@ -1119,6 +1119,7 @@ MerVLAN includes built-in hardware profiles for a growing range of Asuswrt-Merli
 | RT-AC86U | 4 | |
 | RT-AX56U | 4 | |
 | RT-AX58U | 4 | |
+| RT-AX58U_V2 | 1 | LAN1–LAN4 share one VLAN bridge — no per-port isolation |
 | RT-AX68U | 4 | |
 | RT-AX82U | 4 | |
 | RT-AX86S | 4 | |
