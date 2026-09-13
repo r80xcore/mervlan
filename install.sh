@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.65"                      #
+#                    - File: install.sh || version="0.66"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -2507,6 +2507,20 @@ INSTALL_LOG_POLICY="reset"
 
 install_maintenance_admit || exit 1
 trap 'install_maintenance_exit_handler' EXIT
+
+# Legacy installations may predate the durable SSH trust-state root.  The
+# installed-source and public/runtime-reinstall paths must create that
+# scaffolding before they publish files or reach final verification, while
+# preserving any existing trust records.
+case "$MODE" in
+    ""|reinstall)
+        if ! ensure_durable_state_root; then
+            [ -n "$RESULT_DETAIL" ] || RESULT_DETAIL="cannot initialize durable state root"
+            echo "[install] ERROR: $RESULT_DETAIL" >&2
+            exit 1
+        fi
+        ;;
+esac
 
 if [ "$MODE" = "full" ]; then
     if ! run_full_install_wizard; then

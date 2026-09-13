@@ -152,4 +152,17 @@ grep -Fq 'settings/lib_settings_reconcile.sh' "$INSTALL_FILE" || fail strict-lib
 grep -Fq 'functions/settings_reconcile.sh' "$INSTALL_FILE" || fail strict-helper-requirement
 pass strict-new-package-requirements
 
+# Existing-source installs and internal public/runtime reinstalls must create
+# the durable trust-state scaffolding before the install flow can publish or
+# verify the installation. This covers legacy trees that predate ssh_trust.
+INSTALL_ENTRYPOINT="$TEST_ROOT/install-entrypoint.txt"
+awk '
+  /install_maintenance_admit \|\| exit 1/ { capture=1 }
+  capture { print }
+  capture && /if \[ "\$MODE" = "full" \]; then/ { exit }
+' "$INSTALL_FILE" > "$INSTALL_ENTRYPOINT" || fail existing-state-entrypoint-extraction
+grep -Fq '""|reinstall)' "$INSTALL_ENTRYPOINT" || fail existing-source-state-root-wiring
+grep -Fq 'ensure_durable_state_root' "$INSTALL_ENTRYPOINT" || fail existing-source-state-root-initialization
+pass existing-source-state-root-initialization
+
 printf 'INSTALL_UPDATE_MODE_MIGRATION_CONTRACT_OK\n'

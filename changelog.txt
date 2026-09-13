@@ -1,5 +1,11 @@
 mervlan v0.53.28-dev
 
+Fixed: Legacy-install durable state initialization
+- Standard installed-source installs and public/runtime reinstalls now create
+  the durable SSH trust-state scaffolding before final verification, so
+  upgrades from older versions do not report a false failed installation when
+  no nodes are configured.
+
 Fixed: Boot and startup reliability
 - Resolved boot watchdog and manager-handoff races that could delay VLAN
   configuration during startup until a later automatic Heal recovered it.
