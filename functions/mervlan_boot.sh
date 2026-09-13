@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: mervlan_boot.sh || version="0.72.1"                  #
+#              - File: mervlan_boot.sh || version="0.72.2"                  #
 # ============================================================================ #
 # - Purpose:    Manage MerVLAN Manager auto-start, service-event helper, and   #
 #               SSH propagation to nodes for fully automated VLAN management.  #
@@ -286,8 +286,12 @@ reconcile_legacy_boot_file_locks() {
   _rbl_lock=""
   for _rbl_dest in "$SERVICE_EVENT_WRAPPER" "$SERVICES_START"; do
     _rbl_lock="$LOCKDIR/${_rbl_dest##*/}.lock"
-    [ -e "$_rbl_lock" ] || continue
+    [ -e "$_rbl_lock" ] || [ -L "$_rbl_lock" ] || continue
     [ -d "$_rbl_lock" ] && continue
+    [ ! -L "$_rbl_lock" ] || {
+      error -c vlan,cli "Refusing legacy boot-file lock symlink $_rbl_lock"
+      return 1
+    }
     merv_lock_quarantine_legacy_file "$_rbl_lock" "boot-file" || return 1
   done
   return 0
@@ -943,12 +947,18 @@ case "$ACTION" in
   # setupenable — Setup-only: install service-event wrapper on main router     #
   # ========================================================================== #
   setupenable)
+    if ! reconcile_legacy_boot_file_locks; then
+      error -c vlan,cli "Refusing setupenable while legacy boot-file lock state is ambiguous"
+      exit 1
+    fi
     # Ensure /jffs/scripts directory exists
-    mkdir -p "$SCRIPTS_DIR"
+    mkdir -p "$SCRIPTS_DIR" || { error -c vlan,cli "Failed to create $SCRIPTS_DIR"; exit 1; }
     # Inject service-event wrapper into system rc_service handler
-  inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
+    inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
+    marker_present "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Service-event injection verification failed"; exit 1; }
     # Inject addon boot entry into services-start (for addon install.sh auto-load)
-  inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install addon boot entry"; exit 1; }
+    inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install addon boot entry"; exit 1; }
+    marker_present "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "services-start injection verification failed"; exit 1; }
     info -c vlan,cli "Installed service-event with MERV_BASE=$MERV_BASE (setup-only)"
     # Propagate setupenable to all configured nodes via SSH
     handle_nodes_via_ssh "setupenable"
@@ -958,16 +968,34 @@ case "$ACTION" in
   # setupdisable — Setup-only: remove service-event wrapper and addon entry    #
   # ========================================================================== #
   setupdisable)
+    if ! reconcile_legacy_boot_file_locks; then
+      error -c vlan,cli "Refusing setupdisable while legacy boot-file lock state is ambiguous"
+      exit 1
+    fi
+    _setupdisable_failed=0
     # Remove injected service-event wrapper content (idempotent)
     if [ -f "$SERVICE_EVENT_WRAPPER" ]; then
-  remove_template_block "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || warn -c vlan,cli "Failed to remove injected service-event content"
-      info -c vlan,cli "Removed service-event injection (setup-only disable)"
+      if ! remove_template_block "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER"; then
+        error -c vlan,cli "Failed to remove injected service-event content"
+        _setupdisable_failed=1
+      elif marker_present "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER"; then
+        error -c vlan,cli "Service-event injection remains after setupdisable"
+        _setupdisable_failed=1
+      else
+        info -c vlan,cli "Removed service-event injection (setup-only disable)"
+      fi
     else
       info -c vlan,cli "service-event not present; nothing to disable"
     fi
     # Remove injected addon boot entry from services-start (idempotent)
     if [ -f "$SERVICES_START" ]; then
-  remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || warn -c vlan,cli "Failed to remove addon boot entry"
+      if ! remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START"; then
+        error -c vlan,cli "Failed to remove addon boot entry"
+        _setupdisable_failed=1
+      elif marker_present "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START"; then
+        error -c vlan,cli "Addon boot entry remains after setupdisable"
+        _setupdisable_failed=1
+      fi
     fi
     # Tear down MERV_QT quarantine chain: flush rules, remove FORWARD/INPUT
     # jumps, then delete chain. Strict ebtables order: -F before -D, -D before
@@ -989,8 +1017,12 @@ case "$ACTION" in
       error -c vlan,cli "MERV_MAC: could not remove persistent shield database files"
       exit 1
     fi
-    # Propagate setupdisable to all configured nodes via SSH
-    handle_nodes_via_ssh "setupdisable"
+    # Propagate setupdisable to all configured nodes via SSH. Preserve any
+    # local hook-removal failure even if node propagation itself succeeds.
+    if ! handle_nodes_via_ssh "setupdisable"; then
+      _setupdisable_failed=1
+    fi
+    [ "$_setupdisable_failed" -eq 0 ] || exit 1
     ;;
   
   # ========================================================================== #

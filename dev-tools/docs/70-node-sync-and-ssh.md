@@ -33,6 +33,23 @@ That optimization is always guarded by a fresh SHA-256 content stamp; before
 each connection the endpoint, record shape, and expiry are checked again, and
 an enroll, revoke, or changed trust file invalidates both caches.
 
+The configured `Nodes.NODE<n>` address remains the canonical ASUS/recovery
+identity. When `WAN_NATIVE_NODE<n>` is numeric, its configured
+`NODE<n>_WAN_NATIVE_IP` is the preferred connection endpoint; the canonical
+address is a transport fallback only for a proven pre-session failure
+(unreachable, timeout, refused, or no route). Remote command exits, trust/key
+errors, host-key mismatches, and any ambiguous SSH failure never retry a
+command on another endpoint. This contract applies to host-key preflight as
+well as Sync, Execute, collection, MAC Shield, update, and backup workflows.
+
+Endpoint discovery and reachability prechecks may retry before a remote command
+is started. `merv_ssh_exec_endpoint()` executes a command once by default; an
+explicit `MERV_SSH_EXEC_RETRY_SAFE=1` is reserved for callers that have already
+established the command as read-only/idempotent, and still cannot replay an
+ambiguous command/session timeout or remote exit. Client collection may connect
+through the preferred WAN Native address, but its published router identity and
+remote observation metadata remain the configured ASUS/recovery address.
+
 On development and test branches, the same staged pipeline also copies:
 
 ```text
@@ -48,8 +65,12 @@ rules are never copied to devices.
 
 ## SSH limits
 
-- Keep total simultaneous SSH sessions, including log monitoring, at two or
-  fewer.
+- Node-operation SSH work is bounded by the shared pool width resolved from
+  MAIN-local `General.NODE_PARALLELISM` (1–5, default 2). MAIN-local work does
+  not consume a remote slot; do not create additional unbounded node workers.
+- Complete-node trust preflight runs serially before node operations. Worker
+  payloads and terminal results remain private until the MAIN parent validates
+  and aggregates them serially.
 - Use bounded noninteractive connections and no host-key bypass.
 - Use explicit paths, not wildcards or directory destinations.
 - The router's shell may not provide `command`, `timeout`, or `mktemp`.
@@ -97,5 +118,5 @@ main-router orchestration helper; do not classify that omission as a node
 runtime failure.
 
 The router shell may not provide GNU `timeout`, `mktemp`, `scp`, or Bash. Keep
-SSH calls bounded by existing worker controls, use explicit paths, and preserve
-the maximum two concurrent node sessions.
+SSH calls bounded by the configured worker controls, use explicit paths, and
+preserve the shared pool's 1–5 node-operation bound.

@@ -111,7 +111,12 @@ if [ ! -s "$_shkp_root/.ssh/known_hosts" ]; then
   if grep -qi "Connection refused" "$_shkp_root/client.stderr" 2>/dev/null; then
     exit 11
   fi
-  if grep -qi "No route to host\|Network is unreachable\|timed out\|Connection timed out" "$_shkp_root/client.stderr" 2>/dev/null; then
+  # ASUS Dropbear commonly reports an unreachable route as "Connect failed"
+  # instead of the OpenSSH-style timeout text.  No known_hosts record exists
+  # at this point, so this is a pre-session transport failure, not a
+  # host-key/identity result.  Callers may therefore try their already-pinned
+  # recovery endpoint; any key observed by the probe remains terminal below.
+  if grep -qi "No route to host\|Network is unreachable\|timed out\|Connection timed out\|Connect failed\|Connection closed\|Connection reset\|Connection aborted" "$_shkp_root/client.stderr" 2>/dev/null; then
     exit 10
   fi
   exit 5

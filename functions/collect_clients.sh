@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: collect_clients.sh || version="0.53"                  #
+#                - File: collect_clients.sh || version="0.56"                  #
 # ============================================================================ #
 # - Purpose:    Orchestrate collection of VLAN bridges and client MAC          # 
 #               addresses from main and nodes to be stored in JSON format      #
@@ -35,6 +35,7 @@ fi
 # MAC validators reused by the client-metadata annotation pass. Best-effort:
 # if absent we degrade to unguarded collection rather than fail.
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh" 2>/dev/null || exit 75
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
@@ -58,13 +59,23 @@ fi
 # directories and clear any stale results from previous runs.                  #
 # ============================================================================ #
 
-# Timeout (seconds) for remote SSH commands; prevents hanging on slow nodes
-TIMEOUT=10
+# Remote client collection may wait up to 120s for the node-owned observation
+# generation. Give that SSH session a 150s hard bound, while the enclosing
+# node worker gets 180s for endpoint/precheck, transport, artifact return, and
+# cleanup. Ordinary SSH callers retain the shared short timeout.
+NODE_RESULT_SSH_TIMEOUT=150
 # Retry controls for transient node boot/SSH delays
 RETRY_MAX="${COLLECT_RETRY_MAX:-2}"
 RETRY_DELAY="${COLLECT_RETRY_DELAY:-3}"
-# Maximum time (seconds) to wait for all collection jobs to complete
-WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-90}"
+# MAIN is collected before any remote work starts. Keep its deadline separate
+# from the node-pool duration so a hung local collector cannot consume the
+# remote pool's entire budget (or allow remote work to start around it).
+MAIN_TIMEOUT="${COLLECT_MAIN_TIMEOUT:-90}"
+case "$MAIN_TIMEOUT" in
+  ''|*[!0-9]*|0) MAIN_TIMEOUT=90 ;;
+esac
+# Per-node collection worker deadline enclosing endpoint/precheck/SSH/result work.
+WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-180}"
 
 # Cleanup handler for temp files on exit/interrupt
 # Only the process that OWNS the collection lock may remove COLLECTDIR — a
@@ -73,6 +84,36 @@ WAIT_TIMEOUT="${COLLECT_WAIT_TIMEOUT:-90}"
 cleanup_collect() {
   _collect_cleanup_rc=$?
   _collect_cleanup_failed=0
+  _collect_pool_abort_failed=0
+  # MAIN is normally reaped before the remote pool starts.  If the parent is
+  # interrupted during that bounded pre-pool phase, stop and reap its owned
+  # wrapper before removing the shared collection workspace.
+  if [ "${MAIN_REAPED:-1}" -eq 0 ] && [ -n "${MAIN_PID:-}" ]; then
+    collect_stop_tracked_pid "$MAIN_PID" "${MAIN_START:-}" || _collect_cleanup_failed=1
+    wait "$MAIN_PID" 2>/dev/null || :
+    MAIN_REAPED=1
+  fi
+  # If the bounded pool was interrupted, reconcile active wrappers and their
+  # children by the shared PID/start identity contract before removing its
+  # private root. A normally returned pool has already drained every slot.
+  # The generic pool state is authoritative.  COLLECT_POOL_ACTIVE is only a
+  # local phase marker and may already be cleared after a failing pool return;
+  # never let that hide retained worker ownership from EXIT cleanup.
+  if collect_pool_state_unresolved &&
+     type mnj_pool_abort_active >/dev/null 2>&1; then
+    if mnj_pool_abort_active timeout collector-exit; then
+      COLLECT_POOL_ACTIVE=0
+    else
+      _collect_pool_abort_failed=1
+      _collect_cleanup_failed=1
+      error -c cli,vlan "Client collection cleanup retained ownership because node workers could not be reconciled"
+    fi
+  fi
+  if collect_pool_state_unresolved; then
+    _collect_pool_abort_failed=1
+    _collect_cleanup_failed=1
+    error -c cli,vlan "Client collection cleanup retained ownership because generic node-pool state remains unresolved"
+  fi
   # Kill any remaining background collection jobs
   for _collect_track in ${BG_TRACKED:-}; do
     _collect_pid=${_collect_track%%:*}
@@ -89,7 +130,7 @@ cleanup_collect() {
   # If a worker identity could not be recorded, do not release the collection
   # owner: a later process must not race an unvalidated child.  The preserved
   # lock/workspace is an explicit recovery signal rather than silent success.
-  if [ "${COLLECT_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+  if [ "$_collect_pool_abort_failed" -eq 0 ] && [ "${COLLECT_LOCK_ACQUIRED:-0}" -eq 1 ]; then
     if [ "${BG_IDENTITY_FAILURE:-0}" -eq 1 ]; then
       _collect_cleanup_failed=1
       error -c cli,vlan "Client collection cleanup retained ownership because a worker identity was unverifiable"
@@ -104,6 +145,13 @@ cleanup_collect() {
       else
         COLLECT_LOCK_ACQUIRED=0
       fi
+    fi
+  fi
+  if ! collect_pool_state_unresolved && [ -n "${COLLECT_POOL_ROOT:-}" ] &&
+     [ -d "$COLLECT_POOL_ROOT" ]; then
+    if ! rm -rf "$COLLECT_POOL_ROOT" 2>/dev/null; then
+      _collect_cleanup_failed=1
+      error -c cli,vlan "Client collection cleanup could not remove its private node-job workspace"
     fi
   fi
   [ -z "${OUT_WORK:-}" ] || rm -f "$OUT_WORK" 2>/dev/null || _collect_cleanup_failed=1
@@ -127,6 +175,16 @@ trap 'collect_handle_signal 143' TERM
 BG_PIDS=""
 BG_TRACKED=""
 BG_IDENTITY_FAILURE=0
+MAIN_PID=""
+MAIN_START=""
+MAIN_REAPED=1
+collect_pool_state_unresolved() {
+  if type mnj_pool_state_unresolved >/dev/null 2>&1; then
+    mnj_pool_state_unresolved
+    return $?
+  fi
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0) return 1 ;; *) return 0 ;; esac
+}
 collect_stop_tracked_pid() {
   _collect_stop_pid="$1"
   _collect_stop_start="$2"
@@ -233,6 +291,37 @@ mkdir -p "$COLLECTDIR" "$RESULTDIR"
 # Writing to a work file and renaming at the end prevents the browser from
 # seeing a missing, partial, or unannotated file during collection.
 OUT_WORK="${OUT_FINAL}.new.$$"
+# A collection generation is all-or-nothing.  Private per-router error
+# artifacts are useful diagnostics, but are never eligible for the public
+# aggregate.  Keep the first attributable failure so the observation worker
+# can retain the requested generation and operators have a bounded fault file.
+COLLECT_FAILED=0
+COLLECT_FAILURE_PHASE=""
+COLLECT_FAILURE_TARGET=""
+COLLECT_FAILURE_REASON=""
+COLLECT_FAULT_FILE="${RESULTDIR}/client_collection_fault"
+REQUIRED_RESULTS=""
+
+collect_note_failure() {
+  [ "$COLLECT_FAILED" -eq 0 ] || return 0
+  COLLECT_FAILED=1
+  COLLECT_FAILURE_PHASE="$1"
+  COLLECT_FAILURE_TARGET="$2"
+  COLLECT_FAILURE_REASON="$3"
+}
+
+collect_write_fault() {
+  [ "$COLLECT_FAILED" -eq 1 ] || return 0
+  _collect_fault_tmp="${COLLECT_FAULT_FILE}.new.$$"
+  {
+    printf 'phase=%s\n' "$COLLECT_FAILURE_PHASE"
+    printf 'target=%s\n' "$COLLECT_FAILURE_TARGET"
+    printf 'reason=%s\n' "$COLLECT_FAILURE_REASON"
+    printf 'epoch=%s\n' "$(date +%s 2>/dev/null || printf 0)"
+  } > "$_collect_fault_tmp" 2>/dev/null &&
+    mv -f "$_collect_fault_tmp" "$COLLECT_FAULT_FILE" 2>/dev/null ||
+    rm -f "$_collect_fault_tmp" 2>/dev/null || :
+}
 
 # ============================================================================ #
 #                             HELPER FUNCTIONS                                 #
@@ -258,18 +347,32 @@ get_node_ips() {
 # ============================================================================ #
 collect_from_node() {
   node_id="$1"
-  node_ip="$2"
-  output_file="$3"
+  configured_ip="$2"
+  if [ "$#" -ge 3 ]; then
+    output_file="$3"
+  else
+    [ -n "${MERV_NODE_JOB_DIR:-}" ] || return 2
+    output_file="$MERV_NODE_JOB_DIR/client.json"
+  fi
+  [ -n "$output_file" ] || return 2
   # This background worker must establish its own initial reachability proof.
   # It may then avoid exactly one duplicate ICMP probe in merv_ssh_exec.
   unset MERV_SSH_SKIP_PING
 
-  info -c vlan "→ Collecting from node $node_ip (NODE${node_id})"
+  # A configured ASUS/default address is the durable router identity.  WAN
+  # Native may select a different SSH transport endpoint, but that temporary
+  # route must never leak into client artifacts or source metadata.
+  transport_ip=$(merv_node_resolve_endpoint "$node_id" "$configured_ip") || {
+    merv_ssh_skip_log "$node_id" "$configured_ip" "collect"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "${MERV_SSH_LAST_REASON:-endpoint-unreachable}" > "$output_file"
+    return 1
+  }
+  info -c vlan "→ Collecting from NODE${node_id} identity $configured_ip via $transport_ip"
 
-  # Use wrapper precheck (validates IP, keys, and ping)
-  if ! merv_ssh_precheck "$node_id" "$node_ip"; then
-    merv_ssh_skip_log "$node_id" "$node_ip" "collect"
-    printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$MERV_SSH_LAST_REASON" > "$output_file"
+  # Use the selected transport only for connectivity/trust checks.
+  if ! merv_ssh_precheck "$node_id" "$transport_ip"; then
+    merv_ssh_skip_log "$node_id" "$configured_ip" "collect"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "$MERV_SSH_LAST_REASON" > "$output_file"
     return 1
   fi
   MERV_SSH_SKIP_PING=1
@@ -282,16 +385,21 @@ collect_from_node() {
   # Keep the remote artifact's router identity equal to the configured IP.
   # The environment is exported once for both request and run-wait because the
   # coordinator executes the local collector only during the latter command.
-  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$node_ip'; MERV_OBS_NO_AUTOSTART=1 sh '$MERV_BASE/functions/post_apply_worker.sh' request collect >/dev/null 2>&1 && sh '$MERV_BASE/functions/post_apply_worker.sh' run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
+  remote_cmd="export MERV_OBS_CLIENT_ROUTER='$configured_ip'; MERV_OBS_NO_AUTOSTART=1 sh '$MERV_BASE/functions/post_apply_worker.sh' request collect >/dev/null 2>&1 && sh '$MERV_BASE/functions/post_apply_worker.sh' run-wait 120 >/dev/null 2>&1 && cat $COLLECTDIR/clients_local.json"
   
-  _result_tmp="$COLLECTDIR/node_${node_ip}.out.$$"
+  _result_tmp="${MERV_NODE_JOB_DIR:-$COLLECTDIR}/remote_result.$$"
   result=""
-  if merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" >"$_result_tmp" 2>/dev/null; then
+  _collect_saved_ssh_timeout="${MERV_SSH_TIMEOUT:-10}"
+  MERV_SSH_TIMEOUT="$NODE_RESULT_SSH_TIMEOUT"
+  export MERV_SSH_TIMEOUT
+  if merv_ssh_exec "$node_id" "$configured_ip" "$remote_cmd" >"$_result_tmp" 2>/dev/null; then
     rc=0
     result="$(cat "$_result_tmp" 2>/dev/null)"
   else
     rc=$?
   fi
+  MERV_SSH_TIMEOUT="$_collect_saved_ssh_timeout"
+  export MERV_SSH_TIMEOUT
   rm -f "$_result_tmp" 2>/dev/null || :
 
   if [ $rc -eq 0 ] && [ -n "$result" ]; then
@@ -301,19 +409,27 @@ collect_from_node() {
        ! mv -f "$_node_output_tmp" "$output_file" 2>/dev/null; then
       rm -f "$_node_output_tmp" 2>/dev/null || :
       _reason="invalid-json"
-      warn -c cli,vlan "Invalid JSON received from $node_ip; using an error artifact"
-      printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
+      warn -c cli,vlan "Invalid JSON received from NODE${node_id} via $transport_ip; using an error artifact"
+      printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "$_reason" > "$output_file"
       return 1
     fi
-    info -c vlan "✓ Successfully collected from $node_ip"
+    info -c vlan "✓ Successfully collected from NODE${node_id} identity $configured_ip via $transport_ip"
     return 0
   else
     _reason="${MERV_SSH_LAST_REASON:-fetch-failed}"
     [ "$rc" -eq 0 ] && [ -z "$result" ] && _reason="empty-output"
-    warn -c cli,vlan "Failed to fetch results from $node_ip (rc=$rc, reason=$_reason)"
-    printf '{"router":"%s","error":"%s","vlans":[]}' "$node_ip" "$_reason" > "$output_file"
+    warn -c cli,vlan "Failed to fetch results from NODE${node_id} identity $configured_ip via $transport_ip (rc=$rc, reason=$_reason)"
+    printf '{"router":"%s","error":"%s","vlans":[]}' "$configured_ip" "$_reason" > "$output_file"
     return 1
   fi
+}
+
+# mnj_pool_run invokes handlers as (node-id, configured-IP) inside an isolated
+# worker directory. The handler writes only its private client artifact;
+# parent-side validation and aggregation remain serial and authoritative.
+collect_node_job() {
+  [ -n "${MERV_NODE_JOB_DIR:-}" ] || return 2
+  collect_from_node "$1" "$2" "$MERV_NODE_JOB_DIR/client.json"
 }
 
 # ============================================================================ #
@@ -327,11 +443,53 @@ MAIN_JSON="$COLLECTDIR/main.json"
 MAIN_IP=$(nvram get lan_ipaddr 2>/dev/null | tr -d '\r\n')
 
 collect_from_main() {
-  if sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1 &&
-     json_validate_file "$MAIN_JSON" 2>/dev/null; then
+  # Keep the actual local collector as a child of this owned wrapper.  The
+  # parent can therefore enforce MAIN_TIMEOUT, while this trap also terminates
+  # the collector child before the wrapper exits on a deadline or signal.
+  _collect_main_exec_pid=""
+  _collect_main_exec_start=""
+  collect_main_stop_child() {
+    _collect_main_stop_pid="$1"
+    _collect_main_stop_start="$2"
+    case "$_collect_main_stop_pid:$_collect_main_stop_start" in
+      ''|*[!0-9:]*|:*|*::*)
+        [ -n "$_collect_main_stop_pid" ] && wait "$_collect_main_stop_pid" 2>/dev/null || :
+        return 1
+        ;;
+    esac
+    if merv_process_identity_matches "$_collect_main_stop_pid" "$_collect_main_stop_start" 2>/dev/null; then
+      kill -TERM "$_collect_main_stop_pid" 2>/dev/null || :
+      _collect_main_stop_n=0
+      while [ "$_collect_main_stop_n" -lt 1 ] &&
+            merv_process_identity_matches "$_collect_main_stop_pid" "$_collect_main_stop_start" 2>/dev/null; do
+        sleep 1
+        _collect_main_stop_n=$((_collect_main_stop_n + 1))
+      done
+      if merv_process_identity_matches "$_collect_main_stop_pid" "$_collect_main_stop_start" 2>/dev/null; then
+        kill -KILL "$_collect_main_stop_pid" 2>/dev/null || :
+      fi
+    fi
+    wait "$_collect_main_stop_pid" 2>/dev/null || :
+    merv_process_identity_matches "$_collect_main_stop_pid" "$_collect_main_stop_start" 2>/dev/null && return 1
+    return 0
+  }
+  collect_main_handle_signal() {
+    _collect_main_signal_rc="$1"
+    trap - INT TERM
+    collect_main_stop_child "$_collect_main_exec_pid" "$_collect_main_exec_start" || :
+    exit "$_collect_main_signal_rc"
+  }
+  trap 'collect_main_handle_signal 143' INT TERM
+  sh "$FUNCDIR/collect_local_clients.sh" "$MAIN_JSON" "Main Router" "$MAIN_IP" >>"$LOG_chan_cli" 2>&1 &
+  _collect_main_exec_pid="$!"
+  _collect_main_exec_start=$(merv_proc_start_time "$_collect_main_exec_pid" 2>/dev/null || printf '')
+  wait "$_collect_main_exec_pid"
+  rc=$?
+  trap - INT TERM
+  if [ "$rc" -eq 0 ] && json_validate_file "$MAIN_JSON" 2>/dev/null; then
     info -c vlan "✓ Main router collection completed"
+    return 0
   else
-    rc=$?
     error -c cli,vlan "✗ Main router collection failed (rc=$rc)"
     if [ -s "$MAIN_JSON" ] && ! json_validate_file "$MAIN_JSON" 2>/dev/null; then
       warn -c cli,vlan "Main router collection produced invalid JSON; using an error artifact"
@@ -339,7 +497,74 @@ collect_from_main() {
     fi
     rm -f "$MAIN_JSON" 2>/dev/null || :
     printf '{"router":"%s","error":"collector-failed","vlans":[]}' "Main Router" > "$MAIN_JSON"
+    return 1
   fi
+}
+
+# Run MAIN to a terminal result before entering the remote node pool.  A
+# status file distinguishes an exited/reaped wrapper from a still-live process
+# without relying on a non-portable wait -n or a process-group kill.
+collect_main_bounded() {
+  MAIN_STATUS="$COLLECTDIR/main.status"
+  rm -f "$MAIN_STATUS" 2>/dev/null || :
+  (
+    trap - EXIT INT TERM
+    collect_from_main
+    _collect_main_worker_rc=$?
+    printf '%s\n' "$_collect_main_worker_rc" > "$MAIN_STATUS"
+    exit "$_collect_main_worker_rc"
+  ) &
+  MAIN_PID="$!"
+  MAIN_REAPED=0
+  MAIN_START=$(merv_proc_start_time "$MAIN_PID" 2>/dev/null || printf '')
+
+  # An unverified wrapper cannot be safely signalled.  Reap it directly and
+  # fail closed; never start remote work without a verified MAIN boundary.
+  case "$MAIN_PID:$MAIN_START" in
+    ''|*[!0-9:]*|:*|*::*)
+      wait "$MAIN_PID" 2>/dev/null
+      MAIN_RC=$?
+      MAIN_REAPED=1
+      collect_note_failure main main identity-unverified
+      return 1
+      ;;
+  esac
+
+  MAIN_WAITED=0
+  MAIN_TIMED_OUT=0
+  MAIN_RC=1
+  while [ "$MAIN_WAITED" -lt "$MAIN_TIMEOUT" ]; do
+    if [ -s "$MAIN_STATUS" ]; then
+      wait "$MAIN_PID" 2>/dev/null
+      MAIN_RC=$?
+      MAIN_REAPED=1
+      break
+    fi
+    if ! merv_process_identity_matches "$MAIN_PID" "$MAIN_START" 2>/dev/null; then
+      wait "$MAIN_PID" 2>/dev/null
+      MAIN_RC=$?
+      MAIN_REAPED=1
+      break
+    fi
+    sleep 1
+    MAIN_WAITED=$((MAIN_WAITED + 1))
+  done
+
+  if [ "$MAIN_REAPED" -eq 0 ]; then
+    MAIN_TIMED_OUT=1
+    warn -c cli,vlan "Main router collection timeout after ${MAIN_TIMEOUT}s"
+    collect_stop_tracked_pid "$MAIN_PID" "$MAIN_START" || :
+    wait "$MAIN_PID" 2>/dev/null
+    MAIN_RC=$?
+    MAIN_REAPED=1
+    collect_note_failure main main timeout
+    return 1
+  fi
+  [ "${MAIN_RC:-1}" -eq 0 ] || {
+    collect_note_failure main main collector-failed
+    return 1
+  }
+  return 0
 }
 
 # ============================================================================ #
@@ -373,10 +598,10 @@ else
 fi
 
 # ============================================================================ #
-#                        PARALLEL NODE COLLECTION                              #
-# Spawn background collection jobs for each configured node. Run jobs in       #
-# parallel to minimize total time. Wait for all jobs to complete before        #
-# proceeding to result merging.                                                #
+#                        BOUNDED NODE COLLECTION                               #
+# MAIN is collected in its own local worker. Remote nodes use the shared       #
+# bounded pool so General.NODE_PARALLELISM limits SSH/collection work without  #
+# allowing MAIN to consume a remote slot.                                      #
 # ============================================================================ #
 
 # A progress-backed collection must discover every untrusted node before
@@ -423,27 +648,52 @@ EOF
   fi
 fi
 
-# Start main collection only after the complete node trust preflight passes.
-( trap - EXIT INT TERM; collect_from_main ) &
-MAIN_PID="$!"
-collect_track_pid "$MAIN_PID" || :
+# Start and fully reap MAIN only after the complete node trust preflight
+# passes.  No remote pool may start until this bounded phase succeeds.
+REQUIRED_RESULTS="$MAIN_JSON:main"
+if ! collect_main_bounded; then
+  collect_write_fault
+  error -c cli,vlan "Client collection failed before remote work: phase=$COLLECT_FAILURE_PHASE target=$COLLECT_FAILURE_TARGET reason=$COLLECT_FAILURE_REASON; preserving previous inventory"
+  rm -f "$OUT_WORK" 2>/dev/null || :
+  exit 1
+fi
 
 if [ "$NODES_ENABLED" = "true" ]; then
-  # Spawn collection background jobs for each node with PID tracking
-  info -c vlan "Spawning node collection jobs (timeout: ${WAIT_TIMEOUT}s)..."
-  
-  # Write node IPs to temp file to avoid subshell issues with pipes
-  _node_tmp="$COLLECTDIR/node_ips.tmp"
-  printf '%s\n' "$NODE_IPS" > "$_node_tmp"
-  
-  # Read from file (not pipe) so background PIDs stay in this shell
-  while read -r node_id node_ip; do
+  COLLECT_RUN_ID="$(date +%s)-$$"
+  COLLECT_POOL_ROOT="$TMPDIR/node_jobs/client.$COLLECT_RUN_ID"
+  COLLECT_POOL_NODES="$COLLECTDIR/node_ips.tmp"
+  printf '%s\n' "$NODE_IPS" > "$COLLECT_POOL_NODES" || exit 1
+  # Keep this exact node file until mnj_pool_run has copied and validated it.
+  while IFS=' ' read -r node_id node_ip _node_extra || [ -n "$node_id" ]; do
     [ -n "$node_id" ] || continue
-    ( trap - EXIT INT TERM; collect_from_node "$node_id" "$node_ip" "$COLLECTDIR/node_${node_ip}.json" ) &
-    # Track PID for cleanup handler
-    collect_track_pid "$!" || :
-  done < "$_node_tmp"
-  rm -f "$_node_tmp"
+    REQUIRED_RESULTS="$REQUIRED_RESULTS $COLLECT_POOL_ROOT/node_${node_id}/client.json:node-${node_id}"
+  done < "$COLLECT_POOL_NODES"
+
+  info -c vlan "Starting bounded node collection pool (timeout: ${WAIT_TIMEOUT}s)..."
+  COLLECT_POOL_ACTIVE=1
+  mnj_pool_run "$COLLECT_POOL_ROOT" collect "${MERV_NODE_PARALLELISM:-}" "$WAIT_TIMEOUT" "$COLLECT_POOL_NODES" collect_node_job
+  COLLECT_POOL_RC=$?
+  # A failed identity reconciliation intentionally leaves the generic pool
+  # active.  Keep the local phase marker truthful as well and stop before any
+  # validation, merge, or public inventory publication; a later pool must not
+  # overwrite retained slot/pending metadata.
+  if ! collect_pool_state_unresolved; then
+    COLLECT_POOL_ACTIVE=0
+  else
+    COLLECT_POOL_ACTIVE=1
+  fi
+  rm -f "$COLLECT_POOL_NODES"
+  if collect_pool_state_unresolved; then
+    collect_note_failure lifecycle node-pool unresolved-pool
+    error -c cli,vlan "Client collection stopped: node pool ownership remains unresolved; preserving workspace and collection lock"
+    rm -f "$OUT_WORK" 2>/dev/null || :
+    exit 75
+  fi
+  if [ "$COLLECT_POOL_RC" -ne 0 ]; then
+    # Keep the established worker-level fault contract. Terminal marker and
+    # private artifact checks below still attribute missing/malformed results.
+    collect_note_failure worker collection worker-nonzero
+  fi
 fi
 
 # A worker whose process start identity could not be recorded is not safely
@@ -455,53 +705,44 @@ if [ "${BG_IDENTITY_FAILURE:-0}" -eq 1 ]; then
   exit 75
 fi
 
-# Wait for all background jobs (main + nodes) with timeout
-if [ -n "$BG_PIDS" ]; then
-  waited=0
-  while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
-    _still_running=0
-    for _collect_track in ${BG_TRACKED:-}; do
-      _collect_pid=${_collect_track%%:*}
-      _collect_start=${_collect_track#*:}
-      case "$_collect_pid:$_collect_start" in
-        ''|*[!0-9:]*|:*|*::*) continue ;;
-      esac
-      if merv_process_identity_matches "$_collect_pid" "$_collect_start" 2>/dev/null; then
-        _still_running=1
-        break
-      fi
-    done
+# Validate every remote terminal marker before considering its JSON artifact.
+# mnj_pool_run drains the pool, but the parent repeats the exact configured
+# node-set check so a missing, stale, wrong-node, or non-ok marker cannot be
+# merged or published.
+if [ "$NODES_ENABLED" = "true" ]; then
+  while IFS=' ' read -r _collect_node_id _collect_node_ip _collect_node_extra || [ -n "$_collect_node_id" ]; do
+    [ -n "$_collect_node_id" ] || continue
+    _collect_node_result="$COLLECT_POOL_ROOT/node_${_collect_node_id}/result"
+    if ! mnj_result_validate "$_collect_node_result" "$_collect_node_id" collect; then
+      collect_note_failure result "node-${_collect_node_id}" missing-result
+    elif [ "$MNJ_RESULT_STATE" != ok ]; then
+      collect_note_failure result "node-${_collect_node_id}" "$MNJ_RESULT_STATE"
+    fi
+  done <<EOF
+$NODE_IPS
+EOF
+fi
 
-    [ "$_still_running" -eq 0 ] && break
-
-    sleep 1
-    waited=$((waited + 1))
-  done
-
-  if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
-    warn -c cli,vlan "Client collection timeout after ${WAIT_TIMEOUT}s; some results may be incomplete"
-    for _collect_track in ${BG_TRACKED:-}; do
-      _collect_pid=${_collect_track%%:*}
-      _collect_start=${_collect_track#*:}
-      case "$_collect_pid:$_collect_start" in
-        ''|*[!0-9:]*|:*|*::*) continue ;;
-      esac
-      collect_stop_tracked_pid "$_collect_pid" "$_collect_start" || :
-    done
-  else
-    info -c vlan "All collection jobs finished in ${waited}s"
+# Reap status alone is insufficient: a worker can intentionally leave a valid
+# JSON error artifact.  Require one valid, non-error result for every requested
+# main/node target before a new public aggregate is even constructed.
+for _collect_expected in $REQUIRED_RESULTS; do
+  _collect_expected_file=${_collect_expected%%:*}
+  _collect_expected_target=${_collect_expected#*:}
+  if [ ! -s "$_collect_expected_file" ]; then
+    collect_note_failure result "$_collect_expected_target" missing-result
+  elif ! json_validate_file "$_collect_expected_file" 2>/dev/null; then
+    collect_note_failure result "$_collect_expected_target" invalid-json
+  elif grep -q '"error"[[:space:]]*:' "$_collect_expected_file" 2>/dev/null; then
+    collect_note_failure result "$_collect_expected_target" error-artifact
   fi
+done
 
-    for _collect_track in ${BG_TRACKED:-}; do
-      _collect_pid=${_collect_track%%:*}
-      _collect_start=${_collect_track#*:}
-      case "$_collect_pid:$_collect_start" in
-        ''|*[!0-9:]*|:*|*::*) continue ;;
-      esac
-      wait "$_collect_pid" 2>/dev/null
-    done
-  BG_PIDS=""
-  BG_TRACKED=""
+if [ "$COLLECT_FAILED" -ne 0 ]; then
+  collect_write_fault
+  error -c cli,vlan "Client collection failed: phase=$COLLECT_FAILURE_PHASE target=$COLLECT_FAILURE_TARGET reason=$COLLECT_FAILURE_REASON; preserving previous inventory"
+  rm -f "$OUT_WORK" 2>/dev/null || :
+  exit 1
 fi
 
 # ============================================================================ #
@@ -525,10 +766,11 @@ RUN_ID="$(date +%s)-$$"
   echo "  \"run_id\": \"$RUN_ID\","
   echo "  \"nodes\": ["
 
-  # Track first entry to avoid trailing comma after last entry
+  # Track first entry to avoid trailing comma after last entry.  MAIN is
+  # separate from the remote pool, whose artifacts remain in private job
+  # directories until this parent-owned serial merge.
   FIRST=1
-  # Iterate through all collected JSON files (main router + nodes)
-  for json_file in "$COLLECTDIR/main.json" "$COLLECTDIR"/node_*.json; do
+  for json_file in "$COLLECTDIR/main.json"; do
     # Skip if file doesn't exist
     [ -f "$json_file" ] || continue
     # Add comma separator between entries (not before first entry)
@@ -536,6 +778,18 @@ RUN_ID="$(date +%s)-$$"
     # Indent and append JSON content (sed adds 4 spaces to each line)
     sed 's/^/    /' "$json_file"
   done
+
+  if [ "$NODES_ENABLED" = "true" ]; then
+    while IFS=' ' read -r _merge_node_id _merge_node_ip _merge_node_extra || [ -n "$_merge_node_id" ]; do
+      [ -n "$_merge_node_id" ] || continue
+      json_file="$COLLECT_POOL_ROOT/node_${_merge_node_id}/client.json"
+      [ -f "$json_file" ] || continue
+      if [ "$FIRST" -eq 1 ]; then FIRST=0; else echo ","; fi
+      sed 's/^/    /' "$json_file"
+    done <<EOF
+$NODE_IPS
+EOF
+  fi
 
   echo "  ]"
   echo "}"
@@ -866,4 +1120,5 @@ rm -rf "$COLLECTDIR"
 
 info -c vlan "✓ Client collection completed - JSON saved to $OUT_FINAL"
 info -c cli,vlan "Refreshing client list complete"
+rm -f "$COLLECT_FAULT_FILE" 2>/dev/null || :
 exit 0

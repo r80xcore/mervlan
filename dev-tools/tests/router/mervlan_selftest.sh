@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#            - File: mervlan_selftest.sh || version="0.72.5"                #
+#            - File: mervlan_selftest.sh || version="0.72.9"                #
 # ============================================================================ #
 # Isolated MerVLAN protocol tests. Mutating tests use a fake-ebtables backend
 # and a state root beneath /tmp/mervlan_tmp/selftest.<run-id>.
@@ -98,7 +98,9 @@ write_fake_stat "$$" "424242" || exit 2
 
 # The fake backend stores one plain-text rule file per chain. It implements only
 # the ebtables operations used by the DHCP-hold API and supports deterministic
-# command failure through FAKE_EBTABLES_FAIL_MATCH.
+# command failure through FAKE_EBTABLES_FAIL_MATCH.  The continuity monitor is
+# deliberately evaluated after each successful kernel mutation so a repair
+# cannot hide a flush/delete-to-add gap behind an outer checkpoint.
 cat > "$SELFTEST_FAKE_BIN" <<'FAKE_EBTABLES'
 #!/bin/sh
 set -u
@@ -180,6 +182,48 @@ case "$op" in
     ;;
   *) exit 64 ;;
 esac
+
+case "$op" in
+  -N|-A|-I|-D|-F|-X)
+    if [ -f "$state/continuous-required" ]; then
+      mutation_file="$state/continuous-mutations"
+      mutation_count=$(cat "$mutation_file" 2>/dev/null || printf 0)
+      case "$mutation_count" in ''|*[!0-9]*) mutation_count=0 ;; esac
+      mutation_count=$((mutation_count + 1))
+      printf '%s\n' "$mutation_count" > "$mutation_file"
+
+      child_file="$state/chains/${MERV_DHCP_HOLD_CHAIN:-MERV_DHCP_HOLD}"
+      forward_file="$state/chains/FORWARD"
+      input_file="$state/chains/INPUT"
+      child_exact=0 forward_exact=0 input_exact=0
+      [ -f "$child_file" ] && child_exact=$(grep -Fxc -- '-p IPv4 --ip-proto udp --ip-dport 67 -j DROP' "$child_file" 2>/dev/null || :)
+      [ -f "$forward_file" ] && forward_exact=$(grep -Fxc -- "-j ${MERV_DHCP_HOLD_CHAIN:-MERV_DHCP_HOLD}" "$forward_file" 2>/dev/null || :)
+      [ -f "$input_file" ] && input_exact=$(grep -Fxc -- "-j ${MERV_DHCP_HOLD_CHAIN:-MERV_DHCP_HOLD}" "$input_file" 2>/dev/null || :)
+      case "$child_exact" in ''|*[!0-9]*) child_exact=0 ;; esac
+      case "$forward_exact" in ''|*[!0-9]*) forward_exact=0 ;; esac
+      case "$input_exact" in ''|*[!0-9]*) input_exact=0 ;; esac
+      if [ "$child_exact" -ge 1 ] 2>/dev/null && { [ "$forward_exact" -ge 1 ] 2>/dev/null || [ "$input_exact" -ge 1 ] 2>/dev/null; }; then
+        : > "$state/continuous-established"
+      elif [ -f "$state/continuous-established" ]; then
+        printf 'gap mutation=%s command=%s child=%s forward=%s input=%s\n' \
+          "$mutation_count" "$op $chain $*" "$child_exact" "$forward_exact" "$input_exact" \
+          >> "$state/continuous-gaps"
+      fi
+
+      case "${FAKE_EBTABLES_POST_FAIL_AT:-}" in
+        "$mutation_count") exit 72 ;;
+      esac
+      case "${FAKE_EBTABLES_SIGNAL_AFTER:-}" in
+        "$mutation_count")
+          case "${FAKE_EBTABLES_SIGNAL_PID:-}" in
+            ''|*[!0-9]*) ;;
+            *) kill "-${FAKE_EBTABLES_SIGNAL_NAME:-TERM}" "$FAKE_EBTABLES_SIGNAL_PID" 2>/dev/null || : ;;
+          esac
+          ;;
+      esac
+    fi
+    ;;
+esac
 exit 0
 FAKE_EBTABLES
 chmod 700 "$SELFTEST_FAKE_BIN" || exit 2
@@ -223,6 +267,20 @@ exit "$_cece_rc"
 CONCURRENT_ENFORCE_CHILD
 chmod 700 "$SELFTEST_CONCURRENT_CHILD" || exit 2
 
+SELFTEST_DHCP_SIGNAL_CHILD="$SELFTEST_ROOT/bin/dhcp-enforce-signal-child"
+cat > "$SELFTEST_DHCP_SIGNAL_CHILD" <<'DHCP_ENFORCE_SIGNAL_CHILD'
+#!/bin/sh
+. "$MERV_BASE/settings/var_settings.sh" || exit 2
+. "$MERV_BASE/settings/lib_identity.sh" || exit 2
+. "$MERV_BASE/settings/lib_owner_lock.sh" || exit 2
+. "$MERV_BASE/settings/lib_mervqt.sh" || exit 2
+FAKE_EBTABLES_SIGNAL_PID="$$"
+export FAKE_EBTABLES_SIGNAL_PID
+merv_dhcp_hold_enforce
+exit $?
+DHCP_ENFORCE_SIGNAL_CHILD
+chmod 700 "$SELFTEST_DHCP_SIGNAL_CHILD" || exit 2
+
 selftest_reset() {
   case "$SELFTEST_FAKE_STATE" in "$SELFTEST_ROOT"/*) ;; *) return 1 ;; esac
   rm -rf "$SELFTEST_FAKE_STATE" "$SELFTEST_STATE" 2>/dev/null || return 1
@@ -230,8 +288,31 @@ selftest_reset() {
   : > "$SELFTEST_FAKE_STATE/chains/FORWARD"
   : > "$SELFTEST_FAKE_STATE/chains/INPUT"
   rm -f "$MERV_DHCP_HOLD_LEGACY_MARKER"
-  unset FAKE_EBTABLES_FAIL_MATCH MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
-  export FAKE_EBTABLES_FAIL_MATCH MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  unset FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
+    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION \
+    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT MERV_SELFTEST_HANDOFF_INTERLEAVE
+  export FAKE_EBTABLES_FAIL_MATCH FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER \
+    FAKE_EBTABLES_SIGNAL_PID FAKE_EBTABLES_SIGNAL_NAME MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION \
+    MERV_OWNER_LOCK_FAULT MERV_DHCP_STATE_LOCK_FAULT MERV_SELFTEST_HANDOFF_INTERLEAVE
+}
+
+# The production handoff request exposes a test-only hook after the parent
+# transition and before the requested record is made visible. Re-run the
+# reconciler directly at that boundary to model the exact lock-serialized
+# interleaving that previously classified a requested record as orphaned.
+merv_dhcp_handoff_request_hook() {
+  [ "${MERV_SELFTEST_HANDOFF_INTERLEAVE:-0}" = 1 ] || return 0
+  _tdhi_id="$1"
+  _tdhi_owner="$2"
+  _tdhi_pending="$3"
+  [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/$_tdhi_id" ] || return 1
+  [ "$(cat "$_tdhi_owner/phase" 2>/dev/null)" = handoff_wait ] || return 1
+  [ "$(cat "$_tdhi_owner/handoff_id" 2>/dev/null)" = "$_tdhi_id" ] || return 1
+  [ -d "$_tdhi_pending" ] && [ ! -e "$_tdhi_pending/ready" ] || return 1
+  _merv_dhcp_reconcile_handoffs_locked || return 1
+  [ ! -e "$MERV_DHCP_HOLD_STATE_ROOT/handoffs/$_tdhi_id" ] || return 1
+  : > "$SELFTEST_ROOT/handoff-interleave-proof"
+  return 0
 }
 
 pass() {
@@ -400,6 +481,157 @@ test_dhcp_rule_exactness() {
   export MERV_DHCP_HOLD_PROC_ROOT
 }
 
+# Return true when the fake ebtables state has an effective DHCP server
+# protection path: an exact child DROP plus at least one exact parent jump.
+# The production contract ultimately requires both parents, but this narrower
+# predicate detects the dangerous transition from an already-protective
+# damaged state to no protection at all.
+selftest_dhcp_effective_protection() {
+  _sdep_child="$SELFTEST_FAKE_STATE/chains/$MERV_DHCP_HOLD_CHAIN"
+  _sdep_forward="$SELFTEST_FAKE_STATE/chains/FORWARD"
+  _sdep_input="$SELFTEST_FAKE_STATE/chains/INPUT"
+  _sdep_child_count=0 _sdep_forward_count=0 _sdep_input_count=0
+  [ -f "$_sdep_child" ] && _sdep_child_count=$(grep -Fxc -- '-p IPv4 --ip-proto udp --ip-dport 67 -j DROP' "$_sdep_child" 2>/dev/null || :)
+  [ -f "$_sdep_forward" ] && _sdep_forward_count=$(grep -Fxc -- "-j $MERV_DHCP_HOLD_CHAIN" "$_sdep_forward" 2>/dev/null || :)
+  [ -f "$_sdep_input" ] && _sdep_input_count=$(grep -Fxc -- "-j $MERV_DHCP_HOLD_CHAIN" "$_sdep_input" 2>/dev/null || :)
+  case "$_sdep_child_count" in ''|*[!0-9]*) _sdep_child_count=0 ;; esac
+  case "$_sdep_forward_count" in ''|*[!0-9]*) _sdep_forward_count=0 ;; esac
+  case "$_sdep_input_count" in ''|*[!0-9]*) _sdep_input_count=0 ;; esac
+  [ "$_sdep_child_count" -ge 1 ] 2>/dev/null && \
+    { [ "$_sdep_forward_count" -ge 1 ] 2>/dev/null || [ "$_sdep_input_count" -ge 1 ] 2>/dev/null; }
+}
+
+selftest_dhcp_continuity_arm() {
+  rm -f "$SELFTEST_FAKE_STATE/continuous-required" \
+    "$SELFTEST_FAKE_STATE/continuous-established" \
+    "$SELFTEST_FAKE_STATE/continuous-gaps" \
+    "$SELFTEST_FAKE_STATE/continuous-mutations"
+  : > "$SELFTEST_FAKE_STATE/continuous-required"
+  selftest_dhcp_effective_protection && : > "$SELFTEST_FAKE_STATE/continuous-established"
+}
+
+selftest_dhcp_continuity_seed() {
+  _sdcs_mode="$1"
+  selftest_reset || return 1
+  merv_dhcp_hold_enforce || return 1
+  case "$_sdcs_mode" in
+    extra-child)
+      "$SELFTEST_FAKE_BIN" -t filter -A "$MERV_DHCP_HOLD_CHAIN" -j DROP ;;
+    duplicate-drop)
+      "$SELFTEST_FAKE_BIN" -t filter -A "$MERV_DHCP_HOLD_CHAIN" \
+        -p IPv4 --ip-proto udp --ip-dport 67 -j DROP ;;
+    duplicate-forward)
+      "$SELFTEST_FAKE_BIN" -t filter -A FORWARD -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    duplicate-input)
+      "$SELFTEST_FAKE_BIN" -t filter -A INPUT -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    conditional-parent)
+      "$SELFTEST_FAKE_BIN" -t filter -A FORWARD -p IPv4 -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    missing-drop)
+      "$SELFTEST_FAKE_BIN" -t filter -D "$MERV_DHCP_HOLD_CHAIN" \
+        -p IPv4 --ip-proto udp --ip-dport 67 -j DROP ;;
+    missing-forward)
+      "$SELFTEST_FAKE_BIN" -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" ;;
+    chain-absent)
+      "$SELFTEST_FAKE_BIN" -t filter -D FORWARD -j "$MERV_DHCP_HOLD_CHAIN" || return 1
+      "$SELFTEST_FAKE_BIN" -t filter -D INPUT -j "$MERV_DHCP_HOLD_CHAIN" || return 1
+      "$SELFTEST_FAKE_BIN" -t filter -F "$MERV_DHCP_HOLD_CHAIN" || return 1
+      "$SELFTEST_FAKE_BIN" -t filter -X "$MERV_DHCP_HOLD_CHAIN" ;;
+    partial-flush)
+      "$SELFTEST_FAKE_BIN" -t filter -F "$MERV_DHCP_HOLD_CHAIN" ;;
+    *) return 2 ;;
+  esac
+}
+
+selftest_dhcp_continuity_no_gap() {
+  [ ! -s "$SELFTEST_FAKE_STATE/continuous-gaps" ]
+}
+
+selftest_dhcp_continuity_case() {
+  _sdcc_label="$1" _sdcc_mode="$2" _sdcc_signal="$3"
+  selftest_dhcp_continuity_seed "$_sdcc_mode" || { fail "DHCP continuity $_sdcc_label seed"; return 1; }
+  selftest_dhcp_continuity_arm
+  if [ -n "$_sdcc_signal" ]; then
+    FAKE_EBTABLES_SIGNAL_AFTER="$_sdcc_signal" \
+      FAKE_EBTABLES_SIGNAL_NAME="$_sdcc_label" \
+      /bin/sh "$SELFTEST_DHCP_SIGNAL_CHILD" >/dev/null 2>&1
+    _sdcc_rc=$?
+  else
+    merv_dhcp_hold_enforce
+    _sdcc_rc=$?
+  fi
+  _sdcc_mutations=$(cat "$SELFTEST_FAKE_STATE/continuous-mutations" 2>/dev/null || printf 0)
+  case "$_sdcc_mutations" in ''|*[!0-9]*) _sdcc_mutations=0 ;; esac
+  if [ -n "$_sdcc_signal" ]; then
+    [ "$_sdcc_rc" -ne 0 ] && pass "DHCP continuity $_sdcc_mode signal $_sdcc_label interrupts owner" ||
+      fail "DHCP continuity $_sdcc_mode signal $_sdcc_label interrupts owner"
+  else
+    [ "$_sdcc_rc" -eq 0 ] && pass "DHCP continuity $_sdcc_mode repairs" ||
+      fail "DHCP continuity $_sdcc_mode repairs (rc=$_sdcc_rc)"
+  fi
+  selftest_dhcp_continuity_no_gap && pass "DHCP continuity $_sdcc_mode preserves effective protection" || {
+    fail "DHCP continuity $_sdcc_mode has a protection gap"; cat "$SELFTEST_FAKE_STATE/continuous-gaps" >&2 2>/dev/null || :;
+  }
+  unset FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+  export FAKE_EBTABLES_POST_FAIL_AT FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+  assert_ok "DHCP continuity $_sdcc_mode reconciles exactly" merv_dhcp_hold_enforce
+  assert_ok "DHCP continuity $_sdcc_mode final state exact" merv_dhcp_hold_rules_present
+  SELFTEST_CONTINUITY_MUTATIONS="$_sdcc_mutations"
+  export SELFTEST_CONTINUITY_MUTATIONS
+}
+
+test_dhcp_continuous_repair() {
+  for _tdcr_mode in extra-child duplicate-drop duplicate-forward duplicate-input \
+    conditional-parent missing-drop missing-forward chain-absent partial-flush; do
+    selftest_dhcp_continuity_case baseline "$_tdcr_mode" ""
+    _tdcr_mutations="${SELFTEST_CONTINUITY_MUTATIONS:-0}"
+    case "$_tdcr_mutations" in ''|*[!0-9]*) _tdcr_mutations=0 ;; esac
+    _tdcr_i=1
+    while [ "$_tdcr_i" -le "$_tdcr_mutations" ]; do
+      selftest_dhcp_continuity_seed "$_tdcr_mode" || { fail "DHCP continuity $_tdcr_mode post-failure seed"; break; }
+      selftest_dhcp_continuity_arm
+      FAKE_EBTABLES_POST_FAIL_AT="$_tdcr_i"
+      export FAKE_EBTABLES_POST_FAIL_AT
+      merv_dhcp_hold_enforce >/dev/null 2>&1
+      _tdcr_fail_rc=$?
+      if [ "$_tdcr_fail_rc" -ne 0 ]; then
+        pass "DHCP continuity $_tdcr_mode post-failure $_tdcr_i is visible"
+      elif merv_dhcp_hold_rules_present; then
+        # `-N` can report failure after successfully creating the chain.  The
+        # production idempotence check is allowed to prove that semantic
+        # success and continue to an exact held state.
+        pass "DHCP continuity $_tdcr_mode post-failure $_tdcr_i is recovered inline"
+      else
+        fail "DHCP continuity $_tdcr_mode post-failure $_tdcr_i is visible"
+      fi
+      selftest_dhcp_continuity_no_gap && pass "DHCP continuity $_tdcr_mode post-failure $_tdcr_i retains protection" ||
+        fail "DHCP continuity $_tdcr_mode post-failure $_tdcr_i has a protection gap"
+      unset FAKE_EBTABLES_POST_FAIL_AT
+      export FAKE_EBTABLES_POST_FAIL_AT
+      assert_ok "DHCP continuity $_tdcr_mode post-failure $_tdcr_i reconciles" merv_dhcp_hold_enforce
+      assert_ok "DHCP continuity $_tdcr_mode post-failure $_tdcr_i exact" merv_dhcp_hold_rules_present
+
+      for _tdcr_signal in TERM INT; do
+        selftest_dhcp_continuity_seed "$_tdcr_mode" || { fail "DHCP continuity $_tdcr_mode $_tdcr_signal seed"; continue; }
+        selftest_dhcp_continuity_arm
+        FAKE_EBTABLES_SIGNAL_AFTER="$_tdcr_i"
+        FAKE_EBTABLES_SIGNAL_NAME="$_tdcr_signal"
+        export FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+        /bin/sh "$SELFTEST_DHCP_SIGNAL_CHILD" >/dev/null 2>&1
+        _tdcr_signal_rc=$?
+        [ "$_tdcr_signal_rc" -ne 0 ] && pass "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i interrupts owner" ||
+          fail "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i interrupts owner"
+        selftest_dhcp_continuity_no_gap && pass "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i retains protection" ||
+          fail "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i has a protection gap"
+        unset FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+        export FAKE_EBTABLES_SIGNAL_AFTER FAKE_EBTABLES_SIGNAL_NAME
+        assert_ok "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i reconciles" merv_dhcp_hold_enforce
+        assert_ok "DHCP continuity $_tdcr_mode $_tdcr_signal $_tdcr_i exact" merv_dhcp_hold_rules_present
+      done
+      _tdcr_i=$((_tdcr_i + 1))
+    done
+  done
+}
+
 test_l2_guard_dump_contract() {
   _tlgd_human='Bridge chain: MERV_MAC, entries: 1, policy: ACCEPT
 -s 02:00:00:00:00:01 --logical-in br0 -j DROP
@@ -451,6 +683,33 @@ ebtables -t filter -A MERV_MAC -s 8:95:42:19:53:b2 --logical-in br0 -j DROP'
   return "$_tlgd_ok"
 }
 
+test_l2_guard_exactness_contract() {
+  selftest_reset || return 1
+  _tlge_dry="${DRY_RUN:-no}"
+  DRY_RUN=no
+  export DRY_RUN
+  ebtables() { "$SELFTEST_FAKE_BIN" "$@"; }
+  merv_iface_vid_list() { printf 'wl0.2 189\n'; }
+  merv_managed_eth_iface_vid_list() { printf 'lan_mapped 189\n'; }
+
+  assert_ok "QT exact reconciler arms VAP and mapped Ethernet rules" merv_qt_ensure_expected_rules
+  assert_ok "QT exact verifier accepts canonical expected rules" merv_qt_verify_exact
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_QT -i rogue0 --logical-in br0 -j DROP
+  assert_rc 1 "QT exact verifier rejects stale child" merv_qt_verify_exact
+  assert_ok "QT reconciler removes stale child without chain flush" merv_qt_ensure_expected_rules
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_QT -i wl0.2 --logical-in br0 -j DROP
+  assert_rc 1 "QT exact verifier rejects duplicate child" merv_qt_verify_exact
+  assert_ok "QT reconciler removes duplicate child" merv_qt_ensure_expected_rules
+  "$SELFTEST_FAKE_BIN" -t filter -D INPUT -j MERV_QT
+  assert_rc 1 "QT exact verifier rejects missing INPUT parent" merv_qt_verify_exact
+  assert_ok "strict QT restorer repairs missing parent" restore_merv_qt_shield
+  assert_ok "strict QT restorer leaves exact state" merv_qt_verify_exact
+
+  unset -f ebtables merv_iface_vid_list merv_managed_eth_iface_vid_list 2>/dev/null || :
+  DRY_RUN="$_tlge_dry"
+  export DRY_RUN
+}
+
 test_mac_shield_lifecycle() {
   selftest_reset || return 1
   _tms_old_active="$MERV_MAC_DB_ACTIVE"
@@ -484,6 +743,178 @@ test_mac_shield_lifecycle() {
   return "$_tms_rc"
 }
 
+test_l2_guard_coordinator_contract() {
+  _tlgc_ok=1
+  for _tlgc_name in restore_merv_qt_shield restore_merv_mac_shield \
+    merv_dhcp_hold_restore_if_active merv_l2_guard_restore_all merv_guard_tick \
+    merv_guarded_sleep; do
+    type "$_tlgc_name" >/dev/null 2>&1 && pass "L2 guard public API exposes $_tlgc_name" || {
+      fail "L2 guard public API exposes $_tlgc_name"
+      _tlgc_ok=0
+    }
+  done
+
+  _tlgc_case() {
+    _tlgc_expected="$1"
+    _tlgc_fail="$2"
+    _tlgc_trace="$SELFTEST_ROOT/guard-coordinator.$_tlgc_expected.trace"
+    _tlgc_dump="$SELFTEST_ROOT/guard-coordinator.$_tlgc_expected.dump"
+    _tlgc_calls="$SELFTEST_ROOT/guard-coordinator.$_tlgc_expected.calls"
+    rm -f "$_tlgc_trace" "$_tlgc_dump" "$_tlgc_calls"
+    (
+      mervqt_has_ebtables() { return 0; }
+      ebtables() {
+        case "$*" in
+          *" -L --Lx")
+            printf '%s\n' 'ebtables -t filter -N MERV_QT' > "$_tlgc_dump"
+            printf '%s\n' dump >> "$_tlgc_calls"
+            cat "$_tlgc_dump"
+            ;;
+          *) return 64 ;;
+        esac
+      }
+      restore_merv_qt_shield() {
+        printf 'qt:%s\n' "$1" >> "$_tlgc_trace"
+        [ "$_tlgc_fail" = qt ] && return 17
+        return 0
+      }
+      restore_merv_mac_shield() {
+        printf 'mac:%s\n' "$1" >> "$_tlgc_trace"
+        [ "$_tlgc_fail" = mac ] && return 18
+        return 0
+      }
+      merv_dhcp_hold_restore_if_active() {
+        printf 'dhcp\n' >> "$_tlgc_trace"
+        [ "$_tlgc_fail" = dhcp ] && return 19
+        return 0
+      }
+      merv_l2_guard_restore_all
+    )
+    _tlgc_rc=$?
+    case "$_tlgc_fail" in
+      '') _tlgc_expected_rc=0; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\nmac:ebtables -t filter -N MERV_QT\ndhcp\n') ;;
+      qt) _tlgc_expected_rc=17; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\n') ;;
+      mac) _tlgc_expected_rc=18; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\nmac:ebtables -t filter -N MERV_QT\n') ;;
+      dhcp) _tlgc_expected_rc=19; _tlgc_expected_trace=$(printf 'qt:ebtables -t filter -N MERV_QT\nmac:ebtables -t filter -N MERV_QT\ndhcp\n') ;;
+      *) _tlgc_expected_rc=1; _tlgc_expected_trace='' ;;
+    esac
+    if [ "$_tlgc_rc" -eq "$_tlgc_expected_rc" ] &&
+       [ "$(cat "$_tlgc_trace" 2>/dev/null)" = "${_tlgc_expected_trace%\n}" ] &&
+       [ "$(wc -l < "$_tlgc_calls" 2>/dev/null | tr -d ' ')" = 1 ]; then
+      pass "L2 guard coordinator $_tlgc_expected propagates failure and shares one dump"
+    else
+      fail "L2 guard coordinator $_tlgc_expected propagates failure and shares one dump (rc=$_tlgc_rc)"
+      _tlgc_ok=0
+    fi
+  }
+
+  _tlgc_case success ''
+  _tlgc_case qt qt
+  _tlgc_case mac mac
+  _tlgc_case dhcp dhcp
+
+  _tlgc_tick_trace="$SELFTEST_ROOT/guard-tick.trace"
+  _tlgc_tick_calls="$SELFTEST_ROOT/guard-tick.calls"
+  rm -f "$_tlgc_tick_trace" "$_tlgc_tick_calls"
+  (
+    mervqt_has_ebtables() { return 0; }
+    ebtables() {
+      case "$*" in
+        *" -L --Lx") printf '%s\n' 'ebtables -t filter -N MERV_QT' >> "$_tlgc_tick_calls"; printf '%s\n' 'ebtables -t filter -N MERV_QT' ;;
+        *) return 64 ;;
+      esac
+    }
+    restore_merv_qt_shield() { printf 'qt:%s\n' "$1" >> "$_tlgc_tick_trace"; return 0; }
+    restore_merv_mac_shield() { printf 'mac:%s\n' "$1" >> "$_tlgc_tick_trace"; return 0; }
+    merv_dhcp_hold_restore_if_active() { printf 'dhcp\n' >> "$_tlgc_tick_trace"; return 0; }
+    merv_guard_tick
+  )
+  _tlgc_rc=$?
+  if [ "$_tlgc_rc" -eq 0 ] && [ "$(wc -l < "$_tlgc_tick_calls" 2>/dev/null | tr -d ' ')" = 1 ]; then
+    pass "L2 guard tick performs one shared table dump"
+  else
+    fail "L2 guard tick performs one shared table dump (rc=$_tlgc_rc)"
+    _tlgc_ok=0
+  fi
+
+  selftest_reset || return 1
+  _tlgc_old_dry="${DRY_RUN:-no}"
+  _tlgc_old_active="$MERV_MAC_DB_ACTIVE"
+  _tlgc_old_jffs="$MERV_MAC_DB_JFFS"
+  _tlgc_old_override="$MERV_MAC_OVERRIDE_DB"
+  _tlgc_empty_db="$SELFTEST_ROOT/guard-empty.db"
+  : > "$_tlgc_empty_db"
+  MERV_MAC_DB_ACTIVE="$_tlgc_empty_db"
+  MERV_MAC_DB_JFFS="$_tlgc_empty_db"
+  MERV_MAC_OVERRIDE_DB="$SELFTEST_ROOT/guard-empty.override"
+  DRY_RUN=no
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  ebtables() { "$SELFTEST_FAKE_BIN" "$@"; }
+  merv_iface_vid_list() { printf 'wl0.2 189\n'; }
+  merv_managed_eth_iface_vid_list() { :; }
+  assert_ok "L2 guard healthy state can be armed" merv_qt_ensure_expected_rules
+  assert_ok "L2 guard healthy MAC state can be armed" ebt_mac_shield_init_and_apply "$_tlgc_empty_db"
+  : > "$SELFTEST_FAKE_STATE/commands"
+  assert_ok "L2 guard healthy coordinator verifies exact state" merv_l2_guard_restore_all
+  if grep -E -- ' -[NFAIDX]( |$)' "$SELFTEST_FAKE_STATE/commands" >/dev/null 2>&1; then
+    fail "L2 guard healthy coordinator performs no mutating writes"
+    _tlgc_ok=0
+  else
+    pass "L2 guard healthy coordinator performs no mutating writes"
+  fi
+  unset -f ebtables merv_iface_vid_list merv_managed_eth_iface_vid_list 2>/dev/null || :
+  MERV_MAC_DB_ACTIVE="$_tlgc_old_active"
+  MERV_MAC_DB_JFFS="$_tlgc_old_jffs"
+  MERV_MAC_OVERRIDE_DB="$_tlgc_old_override"
+  DRY_RUN="$_tlgc_old_dry"
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+
+  _tlgc_sleep_trace="$SELFTEST_ROOT/guarded-sleep.trace"
+  rm -f "$_tlgc_sleep_trace"
+  (
+    merv_guard_tick() { printf '%s\n' tick >> "$_tlgc_sleep_trace"; return 23; }
+    sleep() { printf '%s\n' sleep >> "$_tlgc_sleep_trace"; return 0; }
+    merv_guarded_sleep 2
+  )
+  _tlgc_rc=$?
+  if [ "$_tlgc_rc" -eq 23 ] && [ "$(cat "$_tlgc_sleep_trace" 2>/dev/null)" = tick ]; then
+    pass "guarded sleep propagates guard failure before sleeping"
+  else
+    fail "guarded sleep propagates guard failure before sleeping (rc=$_tlgc_rc)"
+    _tlgc_ok=0
+  fi
+
+  _tlgc_manager="$MERV_BASE/functions/mervlan_manager.sh"
+  _tlgc_wait_fn="$SELFTEST_ROOT/manager-wait-for-interface.sh"
+  awk '
+    /^wait_for_interface\(\) \{/ { emit=1 }
+    emit { print }
+    emit && /^}$/ { exit }
+  ' "$_tlgc_manager" > "$_tlgc_wait_fn"
+  if [ -s "$_tlgc_wait_fn" ]; then
+    _tlgc_manager_trace="$SELFTEST_ROOT/manager-wait.trace"
+    rm -f "$_tlgc_manager_trace"
+    (
+      . "$_tlgc_wait_fn"
+      iface_exists() { return 1; }
+      merv_guard_tick() { printf '%s\n' guard >> "$_tlgc_manager_trace"; return 29; }
+      sleep() { printf '%s\n' sleep >> "$_tlgc_manager_trace"; return 0; }
+      wait_for_interface eth-test
+    )
+    _tlgc_rc=$?
+    if [ "$_tlgc_rc" -eq 1 ] && [ "$(cat "$_tlgc_manager_trace" 2>/dev/null)" = guard ]; then
+      pass "manager wait-for-interface caller propagates guard failure"
+    else
+      fail "manager wait-for-interface caller propagates guard failure (rc=$_tlgc_rc)"
+      _tlgc_ok=0
+    fi
+  else
+    fail "manager wait-for-interface caller fixture extracted"
+    _tlgc_ok=0
+  fi
+  return "$_tlgc_ok"
+}
+
 test_process_identity() {
   selftest_reset || return 1
   write_fake_stat 9001 123456
@@ -495,7 +926,321 @@ test_process_identity() {
   assert_rc 1 "invalid PID rejected" merv_proc_start_time "../1" "$MERV_DHCP_HOLD_PROC_ROOT"
 }
 
+# Deterministic replacement-window fixture used by the owner-lock tests. The
+# production hook is inert unless its named fault is enabled below.
+merv_owner_lock_quarantine_hook() {
+  _soqr_lock="$1"
+  _soqr_backup="${_soqr_lock}.race-original"
+  rm -rf "$_soqr_backup" 2>/dev/null || return 1
+  mv "$_soqr_lock" "$_soqr_backup" || return 1
+  mkdir "$_soqr_lock" || return 1
+  _soqr_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+  merv_owner_v2_write_atomic "$_soqr_lock" "$$" "$_soqr_start" replacement-owner 1 1
+}
+
+# Deterministic owner-observation fixture.  The production gates are inert
+# unless their named fault is selected and this hook exists.  Each branch
+# replaces only this isolated selftest lock path so the real classifier sees
+# the same filesystem boundary it would on a router.
+merv_owner_lock_state_hook() {
+  _sosh_point="${1:-}"; _sosh_lock="${2:-}"
+  case "${MERV_OWNER_LOCK_STATE_HOOK_MODE:-}:$_sosh_point" in
+    disappearance-before:before-readable|disappearance-during:during-read)
+      rm -f "$_sosh_lock/owner" 2>/dev/null || return 1
+      rmdir "$_sosh_lock" 2>/dev/null
+      ;;
+    obstruction-before:before-readable|obstruction-during:during-read)
+      rm -rf "$_sosh_lock" 2>/dev/null || return 1
+      : > "$_sosh_lock"
+      ;;
+    replacement-before:before-readable|replacement-during:during-read)
+      rm -rf "$_sosh_lock" 2>/dev/null || return 1
+      mkdir "$_sosh_lock" || return 1
+      _sosh_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+      merv_owner_v2_write_atomic "$_sosh_lock" "$$" "$_sosh_start" \
+        "state-${_sosh_point}" 1 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+merv_dhcp_state_lock_quarantine_hook() {
+  _sdqr_lock="$1"
+  _sdqr_backup="${_sdqr_lock}.race-original"
+  rm -rf "$_sdqr_backup" 2>/dev/null || return 1
+  mv "$_sdqr_lock" "$_sdqr_backup" || return 1
+  mkdir "$_sdqr_lock" || return 1
+  _sdqr_start=$(merv_proc_start_time "$$" "$MERV_DHCP_HOLD_PROC_ROOT" 2>/dev/null) || return 1
+  _sdqr_now=$(merv_dhcp_state_lock_now 2>/dev/null) || return 1
+  printf '%s\n' "$$" > "$_sdqr_lock/pid" || return 1
+  printf '%s\n' "$_sdqr_start" > "$_sdqr_lock/proc_start_time" || return 1
+  printf '%s\n' "$_sdqr_now" > "$_sdqr_lock/created_epoch" || return 1
+  printf '%s\n' replacement-owner > "$_sdqr_lock/owner_nonce"
+}
+
+test_owner_state_release_probe() {
+  selftest_reset || return 1
+  _tosr_lock="$SELFTEST_ROOT/owner-state-release/claim.lock"
+  mkdir -p "${_tosr_lock%/*}" || return 1
+  mkdir "$_tosr_lock" || return 1
+  (
+    TOSR_LS_ONCE=1
+    TOSR_PATH="$_tosr_lock"
+    ls() {
+      command ls "$@"
+      _tosr_ls_rc=$?
+      if [ "${TOSR_LS_ONCE:-0}" -eq 1 ]; then
+        TOSR_LS_ONCE=0
+        rmdir "$TOSR_PATH" 2>/dev/null || :
+      fi
+      return "$_tosr_ls_rc"
+    }
+    _tosr_state=$(merv_owner_lock_state "$TOSR_PATH")
+    [ "$_tosr_state" = absent ]
+  ) && pass "owner state reclassifies post-probe release as absent" ||
+    fail "owner state reclassifies post-probe release as absent"
+}
+
+test_owner_state_timestamp_release_probe() {
+  selftest_reset || return 1
+  _totsr_dir="$SELFTEST_ROOT/owner-state-timestamp-release"
+  _totsr_lock="$_totsr_dir/claim.lock"
+  _totsr_trace="$_totsr_dir/date.trace"
+  _totsr_state="$_totsr_dir/state"
+  _totsr_state_rc="$_totsr_dir/state.rc"
+  _totsr_acquire_rc="$_totsr_dir/acquire.rc"
+  _totsr_owner="$_totsr_dir/acquired.owner"
+  _totsr_release_rc="$_totsr_dir/release.rc"
+  _totsr_output="$_totsr_dir/acquire.output"
+  mkdir -p "$_totsr_dir" || return 1
+  mkdir "$_totsr_lock" || return 1
+
+  # This hook is intentionally limited to the production mtime form. The
+  # initial ls probe and the now/temporary-name date calls remain untouched;
+  # only date -r <lock> removes the incomplete claim before date runs.
+  (
+    TOTS_DATE_ONCE=1
+    TOTS_PATH="$_totsr_lock"
+    TOTS_TRACE="$_totsr_trace"
+    date() {
+      printf 'date %s\n' "$*" >> "$TOTS_TRACE"
+      if [ "${1:-}" = -r ] && [ "${2:-}" = "$TOTS_PATH" ] &&
+         [ "${TOTS_DATE_ONCE:-0}" -eq 1 ]; then
+        TOTS_DATE_ONCE=0
+        printf '%s\n' remove-at-mtime >> "$TOTS_TRACE"
+        rmdir "$TOTS_PATH" 2>/dev/null || :
+      fi
+      /bin/date "$@"
+    }
+
+    merv_owner_lock_state "$TOTS_PATH" > "$_totsr_state" 2>/dev/null
+    printf '%s\n' "$?" > "$_totsr_state_rc"
+
+    # Recreate the same incomplete claim and repeat the exact seam through the
+    # real acquisition path. A fixed implementation must retry only after the
+    # authoritative absence recheck, then publish and release its own owner.
+    mkdir "$TOTS_PATH" || exit 70
+    TOTS_DATE_ONCE=1
+    merv_owner_lock_acquire "$TOTS_PATH" 0 0 timestamp-release > "$_totsr_output" 2>&1
+    _totsr_acq_rc=$?
+    printf '%s\n' "$_totsr_acq_rc" > "$_totsr_acquire_rc"
+    if [ "$_totsr_acq_rc" -eq 0 ] && [ -f "$TOTS_PATH/owner" ]; then
+      cp "$TOTS_PATH/owner" "$_totsr_owner" || exit 71
+      merv_owner_lock_release "$TOTS_PATH" "$MERV_LOCK_NONCE" > /dev/null 2>&1
+      printf '%s\n' "$?" > "$_totsr_release_rc"
+    else
+      printf '%s\n' not-published > "$_totsr_owner"
+      printf '%s\n' not-attempted > "$_totsr_release_rc"
+    fi
+  )
+
+  _totsr_state_value=$(cat "$_totsr_state" 2>/dev/null || printf '')
+  _totsr_state_status=$(cat "$_totsr_state_rc" 2>/dev/null || printf '')
+  _totsr_mtime_calls=$(grep -Fxc -- "date -r $_totsr_lock +%s" "$_totsr_trace" 2>/dev/null || printf 0)
+  _totsr_remove_calls=$(grep -Fxc -- remove-at-mtime "$_totsr_trace" 2>/dev/null || printf 0)
+  case "$_totsr_state_status" in ''|*[!0-9]*) _totsr_state_status=99 ;; esac
+  case "$_totsr_mtime_calls" in ''|*[!0-9]*) _totsr_mtime_calls=99 ;; esac
+  case "$_totsr_remove_calls" in ''|*[!0-9]*) _totsr_remove_calls=99 ;; esac
+  if [ "$_totsr_state_status" -eq 0 ] 2>/dev/null &&
+     [ "$_totsr_state_value" = absent ] &&
+     [ "$_totsr_mtime_calls" -eq 2 ] 2>/dev/null &&
+     [ "$_totsr_remove_calls" -eq 2 ] 2>/dev/null; then
+    pass "owner state reclassifies release at timestamp retrieval as absent"
+  else
+    fail "owner state reclassifies release at timestamp retrieval as absent (state=$_totsr_state_value state_rc=$_totsr_state_status mtime_calls=$_totsr_mtime_calls remove_calls=$_totsr_remove_calls)"
+  fi
+
+  _totsr_acq_status=$(cat "$_totsr_acquire_rc" 2>/dev/null || printf '')
+  _totsr_release_status=$(cat "$_totsr_release_rc" 2>/dev/null || printf '')
+  case "$_totsr_acq_status" in ''|*[!0-9]*) _totsr_acq_status=99 ;; esac
+  case "$_totsr_release_status" in ''|*[!0-9]*) _totsr_release_status=99 ;; esac
+  if [ "$_totsr_acq_status" -eq 0 ] 2>/dev/null &&
+     grep -q '^pid=' "$_totsr_owner" 2>/dev/null &&
+     [ "$_totsr_release_status" -eq 0 ] 2>/dev/null &&
+     [ ! -e "$_totsr_lock" ]; then
+    pass "owner acquisition retries after timestamp-release and releases exact owner"
+  else
+    fail "owner acquisition retries after timestamp-release and releases exact owner (acquire_rc=$_totsr_acq_status release_rc=$_totsr_release_status state=$_totsr_state_value)"
+  fi
+}
+
+test_owner_state_owner_disappearance() {
+  selftest_reset || return 1
+  _tosod_root="$SELFTEST_ROOT/owner-state-owner-disappearance"
+  _tosod_lock="$_tosod_root/claim.lock"
+  _tosod_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+  mkdir -p "$_tosod_root" || return 1
+
+  _tosod_prepare() {
+    rm -rf "$_tosod_lock" 2>/dev/null || return 1
+    mkdir "$_tosod_lock" || return 1
+    merv_owner_v2_write_atomic "$_tosod_lock" "$$" "$_tosod_start" state-original 1 1
+  }
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = absent ] && [ ! -e "$_tosod_lock" ] &&
+    pass "owner disappearance before readability is authoritatively absent" ||
+    fail "owner disappearance before readability is not authoritatively absent"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  if merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-disappearance-before &&
+     merv_owner_lock_owner_matches "$_tosod_lock" "$MERV_LOCK_NONCE"; then
+    _tosod_nonce="$MERV_LOCK_NONCE"
+    pass "owner acquisition retries after disappearance before readability"
+  else
+    _tosod_nonce=''
+    fail "owner acquisition does not retry after disappearance before readability"
+  fi
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ -n "$_tosod_nonce" ] &&
+    assert_ok "owner acquisition release follows pre-read disappearance" \
+      merv_owner_lock_release "$_tosod_lock" "$_tosod_nonce"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=obstruction-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = unknown ] && [ -f "$_tosod_lock" ] &&
+    pass "owner readability obstruction remains unknown and preserved" ||
+    fail "owner readability obstruction was reclassified or mutated"
+  assert_rc 1 "owner readability obstruction blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-readability-obstruction
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_FAULT=state-owner-unreadable
+  export MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tosod_lock" 2>/dev/null &&
+    [ "$_tosod_state" = unknown ] &&
+    [ "$MERV_OWNER_V2_NONCE" = state-original ] &&
+    pass "unreadable retained owner remains unknown and preserved" ||
+    fail "unreadable retained owner was reclassified or mutated"
+  MERV_OWNER_LOCK_FAULT=state-owner-unreadable
+  export MERV_OWNER_LOCK_FAULT
+  assert_rc 1 "unreadable retained owner blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-unreadable-retained
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  assert_ok "unreadable retained owner releases only by exact nonce" \
+    merv_owner_lock_release "$_tosod_lock" state-original
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=replacement-before
+  MERV_OWNER_LOCK_FAULT=state-owner-before-readable
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tosod_lock" 2>/dev/null &&
+    [ "$_tosod_state" = live ] &&
+    [ "$MERV_OWNER_V2_NONCE" = state-before-readable ] &&
+    pass "owner replacement before readability remains live and authoritative" ||
+    fail "owner replacement before readability was reclassified or lost"
+  assert_rc 1 "owner replacement before readability blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-readability-replacement
+  assert_ok "owner replacement before readability releases by its exact nonce" \
+    merv_owner_lock_release "$_tosod_lock" state-before-readable
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = absent ] && [ ! -e "$_tosod_lock" ] &&
+    pass "owner disappearance during read is authoritatively absent" ||
+    fail "owner disappearance during read is not authoritatively absent"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=disappearance-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  if merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-disappearance-during &&
+     merv_owner_lock_owner_matches "$_tosod_lock" "$MERV_LOCK_NONCE"; then
+    _tosod_nonce="$MERV_LOCK_NONCE"
+    pass "owner acquisition retries after disappearance during read"
+  else
+    _tosod_nonce=''
+    fail "owner acquisition does not retry after disappearance during read"
+  fi
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ -n "$_tosod_nonce" ] &&
+    assert_ok "owner acquisition release follows in-read disappearance" \
+      merv_owner_lock_release "$_tosod_lock" "$_tosod_nonce"
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=obstruction-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  [ "$_tosod_state" = malformed ] && [ -f "$_tosod_lock" ] &&
+    pass "owner read obstruction remains malformed and preserved" ||
+    fail "owner read obstruction was reclassified or mutated"
+  assert_rc 1 "owner read obstruction blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-read-obstruction
+
+  _tosod_prepare || return 1
+  MERV_OWNER_LOCK_STATE_HOOK_MODE=replacement-during
+  MERV_OWNER_LOCK_FAULT=state-owner-during-read
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  _tosod_state=$(merv_owner_lock_state "$_tosod_lock")
+  unset MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_STATE_HOOK_MODE MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tosod_lock" 2>/dev/null &&
+    [ "$_tosod_state" = live ] &&
+    [ "$MERV_OWNER_V2_NONCE" = state-during-read ] &&
+    pass "owner replacement during read remains live and authoritative" ||
+    fail "owner replacement during read was reclassified or lost"
+  assert_rc 1 "owner replacement during read blocks acquisition" \
+    merv_owner_lock_acquire "$_tosod_lock" 0 0 owner-read-replacement
+  assert_ok "owner replacement during read releases by its exact nonce" \
+    merv_owner_lock_release "$_tosod_lock" state-during-read
+}
+
 test_owner_lock_contract() {
+  selftest_reset || return 1
+  test_owner_state_release_probe || return 1
+  test_owner_state_timestamp_release_probe || return 1
+  test_owner_state_owner_disappearance || return 1
   selftest_reset || return 1
   _tol_root="$SELFTEST_ROOT/owner-lock"
   _tol_lock="$_tol_root/claim"
@@ -571,6 +1316,51 @@ test_owner_lock_contract() {
   rm -rf "$MERV_DHCP_HOLD_PROC_ROOT/9001"
   assert_rc 1 "owner v2 distinguishes a dead identity" \
     merv_owner_v2_matches "$_tol_lock" 9001 123456 second-owner "$MERV_DHCP_HOLD_PROC_ROOT"
+
+  # A pre-owner-aware lock may be a regular file.  It is an obstruction, not
+  # an absent directory: acquire must fail immediately instead of retrying the
+  # impossible mkdir forever.
+  rm -rf "$_tol_lock" 2>/dev/null || return 1
+  : > "$_tol_lock" || return 1
+  [ "$(merv_owner_lock_state "$_tol_lock")" = unknown ] &&
+    pass "regular-file lock obstruction is fail-closed, not absent" ||
+    fail "regular-file lock obstruction is fail-closed, not absent"
+  assert_rc 1 "regular-file lock obstruction fails bounded acquisition" \
+    merv_owner_lock_acquire "$_tol_lock" 0 0 owner-obstruction
+
+  # A lock-root symlink is equally ambiguous, even when it points at a real
+  # directory. Never follow it as an owner directory.
+  rm -f "$_tol_lock" 2>/dev/null || return 1
+  mkdir -p "$_tol_root/symlink-target" || return 1
+  ln -s "$_tol_root/symlink-target" "$_tol_lock" || return 1
+  [ "$(merv_owner_lock_state "$_tol_lock")" = unknown ] &&
+    pass "symlink lock obstruction is fail-closed" ||
+    fail "symlink lock obstruction is fail-closed"
+  assert_rc 1 "symlink lock obstruction fails bounded acquisition" \
+    merv_owner_lock_acquire "$_tol_lock" 0 0 owner-symlink-obstruction
+
+  # A live replacement installed after dead-owner classification must not be
+  # moved into the stale quarantine. The hook opens the exact rename window;
+  # production verification restores the replacement and fails closed.
+  rm -rf "$_tol_lock" "${_tol_lock}.race-original" 2>/dev/null || return 1
+  mkdir "$_tol_lock" || return 1
+  merv_owner_v2_write_atomic "$_tol_lock" 999999 1 stale-before-replacement 1 1 || return 1
+  MERV_OWNER_LOCK_FAULT=quarantine-window
+  export MERV_OWNER_LOCK_FAULT
+  assert_rc 1 "replacement owner blocks generic stale quarantine" \
+    merv_owner_lock_acquire "$_tol_lock" 0 0 owner-replacement-race
+  unset MERV_OWNER_LOCK_FAULT
+  export MERV_OWNER_LOCK_FAULT
+  merv_owner_v2_read "$_tol_lock" 2>/dev/null &&
+    [ "$MERV_OWNER_V2_NONCE" = replacement-owner ] &&
+    pass "generic replacement owner remains authoritative" ||
+    fail "generic replacement owner remains authoritative"
+  [ -d "${_tol_lock}.race-original" ] &&
+    pass "generic original stale claim is retained for inspection" ||
+    fail "generic original stale claim is retained for inspection"
+  assert_ok "generic replacement owner releases after failed reclaim" \
+    merv_owner_lock_release "$_tol_lock" replacement-owner
+  rm -rf "${_tol_lock}.race-original" 2>/dev/null || return 1
 }
 
 test_maintenance_lock_interop() {
@@ -1009,6 +1799,82 @@ test_dhcp_incomplete_lock() {
   selftest_reset || return 1
   _tdil_lock="$SELFTEST_STATE/state.lock"
 
+  # A timestamp read can lose a release race. The replacement timestamp helper
+  # removes the real lock before failing; acquisition may retry only after the
+  # authoritative non-following absence probe succeeds, and must not warn.
+  mkdir "$_tdil_lock" || return 1
+  _tdil_absent_output=$( \
+    merv_dhcp_state_lock_timestamp() { rmdir "$_tdil_lock" 2>/dev/null || :; return 1; }
+    merv_dhcp_state_lock_acquire
+  ) 2>&1
+  _tdil_absent_rc=$?
+  if [ "$_tdil_absent_rc" -eq 0 ] && [ -z "$_tdil_absent_output" ] &&
+     [ -d "$_tdil_lock" ] && [ -f "$_tdil_lock/owner_nonce" ]; then
+    pass "timestamp failure retries only after verified lock absence"
+  else
+    fail "timestamp failure retries only after verified lock absence"
+  fi
+  _tdil_nonce=$(cat "$_tdil_lock/owner_nonce" 2>/dev/null || printf '')
+  assert_ok "timestamp-race successor releases by exact nonce" \
+    merv_dhcp_state_lock_release "$_tdil_nonce"
+
+  # An unreadable timestamp with the lock still present must warn and retain the
+  # claim; no retry or reclaim is allowed from an ambiguous observation.
+  mkdir "$_tdil_lock" || return 1
+  _tdil_retain_log_root="$SELFTEST_ROOT/dhcp-retain-logs"
+  _tdil_retain_log="$_tdil_retain_log_root/vlan.log"
+  mkdir -p "$_tdil_retain_log_root" || return 1
+  _tdil_retain_output=$( \
+    LOGROOT="$_tdil_retain_log_root"
+    LOG_chan_cli="$_tdil_retain_log_root/cli.log"
+    LOG_chan_vlan="$_tdil_retain_log"
+    LOG_SYSLOG=0
+    unset LOG_SETTINGS_LOADED
+    . "$MERV_BASE/settings/log_settings.sh" || exit 2
+    merv_dhcp_state_lock_timestamp() { return 1; }
+    merv_dhcp_state_lock_acquire
+  ) 2>&1
+  _tdil_retain_rc=$?
+  if [ "$_tdil_retain_rc" -eq 2 ] && [ -d "$_tdil_lock" ] &&
+     [ -f "$_tdil_retain_log" ] &&
+     grep -q 'age is unverifiable' "$_tdil_retain_log"; then
+    pass "timestamp failure with retained lock warns without reclaim"
+  else
+    fail "timestamp failure with retained lock warns without reclaim"
+  fi
+  rmdir "$_tdil_lock" || return 1
+
+  # Open the exact complete-owner quarantine window. A live replacement must
+  # remain at state.lock while the stale predecessor is retained separately.
+  mkdir "$_tdil_lock" || return 1
+  printf '999999\n1\n1\ndead-before-replacement\n' | {
+    IFS= read -r _tdil_pid
+    IFS= read -r _tdil_start
+    IFS= read -r _tdil_created
+    IFS= read -r _tdil_nonce
+    printf '%s\n' "$_tdil_pid" > "$_tdil_lock/pid"
+    printf '%s\n' "$_tdil_start" > "$_tdil_lock/proc_start_time"
+    printf '%s\n' "$_tdil_created" > "$_tdil_lock/created_epoch"
+    printf '%s\n' "$_tdil_nonce" > "$_tdil_lock/owner_nonce"
+  }
+  MERV_DHCP_STATE_LOCK_FAULT=quarantine-window
+  export MERV_DHCP_STATE_LOCK_FAULT
+  assert_rc 2 "replacement owner blocks DHCP stale quarantine" merv_dhcp_state_lock_acquire
+  unset MERV_DHCP_STATE_LOCK_FAULT
+  export MERV_DHCP_STATE_LOCK_FAULT
+  if [ "$(cat "$_tdil_lock/pid" 2>/dev/null)" = "$$" ] &&
+     [ "$(cat "$_tdil_lock/owner_nonce" 2>/dev/null)" = replacement-owner ]; then
+    pass "DHCP replacement owner remains authoritative"
+  else
+    fail "DHCP replacement owner remains authoritative"
+  fi
+  [ -d "${_tdil_lock}.race-original" ] &&
+    pass "DHCP stale predecessor is retained for inspection" ||
+    fail "DHCP stale predecessor is retained for inspection"
+  assert_ok "DHCP replacement owner releases after failed reclaim" \
+    merv_dhcp_state_lock_release replacement-owner
+  rm -rf "${_tdil_lock}.race-original" 2>/dev/null || return 1
+
   # A just-published empty claim must remain protected long enough for its
   # writer to complete. Its owner removes it, after which this waiter may
   # acquire; a premature quarantine would leave an incomplete quarantine.
@@ -1287,6 +2153,48 @@ test_dhcp_crash_points() {
 }
 
 test_heal_handoff() {
+  selftest_reset || return 1
+  assert_ok "handoff transaction parent acquires" merv_dhcp_hold_acquire heal heal-transaction-parent
+  _thh_tx_parent="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "handoff transaction parent mutates" merv_dhcp_hold_mark_mutating "$_thh_tx_parent" heal-eviction
+  MERV_SELFTEST_HANDOFF_INTERLEAVE=1
+  export MERV_SELFTEST_HANDOFF_INTERLEAVE
+  assert_ok "handoff transaction publishes parent before requested record" \
+    merv_dhcp_handoff_request "$_thh_tx_parent" manager heal-transaction-handoff
+  unset MERV_SELFTEST_HANDOFF_INTERLEAVE
+  export MERV_SELFTEST_HANDOFF_INTERLEAVE
+  assert_file "$SELFTEST_ROOT/handoff-interleave-proof" \
+    "reconciler interleaving sees no unpaired requested handoff"
+  [ "$(cat "$SELFTEST_STATE/owners/$_thh_tx_parent/phase" 2>/dev/null)" = handoff_wait ] &&
+    [ "$(cat "$SELFTEST_STATE/owners/$_thh_tx_parent/handoff_id" 2>/dev/null)" = heal-transaction-handoff ] &&
+    [ "$(cat "$SELFTEST_STATE/handoffs/heal-transaction-handoff/handoff_state" 2>/dev/null)" = requested ] &&
+    pass "handoff transaction leaves exact parent and requested state" ||
+    fail "handoff transaction leaves exact parent and requested state"
+  assert_ok "handoff transaction cleanup remains fail-closed" \
+    merv_dhcp_hold_abandon "$_thh_tx_parent" transaction-test-cleanup
+
+  selftest_reset || return 1
+  assert_ok "handoff fault parent acquires" merv_dhcp_hold_acquire heal heal-fault-parent
+  _thh_fault_parent="$MERV_DHCP_HOLD_TOKEN"
+  assert_ok "handoff fault parent mutates" merv_dhcp_hold_mark_mutating "$_thh_fault_parent" heal-eviction
+  MERV_DHCP_HOLD_FAULT_POINT=handoff-parent-transition-published
+  MERV_DHCP_HOLD_FAULT_ACTION=return
+  export MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  assert_rc 4 "handoff transition fault is reported" \
+    merv_dhcp_handoff_request "$_thh_fault_parent" manager heal-fault-handoff
+  unset MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  export MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  [ "$(cat "$SELFTEST_STATE/owners/$_thh_fault_parent/phase" 2>/dev/null)" = handoff_wait ] &&
+    [ "$(cat "$SELFTEST_STATE/owners/$_thh_fault_parent/handoff_id" 2>/dev/null)" = heal-fault-handoff ] &&
+    [ ! -e "$SELFTEST_STATE/handoffs/heal-fault-handoff" ] &&
+    [ -z "$(find "$SELFTEST_STATE/handoffs" -mindepth 1 -maxdepth 1 -name '.heal-fault-handoff.pending.*' -print 2>/dev/null)" ] &&
+    [ -f "$SELFTEST_STATE/recovery.pending" ] &&
+    pass "handoff fault rollback retains fail-closed parent state" ||
+    fail "handoff fault rollback retains fail-closed parent state"
+  assert_ok "handoff fault cleanup retains DHCP protection" \
+    merv_dhcp_hold_abandon "$_thh_fault_parent" transaction-fault-cleanup
+  assert_ok "handoff fault cleanup leaves exact hold" merv_dhcp_hold_rules_present
+
   selftest_reset || return 1
   assert_ok "heal parent acquires" merv_dhcp_hold_acquire heal heal-parent
   _thh_parent="$MERV_DHCP_HOLD_TOKEN"
@@ -1668,15 +2576,28 @@ observation_reset() {
   MERV_OBSERVATION_ROOT="$SELFTEST_ROOT/observation"
   MERV_OBSERVATION_PROC_ROOT="/proc"
   MERV_OBSERVATION_CONFIG_LOCKDIR="$SELFTEST_ROOT/observation-config-locks"
+  # Keep the maintenance-blocking case's explicit selftest lock, but give all
+  # other observation fixtures a private, verifiably idle Update namespace.
+  case "${MERV_UPDATE_MAINTENANCE_LOCK:-}" in
+    "$SELFTEST_ROOT"/*) : ;;
+    *) MERV_UPDATE_MAINTENANCE_LOCK="$SELFTEST_ROOT/observation-maintenance.lock" ;;
+  esac
+  MERV_STATE_ROOT="$SELFTEST_ROOT/observation-update-state"
+  MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+  MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
   OBS_TEST_LOG="$SELFTEST_ROOT/observation.log"
   OBS_TEST_SNAPSHOT="$SELFTEST_ROOT/bin/observation-snapshot"
   OBS_TEST_COLLECTION="$SELFTEST_ROOT/bin/observation-collection"
   export MERV_OBSERVATION_ROOT MERV_OBSERVATION_PROC_ROOT
   export MERV_OBSERVATION_CONFIG_LOCKDIR
+  export MERV_UPDATE_MAINTENANCE_LOCK MERV_STATE_ROOT
+  export MERV_UPDATE_JOURNAL MERV_UPDATE_QUIESCE_FILE
   export OBS_TEST_LOG OBS_TEST_SNAPSHOT OBS_TEST_COLLECTION
   rm -rf "$MERV_OBSERVATION_ROOT" "$MERV_OBSERVATION_CONFIG_LOCKDIR" 2>/dev/null || return 1
+  rm -rf "$MERV_STATE_ROOT" 2>/dev/null || return 1
   rm -f "$OBS_TEST_LOG" "$SELFTEST_ROOT"/obs-* 2>/dev/null || return 1
-  mkdir -p "$MERV_OBSERVATION_CONFIG_LOCKDIR" || return 1
+  mkdir -p "$MERV_OBSERVATION_CONFIG_LOCKDIR" "$MERV_STATE_ROOT" \
+    "${MERV_UPDATE_MAINTENANCE_LOCK%/*}" || return 1
   {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' 'printf "snapshot\n" >> "$OBS_TEST_LOG"'
@@ -1863,8 +2784,73 @@ test_observation_lock() {
   [ "$(observation_number snapshot_completed_generation)" = 0 ] &&
     pass "interrupted observation does not advance completion" || {
       fail "interrupted observation does not advance completion"; _tol_ok=0;
-    }
+  }
   rm -f "$SELFTEST_ROOT/obs-snapshot-kill-worker" || return 1
+
+  # Shield observation owns the node pool while this worker holds the
+  # observation lock.  Keep the interruption ordering executable as a
+  # contract test: abort must be attempted in cleanup before that lock can be
+  # released, and the signal path must invoke the same abort hook.
+  _tol_obs_source="$MERV_BASE/functions/post_apply_worker.sh"
+  _tol_obs_cleanup=$(sed -n '/^obs_worker_cleanup() {/,/^}/p' "$_tol_obs_source" 2>/dev/null)
+  _tol_obs_abort_line=$(printf '%s\n' "$_tol_obs_cleanup" | grep -n 'obs_abort_active_pool' | head -1 | cut -d: -f1)
+  _tol_obs_release_line=$(printf '%s\n' "$_tol_obs_cleanup" | grep -n 'obs_lock_release.*OBS_WORKER_LOCK' | head -1 | cut -d: -f1)
+  if [ -n "$_tol_obs_abort_line" ] && [ -n "$_tol_obs_release_line" ] &&
+     [ "$_tol_obs_abort_line" -lt "$_tol_obs_release_line" ] 2>/dev/null; then
+    pass "Shield cleanup aborts node pool before observation lock release"
+  else
+    fail "Shield cleanup aborts node pool before observation lock release"; _tol_ok=0
+  fi
+  _tol_obs_signal=$(sed -n '/^obs_handle_signal() {/,/^}/p' "$_tol_obs_source" 2>/dev/null)
+  printf '%s\n' "$_tol_obs_signal" | grep -Fq 'obs_abort_active_pool' &&
+    pass "Shield interruption signal path invokes node-pool abort" || {
+      fail "Shield interruption signal path invokes node-pool abort"; _tol_ok=0;
+    }
+
+  # Every parent that can own the shared pool must reconcile it from its
+  # interruption/EXIT cleanup before releasing its own action/observation
+  # lock.  Keep this as a source contract for the four production paths so a
+  # future cleanup edit cannot silently reintroduce early lock release.
+  _tol_is_node=$(json_get_flag IS_NODE 0 "$SETTINGS_FILE" 2>/dev/null)
+  for _tol_route in \
+    'collect_clients.sh|cleanup_collect|merv_lock_release.*COLLECT_LOCK|client collection' \
+    'execute_nodes.sh|execute_nodes_progress_cleanup|merv_owner_lock_release.*EXEC_NODES_LOCK|execute' \
+    'sync_nodes.sh|_cleanup_sync_tmp|merv_owner_lock_release.*SYNC_LOCK|sync' \
+    'post_apply_worker.sh|obs_worker_cleanup|obs_lock_release.*OBS_WORKER_LOCK|Shield observation'; do
+    _tol_route_file=${_tol_route%%|*}
+    _tol_route_rest=${_tol_route#*|}
+    _tol_route_fn=${_tol_route_rest%%|*}
+    _tol_route_rest=${_tol_route_rest#*|}
+    _tol_route_release=${_tol_route_rest%%|*}
+    _tol_route_label=${_tol_route_rest#*|}
+    _tol_route_source="$MERV_BASE/functions/$_tol_route_file"
+    if [ ! -f "$_tol_route_source" ]; then
+      case "$_tol_route_file:${_tol_is_node:-0}" in
+        post_apply_worker.sh:*)
+          fail "$_tol_route_label source is required on every role"; _tol_ok=0
+          ;;
+        *:1)
+          pass "$_tol_route_label cleanup source omitted on node"
+          ;;
+        *)
+          fail "$_tol_route_label cleanup source missing on MAIN/local"; _tol_ok=0
+          ;;
+      esac
+      continue
+    fi
+    _tol_route_body=$(sed -n "/^${_tol_route_fn}() {/,/^}/p" "$_tol_route_source" 2>/dev/null)
+    case "$_tol_route_file:$_tol_route_fn" in
+      post_apply_worker.sh:obs_worker_cleanup) _tol_route_abort=$(printf '%s\n' "$_tol_route_body" | grep -n 'obs_abort_active_pool' | head -1 | cut -d: -f1) ;;
+      *) _tol_route_abort=$(printf '%s\n' "$_tol_route_body" | grep -n 'mnj_pool_abort_active' | head -1 | cut -d: -f1) ;;
+    esac
+    _tol_route_release_line=$(printf '%s\n' "$_tol_route_body" | grep -E -n "$_tol_route_release" | head -1 | cut -d: -f1)
+    if [ -n "$_tol_route_abort" ] && [ -n "$_tol_route_release_line" ] &&
+       [ "$_tol_route_abort" -lt "$_tol_route_release_line" ] 2>/dev/null; then
+      pass "$_tol_route_label cleanup aborts pool before lock release"
+    else
+      fail "$_tol_route_label cleanup aborts pool before lock release"; _tol_ok=0
+    fi
+  done
 
   MERV_UPDATE_MAINTENANCE_LOCK="$SELFTEST_ROOT/observation-maintenance.lock"
   export MERV_UPDATE_MAINTENANCE_LOCK
@@ -2099,7 +3085,10 @@ test_client_refresh_contract() {
     pass "non-cron collection callers remain enabled" ||
     fail "non-cron collection callers remain enabled"
 
-  grep -q '"HTML_CLIENT_REFRESH_MINUTES": "30"' "$_tcr_settings" &&
+  # The installed settings file is deliberately user-mutable.  Verify the
+  # persisted key plus the UI's shipped default rather than requiring a live
+  # router to still use that default.
+  grep -q '"HTML_CLIENT_REFRESH_MINUTES"' "$_tcr_settings" &&
     grep -q 'HTML_CLIENT_REFRESH_MINUTES: "30"' "$_tcr_html" &&
     grep -q 'clientAutoRefreshCooldownMs' "$_tcr_html" &&
     grep -q 'clientGeneratedMs(snapshot)' "$_tcr_html" &&
@@ -2114,6 +3103,21 @@ test_client_refresh_contract() {
     pass "node collection preserves configured IP identity through worker" ||
     fail "node collection preserves configured IP identity through worker"
 
+  if grep -Fq 'settings/lib_node_jobs.sh' "$_tcr_collect" &&
+     grep -Fq 'mnj_pool_run' "$_tcr_collect" &&
+     grep -Fq 'mnj_pool_run "$COLLECT_POOL_ROOT" collect' "$_tcr_collect" &&
+     grep -Fq '"${MERV_NODE_PARALLELISM:-}"' "$_tcr_collect" &&
+     grep -Fq 'mnj_result_validate' "$_tcr_collect" &&
+     grep -Fq 'MERV_NODE_JOB_DIR/client.json' "$_tcr_collect" &&
+     grep -Fq 'COLLECT_POOL_ROOT/node_' "$_tcr_collect" &&
+     grep -Fq 'collect_main_bounded()' "$_tcr_collect" &&
+     grep -Fq 'if ! collect_main_bounded; then' "$_tcr_collect" &&
+     ! grep -Fq 'collect_from_node "$node_id" "$node_ip" "$COLLECTDIR' "$_tcr_collect"; then
+    pass "client collection uses bounded remote pool with MAIN outside pool"
+  else
+    fail "client collection uses bounded remote pool with MAIN outside pool"
+  fi
+
   grep -q "PRODUCTID_NODE' + i" "$_tcr_html" &&
     grep -q "formatName(alias" "$_tcr_html" &&
     grep -q "formatName('Main Router'" "$_tcr_html" &&
@@ -2124,6 +3128,21 @@ test_client_refresh_contract() {
     grep -q 'info -c cli,vlan "Refreshing client list complete"' "$_tcr_collect" &&
     pass "successful client refresh keeps CLI routine logging concise" ||
     fail "successful client refresh keeps CLI routine logging concise"
+
+  grep -q 'REQUIRED_RESULTS=' "$_tcr_collect" &&
+    grep -q 'worker-nonzero' "$_tcr_collect" &&
+    grep -q 'error-artifact' "$_tcr_collect" &&
+    grep -q 'preserving previous inventory' "$_tcr_collect" &&
+    grep -q 'client_collection_fault' "$_tcr_collect" &&
+    pass "client collection requires a complete non-error generation before publication" ||
+    fail "client collection requires a complete non-error generation before publication"
+
+  grep -q 'obs_collection_failure_notice' "$_tcr_worker" &&
+    grep -q 'client-collection-failed' "$_tcr_worker" &&
+    grep -q 'fetchClientCollectionFailure' "$_tcr_html" &&
+    grep -q 'showing the last known client data' "$_tcr_html" &&
+    pass "failed client refresh publishes a terminal failure while retaining prior data" ||
+    fail "failed client refresh publishes a terminal failure while retaining prior data"
 }
 
 test_manager_ownership() {
@@ -2349,18 +3368,52 @@ test_node_runner_status() {
 node_job_test_handler() {
   _tnjh_node="$1" _tnjh_ip="$2"
   mkdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node" || exit 1
+  trap 'rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node" 2>/dev/null || :; exit 143' TERM INT
+  printf 'start %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events"
   while ! mkdir "$NODE_JOB_TEST_ROOT/count.lock" 2>/dev/null; do sleep 1; done
   _tnjh_count=$(find "$NODE_JOB_TEST_ROOT/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
   _tnjh_max=$(cat "$NODE_JOB_TEST_ROOT/max" 2>/dev/null || printf '0')
   [ "$_tnjh_count" -gt "$_tnjh_max" ] 2>/dev/null && printf '%s\n' "$_tnjh_count" > "$NODE_JOB_TEST_ROOT/max"
   rmdir "$NODE_JOB_TEST_ROOT/count.lock" 2>/dev/null || :
   case "${NODE_JOB_TEST_SCENARIO:-pool}:$_tnjh_node" in
-    pool:2) sleep 3 ;;
-    pool:3) sleep 1; rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"; return 7 ;;
+    pool:2) sleep 3; printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events" ;;
+    pool:3) sleep 1; rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"; printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events"; return 7 ;;
+    setup-failure:1) sleep 10 ;;
     timeout:1) sleep 10 ;;
-    *) sleep 1 ;;
+    # Hold the first batch behind a filesystem barrier.  A fixed sleep is not
+    # deterministic on a busy BusyBox/Git shell: at widths 3--5 the parent can
+    # take long enough to publish the final slot that an early worker exits
+    # before the occupancy sample.  The barrier is released only after every
+    # first-batch active marker and wrapper identity has been published.
+    matrix:*)
+      _tnjh_width="${NODE_JOB_TEST_WIDTH:-0}"
+      case "$_tnjh_width" in ''|*[!0-9]*|0) _tnjh_width=1 ;; esac
+      while :; do
+        _tnjh_active=$(find "$NODE_JOB_TEST_ROOT/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+        _tnjh_wrappers=0
+        for _tnjh_wrapper in "$NODE_JOB_TEST_ROOT"/jobs/node_*/wrapper.pid; do
+          [ -f "$_tnjh_wrapper" ] && _tnjh_wrappers=$((_tnjh_wrappers + 1))
+        done
+        if [ "${_tnjh_active:-0}" -ge "$_tnjh_width" ] 2>/dev/null &&
+           [ "$_tnjh_wrappers" -ge "$_tnjh_width" ] 2>/dev/null; then
+          : > "$NODE_JOB_TEST_ROOT/matrix.ready"
+          break
+        fi
+        sleep 1
+      done
+      while [ ! -f "$NODE_JOB_TEST_ROOT/matrix.ready" ]; do sleep 1; done
+      # Allow the launcher to finish publishing the last slot before any
+      # worker can publish a terminal result and be reaped/reused.
+      sleep 2
+      printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events"
+      ;;
+    *) sleep 1; printf 'end %s\n' "$_tnjh_node" >> "$NODE_JOB_TEST_ROOT/events" ;;
   esac
   rmdir "$NODE_JOB_TEST_ROOT/active/$_tnjh_node"
+}
+
+node_job_abort_test_handler() {
+  sleep 30
 }
 
 node_job_progress_hook() {
@@ -2400,6 +3453,180 @@ test_node_worker_pool() {
     pass "worker pool progress hook runs only in parent" ||
     fail "worker pool progress hook runs only in parent"
   MNJ_POOL_PROGRESS_HOOK=""
+
+  # Verify the generic abort arguments are carried into a terminal result even
+  # when a pending publication has no signalable identity.  This is a pure
+  # metadata case; no PID-only signal is permitted.
+  _tnwp_abort_exact="$_tnwp_root/abort-exact"
+  rm -rf "$_tnwp_abort_exact" 2>/dev/null || :
+  mkdir -p "$_tnwp_abort_exact/node_1" || return 1
+  MNJ_POOL_ROOT="$_tnwp_abort_exact"; MNJ_POOL_PHASE=abortphase; MNJ_POOL_ACTIVE=1
+  MNJ_POOL_PENDING_PID=999999; MNJ_POOL_PENDING_START=''
+  MNJ_POOL_PENDING_DIR="$_tnwp_abort_exact/node_1"; MNJ_POOL_PENDING_NODE=1
+  if mnj_pool_abort_active failed exact-reason &&
+     mnj_result_validate "$_tnwp_abort_exact/node_1/result" 1 abortphase &&
+     [ "$MNJ_RESULT_STATE" = failed ] && [ "$MNJ_RESULT_REASON" = exact-reason ]; then
+    pass "node pool abort accepts generic state and reason"
+  else
+    fail "node pool abort accepts generic state and reason"
+  fi
+  rm -rf "$_tnwp_abort_exact" 2>/dev/null || :
+
+  # Exercise every supported width with one more job than available slots.
+  # The handler records active occupancy and start/end ordering.  N+1 can only
+  # start after an earlier end, proving a completed slot is reaped and reused;
+  # the active maximum proves the pool never exceeds its configured width.
+  _tnwp_matrix_ok=1
+  for _tnwp_parallel in 1 2 3 4 5; do
+    _tnwp_matrix="$SELFTEST_ROOT/node-jobs/matrix-$_tnwp_parallel"
+    rm -rf "$_tnwp_matrix" 2>/dev/null || :
+    mkdir -p "$_tnwp_matrix/active" || { fail "worker pool matrix N=$_tnwp_parallel fixture setup"; _tnwp_matrix_ok=0; continue; }
+    NODE_JOB_TEST_ROOT="$_tnwp_matrix"; export NODE_JOB_TEST_ROOT
+    NODE_JOB_TEST_SCENARIO=matrix; export NODE_JOB_TEST_SCENARIO
+    NODE_JOB_TEST_WIDTH="$_tnwp_parallel"; export NODE_JOB_TEST_WIDTH
+    printf '0\n' > "$_tnwp_matrix/max"
+    : > "$_tnwp_matrix/events"
+    : > "$_tnwp_matrix/nodes"
+    _tnwp_node=1
+    while [ "$_tnwp_node" -le $((_tnwp_parallel + 1)) ]; do
+      printf '%s 192.0.2.%s\n' "$_tnwp_node" "$_tnwp_node" >> "$_tnwp_matrix/nodes"
+      _tnwp_node=$((_tnwp_node + 1))
+    done
+    if mnj_pool_run "$_tnwp_matrix/jobs" "matrix$_tnwp_parallel" "$_tnwp_parallel" 15 "$_tnwp_matrix/nodes" node_job_test_handler; then
+      :
+    else
+      fail "worker pool N=$_tnwp_parallel reports failure"; _tnwp_matrix_ok=0
+    fi
+    _tnwp_observed_max=$(cat "$_tnwp_matrix/max" 2>/dev/null || printf 0)
+    if [ "$_tnwp_observed_max" -eq "$_tnwp_parallel" ] 2>/dev/null; then
+      pass "worker pool N=$_tnwp_parallel never exceeds configured width"
+    else
+      fail "worker pool N=$_tnwp_parallel never exceeds configured width (max=$_tnwp_observed_max)"; _tnwp_matrix_ok=0
+    fi
+    _tnwp_starts=$(grep -c '^start ' "$_tnwp_matrix/events" 2>/dev/null || :)
+    _tnwp_ends=$(grep -c '^end ' "$_tnwp_matrix/events" 2>/dev/null || :)
+    [ "$_tnwp_starts" -eq $((_tnwp_parallel + 1)) ] && [ "$_tnwp_ends" -eq $((_tnwp_parallel + 1)) ] &&
+      pass "worker pool N=$_tnwp_parallel starts and reaps N+1 jobs" || {
+        fail "worker pool N=$_tnwp_parallel starts/reaps N+1 jobs (starts=$_tnwp_starts ends=$_tnwp_ends)"; _tnwp_matrix_ok=0;
+      }
+    _tnwp_first_end=$(awk '$1 == "end" { print NR; exit }' "$_tnwp_matrix/events" 2>/dev/null || printf 0)
+    _tnwp_extra_start=$(awk -v node=$((_tnwp_parallel + 1)) '$1 == "start" && $2 == node { print NR; exit }' "$_tnwp_matrix/events" 2>/dev/null || printf 0)
+    [ "$_tnwp_first_end" -gt 0 ] 2>/dev/null && [ "$_tnwp_extra_start" -gt "$_tnwp_first_end" ] 2>/dev/null &&
+      pass "worker pool N=$_tnwp_parallel reuses a reaped slot for job N+1" || {
+        fail "worker pool N=$_tnwp_parallel reuses a reaped slot for job N+1"; _tnwp_matrix_ok=0;
+      }
+    _tnwp_active_left=$(find "$_tnwp_matrix/active" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    [ "$_tnwp_active_left" -eq 0 ] 2>/dev/null &&
+      pass "worker pool N=$_tnwp_parallel leaves no active slots" || {
+        fail "worker pool N=$_tnwp_parallel leaves no active slots"; _tnwp_matrix_ok=0;
+      }
+    _tnwp_node=1
+    while [ "$_tnwp_node" -le $((_tnwp_parallel + 1)) ]; do
+      if mnj_result_validate "$_tnwp_matrix/jobs/node_$_tnwp_node/result" "$_tnwp_node" "matrix$_tnwp_parallel" &&
+         [ "$MNJ_RESULT_STATE" = ok ]; then
+        :
+      else
+        fail "worker pool N=$_tnwp_parallel publishes node $_tnwp_node result"; _tnwp_matrix_ok=0
+      fi
+      _tnwp_node=$((_tnwp_node + 1))
+    done
+  done
+  [ "$_tnwp_matrix_ok" -eq 1 ] || return 1
+
+  # Force a post-launch setup failure on the second node.  The first worker
+  # must be reconciled even though its slot was already published, and the
+  # pool must leave a terminal result with no handler activity behind.
+  _tnwp_setup="$SELFTEST_ROOT/node-jobs/setup-failure"
+  rm -rf "$_tnwp_setup" 2>/dev/null || :
+  mkdir -p "$_tnwp_setup/active" "$_tnwp_setup/jobs/node_2" || return 1
+  NODE_JOB_TEST_ROOT="$_tnwp_setup"; export NODE_JOB_TEST_ROOT
+  NODE_JOB_TEST_SCENARIO=setup-failure; export NODE_JOB_TEST_SCENARIO
+  printf '0\n' > "$_tnwp_setup/max"
+  printf '1 192.0.2.1\n2 192.0.2.2\n' > "$_tnwp_setup/nodes"
+  if mnj_pool_run "$_tnwp_setup/jobs" setupfailure 2 10 "$_tnwp_setup/nodes" node_job_test_handler; then
+    fail "worker pool setup failure is reported"
+  else
+    pass "worker pool setup failure is reported"
+  fi
+  mnj_result_validate "$_tnwp_setup/jobs/node_1/result" 1 setupfailure && [ "$MNJ_RESULT_STATE" != ok ] &&
+    pass "worker pool reconciles published slot after setup failure" ||
+    fail "worker pool reconciles published slot after setup failure"
+  ! mnj_child_identity_live "$_tnwp_setup/jobs/node_1" &&
+    [ -z "$MNJ_S1_PID$MNJ_S2_PID$MNJ_S3_PID$MNJ_S4_PID$MNJ_S5_PID" ] &&
+    pass "worker pool setup failure leaves no live workers or slots" ||
+    fail "worker pool setup failure leaves no live workers or slots"
+
+  # Exercise the parent-abort contract with one pending wrapper plus each
+  # supported total slot count (1 through 5).  The test uses real worker
+  # wrappers and process start identities, so each case covers TERM/KILL,
+  # pending publication, reaping, terminal-result publication, and metadata
+  # clearing without relying on a synthetic PID fixture.  Alternate terminal
+  # states prove the generic <state> <reason> API rather than one hard-coded
+  # setup-failure result.
+  _tnwp_abort_matrix_ok=1
+  for _tnwp_abort_total in 1 2 3 4 5; do
+    _tnwp_abort="$_tnwp_root/abort-$_tnwp_abort_total"
+    rm -rf "$_tnwp_abort" 2>/dev/null || :
+    mkdir -p "$_tnwp_abort" || { fail "node pool abort N=$_tnwp_abort_total fixture setup"; _tnwp_abort_matrix_ok=0; continue; }
+    case "$_tnwp_abort_total" in 1|3|5) _tnwp_abort_state=failed ;; *) _tnwp_abort_state=timeout ;; esac
+    MNJ_POOL_ROOT="$_tnwp_abort"; MNJ_POOL_PHASE=abortphase; MNJ_POOL_ACTIVE=1
+    MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+    MNJ_S1_PID=''; MNJ_S2_PID=''; MNJ_S3_PID=''; MNJ_S4_PID=''; MNJ_S5_PID=''
+    MNJ_S1_START=''; MNJ_S2_START=''; MNJ_S3_START=''; MNJ_S4_START=''; MNJ_S5_START=''
+    MNJ_S1_DIR=''; MNJ_S2_DIR=''; MNJ_S3_DIR=''; MNJ_S4_DIR=''; MNJ_S5_DIR=''
+    MNJ_S1_NODE=''; MNJ_S2_NODE=''; MNJ_S3_NODE=''; MNJ_S4_NODE=''; MNJ_S5_NODE=''
+    MNJ_S1_DEADLINE=''; MNJ_S2_DEADLINE=''; MNJ_S3_DEADLINE=''; MNJ_S4_DEADLINE=''; MNJ_S5_DEADLINE=''
+
+    # Publish total-1 workers into slots 1..N-1; leave node N pending.
+    _tnwp_abort_slot=1
+    while [ "$_tnwp_abort_slot" -lt "$_tnwp_abort_total" ]; do
+      _tnwp_abort_dir="$_tnwp_abort/node_$_tnwp_abort_slot"
+      mkdir -p "$_tnwp_abort_dir" || { fail "node pool abort N=$_tnwp_abort_total slot setup"; _tnwp_abort_matrix_ok=0; break; }
+      ( mnj_worker "$_tnwp_abort_dir" "$_tnwp_abort_slot" abortphase node_job_abort_test_handler "$_tnwp_abort_slot" "192.0.2.$_tnwp_abort_slot" ) </dev/null &
+      _tnwp_abort_pid=$!
+      _tnwp_abort_start=$(merv_proc_start_time "$_tnwp_abort_pid" 2>/dev/null || printf '')
+      MNJ_POOL_PENDING_PID="$_tnwp_abort_pid"; MNJ_POOL_PENDING_START="$_tnwp_abort_start"
+      MNJ_POOL_PENDING_DIR="$_tnwp_abort_dir"; MNJ_POOL_PENDING_NODE="$_tnwp_abort_slot"
+      printf '%s\n' "$_tnwp_abort_pid" > "$_tnwp_abort_dir/wrapper.pid" || { fail "node pool abort N=$_tnwp_abort_total wrapper PID"; _tnwp_abort_matrix_ok=0; break; }
+      printf '%s\n' "$_tnwp_abort_start" > "$_tnwp_abort_dir/wrapper.proc_start_time" || { fail "node pool abort N=$_tnwp_abort_total wrapper identity"; _tnwp_abort_matrix_ok=0; break; }
+      mnj_slot_set "$_tnwp_abort_slot" "$_tnwp_abort_pid" "$_tnwp_abort_start" "$_tnwp_abort_dir" "$_tnwp_abort_slot" 999999999
+      MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+      _tnwp_abort_slot=$((_tnwp_abort_slot + 1))
+    done
+    _tnwp_abort_dir="$_tnwp_abort/node_$_tnwp_abort_total"
+    mkdir -p "$_tnwp_abort_dir" || { fail "node pool abort N=$_tnwp_abort_total pending setup"; _tnwp_abort_matrix_ok=0; continue; }
+    ( mnj_worker "$_tnwp_abort_dir" "$_tnwp_abort_total" abortphase node_job_abort_test_handler "$_tnwp_abort_total" "192.0.2.$_tnwp_abort_total" ) </dev/null &
+    MNJ_POOL_PENDING_PID=$!; MNJ_POOL_PENDING_START=$(merv_proc_start_time "$MNJ_POOL_PENDING_PID" 2>/dev/null || printf '')
+    MNJ_POOL_PENDING_DIR="$_tnwp_abort_dir"; MNJ_POOL_PENDING_NODE="$_tnwp_abort_total"
+
+    if mnj_pool_abort_active "$_tnwp_abort_state" parent-term; then
+      pass "node pool abort N=$_tnwp_abort_total accepts state=$_tnwp_abort_state reason=parent-term"
+    else
+      fail "node pool abort N=$_tnwp_abort_total accepts state=$_tnwp_abort_state reason=parent-term"; _tnwp_abort_matrix_ok=0
+    fi
+    [ "${MNJ_POOL_ACTIVE:-1}" -eq 0 ] &&
+      [ -z "$MNJ_POOL_PENDING_PID$MNJ_POOL_PENDING_START$MNJ_POOL_PENDING_DIR$MNJ_POOL_PENDING_NODE" ] &&
+      [ -z "$MNJ_S1_PID$MNJ_S2_PID$MNJ_S3_PID$MNJ_S4_PID$MNJ_S5_PID" ] &&
+      pass "node pool abort N=$_tnwp_abort_total clears metadata after identity-safe reap" || {
+        fail "node pool abort N=$_tnwp_abort_total clears metadata after identity-safe reap"; _tnwp_abort_matrix_ok=0;
+      }
+    _tnwp_abort_ok=1
+    _tnwp_abort_node=1
+    while [ "$_tnwp_abort_node" -le "$_tnwp_abort_total" ]; do
+      if mnj_result_validate "$_tnwp_abort/node_$_tnwp_abort_node/result" "$_tnwp_abort_node" abortphase &&
+         case "$MNJ_RESULT_STATE" in failed|timeout) true ;; *) false ;; esac &&
+         case "$MNJ_RESULT_REASON" in parent-term|worker-term-timeout) true ;; *) false ;; esac &&
+         ! mnj_child_identity_live "$_tnwp_abort/node_$_tnwp_abort_node"; then
+        :
+      else
+        fail "node pool abort N=$_tnwp_abort_total publishes/reaps node $_tnwp_abort_node"; _tnwp_abort_ok=0
+      fi
+      _tnwp_abort_node=$((_tnwp_abort_node + 1))
+    done
+    [ "$_tnwp_abort_ok" -eq 1 ] && pass "node pool abort N=$_tnwp_abort_total publishes state=$_tnwp_abort_state for pending+slots" || _tnwp_abort_matrix_ok=0
+    rm -rf "$_tnwp_abort" 2>/dev/null || :
+  done
+  [ "$_tnwp_abort_matrix_ok" -eq 1 ] || return 1
 
   _tnwp_timeout="$SELFTEST_ROOT/node-jobs/timeout"
   mkdir -p "$_tnwp_timeout/active" || return 1
@@ -2545,6 +3772,7 @@ test_apmo_completion_contract() {
   _tapm_ui="$MERV_BASE/www/index.html"
   _tapm_handler="$MERV_BASE/functions/service-event-handler.sh"
   _tapm_probe="$MERV_BASE/functions/hw_probe.sh"
+  _tapm_css="$MERV_BASE/www/vlan_index_style.css"
   _tapm_ok=1
 
   if grep -q 'async function runVerifiedHardwareProbe' "$_tapm_ui" &&
@@ -2573,6 +3801,54 @@ test_apmo_completion_contract() {
     pass "HW probe publishes correlated terminal acknowledgements"
   else
     fail "HW probe publishes correlated terminal acknowledgements"
+    _tapm_ok=0
+  fi
+
+  _tapm_refresh=$(sed -n '/async function refreshHwProfile/,/async function checkForUpdates/p' "$_tapm_ui")
+  _tapm_probe_save=$(sed -n '/async function applyOverrideWithHwProbe/,/function extractOverrideSaveExpected/p' "$_tapm_ui")
+  _tapm_save_only=$(sed -n '/async function applyOverrideSaveOnly/,/async function refreshHwProfile/p' "$_tapm_ui")
+  _tapm_auto_sync=$(sed -n '/async function autoSyncAdvancedOverrideNodes/,/async function applyOverrideWithHwProbe/p' "$_tapm_ui")
+  _tapm_payload=$(sed -n '/function buildOverridePayloadForMerlin/,/function buildClientMetaPayloadForMerlin/p' "$_tapm_ui")
+  _tapm_ack_wait=$(sed -n '/async function waitForVerifiedActionResult/,/async function executeVerifiedServiceAction/p' "$_tapm_ui")
+  _tapm_modal=$(sed -n '/function showAdvancedOverrideModal/,/function hideAdvancedOverrideModal/p' "$_tapm_ui")
+  if printf '%s\n' "$_tapm_refresh" | grep -q 'prepareAdvancedOverrideLoadingLayer();' &&
+     printf '%s\n' "$_tapm_refresh" | awk '/await loadSettings\(\);/ { loaded = NR } /refreshOpenAdvancedOverrideModalFromCache\(\);/ { refreshed = NR } END { exit !(loaded && refreshed && loaded < refreshed) }' &&
+     ! printf '%s\n' "$_tapm_refresh" | grep -q 'hideAdvancedOverrideModal();' &&
+     printf '%s\n' "$_tapm_auto_sync" | grep -q 'prepareAdvancedOverrideLoadingLayer();' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/waitForVerifiedActionResult\(saveRequestToken/ { ack = NR } /waitForSettingsToMatch\(expectedManaged/ { persist = NR } END { exit !(ack && persist && ack < persist) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/waitForVerifiedActionResult\(saveRequestToken/ { ack = NR } /waitForSettingsToMatch\(expectedManaged/ { persist = NR } END { exit !(ack && persist && ack < persist) }' &&
+     grep -Fq 'function prepareAdvancedOverrideLoadingLayer()' "$_tapm_ui" &&
+     printf '%s\n' "$_tapm_modal" | grep -Fq 'try { formPane.appendChild(modal); } catch (e) { /* ignore */ }' &&
+     ! grep -Fq 'document.body.appendChild(backdrop)' "$_tapm_ui" &&
+     grep -Fq '.mervlan-loading-backdrop.mervlan-loading-backdrop--apmo .mervlan-loading-panel' "$_tapm_css" &&
+     grep -Fq 'left:var(--apmo-loader-center-x, 50%);' "$_tapm_css" &&
+     grep -Fq 'top:var(--apmo-loader-center-y, 50%);' "$_tapm_css" &&
+     grep -Fq 'const modalIsInForm = modal.parentElement === form;' "$_tapm_ui" &&
+     grep -Fq 'function refreshOpenAdvancedOverrideModalFromCache(confirmedOverrides = null)' "$_tapm_ui" &&
+     grep -Fq 'Object.prototype.hasOwnProperty.call(confirmedOverrides, key)' "$_tapm_ui" &&
+     grep -Fq 'function autoSyncAdvancedOverrideNodesEnabled()' "$_tapm_ui" &&
+     grep -Fq 'function configuredAdvancedOverrideTargets()' "$_tapm_ui" &&
+     printf '%s\n' "$_tapm_payload" | grep -Fq 'configuredAdvancedOverrideTargets().forEach(t => {' &&
+     ! printf '%s\n' "$_tapm_payload" | grep -Fq 'nodeTokens(true).forEach(t => {' &&
+     printf '%s\n' "$_tapm_ack_wait" | grep -Fq 'PATHS.ACTION_RESULTS_DIR + encodeURIComponent(requestToken)' &&
+     printf '%s\n' "$_tapm_ack_wait" | grep -Fq 'PATHS.ACTION_RESULT +' &&
+     printf '%s\n' "$_tapm_ack_wait" | grep -Fq 'parsed.request_token === requestToken && parsed.action === actionName' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/clearFields\(\);/ { cleared = NR } /await loadSettings\(\);/ { loaded = NR } /refreshOpenAdvancedOverrideModalFromCache\(expectedManaged\);/ { refreshed = NR } END { exit !(cleared && loaded && refreshed && cleared < loaded && loaded < refreshed) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/clearFields\(\);/ { cleared = NR } /await loadSettings\(\);/ { loaded = NR } /refreshOpenAdvancedOverrideModalFromCache\(expectedManaged\);/ { refreshed = NR } END { exit !(cleared && loaded && refreshed && cleared < loaded && loaded < refreshed) }' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/await loadSettings\(\);/ { loaded = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(loaded && auto && loaded < auto) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/await loadSettings\(\);/ { loaded = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(loaded && auto && loaded < auto) }' &&
+     printf '%s\n' "$_tapm_probe_save" | awk '/loadingTask\.completion/ { completed = NR } /MerVLANLoading\.close\(\);/ { released = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(completed && released && auto && completed < released && released < auto) }' &&
+     printf '%s\n' "$_tapm_save_only" | awk '/loadingTask\.completion/ { completed = NR } /MerVLANLoading\.close\(\);/ { released = NR } /autoSyncAdvancedOverrideNodesEnabled\(\)/ { auto = NR } END { exit !(completed && released && auto && completed < released && released < auto) }' &&
+     grep -Fq 'info -c cli "Refreshing hardware profile for $_OVR_TARGET..."' "$_tapm_probe" &&
+     grep -Fq 'info -c cli "Hardware profile refreshed: $MODEL ($MAX_ETH_PORTS LAN ports; WAN $WAN_IF)"' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware detection complete"' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware model:' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware Ethernet:' "$_tapm_probe" &&
+     grep -Fq 'info -c vlan "Hardware profile stored in settings.json' "$_tapm_probe" &&
+     ! grep -Fq 'info -c cli,vlan' "$_tapm_probe"; then
+    pass "manual HW refresh exposes its loading state, summarizes CLI output, and keeps diagnostics in the VLAN log"
+  else
+    fail "manual HW refresh exposes its loading state, summarizes CLI output, and keeps diagnostics in the VLAN log"
     _tapm_ok=0
   fi
 
@@ -2961,10 +4237,16 @@ test_payload_contract() {
      grep -Fq 'settings/lib_owner_lock.sh' "$_tpc_install" &&
      grep -Fq 'settings/lib_owner_lock.sh' "$SELFTEST_SCRIPT" &&
      grep -A25 'FILES_TO_COPY_CHMOD_644=' "$_tpc_sync" | grep -Fq 'settings/lib_owner_lock.sh' &&
-     grep -A20 'for rel_path in' "$_tpc_update" | grep -Fq 'settings/lib_owner_lock.sh'; then
-    pass "Full runtime manifests include lib_owner_lock.sh"
+     sed -n '/^CORE_STAGE_FILES="/,/^OPTIONAL_STAGE_FILES="/p' "$_tpc_update" | grep -Fq 'settings/lib_owner_lock.sh' &&
+     grep -Fq 'settings/lib_maintenance_recovery.sh' "$_tpc_sync" &&
+     grep -Fq 'settings/lib_maintenance_recovery.sh' "$_tpc_update" &&
+     grep -Fq 'settings/lib_maintenance_recovery.sh' "$_tpc_install" &&
+     grep -A25 'FILES_TO_COPY_CHMOD_644=' "$_tpc_sync" | grep -Fq 'settings/lib_maintenance_recovery.sh' &&
+     sed -n '/^CORE_STAGE_FILES="/,/^OPTIONAL_STAGE_FILES="/p' "$_tpc_update" | grep -Fq 'settings/lib_maintenance_recovery.sh' &&
+     sed -n '/^update_stage_core_valid() {/,/^}/p' "$_tpc_update" | grep -Fq 'for _update_stage_required in $CORE_STAGE_FILES'; then
+    pass "Full runtime manifests include maintenance recovery libraries"
   else
-    fail "Full runtime manifests include lib_owner_lock.sh"
+    fail "Full runtime manifests include maintenance recovery libraries"
     _tpc_ok=0
   fi
   if grep -Fq 'FILES_TO_COPY="settings/settings.json"' "$_tpc_sync" &&
@@ -3113,7 +4395,7 @@ test_failure_propagation_contract() {
   _tfpc_meta="$MERV_BASE/functions/mac_client_meta.sh"
   _tfpc_ok=1
 
-  if grep -q 'isCancelled: () => loadingTask && !loadingTask.isRunning()' "$_tfpc_ui" &&
+  if grep -Eq 'isCancelled: \(\) => [A-Za-z]+LoadingTask && ![A-Za-z]+LoadingTask\.isRunning\(\)' "$_tfpc_ui" &&
      grep -q 'isRunning: () => !!active' "$_tfpc_ui" &&
      grep -q 'passProgressToken: true' "$_tfpc_ui" &&
      grep -q 'maintenanceLastPollError' "$_tfpc_ui" &&
@@ -3142,10 +4424,14 @@ test_failure_propagation_contract() {
      grep -q 'exit 2' "$_tfpc_meta" &&
      grep -q '_meta_partial=1' "$_tfpc_meta" &&
      grep -q 'Client metadata persisted, but MAC shield enforcement or follow-up work requires recovery' "$_tfpc_meta" &&
+     grep -q '_shield_reload=staged' "$_tfpc_meta" &&
+     grep -q 'Client metadata saved; MAC Shield has no active database' "$_tfpc_meta" &&
+     grep -q 'merv_action_progress_update collect 4 4 94 "Refreshing client inventory..."' "$_tfpc_meta" &&
+     grep -q 'merv_action_progress_update complete 1 1 98 "Finalizing client metadata..."' "$_tfpc_meta" &&
      ! grep -q '_name_pairs\|name entries:' "$_tfpc_meta"; then
-    pass "MAC refresh and metadata actions publish terminal failure states"
+    pass "MAC refresh and metadata actions distinguish strict failures from safely staged metadata"
   else
-    fail "MAC refresh and metadata actions publish terminal failure states"
+    fail "MAC refresh and metadata actions distinguish strict failures from safely staged metadata"
     _tfpc_ok=0
   fi
 
@@ -3290,7 +4576,7 @@ test_ssh_trust_contract() {
      grep -Fq 'pauseForSshTrust' "$_tst_ui" &&
      grep -Fq 'waitsForSshTrustAck' "$_tst_ui" &&
      grep -Fq 'sshTrustDecisionSelectedChallengeIds' "$_tst_ui" &&
-     grep -Fq 'Auto-abort in' "$_tst_ui" &&
+     grep -Fq 'Decision expires in' "$_tst_ui" &&
      grep -Fq '#sshTrustModal {' "$_tst_ui" &&
      grep -Fq 'max-height: calc(100vh - 28px);' "$_tst_ui" &&
      grep -Fq 'formPane.appendChild(overlay)' "$_tst_ui" &&
@@ -3419,11 +4705,13 @@ test_ssh_trust_contract() {
      grep -Fq 'STAGED_NODE_FAIL' "$_tst_sync" &&
      grep -Fq 'node-activation-failed' "$_tst_sync" &&
      grep -Fq 'MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh' "$_tst_boot" &&
-     grep -Fq 'reconcile_legacy_boot_file_locks' "$_tst_boot" &&
+     [ "$(grep -Fc 'reconcile_legacy_boot_file_locks' "$_tst_boot")" -ge 3 ] &&
+     grep -Fq 'Refusing setupenable while legacy boot-file lock state is ambiguous' "$_tst_boot" &&
+     grep -Fq 'Refusing setupdisable while legacy boot-file lock state is ambiguous' "$_tst_boot" &&
      grep -Fq 'merv_lock_quarantine_legacy_file' "$_tst_lib"; then
-    pass "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+    pass "boot hook activation/removal uses shell-safe invocation, diagnostics, and legacy-lock migration"
   else
-    fail "node SSH activation uses shell-safe invocation, diagnostics, and legacy-lock migration"
+    fail "boot hook activation/removal uses shell-safe invocation, diagnostics, and legacy-lock migration"
     _tst_ok=0
   fi
 
@@ -3568,23 +4856,1017 @@ test_apply_observation_contract() {
   esac
 
   _tao_wrap="$MERV_BASE/functions/mervlan_boot_wrap.sh"
-  _tao_shield_clear=$(grep -n 'rm -f "$LOCKDIR/merv_boot_shield.active"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_enter=$(grep -nF 'if _merv_boot_watchdog_transient_lock_enter; then' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_temp=$(grep -nF '_merv_boot_watchdog_temp_begin "$_boot_marker" retire' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_move=$(grep -nF 'mv "$_boot_marker" "$_boot_marker_tomb"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_leave=$(grep -nF '_merv_boot_watchdog_transient_lock_leave' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_restore_guard=$(grep -nF '[ ! -e "$_boot_marker" ] && [ ! -L "$_boot_marker" ]' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_restore=$(grep -nF 'mv "$_boot_marker_tomb" "$_boot_marker"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  _tao_retire_tomb_cleanup=$(grep -nF 'rm -f "$_boot_marker_tomb"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
   _tao_boot_wait=$(grep -n 'run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"' "$_tao_wrap" 2>/dev/null | tail -n 1 | cut -d: -f1)
   if grep -Fq 'if [ "$MERV_MANAGER_MODE" = "boot" ]' "$_tao_manager" &&
      grep -Fq 'request snapshot collect' "$_tao_manager" &&
-     [ -n "$_tao_shield_clear" ] && [ -n "$_tao_boot_wait" ] &&
-     [ "$_tao_shield_clear" -lt "$_tao_boot_wait" ]; then
-    pass "Boot queues observation, tears down the shield, then runs the worker"
+     [ -n "$_tao_retire_enter" ] && [ -n "$_tao_retire_temp" ] &&
+     [ -n "$_tao_retire_move" ] && [ -n "$_tao_retire_leave" ] &&
+     [ -n "$_tao_retire_restore_guard" ] && [ -n "$_tao_retire_restore" ] &&
+     [ -n "$_tao_retire_tomb_cleanup" ] && [ -n "$_tao_boot_wait" ] &&
+     [ "$_tao_retire_enter" -lt "$_tao_retire_temp" ] &&
+     [ "$_tao_retire_temp" -lt "$_tao_retire_move" ] &&
+     [ "$_tao_retire_move" -lt "$_tao_retire_leave" ] &&
+     [ "$_tao_retire_leave" -lt "$_tao_retire_restore_guard" ] &&
+     [ "$_tao_retire_restore_guard" -lt "$_tao_retire_restore" ] &&
+     [ "$_tao_retire_leave" -lt "$_tao_retire_tomb_cleanup" ] &&
+     [ "$_tao_retire_tomb_cleanup" -lt "$_tao_boot_wait" ]; then
+    pass "Boot atomically retires the exact shield marker before observation"
   else
-    fail "Boot queues observation, tears down the shield, then runs the worker"
+    fail "Boot atomically retires the exact shield marker before observation"
     _tao_ok=0
   fi
 
   return "$_tao_ok"
 }
 
+test_wan_native_contract() {
+  _twn_ok=0
+  _twn_root="$SELFTEST_ROOT/wan-native"
+  _twn_base="$_twn_root/base"
+  _twn_bin="$_twn_root/bin"
+  _twn_net="$_twn_root/net"
+  _twn_proc="$_twn_root/proc"
+  _twn_dhcp_pidfile="$_twn_root/udhcpc_lan.pid"
+  _twn_dhcp_addr="$_twn_root/lan.addr"
+  _twn_dhcp_expected="192.0.2.20"
+  rm -rf "$_twn_root" 2>/dev/null || return 1
+  mkdir -p "$_twn_base" "$_twn_bin" "$_twn_net/br0/brif" "$_twn_net/eth0" "$_twn_proc" || return 1
+  cp -R "$MERV_BASE/settings" "$_twn_base/" || return 1
+  mkdir -p "$_twn_base/functions" || return 1
+  cp "$MERV_BASE/functions/mervlan_wan.sh" "$_twn_base/functions/" || return 1
+  printf '%s\n' '02:00:00:00:00:01' > "$_twn_net/br0/address"
+  : > "$_twn_net/eth0/address"
+  : > "$_twn_net/br0/brif/eth0"
+  printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+
+cat > "$_twn_bin/nvram" <<'MERV_WAN_NVRAM'
+#!/bin/sh
+[ "$1" = get ] || exit 1
+case "$2" in
+  lan_proto) printf '%s\n' "${WAN_TEST_LAN_PROTO:-dhcp}" ;;
+  lan_ipaddr) printf '%s\n' "${WAN_TEST_EXPECTED_ADDRESS:-192.0.2.20/24}" ;;
+  *) exit 1 ;;
+esac
+MERV_WAN_NVRAM
+
+cat > "$_twn_bin/brctl" <<'MERV_WAN_BRCTL'
+#!/bin/sh
+wan_test_signal() {
+  [ -n "${WAN_TEST_SIGNAL_PHASE:-}" ] || return 0
+  [ -n "${WAN_TEST_SIGNAL_PID:-}" ] || return 0
+  [ -n "${WAN_TEST_SIGNAL_ONCE:-}" ] || return 0
+  [ ! -e "$WAN_TEST_SIGNAL_ONCE" ] || return 0
+  : > "$WAN_TEST_SIGNAL_ONCE" || return 0
+  kill -TERM "$WAN_TEST_SIGNAL_PID" 2>/dev/null || :
+}
+case "$1" in
+  addif)
+    [ "${FAIL_ADD_IF:-}" != "$3" ] || exit 1
+    mkdir -p "$MERV_WAN_NET_ROOT/$2/brif" || exit 1
+    : > "$MERV_WAN_NET_ROOT/$2/brif/$3"
+    [ -n "${WAN_TEST_ORDER_LOG:-}" ] && printf 'add %s\n' "$3" >> "$WAN_TEST_ORDER_LOG"
+    [ "${FAIL_VERIFY_IF:-}" = "$3" ] && {
+      { printf '%s  VID: 4094\n' "$3"; printf 'Device: wrong-lower\n'; } > "$MERV_WAN_PROC_VLAN_ROOT/$3"
+    }
+    [ "${WAN_TEST_SIGNAL_PHASE:-}" = attach-before-verify ] && [ "$3" = "${WAN_TEST_SIGNAL_IF:-}" ] && wan_test_signal || :
+    ;;
+  delif)
+    [ "${FAIL_DEL_IF:-}" != "$3" ] || exit 1
+    rm -f "$MERV_WAN_NET_ROOT/$2/brif/$3"
+    [ -n "${WAN_TEST_ORDER_LOG:-}" ] && printf 'del %s\n' "$3" >> "$WAN_TEST_ORDER_LOG"
+    [ "${WAN_TEST_SIGNAL_PHASE:-}" = detach-before-attach ] && [ "$3" = "${WAN_TEST_SIGNAL_IF:-}" ] && wan_test_signal || :
+    ;;
+  show) : ;;
+  *) exit 1 ;;
+esac
+MERV_WAN_BRCTL
+  cat > "$_twn_bin/ip" <<'MERV_WAN_IP'
+#!/bin/sh
+[ "$1" = -4 ] && shift
+[ "$1" = addr ] && {
+  shift
+  case "$1" in
+    show)
+      [ "$2" = dev ] || exit 1
+      _wan_addr=$(sed -n '1p' "${WAN_TEST_ADDRESS_FILE:?}" 2>/dev/null)
+      [ -n "$_wan_addr" ] && printf '    inet %s scope global %s\n' "$_wan_addr" "$3"
+      exit 0
+      ;;
+    flush)
+      [ "$2" = dev ] || exit 1
+      : > "${WAN_TEST_ADDRESS_FILE:?}" || exit 1
+      exit 0
+      ;;
+    add)
+      _wan_addr="$2"
+      [ "$3" = dev ] || exit 1
+      printf '%s\n' "$_wan_addr" > "${WAN_TEST_ADDRESS_FILE:?}" || exit 1
+      exit 0
+      ;;
+    *) exit 1 ;;
+  esac
+}
+[ "$1" = link ] || exit 1
+shift
+case "$1" in
+  add)
+    shift
+    [ "$1" = link ] || exit 1; lower="$2"; shift 2
+    [ "$1" = name ] || exit 1; ifc="$2"; shift 2
+    [ "$1" = type ] && [ "$2" = vlan ] || exit 1; shift 2
+    [ "$1" = id ] || exit 1; vid="$2"
+    mkdir -p "$MERV_WAN_NET_ROOT/$ifc" || exit 1
+    { printf '%s  VID: %s\n' "$ifc" "$vid"; printf 'Device: %s\n' "$lower"; } > "$MERV_WAN_PROC_VLAN_ROOT/$ifc"
+    ;;
+  set)
+    if [ "${FAIL_MAC_DRIFT:-}" = 1 ] && [ "$2" != address ]; then
+      printf '%s\n' '02:00:00:00:00:ff' > "$MERV_WAN_NET_ROOT/br0/address"
+    fi
+    [ "${FAIL_MAC_RESTORE:-}" = 1 ] && [ "$2" = address ] && exit 1
+    :
+    ;;
+  del)
+    ifc="$2"
+    for x in "$MERV_WAN_NET_ROOT"/*/brif/"$ifc"; do [ -e "$x" ] && rm -f "$x" || :; done
+    rm -rf "$MERV_WAN_NET_ROOT/$ifc" "$MERV_WAN_PROC_VLAN_ROOT/$ifc"
+    ;;
+  *) exit 1 ;;
+esac
+MERV_WAN_IP
+  chmod 755 "$_twn_bin/brctl" "$_twn_bin/ip" "$_twn_bin/nvram" || return 1
+  _twn_settings="$_twn_base/settings/settings.json"
+  json_set_section2_value VLAN WAN_Native MAIN_WAN_NATIVE_IP "$_twn_dhcp_expected" "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native MAIN_ASUS_IP 192.0.2.10 "$_twn_settings" || return 1
+  _twn_dhcp_pid=4242
+  printf '%s\n' "$_twn_dhcp_pid" > "$_twn_dhcp_pidfile"
+  # The production helper validates PID/start identity against /proc.  This
+  # isolated fixture uses a private proc root and an authenticated fake
+  # udhcpc identity; the signal itself is published to a marker file, so no
+  # host process is ever signalled.
+  mkdir -p "$_twn_proc/$_twn_dhcp_pid" || return 1
+  {
+    printf '%s' '(udhcpc) S'
+    _twn_stat_i=1
+    while [ "$_twn_stat_i" -lt 19 ]; do printf '%s' ' 0'; _twn_stat_i=$((_twn_stat_i + 1)); done
+    printf '%s\n' ' 424242'
+  } > "$_twn_proc/$_twn_dhcp_pid/stat" || return 1
+  printf 'udhcpc\000-i\000br0\000-p\000%s\000-s\000/sbin/rc\000-H\000wan-test\000' "$_twn_dhcp_pidfile" > "$_twn_proc/$_twn_dhcp_pid/cmdline" || return 1
+  printf '%s\n' 424242 > "${_twn_dhcp_pidfile}.start"
+
+  _twn_run() (
+    # Every invocation must derive its role from the fixture file.  The parent
+    # selftest may have sourced a node-oriented helper, so do not leak a stale
+    # shell NODE_ID into this new WAN process.
+    export NODE_ID='' MERV_NODE_ID=''
+    PATH="$_twn_bin:$PATH" MERV_BASE="$_twn_base" DRY_RUN=no \
+      WAN_TEST_LAN_PROTO="${WAN_TEST_LAN_PROTO:-dhcp}" \
+      WAN_TEST_EXPECTED_ADDRESS="${WAN_TEST_EXPECTED_ADDRESS:-192.0.2.20}" \
+      WAN_TEST_PIDFILE="$_twn_dhcp_pidfile" WAN_TEST_ADDRESS_FILE="$_twn_dhcp_addr" \
+      WAN_TEST_SUPPRESS_FILE="$_twn_root/no-address" \
+      MERV_WAN_DHCP_PIDFILE="$_twn_dhcp_pidfile" \
+      MERV_WAN_DHCP_TEST_ADDRESS_FILE="$_twn_dhcp_addr" \
+      MERV_WAN_DHCP_TEST_LIFECYCLE_FILE="$_twn_root/dhcp.lifecycle" \
+      MERV_WAN_DHCP_TEST_SUPPRESS_FILE="$_twn_root/no-address" \
+      MERV_WAN_DHCP_TEST_ADDRESS_PREFIX="/24" \
+      MERV_WAN_DHCP_TEST_DELAY_POLLS="${WAN_TEST_DHCP_DELAY_POLLS:-0}" \
+      MERV_WAN_DHCP_TEST_TERM_AFTER_RELEASE="${WAN_TEST_DHCP_TERM_AFTER_RELEASE:-0}" \
+      MERV_WAN_DHCP_TEST_TERM_AFTER_TERMINATE="${WAN_TEST_DHCP_TERM_AFTER_TERMINATE:-0}" \
+      MERV_WAN_DHCP_TEST_RELEASE_STAYS_ALIVE="${WAN_TEST_DHCP_RELEASE_STAYS_ALIVE:-0}" \
+      MERV_WAN_DHCP_TEST_TERM_STICKS="${WAN_TEST_DHCP_TERM_STICKS:-0}" \
+      MERV_WAN_DHCP_TEST_STALE_PIDFILE="${WAN_TEST_DHCP_STALE_PIDFILE:-0}" \
+      MERV_WAN_DHCP_TEST_STALE_ADDRESS="${WAN_TEST_DHCP_STALE_ADDRESS:-0}" \
+      MERV_WAN_DHCP_TEST_REUSE_AFTER_RELEASE="${WAN_TEST_DHCP_REUSE_AFTER_RELEASE:-0}" \
+      MERV_WAN_DHCP_TEST_CMDLINE_CHANGE_AFTER_RELEASE="${WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE:-0}" \
+      MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_TERM="${WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM:-0}" \
+      MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_START="${WAN_TEST_DHCP_DUPLICATE_BEFORE_START:-0}" \
+      MERV_WAN_DHCP_WAIT_SEC="${WAN_TEST_DHCP_WAIT_SEC:-1}" \
+      MERV_WAN_DHCP_RELEASE_WAIT_SEC="${WAN_TEST_DHCP_RELEASE_WAIT_SEC:-1}" \
+      MERV_WAN_DHCP_TERM_WAIT_SEC="${WAN_TEST_DHCP_TERM_WAIT_SEC:-1}" \
+      MERV_WAN_NET_ROOT="$_twn_net" MERV_WAN_PROC_VLAN_ROOT="$_twn_proc" MERV_WAN_DHCP_PROC_ROOT="$_twn_proc" \
+      sh -c 'WAN_TEST_SIGNAL_PID=$$; export WAN_TEST_SIGNAL_PID; exec sh "$1" "$2"' \
+      sh "$_twn_base/functions/mervlan_wan.sh" "$1"
+  )
+  _twn_member() { [ -e "$_twn_net/br0/brif/$1" ]; }
+  _twn_dhcp_reset() {
+    _twn_reset_callback="${1:-/sbin/rc}"
+    _twn_reset_pid="${2:-4242}"
+    _twn_reset_hostname="${3:-wan-test}"
+    rm -rf "$_twn_proc"/[0-9]*
+    rm -f "$_twn_dhcp_pidfile" "${_twn_dhcp_pidfile}.start" "$_twn_root/dhcp.lifecycle" "$_twn_root/dhcp.lifecycle.launch-failed"
+    mkdir -p "$_twn_proc/$_twn_reset_pid" || return 1
+    {
+      printf '%s' '(udhcpc) S'; _twn_reset_i=1
+      while [ "$_twn_reset_i" -lt 19 ]; do printf '%s' ' 0'; _twn_reset_i=$((_twn_reset_i + 1)); done
+      printf '%s\n' ' 424242'
+    } > "$_twn_proc/$_twn_reset_pid/stat" || return 1
+    printf 'udhcpc\000-i\000br0\000-p\000%s\000-s\000%s\000-H\000%s\000' "$_twn_dhcp_pidfile" "$_twn_reset_callback" "$_twn_reset_hostname" > "$_twn_proc/$_twn_reset_pid/cmdline" || return 1
+    printf '%s\n' "$_twn_reset_pid" > "$_twn_dhcp_pidfile" || return 1
+    printf '%s\n' 424242 > "${_twn_dhcp_pidfile}.start" || return 1
+    printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+  }
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 10 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.10 && ! _twn_member eth0 && _twn_run verify >/dev/null 2>&1 && _twn_run health >/dev/null 2>&1; then
+    pass "WAN Native converges ASUS -> VLAN 10"
+  else fail "WAN Native converges ASUS -> VLAN 10"; _twn_ok=1; fi
+
+  # ASUSWRT's observed LAN-client hostname contains an underscore.  It is a
+  # bounded accepted firmware form, not an arbitrary argv escape hatch.
+  _twn_dhcp_reset /sbin/rc 4242 ZenWiFi_XT8-79F0 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 11 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.11 && ! _twn_member eth0.10; then
+    pass "WAN Native accepts observed ASUS DHCP hostname form"
+  else fail "WAN Native accepts observed ASUS DHCP hostname form"; _twn_ok=1; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 20 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.20 && ! _twn_member eth0.10 && [ ! -d "$_twn_net/eth0.10" ] && _twn_run verify >/dev/null 2>&1; then
+    pass "WAN Native migrates VLAN 10 -> VLAN 20 and removes stale native upper"
+  else fail "WAN Native migrates VLAN 10 -> VLAN 20 and removes stale native upper"; _twn_ok=1; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0 && ! _twn_member eth0.20 && [ ! -d "$_twn_net/eth0.20" ] && _twn_run verify >/dev/null 2>&1; then
+    if _twn_run health >/dev/null 2>&1 && [ "$(sed -n '1p' "$_twn_dhcp_addr")" = "192.0.2.10/24" ]; then
+      pass "WAN Native restores VLAN 20 -> ASUS with fresh MAIN DHCP"
+    else fail "WAN Native restores VLAN 20 -> ASUS with fresh MAIN DHCP"; _twn_ok=1; fi
+  else fail "WAN Native restores VLAN 20 -> ASUS"; _twn_ok=1; fi
+
+  # Reverse MAIN handoff is its own transaction: failure to acquire the ASUS
+  # endpoint must restore both the VLAN-20 bridge member and VLAN-20 DHCP
+  # state, rather than leaving mixed L2/L3 domains behind.
+  _twn_dhcp_reset /sbin/rc || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 20 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+  : > "$_twn_root/no-address"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  (
+    WAN_TEST_DHCP_WAIT_SEC=0
+    export WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
+  rm -f "$_twn_root/no-address"
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.20 && ! _twn_member eth0 &&
+     [ "$(sed -n '1p' "$_twn_dhcp_addr")" = "192.0.2.20/24" ]; then
+    pass "WAN Native ASUS reacquisition timeout rolls back to numeric L2 and L3"
+  else fail "WAN Native ASUS reacquisition timeout rolls back to numeric L2 and L3"; _twn_ok=1; fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+
+  rm -f "$_twn_net/br0/brif/eth0"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  if _twn_run health >/dev/null 2>&1 || _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native rejects unsupported ASUS topology without physical uplink"; _twn_ok=1
+  else
+    pass "WAN Native rejects unsupported ASUS topology without physical uplink"
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 50 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native validate rejects missing native replacement path"; _twn_ok=1
+  else
+    pass "WAN Native validate rejects missing native replacement path"
+  fi
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native refuses to invent a new br0 path on non-native WAN"; _twn_ok=1
+  elif [ ! -d "$_twn_net/eth0.50" ]; then
+    pass "WAN Native refuses to invent a new br0 path on non-native WAN"
+  else fail "WAN Native refuses to invent a new br0 path on non-native WAN"; _twn_ok=1; fi
+  : > "$_twn_net/br0/brif/eth0"
+
+  # Live preflight must fail closed when either required base interface is
+  # absent, without inventing or mutating a replacement path.
+  mv "$_twn_net/br0" "$_twn_root/br0-missing" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native validate rejects missing br0"; _twn_ok=1
+  else
+    pass "WAN Native validate rejects missing br0"
+  fi
+  mv "$_twn_root/br0-missing" "$_twn_net/br0" || return 1
+  mv "$_twn_net/eth0" "$_twn_root/eth0-missing" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native validate rejects missing uplink"; _twn_ok=1
+  else
+    pass "WAN Native validate rejects missing uplink"
+  fi
+  mv "$_twn_root/eth0-missing" "$_twn_net/eth0" || return 1
+
+  # An existing target owned by another bridge is not a valid replacement
+  # candidate, even when its VLAN metadata names the expected lower device.
+  mkdir -p "$_twn_net/br1/brif" "$_twn_net/eth0.101" || return 1
+  : > "$_twn_net/br1/brif/eth0.101"
+  {
+    printf 'eth0.101  VID: 101\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.101"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 101 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects target owned by another bridge"; _twn_ok=1
+  else
+    pass "WAN Native rejects target owned by another bridge"
+  fi
+  rm -f "$_twn_net/br1/brif/eth0.101"
+  rm -rf "$_twn_net/br1" "$_twn_net/eth0.101" "$_twn_proc/eth0.101"
+
+  # Both halves of target identity are independently required: wrong VID and
+  # wrong lower-device metadata must each reject an existing upper.
+  mkdir -p "$_twn_net/eth0.102" || return 1
+  : > "$_twn_net/br0/brif/eth0.102"
+  {
+    printf 'eth0.102  VID: 101\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.102"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 102 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects existing target with wrong VID metadata"; _twn_ok=1
+  else
+    pass "WAN Native rejects existing target with wrong VID metadata"
+  fi
+  {
+    printf 'eth0.102  VID: 102\n'; printf 'Device: other0\n'
+  } > "$_twn_proc/eth0.102"
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects existing target with wrong lower metadata"; _twn_ok=1
+  else
+    pass "WAN Native rejects existing target with wrong lower metadata"
+  fi
+  rm -f "$_twn_net/br0/brif/eth0.102"
+  rm -rf "$_twn_net/eth0.102" "$_twn_proc/eth0.102"
+
+  # A pre-existing upper with no deterministic procfs identity must be
+  # rejected before validation or mutation; the interface name alone is not
+  # proof of its VLAN ID or lower device.
+  mkdir -p "$_twn_net/eth0.60" || return 1
+  : > "$_twn_net/br0/brif/eth0.60"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 60 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    fail "WAN Native rejects existing upper without VLAN/lower metadata"; _twn_ok=1
+  else
+    pass "WAN Native rejects existing upper without VLAN/lower metadata"
+  fi
+  rm -f "$_twn_net/br0/brif/eth0.60"
+  rm -rf "$_twn_net/eth0.60" "$_twn_proc/eth0.60"
+
+  # Multiple native members are all captured and removed, while an unrelated
+  # detached upper remains outside this helper's deletion ownership.
+  mkdir -p "$_twn_net/eth0.60" "$_twn_net/eth0.61" "$_twn_net/eth0.200" || return 1
+  {
+    printf 'eth0.60  VID: 60\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.60"
+  {
+    printf 'eth0.61  VID: 61\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.61"
+  {
+    printf 'eth0.200  VID: 200\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.200"
+  : > "$_twn_net/br0/brif/eth0.60"
+  : > "$_twn_net/br0/brif/eth0.61"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 70 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.70 && ! _twn_member eth0.60 && ! _twn_member eth0.61 &&
+     [ ! -d "$_twn_net/eth0.60" ] && [ ! -d "$_twn_net/eth0.61" ] && [ -d "$_twn_net/eth0.200" ] && ! _twn_member eth0.200; then
+    pass "WAN Native handles multiple native members and preserves detached unrelated upper"
+  else
+    fail "WAN Native handles multiple native members and preserves detached unrelated upper"; _twn_ok=1
+  fi
+
+  # Re-applying the selected, already-verified target is idempotent and does
+  # not disturb unrelated detached uppers.
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.70 && [ -d "$_twn_net/eth0.200" ] && _twn_run verify >/dev/null 2>&1; then
+    pass "WAN Native same selection is idempotent"
+  else
+    fail "WAN Native same selection is idempotent"; _twn_ok=1
+  fi
+
+  FAIL_DEL_IF=eth0.70; export FAIL_DEL_IF
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 80 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native detach failure is fail-closed"; _twn_ok=1
+  elif _twn_member eth0.70 && ! _twn_member eth0.80 && [ ! -d "$_twn_net/eth0.80" ]; then
+    pass "WAN Native detach failure restores captured native path"
+  else
+    fail "WAN Native detach failure restores captured native path"; _twn_ok=1
+  fi
+  unset FAIL_DEL_IF
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 1 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects VLAN 1"; _twn_ok=1; else pass "WAN Native rejects VLAN 1"; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 4095 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects VLAN 4095"; _twn_ok=1; else pass "WAN Native rejects VLAN 4095"; fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN not-a-vlan "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects nonnumeric VLAN"; _twn_ok=1; else pass "WAN Native rejects nonnumeric VLAN"; fi
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 31 "$_twn_settings" || return 1
+  json_set_section2_value WiFi SSIDs SSID_01 guest "$_twn_settings" || return 1
+  json_set_section2_value VLAN Pool VLAN_01 31 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects SSID VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects SSID VLAN conflict"; fi
+  json_set_section2_value WiFi SSIDs SSID_01 unused-placeholder "$_twn_settings" || return 1
+  json_set_section2_value VLAN Pool VLAN_01 none "$_twn_settings" || return 1
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 32 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TRUNK1 1 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 32 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects tagged trunk VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects tagged trunk VLAN conflict"; fi
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 none "$_twn_settings" || return 1
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 33 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks UNTAGGED_TRUNK1 33 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects untagged trunk VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects untagged trunk VLAN conflict"; fi
+  json_set_section2_value VLAN Trunks UNTAGGED_TRUNK1 none "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TRUNK1 0 "$_twn_settings" || return 1
+
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 30 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Ethernet_ports ETH1_VLAN 30 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then fail "WAN Native rejects same-device access VLAN conflict"; _twn_ok=1; else pass "WAN Native rejects same-device access VLAN conflict"; fi
+  json_set_section2_value VLAN Ethernet_ports ETH1_VLAN none "$_twn_settings" || return 1
+
+  FAIL_ADD_IF=eth0.30; export FAIL_ADD_IF
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native replacement attach failure is fail-closed"; _twn_ok=1
+  elif _twn_member eth0.70 && ! _twn_member eth0.30 && [ ! -d "$_twn_net/eth0.30" ]; then
+    pass "WAN Native replacement attach failure rolls back prior path"
+  else
+    fail "WAN Native replacement attach failure rolls back prior path"; _twn_ok=1
+  fi
+  unset FAIL_ADD_IF
+
+  json_set_section_value General NODE_ID 1 "$_twn_settings" || return 1
+  # This section exercises the retained independent-node policy.  Do not
+  # inherit the live router's AiMesh role when the fixture expects NODE1's
+  # configured native value.
+  json_set_section_value Nodes NODE1_ROLE standalone "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 77 "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_NODE1 44 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.44 && ! _twn_member eth0 && _twn_run verify >/dev/null 2>&1; then
+    pass "WAN Native selects the per-node NODE1 setting"
+  else fail "WAN Native selects the per-node NODE1 setting"; _twn_ok=1; fi
+
+  # DHCP handoff is MAIN-only: a node with a static LAN remains untouched by
+  # the MAIN protocol guard and does not signal the MAIN udhcpc fixture.
+  _twn_node_address_before="$(cat "$_twn_dhcp_addr" 2>/dev/null)"
+  # Some ASUSWRT BusyBox ash versions retain a temporary assignment made for
+  # a shell function.  Keep this node-only static-LAN probe in a subshell so
+  # later MAIN/DHCP cases cannot inherit its intentionally static protocol.
+  (
+    WAN_TEST_LAN_PROTO=static
+    export WAN_TEST_LAN_PROTO
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.44 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "$_twn_node_address_before" ]; then
+    pass "WAN Native leaves node LAN policy untouched"
+  else
+    fail "WAN Native leaves node LAN policy untouched"; _twn_ok=1
+  fi
+
+  # MAIN trunks do not exist on node runtime. Shared settings may therefore use
+  # a VLAN on a MAIN trunk and independently use that VID as NODE1 WAN Native.
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_NODE1 45 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TRUNK1 1 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 45 "$_twn_settings" || return 1
+  if _twn_run validate >/dev/null 2>&1; then
+    pass "WAN Native node validation ignores MAIN-only trunk VLANs"
+  else fail "WAN Native node validation ignores MAIN-only trunk VLANs"; _twn_ok=1; fi
+  json_set_section2_value VLAN Trunks TRUNK1 0 "$_twn_settings" || return 1
+  json_set_section2_value VLAN Trunks TAGGED_TRUNK1 none "$_twn_settings" || return 1
+
+  # Signals delivered during the active membership transaction must restore
+  # the captured path and retain the conventional TERM status.  The fake
+  # brctl sends TERM from the exact detach/add transition once per run.
+  json_set_section_value General NODE_ID none "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 90 "$_twn_settings" || return 1
+  WAN_TEST_SIGNAL_PHASE=detach-before-attach WAN_TEST_SIGNAL_IF=eth0.44 \
+    WAN_TEST_SIGNAL_ONCE="$_twn_root/signal-detach.once"
+  export WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native TERM after detach is nonzero and fail-closed"; _twn_ok=1
+  elif [ "$_twn_rc" -ne 143 ]; then
+    fail "WAN Native TERM after detach preserves status 143 (actual=$_twn_rc)"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.90 && [ ! -d "$_twn_net/eth0.90" ]; then
+    pass "WAN Native TERM after detach restores captured members"
+  else
+    fail "WAN Native TERM after detach restores captured members"; _twn_ok=1
+  fi
+  unset WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+
+  WAN_TEST_SIGNAL_PHASE=attach-before-verify WAN_TEST_SIGNAL_IF=eth0.91 \
+    WAN_TEST_SIGNAL_ONCE="$_twn_root/signal-attach.once"
+  export WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 91 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native TERM after attach is nonzero and fail-closed"; _twn_ok=1
+  elif [ "$_twn_rc" -ne 143 ]; then
+    fail "WAN Native TERM after attach preserves status 143 (actual=$_twn_rc)"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.91 && [ ! -d "$_twn_net/eth0.91" ]; then
+    pass "WAN Native TERM after attach restores captured members"
+  else
+    fail "WAN Native TERM after attach restores captured members"; _twn_ok=1
+  fi
+  unset WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_IF WAN_TEST_SIGNAL_ONCE
+
+  # Corrupting verified metadata after attach forces verify_live to fail; the
+  # same rollback path must restore the previous native upper.
+  FAIL_VERIFY_IF=eth0.92; export FAIL_VERIFY_IF
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 92 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1; then
+    fail "WAN Native verification failure is fail-closed"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.92 && [ ! -d "$_twn_net/eth0.92" ]; then
+    pass "WAN Native verification failure restores captured members"
+  else
+    fail "WAN Native verification failure restores captured members"; _twn_ok=1
+  fi
+  unset FAIL_VERIFY_IF
+
+  # If convergence finds an extra captured native member after the target is
+  # already attached, removal failure must restore every original member and
+  # return nonzero.
+  rm -f "$_twn_net/br0/brif/eth0.44"
+  mkdir -p "$_twn_net/eth0.94" "$_twn_net/eth0.95" || return 1
+  {
+    printf 'eth0.94  VID: 94\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.94"
+  {
+    printf 'eth0.95  VID: 95\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.95"
+  : > "$_twn_net/br0/brif/eth0.94"
+  : > "$_twn_net/br0/brif/eth0.95"
+  FAIL_DEL_IF=eth0.95; export FAIL_DEL_IF
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 94 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native extra-member removal failure is nonzero"; _twn_ok=1
+  elif _twn_member eth0.94 && _twn_member eth0.95; then
+    pass "WAN Native extra-member removal failure restores all captured members"
+  else
+    fail "WAN Native extra-member removal failure restores all captured members"; _twn_ok=1
+  fi
+  unset FAIL_DEL_IF
+  rm -f "$_twn_net/br0/brif/eth0.94" "$_twn_net/br0/brif/eth0.95"
+  rm -rf "$_twn_net/eth0.94" "$_twn_net/eth0.95" "$_twn_proc/eth0.94" "$_twn_proc/eth0.95"
+  : > "$_twn_net/br0/brif/eth0.44"
+
+  # Force a bridge-MAC drift before restore and make the restore command fail;
+  # membership rollback remains mandatory and the operation must be nonzero.
+  FAIL_MAC_DRIFT=1 FAIL_MAC_RESTORE=1; export FAIL_MAC_DRIFT FAIL_MAC_RESTORE
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 93 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ]; then
+    fail "WAN Native MAC restore failure is nonzero"; _twn_ok=1
+  elif _twn_member eth0.44 && ! _twn_member eth0.93 && [ ! -d "$_twn_net/eth0.93" ]; then
+    pass "WAN Native MAC restore failure rolls back native membership"
+  else
+    fail "WAN Native MAC restore failure rolls back native membership"; _twn_ok=1
+  fi
+  unset FAIL_MAC_DRIFT FAIL_MAC_RESTORE
+  printf '%s\n' '02:00:00:00:00:01' > "$_twn_net/br0/address"
+
+  # Record bridge operations to prove no replacement attach happens until all
+  # captured native members have been detached.
+  rm -f "$_twn_net/br0/brif/eth0.44"
+  mkdir -p "$_twn_net/eth0.96" "$_twn_net/eth0.97" || return 1
+  {
+    printf 'eth0.96  VID: 96\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.96"
+  {
+    printf 'eth0.97  VID: 97\n'; printf 'Device: eth0\n'
+  } > "$_twn_proc/eth0.97"
+  : > "$_twn_net/br0/brif/eth0.96"
+  : > "$_twn_net/br0/brif/eth0.97"
+  _twn_order_log="$_twn_root/order.log"
+  : > "$_twn_order_log"
+  WAN_TEST_ORDER_LOG="$_twn_order_log"; export WAN_TEST_ORDER_LOG
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 &&
+     [ "$(sed -n '1p' "$_twn_order_log")" = "del eth0.96" ] &&
+     [ "$(sed -n '2p' "$_twn_order_log")" = "del eth0.97" ] &&
+     [ "$(sed -n '3p' "$_twn_order_log")" = "add eth0.98" ] &&
+     [ "$(wc -l < "$_twn_order_log")" -eq 3 ]; then
+    pass "WAN Native detaches every captured member before target attach"
+  else
+    fail "WAN Native detaches every captured member before target attach"; _twn_ok=1
+  fi
+  unset WAN_TEST_ORDER_LOG
+
+  # A numeric MAIN target needs only its target-domain reservation.  The ASUS
+  # recovery reservation is optional until a later return to ASUS/default.
+  json_set_section2_value VLAN WAN_Native MAIN_ASUS_IP none "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  if _twn_run apply >/dev/null 2>&1 && _twn_member eth0.99 && ! _twn_member eth0.98; then
+    pass "WAN Native numeric MAIN works without ASUS/default recovery IP"
+  else
+    fail "WAN Native numeric MAIN works without ASUS/default recovery IP"; _twn_ok=1
+  fi
+  : > "$_twn_order_log"
+  WAN_TEST_ORDER_LOG="$_twn_order_log"; export WAN_TEST_ORDER_LOG
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN none "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.99 && ! _twn_member eth0 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native refuses return to ASUS without recovery IP before mutation"
+  else
+    fail "WAN Native refuses return to ASUS without recovery IP before mutation"; _twn_ok=1
+  fi
+  unset WAN_TEST_ORDER_LOG
+  json_set_section2_value VLAN WAN_Native MAIN_ASUS_IP 192.0.2.10 "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+
+  # MAIN static LAN is rejected before any bridge operation.  The target and
+  # captured native member must remain exactly as they were before preflight.
+  : > "$_twn_order_log"
+  json_set_section_value General NODE_ID none "$_twn_settings" || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  if (
+    WAN_TEST_LAN_PROTO=static
+    export WAN_TEST_LAN_PROTO
+    _twn_run validate >/dev/null 2>&1
+  ); then
+    fail "WAN Native manager preflight rejects numeric MAIN on static LAN"; _twn_ok=1
+  else
+    pass "WAN Native manager preflight rejects numeric MAIN on static LAN"
+  fi
+  (
+    WAN_TEST_LAN_PROTO=static
+    export WAN_TEST_LAN_PROTO
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native blocks numeric MAIN on static LAN before mutation"
+  else
+    fail "WAN Native blocks numeric MAIN on static LAN before mutation"; _twn_ok=1
+  fi
+
+  # The explicit MAIN endpoint is production state, not a test-only default.
+  # Its absence must fail before bridge mutation even when LAN DHCP is active.
+  json_set_section2_value VLAN WAN_Native MAIN_WAN_NATIVE_IP none "$_twn_settings" || return 1
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native requires persisted MAIN DHCP endpoint before mutation"
+  else
+    fail "WAN Native requires persisted MAIN DHCP endpoint before mutation"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native MAIN_WAN_NATIVE_IP "$_twn_dhcp_expected" "$_twn_settings" || return 1
+
+  # Reboots can remove the configured MerVLAN tmp root before any manager
+  # initialization. DHCP argv identity parsing must fall back to /tmp rather
+  # than turning this read-only preflight into a false safety failure.
+  MERV_WAN_DHCP_TMP_ROOT="$_twn_root/missing-tmpdir"; export MERV_WAN_DHCP_TMP_ROOT
+  if _twn_run validate >/dev/null 2>&1; then
+    pass "WAN Native DHCP identity preflight tolerates missing configured tmp root"
+  else
+    fail "WAN Native DHCP identity preflight tolerates missing configured tmp root"; _twn_ok=1
+  fi
+  unset MERV_WAN_DHCP_TMP_ROOT
+
+  # Delayed lease publication must be observed before commit.  The fake
+  # address is CIDR-shaped at rest, while persisted endpoint is host-only.
+  printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+  (
+    WAN_TEST_DHCP_DELAY_POLLS=1
+    WAN_TEST_DHCP_WAIT_SEC=2
+    export WAN_TEST_DHCP_DELAY_POLLS WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 && ! _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.20/24" ]; then
+    pass "WAN Native accepts delayed persisted MAIN DHCP endpoint acquisition"
+  else
+    fail "WAN Native accepts delayed persisted MAIN DHCP endpoint acquisition"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  (
+    WAN_TEST_DHCP_DELAY_POLLS=0
+    WAN_TEST_DHCP_WAIT_SEC=1
+    export WAN_TEST_DHCP_DELAY_POLLS WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  ) || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+
+  # A successful release/restart is not success by itself: without the expected
+  # lease, bounded acquisition times out and restores both L2 membership and
+  # the captured L3 address through a fresh original-domain lifecycle.
+  printf '%s\n' '192.0.2.10/24' > "$_twn_dhcp_addr"
+  : > "$_twn_root/no-address"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  (
+    WAN_TEST_DHCP_WAIT_SEC=1
+    export WAN_TEST_DHCP_WAIT_SEC
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
+  rm -f "$_twn_root/no-address"
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ]; then
+    pass "WAN Native DHCP restart timeout rolls back L2 and L3"
+  else
+    fail "WAN Native DHCP restart timeout rolls back L2 and L3"; _twn_ok=1
+  fi
+
+  # Lifecycle authentication rejects an unexpected callback before bridge
+  # mutation; no process control action may occur for a foreign argv.
+  _twn_dhcp_reset /not-asus/rc || return 1
+  : > "$_twn_order_log"
+  : > "$_twn_root/dhcp.lifecycle"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ ! -s "$_twn_root/dhcp.lifecycle" ] && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native rejects unexpected ASUS udhcpc callback before mutation"
+  else
+    fail "WAN Native rejects unexpected ASUS udhcpc callback before mutation"; _twn_ok=1
+  fi
+
+  # This is the exact live ASUS behavior: RELEASE deconfigures the old lease
+  # but leaves the authenticated process alive. It must then be explicitly
+  # terminated before exactly one fresh target-domain client is started.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_order_log"
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1; export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 && ! _twn_member eth0.98 &&
+     [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.20/24" ] &&
+     grep -q '^release 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^terminate 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^start 4243$' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native RELEASE-live client terminates before one replacement starts"
+  else
+    fail "WAN Native RELEASE-live client terminates before one replacement starts"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+
+  # A released but still-live client that ignores TERM must never compete with
+  # a new client. Rollback restores L2 before renewing the exact client.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_TERM_STICKS=1 WAN_TEST_DHCP_TERM_WAIT_SEC=0
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_STICKS WAN_TEST_DHCP_TERM_WAIT_SEC
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_STICKS WAN_TEST_DHCP_TERM_WAIT_SEC
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
+     grep -q '^terminate 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^renew 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native TERM timeout renews released client only after L2 rollback"
+  else
+    fail "WAN Native TERM timeout renews released client only after L2 rollback"; _twn_ok=1
+  fi
+
+  # A PID/start identity change after RELEASE must block TERM and any fresh
+  # client. L2 is still restored, but the unknown process is never signalled.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_REUSE_AFTER_RELEASE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_REUSE_AFTER_RELEASE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_REUSE_AFTER_RELEASE
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     grep -q '^release 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^terminate ' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native never TERM-signals a reused DHCP PID after RELEASE"
+  else
+    fail "WAN Native never TERM-signals a reused DHCP PID after RELEASE"; _twn_ok=1
+  fi
+
+  # A changed argv is likewise an unknown process: do not signal or replace it.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_CMDLINE_CHANGE_AFTER_RELEASE
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     ! grep -q '^terminate ' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native never replaces an altered DHCP client after RELEASE"
+  else
+    fail "WAN Native never replaces an altered DHCP client after RELEASE"; _twn_ok=1
+  fi
+
+  # A second valid client that appears during RELEASE is ambiguous and blocks
+  # both TERM and replacement launch.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_DUPLICATE_BEFORE_TERM
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     ! grep -q '^terminate ' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native rejects a second DHCP client before TERM"
+  else
+    fail "WAN Native rejects a second DHCP client before TERM"; _twn_ok=1
+  fi
+
+  # The exiting RELEASE branch must also reject another client before the
+  # replacement boundary; the helper may not collapse or overwrite it.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_DUPLICATE_BEFORE_START=1; export WAN_TEST_DHCP_DUPLICATE_BEFORE_START
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_DUPLICATE_BEFORE_START
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native rejects a DHCP client that appears before replacement"
+  else
+    fail "WAN Native rejects a DHCP client that appears before replacement"; _twn_ok=1
+  fi
+
+  # An interrupt after SIGTERM but before exit follows the same L2-first,
+  # exact-client renew recovery path and keeps status 143.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_TERM_AFTER_TERMINATE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_TERMINATE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_TERMINATE
+  if [ "$_twn_rc" -eq 143 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     grep -q '^terminate 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     grep -q '^renew 4242$' "$_twn_root/dhcp.lifecycle" 2>/dev/null &&
+     ! grep -q '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native TERM after DHCP SIGTERM restores released client safely"
+  else
+    fail "WAN Native TERM after DHCP SIGTERM restores released client safely"; _twn_ok=1
+  fi
+
+  # RELEASE may legitimately exit the client. A pidfile left behind may be
+  # cleaned only after the old authenticated process is proved gone.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_STALE_PIDFILE=1; export WAN_TEST_DHCP_STALE_PIDFILE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_STALE_PIDFILE
+  if [ "$_twn_rc" -eq 0 ] && _twn_member eth0.99 &&
+     grep -q '^start 4243$' "$_twn_root/dhcp.lifecycle" 2>/dev/null; then
+    pass "WAN Native clears only proven stale DHCP pidfile after released exit"
+  else
+    fail "WAN Native clears only proven stale DHCP pidfile after released exit"; _twn_ok=1
+  fi
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 98 "$_twn_settings" || return 1
+  _twn_run apply >/dev/null 2>&1 || return 1
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+
+  # A fresh release must remove the old lease; leaving it installed fails
+  # closed before any replacement client is started.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  WAN_TEST_DHCP_STALE_ADDRESS=1 WAN_TEST_DHCP_RELEASE_WAIT_SEC=0
+  export WAN_TEST_DHCP_STALE_ADDRESS WAN_TEST_DHCP_RELEASE_WAIT_SEC
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_STALE_ADDRESS WAN_TEST_DHCP_RELEASE_WAIT_SEC
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
+     [ "$(grep -c '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null)" -ge 1 ]; then
+    pass "WAN Native rejects stale address after DHCP release"
+  else
+    fail "WAN Native rejects stale address after DHCP release"; _twn_ok=1
+  fi
+
+  # A replacement launch failure leaves no target client; rollback uses the
+  # captured authenticated argv contract to restore one original-domain client.
+  _twn_dhcp_reset /sbin/rc || return 1
+  : > "$_twn_root/dhcp.lifecycle"
+  (
+    MERV_WAN_DHCP_TEST_LAUNCH_FAIL=1
+    export MERV_WAN_DHCP_TEST_LAUNCH_FAIL
+    _twn_run apply >/dev/null 2>&1
+  )
+  _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ] &&
+     [ "$(grep -c '^start ' "$_twn_root/dhcp.lifecycle" 2>/dev/null)" -ge 1 ]; then
+    pass "WAN Native replacement launch failure restores original DHCP client"
+  else
+    fail "WAN Native replacement launch failure restores original DHCP client"; _twn_ok=1
+  fi
+
+  # A second authenticated LAN client is never collapsed or signalled by this
+  # helper; the ambiguous state fails closed before transport mutation.
+  _twn_dhcp_reset /sbin/rc || return 1
+  cp -R "$_twn_proc/4242" "$_twn_proc/4243" || return 1
+  sed 's/424242/424243/' "$_twn_proc/4243/stat" > "$_twn_proc/4243/stat.tmp" && mv "$_twn_proc/4243/stat.tmp" "$_twn_proc/4243/stat"
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98; then
+    pass "WAN Native rejects duplicate authenticated LAN DHCP clients"
+  else
+    fail "WAN Native rejects duplicate authenticated LAN DHCP clients"; _twn_ok=1
+  fi
+  _twn_dhcp_reset /sbin/rc || return 1
+
+  # A TERM immediately after live-client RELEASE is an interruption point.
+  # The transaction trap must restore L2 before renewing that same exact
+  # released client, then retain the conventional signal status.
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 99 "$_twn_settings" || return 1
+  _twn_dhcp_reset /sbin/rc || return 1
+  WAN_TEST_DHCP_RELEASE_STAYS_ALIVE=1 WAN_TEST_DHCP_TERM_AFTER_RELEASE=1
+  export WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_RELEASE
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  unset WAN_TEST_DHCP_RELEASE_STAYS_ALIVE WAN_TEST_DHCP_TERM_AFTER_RELEASE
+  if [ "$_twn_rc" -eq 143 ] && _twn_member eth0.98 && ! _twn_member eth0.99 &&
+     [ "$(cat "$_twn_dhcp_addr" 2>/dev/null)" = "192.0.2.10/24" ]; then
+    pass "WAN Native TERM after DHCP release restores original DHCP lifecycle"
+  else
+    fail "WAN Native TERM after DHCP release restores original DHCP lifecycle"; _twn_ok=1
+  fi
+  _twn_dhcp_reset /sbin/rc || return 1
+
+  # PID zero and a mismatched start-time sidecar are both rejected before any
+  # signal or bridge operation; this covers positive/non-reused PID safety.
+  printf '%s\n' 0 > "$_twn_dhcp_pidfile"
+  json_set_section2_value VLAN WAN_Native WAN_NATIVE_MAIN 100 "$_twn_settings" || return 1
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native rejects non-positive udhcpc PID"
+  else
+    fail "WAN Native rejects non-positive udhcpc PID"; _twn_ok=1
+  fi
+  printf '%s\n' "$_twn_dhcp_pid" > "$_twn_dhcp_pidfile"
+  printf '%s\n' 999999999 > "${_twn_dhcp_pidfile}.start"
+  : > "$_twn_order_log"
+  _twn_run apply >/dev/null 2>&1; _twn_rc=$?
+  rm -f "${_twn_dhcp_pidfile}.start"
+  if [ "$_twn_rc" -ne 0 ] && _twn_member eth0.98 && [ "$(wc -l < "$_twn_order_log")" -eq 0 ]; then
+    pass "WAN Native rejects reused udhcpc PID identity"
+  else
+    fail "WAN Native rejects reused udhcpc PID identity"; _twn_ok=1
+  fi
+
+  if grep -Fq 'Preserving live WAN Native transport' "$MERV_BASE/functions/mervlan_manager.sh" &&
+     [ "$(grep -c 'run_wan_native apply' "$MERV_BASE/functions/mervlan_manager.sh" 2>/dev/null)" -ge 2 ] &&
+     grep -Fq 'run_wan_native verify' "$MERV_BASE/functions/mervlan_manager.sh"; then
+    pass "manager protects, reapplies, and finally verifies WAN Native"
+  else fail "manager protects, reapplies, and finally verifies WAN Native"; _twn_ok=1; fi
+
+  if grep -Fq 'functions/mervlan_wan.sh' "$MERV_BASE/functions/sync_nodes.sh" &&
+     grep -Fq 'functions/mervlan_wan.sh' "$MERV_BASE/functions/update_mervlan.sh" &&
+     grep -Fq 'functions/mervlan_wan.sh' "$MERV_BASE/functions/update_mervlan_repair.manifest"; then
+    pass "WAN Native helper is covered by node sync, update, and repair manifests"
+  else fail "WAN Native helper is covered by node sync, update, and repair manifests"; _twn_ok=1; fi
+
+  if grep -Fq 'wan_main_dhcp_restart()' "$MERV_BASE/functions/mervlan_wan.sh" &&
+     grep -Fq 'nvram get lan_proto' "$MERV_BASE/functions/mervlan_wan.sh" &&
+     grep -Fq 'case "$WAN_DHCP_ASUS_IP_CONFIG" in '"'"''"'"')' "$MERV_BASE/functions/mervlan_wan.sh" &&
+     grep -Fq 'kill -USR2' "$MERV_BASE/functions/mervlan_wan.sh"; then
+    pass "WAN Native restarts MAIN DHCP only after verified transport swap"
+  else fail "WAN Native DHCP restart contract is wired"; _twn_ok=1; fi
+
+  if grep -Fq 'class="no-vlanfield wan-native-value"' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'wan-native-input' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'validateAllWanNativeSettings' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'WAN_NATIVE_MAIN' "$MERV_BASE/settings/settings.json" &&
+     grep -Fq 'json_set_section2_value "VLAN" "WAN_Native"' "$MERV_BASE/functions/save_settings.sh"; then
+    pass "WAN Native UI, schema, and sectioned save path are wired"
+  else fail "WAN Native UI, schema, and sectioned save path are wired"; _twn_ok=1; fi
+
+  # Safety-popup contract: the table owns the one visible VLAN field, while the
+  # form-anchored dialog owns only DHCP reservation endpoints and stages them
+  # through the normal settings transaction.
+  if grep -Fq 'wanNativeConfigPopup' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'function saveWanNativeConfig' "$MERV_BASE/www/index.html" &&
+     grep -Fq "openHelpPopup('wan-native')" "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'WanNativeIpField' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'WAN Native VLAN ID' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wan-native-edit-btn' "$MERV_BASE/www/index.html" &&
+     grep -Fq '>Edit</button><span id="statusWAN_NATIVE"' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'wan-native-config-btn' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativePopupVlan' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'wanNativePopupEdit' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativePopupNodeIp' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativePopupNodeAsusIp' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'cachedWanNativeIp' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'WAN_NATIVE_POPUP_STATE && target !== CURRENT_LAN_TARGET' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'wanNativeOptionalIpIsValid' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'The ASUS/default reservation is optional until you switch back to ASUS.' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'requires both DHCP reservations' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'requires a WAN Native DHCP reservation' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'nodeAsusRow.style.display = isMain ?' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'min-width:var(--wan-native-edit-width, 50px);' "$MERV_BASE/www/vlan_form_style.css" &&
+     grep -Fq 'value.textContent = (!raw || raw.toLowerCase() === "none") ? "ASUS" : raw' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'validateWanNativeField(wanInput' "$MERV_BASE/www/index.html" &&
+     grep -Fq 'anchorModalToForm(popup)' "$MERV_BASE/www/index.html" &&
+     ! grep -Fq 'top: 16%' "$MERV_BASE/www/vlan_form_style.css" &&
+     grep -Fq 'wan-native-popup.modal' "$MERV_BASE/www/vlan_form_style.css"; then
+    pass "WAN Native uses a compact form-anchored DHCP reservation editor"
+  else
+    fail "WAN Native uses a compact form-anchored DHCP reservation editor"
+    _twn_ok=1
+  fi
+
+  return "$_twn_ok"
+}
+
 test_shell_syntax() {
   _tss_bad=0
+  _tss_is_node=$(json_get_flag IS_NODE 0 "$SETTINGS_FILE" 2>/dev/null)
   if grep -q 'grep -c "\^-s ".*|| :' "$MERV_BASE/functions/mervlan_boot.sh"; then
     pass "MAC Shield status zero-count fallback stays numeric"
   else
@@ -3594,6 +5876,8 @@ test_shell_syntax() {
   for _tss_file in \
     "$MERV_BASE/settings/lib_mervqt.sh" \
     "$MERV_BASE/settings/lib_owner_lock.sh" \
+    "$MERV_BASE/settings/lib_maintenance_recovery.sh" \
+    "$MERV_BASE/settings/lib_update_state.sh" \
     "$MERV_BASE/settings/lib_action_lock.sh" \
     "$MERV_BASE/settings/lib_node_jobs.sh" \
     "$MERV_BASE/settings/var_settings.sh" \
@@ -3603,12 +5887,27 @@ test_shell_syntax() {
     "$MERV_BASE/functions/mac_refresh.sh" \
     "$MERV_BASE/functions/service-event-handler.sh" \
     "$MERV_BASE/functions/mervlan_manager.sh" \
+    "$MERV_BASE/functions/mervlan_wan.sh" \
     "$MERV_BASE/functions/heal_event.sh" \
+    "$MERV_BASE/functions/mervlan_backup.sh" \
+    "$MERV_BASE/functions/mervlan_recover.sh" \
+    "$MERV_BASE/functions/update_mervlan.sh" \
     "$MERV_BASE/functions/mervlan_boot.sh" \
     "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
     "$MERV_BASE/settings/mac_shield_snapshot.sh" \
     "$MERV_BASE/templates/mervlan_templates.sh"; do
-    [ -f "$_tss_file" ] || { fail "shell syntax target missing: ${_tss_file##*/}"; _tss_bad=1; continue; }
+    if [ ! -f "$_tss_file" ]; then
+      case "${_tss_file##*/}:${_tss_is_node:-0}" in
+        mervlan_backup.sh:1|mervlan_recover.sh:1|update_mervlan.sh:1)
+          pass "shell syntax ${_tss_file##*/} omitted on node"
+          ;;
+        *)
+          fail "shell syntax target missing: ${_tss_file##*/}"
+          _tss_bad=1
+          ;;
+      esac
+      continue
+    fi
     if sh -n "$_tss_file"; then pass "shell syntax ${_tss_file##*/}"; else fail "shell syntax ${_tss_file##*/}"; _tss_bad=1; fi
   done
   if [ -f "$MERV_BASE/functions/sync_nodes.sh" ]; then
@@ -3656,7 +5955,7 @@ test_signal_termination() {
     printf '%s\n' '}'
     printf '%s\n' 'handle_signal() { status="$1"; [ "$signal_handling" -eq 0 ] || exit "$status"; signal_handling=1; trap - INT TERM; printf "%s\\n" "$status" > "$root/signal.status"; exit "$status"; }'
     printf '%s\n' 'trap - INT TERM; trap cleanup EXIT; trap "handle_signal 130" INT; trap "handle_signal 143" TERM'
-    printf '%s\n' ': > "$lock"; ( trap - EXIT INT TERM; exec sleep 3 ) & child_pid="$!"; child_start=$(merv_proc_start_time "$child_pid" 2>/dev/null || printf ""); printf "%s\\n" "$child_pid" > "$root/child.pid"; printf "%s\\n" "$child_start" > "$root/child.start"; case "${SIGNAL_TEST_SELF:-}" in INT) kill -INT "$$" ;; TERM) kill -TERM "$$" ;; esac; sleep 3; printf "%s\\n" success > "$result"; exit 0'
+    printf '%s\n' ': > "$lock"; printf "%s\\n" "$$" > "$root/fixture.pid"; ( trap - EXIT INT TERM; exec sleep 3 ) & child_pid="$!"; child_start=$(merv_proc_start_time "$child_pid" 2>/dev/null || printf ""); printf "%s\\n" "$child_pid" > "$root/child.pid"; printf "%s\\n" "$child_start" > "$root/child.start"; sleep 3; printf "%s\\n" success > "$result"; exit 0'
   } > "$_tst_fixture" || return 1
   chmod 700 "$_tst_fixture" || return 1
 
@@ -3665,33 +5964,32 @@ test_signal_termination() {
     _tst_expected=${_tst_signal_case#*:}
     _tst_case="$_tst_root/$_tst_signal"
     mkdir -p "$_tst_case" || { _tst_ok=0; continue; }
-    _tst_self_signal=""
-    [ "$_tst_signal" = INT ] && _tst_self_signal=INT
-    if [ -n "$_tst_self_signal" ]; then
-      SIGNAL_TEST_ROOT="$_tst_case" SIGNAL_TEST_SELF="$_tst_self_signal" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1
-      _tst_rc=$?
-    else
-      SIGNAL_TEST_ROOT="$_tst_case" SIGNAL_TEST_SELF="$_tst_self_signal" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1 &
-      _tst_pid=$!
-      sleep 1
-      _tst_parent_start=$(merv_proc_start_time "$_tst_pid" 2>/dev/null || printf '')
-      case "$_tst_parent_start" in
-        ''|*[!0-9]*)
-          fail "signal termination $_tst_signal parent identity is unverifiable"
-          _tst_ok=0
-          ;;
-        *)
-          if merv_process_identity_matches "$_tst_pid" "$_tst_parent_start" 2>/dev/null; then
-            kill -"$_tst_signal" "$_tst_pid" 2>/dev/null || :
-          else
-            fail "signal termination $_tst_signal parent identity changed before signal"
-            _tst_ok=0
-          fi
-          ;;
-      esac
-      wait "$_tst_pid" 2>/dev/null
-      _tst_rc=$?
-    fi
+    # Run the fixture in the foreground.  A non-interactive BusyBox shell
+    # launched as a background job inherits an ignored INT disposition and
+    # cannot test a real INT trap.  Its helper writes the exact fixture PID;
+    # this sibling then delivers the requested signal after that publication.
+    (
+      _tst_wait=0
+      while [ "$_tst_wait" -lt 5 ]; do
+        if [ -s "$_tst_case/fixture.pid" ]; then
+          _tst_fixture_pid=$(cat "$_tst_case/fixture.pid" 2>/dev/null)
+          case "$_tst_fixture_pid" in
+            ''|*[!0-9]*) ;;
+            *) kill -"$_tst_signal" "$_tst_fixture_pid" 2>/dev/null || :; exit 0 ;;
+          esac
+        fi
+        sleep 1
+        _tst_wait=$((_tst_wait + 1))
+      done
+      exit 1
+    ) &
+    _tst_killer=$!
+    SIGNAL_TEST_ROOT="$_tst_case" MERV_BASE="$MERV_BASE" sh "$_tst_fixture" >/dev/null 2>&1
+    _tst_rc=$?
+    wait "$_tst_killer" 2>/dev/null || {
+      fail "signal termination $_tst_signal helper did not deliver"
+      _tst_ok=0
+    }
     if [ "$_tst_rc" -eq "$_tst_expected" ]; then pass "signal termination $_tst_signal returns $_tst_expected"; else fail "signal termination $_tst_signal returns $_tst_expected (actual=$_tst_rc)"; _tst_ok=0; fi
     [ "$(cat "$_tst_case/cleanup.count" 2>/dev/null)" = 1 ] && pass "signal termination $_tst_signal cleanup runs once" || { fail "signal termination $_tst_signal cleanup runs once"; _tst_ok=0; }
     [ "$(cat "$_tst_case/result" 2>/dev/null)" = interrupted ] && pass "signal termination $_tst_signal publishes one interruption result" || { fail "signal termination $_tst_signal publishes one interruption result"; _tst_ok=0; }
@@ -3773,7 +6071,10 @@ run_one() {
     dhcp-api) test_dhcp_api ;;
     dhcp-ebtables-failures) test_dhcp_ebtables_failures ;;
     dhcp-rule-exactness) test_dhcp_rule_exactness ;;
+    dhcp-continuous-repair) test_dhcp_continuous_repair ;;
+    l2-guard-coordinator) test_l2_guard_coordinator_contract ;;
     l2-guard-dump) test_l2_guard_dump_contract ;;
+    l2-guard-exactness) test_l2_guard_exactness_contract ;;
     mac-shield-lifecycle) test_mac_shield_lifecycle ;;
     process-identity) test_process_identity ;;
     owner-lock-contract) test_owner_lock_contract ;;
@@ -3824,6 +6125,7 @@ run_one() {
     ssh-trust) test_ssh_trust_contract ;;
     logging-polling) test_logging_polling_contract ;;
     apply-observation) test_apply_observation_contract ;;
+    wan-native-contract) test_wan_native_contract ;;
     shell-syntax) test_shell_syntax ;;
     signal-termination) test_signal_termination ;;
     live-audit) test_live_audit ;;
@@ -3864,13 +6166,13 @@ if [ "$SELFTEST_ACTION" = "_fault-child" ]; then
 fi
 
 if [ "$SELFTEST_ACTION" = all ]; then
-  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness l2-guard-dump mac-shield-lifecycle \
+  for SELFTEST_CASE in dhcp-api dhcp-ebtables-failures dhcp-rule-exactness dhcp-continuous-repair l2-guard-coordinator l2-guard-dump l2-guard-exactness mac-shield-lifecycle \
     process-identity nonce-uniqueness owner-lock-contract maintenance-lock-interop lock-publication lock-reclaim dhcp-incomplete-lock router-portability dhcp-owners dhcp-phases dhcp-crash-points \
     heal-handoff boot-handoff duplicate-events manager-ownership \
     settle-watchdog recovery failsafe-status post-apply observation-lock observation-concurrency \
     observation-timeouts observation-generations observation-resume-progress atomic-publication json-validation client-refresh-contract \
     node-job-logging node-job-ssh-temp node-runner-status node-worker-pool node-worker-timeout \
-    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity update-download-retry payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation shell-syntax signal-termination live-audit; do
+    execute-node-runner sync-node-pool sync-node-parallel apmo-completion action-lifecycle action-parent-ownership action-lock-failure direct-manager-save-overlap update-lock-ownership update-exclusivity update-download-retry payload-contract failure-propagation ssh-outbound ssh-trust logging-polling apply-observation wan-native-contract shell-syntax signal-termination live-audit; do
     printf '\n# %s\n' "$SELFTEST_CASE"
     run_one "$SELFTEST_CASE"
   done

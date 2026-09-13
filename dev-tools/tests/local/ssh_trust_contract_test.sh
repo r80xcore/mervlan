@@ -33,6 +33,9 @@ TRUST_ACTION_FILE="$MERV_BASE/functions/ssh_trust_action.sh"
 grep -q 'MERV_SSH_TRUST_ORIGINAL_ACTION="$SYNC_PROGRESS_ACTION"' "$SYNC_FILE" || fail settings-only-trust-action
 grep -q 'syncsettings_vlanmgr) sh "\$MERV_BASE/functions/sync_nodes.sh" --settings-only' "$TRUST_ACTION_FILE" || fail settings-only-trust-resume
 grep -q 'sync_vlanmgr|syncsettings_vlanmgr|' "$TRUST_ACTION_FILE" || fail settings-only-trust-allowlist
+grep -q '^functions/ssh_hostkey_probe.sh$' "$SYNC_FILE" || fail sync-hostkey-probe-payload
+grep -A20 '^FILES_TO_COPY_CHMOD="' "$SYNC_FILE" | grep -q '^functions/ssh_hostkey_probe.sh$' || fail sync-hostkey-probe-mode
+ok sync-hostkey-probe-payload
 
 # The action worker sources var_settings.sh, where CUSTOM_SETTINGS_FILE is
 # readonly.  Its startup path must not try to assign that canonical value a
@@ -85,16 +88,40 @@ fi
 [ "$_probe_elapsed" -lt 8 ] || fail probe-timeout-bound
 ok probe-timeout-cleans-up-client
 
+# ASUS Dropbear emits "Connect failed" for an unreachable route.  With no
+# captured known_hosts entry that is strictly a pre-session transport failure,
+# so the probe must return the recovery-fallback classification rather than
+# the ambiguous generic probe result.
+PROBE_CONNECT_FAIL="$TEST_ROOT/probe-connect-fail"
+printf '%s\n' '#!/bin/sh' \
+  'printf "%s\\n" "dbclient: Connection to test@198.51.100.10:22 exited: Connect failed: No route to host" >&2' \
+  '# Keep the fake client alive long enough for the production identity guard to authenticate its child before classifying the captured transport result.' \
+  'sleep 2' \
+  'exit 1' > "$PROBE_CONNECT_FAIL" || fail probe-connect-fail-write
+chmod 700 "$PROBE_CONNECT_FAIL" || fail probe-connect-fail-mode
+MERV_BASE="$PROBE_BASE" MERV_SSH_CLIENT="$PROBE_CONNECT_FAIL" \
+  MERV_SSH_CONNECT_TIMEOUT=1 \
+  sh "$PROBE_BASE/functions/ssh_hostkey_probe.sh" \
+    'NODE1@198.51.100.10:22' 198.51.100.10 22 >/dev/null 2>&1
+[ "$?" -eq 10 ] || fail probe-connect-failed-transport-result
+ok probe-connect-failed-transport-result
+
 # Keep the browser-facing acknowledgement contract covered as well: a trust
 # required result must be valid JSON and must be published to both paths.
 export ACTION_ACK_FILE="$TEST_ROOT/public/action_result.json"
 export ACTION_ACK_INTERNAL_FILE="$TEST_ROOT/internal/action_ack.json"
+export ACTION_ACK_DIR="$TEST_ROOT/public/actions"
+export ACTION_ACK_PENDING_DIR="$TEST_ROOT/state/action_ack_pending"
 . "$BASE_DIR/settings/lib_action_ack.sh" || fail action-ack-library
 action_ack_ssh_trust_required "ack-regression" "sshtrustprobe_vlanmgr" \
   '{"reason":"ssh-trust-required"}' "SSH verification is required." '[]' || fail action-ack-write
 [ -s "$ACTION_ACK_FILE" ] || fail action-ack-public-file
 [ -s "$ACTION_ACK_INTERNAL_FILE" ] || fail action-ack-internal-file
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["status"] == "ssh_trust_required"; assert d["result"]["reason"] == "ssh-trust-required"' "$ACTION_ACK_FILE" || fail action-ack-json
+# Keep the portable local fixture free of a Python runtime requirement. The
+# production renderer receives fixed, shell-validated JSON fragments here, so
+# these exact fields prove the browser-facing acknowledgement contract.
+grep -Fq '"status":"ssh_trust_required"' "$ACTION_ACK_FILE" || fail action-ack-json-status
+grep -Fq '"result":{"reason":"ssh-trust-required"}' "$ACTION_ACK_FILE" || fail action-ack-json-reason
 ok action-ack-json
 
 merv_ssh_trust_init >/dev/null 2>&1 || fail init
@@ -144,6 +171,11 @@ merv_ssh_trust_publish_stage "$STAGE" >/dev/null 2>&1 || fail publish-record
 merv_ssh_hostkey_probe 1 192.168.1.2 22 "$MAC1"
 [ "$?" -eq 0 ] || fail verified-probe
 ok verified-probe
+merv_ssh_require_verified_node 1 192.168.1.99 22 "$MAC1" 192.168.1.2 || fail alternate-endpoint-canonical-trust
+ok alternate-endpoint-canonical-trust
+merv_ssh_hostkey_probe 1 192.168.1.99 22 "$MAC1" 192.168.1.2
+[ "$?" -eq 0 ] || fail alternate-endpoint-canonical-probe
+ok alternate-endpoint-canonical-probe
 merv_ssh_hostkey_probe 1 192.168.1.99 22 "$MAC1"
 [ "$?" -eq 8 ] || fail endpoint-change
 ok endpoint-change
@@ -286,5 +318,12 @@ for _q in "$MERV_SSH_TRUST_QUARANTINE_ROOT"/"$CHALLENGE".invalid.*; do
 done
 [ "$_quarantined" -eq 1 ] || fail malformed-challenge-quarantine
 ok malformed-challenge-quarantine
+
+# Legacy nodes can lack AUTO_NODE<n>_MAC. Their trust identity is therefore
+# the configured ASUS/recovery endpoint, not a temporary WAN Native address.
+LEGACY_STAGE=$(merv_ssh_trust_stage_record 9 none 192.168.1.9 22 ssh-ed25519 "$KEY1" "$FP1") || fail legacy-stage-record
+merv_ssh_trust_publish_stage "$LEGACY_STAGE" >/dev/null 2>&1 || fail legacy-publish-record
+merv_ssh_require_verified_node 9 192.168.1.99 22 none 192.168.1.9 || fail alternate-endpoint-legacy-canonical-trust
+ok alternate-endpoint-legacy-canonical-trust
 
 printf 'SSH_TRUST_CONTRACT_OK\n'

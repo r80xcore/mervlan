@@ -20,6 +20,8 @@ ssh_open=$(function_block showSSHKeyModal)
 ssh_close=$(function_block closeSSHKeyModal)
 ssh_load=$(function_block loadSshKeyIntoModal)
 trust_refresh=$(function_block refreshSshTrustRegistry)
+trust_enroll_ack=$(sed -n "/if (active.action === 'sshtrustenroll_vlanmgr'/,/if (status === 'ssh_trust_required')/p" "$UI_FILE")
+trust_revoke=$(function_block revokeSshTrustNode)
 
 printf '%s\n' "$ssh_open" | grep -Fq "modal.style.display = 'flex';" || fail 'SSH modal is not opened synchronously'
 printf '%s\n' "$ssh_open" | grep -Fq 'loadSshKeyIntoModal();' || fail 'SSH modal does not start its asynchronous key load'
@@ -37,6 +39,12 @@ printf '%s\n' "$trust_refresh" | grep -Fq 'setSshTrustRegistryMessage' || fail '
 [ "$(printf '%s\n' "$trust_refresh" | grep -Fc "MVM_trigger('sshtruststatus_vlanmgr'")" -eq 1 ] || fail 'trust refresh submits an unexpected number of backend actions'
 grep -Fq "if (trustTab) refreshSshTrustRegistry();" "$UI_FILE" || fail 'Trusted Devices tab does not own its status load'
 grep -Fq "['sshTrustRefreshBtn', 'sshTrustSelectAllBtn', 'sshTrustClearSelectionBtn', 'sshTrustProbeBtn']" "$UI_FILE" || fail 'trust loading controls are not guarded'
+printf '%s\n' "$trust_enroll_ack" | grep -Fq 'window.setTimeout(() => submitSshTrustResume(resumeId), 550);' || fail 'stored trust actions no longer resume'
+printf '%s\n' "$trust_enroll_ack" | grep -Fq 'clearSshTrustDecision();' || fail 'direct trust enrollment does not clear its decision UI'
+printf '%s\n' "$trust_enroll_ack" | grep -Fq "if (typeof refreshSshTrustRegistry === 'function') refreshSshTrustRegistry();" || fail 'direct trust enrollment does not refresh the authoritative registry'
+grep -Fq 'return `Decision expires in ${minutes}:${remainder}`;' "$UI_FILE" || fail 'trust decision expiry is still labelled as a cooldown'
+printf '%s\n' "$trust_revoke" | grep -Fq "node_id: node && typeof node === 'object' ? node.nodeId : ''" || fail 'trusted-row revoke loses the normalized node identifier'
+printf '%s\n' "$trust_revoke" | grep -Fq "MVM_triggerVerified('sshtrustrevoke_vlanmgr'" || fail 'trusted-row revoke no longer dispatches through the verified parent action'
 
 settings_open=$(sed -n '/^    async function showServiceSettingsModal()/,/^    function closeServiceSettingsModal()/p' "$UI_FILE")
 settings_loader=$(sed -n '/^    async function loadSettings(opts = {}){/,/^    function toNone/p' "$UI_FILE")
@@ -50,5 +58,8 @@ printf '%s\n' "$settings_loader" | grep -Fq 'const { deferFill = false, shouldCo
 [ "$(printf '%s\n' "$settings_open" | grep -Fc "const overlay = document.getElementById('leftPanelOverlay');")" -eq 1 ] || fail 'Settings modal redeclares its overlay binding'
 ! grep -Fq 'settingsLoadInFlight' "$UI_FILE" || fail 'modal settings request leaks into normal settings loads'
 grep -Fq "_svcSettingsLoadState !== 'ready'" "$UI_FILE" || fail 'Settings controls are not gated on load completion'
+grep -Fq 'serviceSettingsAutoSyncPrerequisites(CURRENT_SETTINGS_CACHE).ready' "$UI_FILE" || fail 'Settings busy state can overwrite Auto-sync prerequisites'
+grep -Fq 'stopServiceConvergenceObservation();' "$UI_FILE" || fail 'Settings modal close does not stop its read-only convergence observer'
+grep -Fq 'observeServiceConvergence();' "$UI_FILE" || fail 'Settings modal open does not rehydrate convergence observation'
 
 printf 'MODAL_LIFECYCLE_CONTRACT_OK\n'

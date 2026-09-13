@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#          - File: service-event-handler.sh || version="0.64"                  #
+#          - File: service-event-handler.sh || version="0.66"                  #
 # ============================================================================ #
 # - Purpose:    Event handler for http and service events                      #
 # ============================================================================ #
@@ -74,6 +74,12 @@ if [ -z "${RAW}" ]; then
   logger -t "VLANMgr" "handler: no action provided (args: '$1' '$2' '$3')"
   exit 0
 fi
+
+# Keep the original spelling for the isolated Developer Tools transport.  The
+# normal event path intentionally normalizes dashes to underscores, but
+# Developer Tools request IDs and self-test cases use a lower-case dash-safe
+# alphabet and must be correlated exactly in the public result.
+DEVTOOLS_RAW_ACTION="$RAW"
 
 # Normalize action format: convert dashes to underscores for case matching
 # Example: "save-vlanmgr" becomes "save_vlanmgr" (case statement uses underscores)
@@ -363,6 +369,358 @@ if [ "$IS_NODE_FLAG" -eq 1 ] && [ "$APP_EVENT" -eq 1 ]; then
 fi
 
 # ========================================================================== #
+# DEVELOPER TOOLS FAST PATH — dev-only, MAIN-only, no lifecycle state        #
+# ========================================================================== #
+# This path is intentionally placed after parsing and node detection, but
+# before PAUSE, lock, progress, acknowledgement, or normal dispatch logic.
+# It accepts one closed action grammar and invokes only the fixed read-only
+# status / boot command or the installed router self-test entry point.
+
+devtools_request_id_valid() {
+  _dt_rid="$1"
+  [ -n "$_dt_rid" ] || return 1
+  [ "${#_dt_rid}" -le 96 ] || return 1
+  case "$_dt_rid" in *[!a-z0-9-]*) return 1 ;; esac
+  return 0
+}
+
+devtools_main_settings_valid() {
+  _dt_settings_file="$1"
+  # Current settings keep identity under General. Prefer that canonical block
+  # so a stray top-level duplicate cannot make a node look like MAIN; retain
+  # the flat-key read only for older installations without the block.
+  _dt_is_node="$(sed -n \
+    '/^[[:space:]]*"General"[[:space:]]*:[[:space:]]*{/,/^[[:space:]]*}/ {
+      s/^[[:space:]]*"IS_NODE"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*,[[:space:]]*$/\1/p
+      s/^[[:space:]]*"IS_NODE"[[:space:]]*:[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p
+    }' \
+    "$_dt_settings_file" 2>/dev/null | head -n 1)"
+  if [ -z "$_dt_is_node" ]; then
+    _dt_is_node="$(json_get_flag IS_NODE __missing__ "$_dt_settings_file" 2>/dev/null)"
+  fi
+  [ "$_dt_is_node" = "0" ] || return 1
+  return 0
+}
+
+devtools_read_setting() {
+  _dtr_section="$1"
+  _dtr_key="$2"
+  _dtr_default="$3"
+  _dtr_file="$4"
+  _dtr_value=""
+  case "$_dtr_section:$_dtr_key" in
+    General:BOOT_ENABLED|General:IS_NODE|Hardware:PRODUCTID)
+      _dtr_value="$(sed -n \
+        "/^[[:space:]]*\"$_dtr_section\"[[:space:]]*:[[:space:]]*{/,/^[[:space:]]*}/ {
+          s/^[[:space:]]*\"$_dtr_key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"[[:space:]]*,[[:space:]]*$/\1/p
+          s/^[[:space:]]*\"$_dtr_key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"[[:space:]]*$/\1/p
+        }" \
+        "$_dtr_file" 2>/dev/null | head -n 1)"
+      ;;
+  esac
+  if [ -z "$_dtr_value" ]; then
+    _dtr_value="$(json_get_flag "$_dtr_key" __missing__ "$_dtr_file" 2>/dev/null)"
+  fi
+  if [ -n "$_dtr_value" ] && [ "$_dtr_value" != "__missing__" ]; then
+    printf '%s\n' "$_dtr_value"
+  else
+    printf '%s\n' "$_dtr_default"
+  fi
+}
+
+devtools_cron_state() {
+  type cru >/dev/null 2>&1 || {
+    printf 'unknown\n'
+    return 0
+  }
+  if cru l 2>/dev/null | grep -Fq "${MERV_BASE%/}/functions/heal_event.sh cron"; then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+devtools_publish_result() {
+  _dtp_request_id="$1"
+  _dtp_operation="$2"
+  _dtp_case="$3"
+  _dtp_rc="$4"
+  _dtp_capture="$5"
+  _dtp_public_base="${PUBLIC_MERV_BASE:-/www/user/mervlan}"
+  case "$_dtp_public_base" in
+    ''|/|*..*|*//*|*[!A-Za-z0-9/_-]*)
+      logger -t "VLANMgr" "handler: Developer Tools public root is unsafe"; return 1 ;;
+    /*) ;;
+    *) logger -t "VLANMgr" "handler: Developer Tools public root is not absolute"; return 1 ;;
+  esac
+  _dtp_result_dir="${_dtp_public_base%/}/tmp/results"
+  mkdir -p "$_dtp_result_dir" 2>/dev/null || {
+    logger -t "VLANMgr" "handler: Developer Tools result directory unavailable"
+    return 1
+  }
+  _dtp_stamp="$(date +%s 2>/dev/null || printf '0')"
+  case "$_dtp_stamp" in ''|*[!0-9]*) _dtp_stamp=0 ;; esac
+  _dtp_tmp="$_dtp_result_dir/.dev_tools_result.${_dtp_stamp}.$_dtp_request_id.$$"
+  if ! {
+    printf 'request_id=%s\n' "$_dtp_request_id"
+    printf 'operation=%s\n' "$_dtp_operation"
+    [ -n "$_dtp_case" ] && printf 'case=%s\n' "$_dtp_case"
+    printf 'exit_code=%s\n' "$_dtp_rc"
+    if [ "$_dtp_rc" -eq 0 ] 2>/dev/null; then
+      printf 'status=ok\n'
+    else
+      printf 'status=failed\n'
+    fi
+    printf 'output:\n'
+    if [ -f "$_dtp_capture" ]; then
+      cat "$_dtp_capture"
+    fi
+    printf '\n'
+  } >"$_dtp_tmp" 2>/dev/null; then
+    rm -f "$_dtp_tmp" 2>/dev/null || :
+    logger -t "VLANMgr" "handler: Developer Tools result staging failed"
+    return 1
+  fi
+  chmod 644 "$_dtp_tmp" 2>/dev/null || {
+    rm -f "$_dtp_tmp" 2>/dev/null || :
+    logger -t "VLANMgr" "handler: Developer Tools result permission setup failed"
+    return 1
+  }
+  mv -f "$_dtp_tmp" "$_dtp_result_dir/dev_tools_result.json" 2>/dev/null || {
+    rm -f "$_dtp_tmp" 2>/dev/null || :
+    logger -t "VLANMgr" "handler: Developer Tools result publication failed"
+    return 1
+  }
+  return 0
+}
+
+devtools_fast_path() {
+  _dt_action="$DEVTOOLS_RAW_ACTION"
+  _dt_operation=""
+  _dt_case=""
+  _dt_request_id=""
+
+  case "$_dt_action" in
+    devtools_vlanmgr_status_rid_*)
+      _dt_operation=status
+      _dt_request_id="${_dt_action#devtools_vlanmgr_status_rid_}"
+      ;;
+    devtools_vlanmgr_cronenable_rid_*)
+      _dt_operation=cronenable
+      _dt_request_id="${_dt_action#devtools_vlanmgr_cronenable_rid_}"
+      ;;
+    devtools_vlanmgr_crondisable_rid_*)
+      _dt_operation=crondisable
+      _dt_request_id="${_dt_action#devtools_vlanmgr_crondisable_rid_}"
+      ;;
+    devtools_vlanmgr_selftest_*_rid_*)
+      _dt_selftest_tail="${_dt_action#devtools_vlanmgr_selftest_}"
+      _dt_case="${_dt_selftest_tail%_rid_*}"
+      _dt_request_id="${_dt_selftest_tail#${_dt_case}_rid_}"
+      _dt_operation=selftest
+      ;;
+    *)
+      logger -t "VLANMgr" "handler: rejected malformed Developer Tools action"
+      return 1
+      ;;
+  esac
+
+  devtools_request_id_valid "$_dt_request_id" || {
+    logger -t "VLANMgr" "handler: rejected invalid Developer Tools request id"
+    return 1
+  }
+  if [ "$_dt_operation" = "selftest" ]; then
+    [ -n "$_dt_case" ] || {
+      logger -t "VLANMgr" "handler: rejected empty Developer Tools self-test case"
+      return 1
+    }
+    case "$_dt_case" in
+      *[!a-z0-9-]*|all)
+        logger -t "VLANMgr" "handler: rejected invalid Developer Tools self-test case"
+        return 1
+        ;;
+    esac
+  fi
+
+  # The served addon must identify an exact development build and the local
+  # settings must prove this process is MAIN.  No fallback to a public or
+  # caller-supplied marker is permitted: uncertainty rejects the request.
+  _dt_index_file="${MERV_BASE%/}/www/index.html"
+  [ -s "$_dt_index_file" ] || {
+    logger -t "VLANMgr" "handler: Developer Tools refused without installed index marker"
+    return 1
+  }
+  _dt_version_marker="$(sed -n 's/^[[:space:]]*<!--[[:space:]]*index\.html version="\([^"]*\)"[[:space:]]*-->[[:space:]]*$/\1/p' "$_dt_index_file" 2>/dev/null | head -n 1)"
+  case "$_dt_version_marker" in
+    *-dev) ;;
+    *) logger -t "VLANMgr" "handler: Developer Tools refused without -dev index marker"; return 1 ;;
+  esac
+  [ -s "$SETTINGS_FILE" ] || {
+    logger -t "VLANMgr" "handler: Developer Tools refused without MAIN settings"
+    return 1
+  }
+  devtools_main_settings_valid "$SETTINGS_FILE" || {
+    logger -t "VLANMgr" "handler: Developer Tools refused on non-MAIN settings"
+    return 1
+  }
+  [ "${MERV_NODE_CONTEXT:-0}" = "0" ] || {
+    logger -t "VLANMgr" "handler: Developer Tools refused in node context"
+    return 1
+  }
+  [ ! -e "${MERV_BASE%/}/.is_node" ] || {
+    logger -t "VLANMgr" "handler: Developer Tools refused with node sentinel"
+    return 1
+  }
+
+  _dt_public_base="${PUBLIC_MERV_BASE:-/www/user/mervlan}"
+  case "$_dt_public_base" in
+    ''|/|*..*|*//*|*[!A-Za-z0-9/_-]*)
+      logger -t "VLANMgr" "handler: Developer Tools public root is unsafe"; return 1 ;;
+    /*) ;;
+    *) logger -t "VLANMgr" "handler: Developer Tools public root is not absolute"; return 1 ;;
+  esac
+  _dt_result_dir="${_dt_public_base%/}/tmp/results"
+  mkdir -p "$_dt_result_dir" 2>/dev/null || {
+    logger -t "VLANMgr" "handler: Developer Tools result directory unavailable"
+    return 1
+  }
+  _dt_stamp="$(date +%s 2>/dev/null || printf '0')"
+  case "$_dt_stamp" in ''|*[!0-9]*) _dt_stamp=0 ;; esac
+  _dt_capture="$_dt_result_dir/.dev_tools_capture.${_dt_stamp}.$_dt_request_id.$$"
+
+  # Keep the command surface closed.  Request data is passed only as a
+  # validated self-test argument; no eval, shell fragment, or path is accepted.
+  case "$_dt_operation" in
+    status)
+      {
+        _dt_boot="$(devtools_read_setting General BOOT_ENABLED unknown "$SETTINGS_FILE")"
+        case "$_dt_boot" in
+          1|yes|on|enabled|true) _dt_boot=1 ;;
+          0|no|off|disabled|false) _dt_boot=0 ;;
+          *) _dt_boot=unknown ;;
+        esac
+        _dt_hardware="$(devtools_read_setting Hardware PRODUCTID Unknown "$SETTINGS_FILE")"
+        if [ -z "$_dt_hardware" ] || [ "$_dt_hardware" = "Unknown" ]; then
+          if type nvram >/dev/null 2>&1; then
+            _dt_hardware="$(nvram get productid 2>/dev/null)"
+          fi
+        fi
+        [ -n "$_dt_hardware" ] || _dt_hardware=Unknown
+
+        _dt_loader=missing
+        if [ -f /jffs/scripts/services-start ]; then
+          if grep -Fq "${MERV_BASE%/}/functions/mervlan_boot_wrap.sh install" /jffs/scripts/services-start 2>/dev/null ||
+             grep -Fq "${MERV_BASE%/}/install.sh" /jffs/scripts/services-start 2>/dev/null; then
+            _dt_loader=active
+          else
+            _dt_loader=custom
+          fi
+        fi
+
+        _dt_service_event=missing
+        if [ -f /jffs/scripts/service-event ]; then
+          if grep -Fq "service-event disabled" /jffs/scripts/service-event 2>/dev/null; then
+            _dt_service_event=disabled
+          elif grep -Fq "${MERV_BASE%/}/functions/service-event-handler.sh" /jffs/scripts/service-event 2>/dev/null; then
+            _dt_service_event=active
+          else
+            _dt_service_event=custom
+          fi
+        fi
+
+        _dt_cron="$(devtools_cron_state)"
+        _dt_mac_state=unknown
+        _dt_mac_rule_count=unknown
+        if type ebtables >/dev/null 2>&1; then
+          _dt_mac_listing="$(ebtables -t filter -L MERV_MAC 2>/dev/null)"
+          _dt_mac_rc=$?
+          if [ "$_dt_mac_rc" -eq 0 ]; then
+            _dt_mac_rule_count="$(printf '%s\n' "$_dt_mac_listing" | grep -c '^-s ' 2>/dev/null)"
+            case "$_dt_mac_rule_count" in
+              ''|*[!0-9]*) _dt_mac_rule_count=0 ;;
+            esac
+            if [ "$_dt_mac_rule_count" -gt 0 ] 2>/dev/null; then
+              _dt_mac_state=on
+            else
+              _dt_mac_state=off
+            fi
+          fi
+        fi
+
+        # These two installed scripts expose read-only status views for the
+        # observation and live-test state. Keep them after the direct probes;
+        # they add body data for the Developer Tools parser without starting
+        # workers, requesting work, or changing lifecycle state.
+        if [ -f "${MERV_BASE%/}/functions/post_apply_worker.sh" ]; then
+          /bin/sh "${MERV_BASE%/}/functions/post_apply_worker.sh" status 2>&1
+        else
+          printf 'observation_worker=not-installed\n'
+          printf 'pending_snapshots=Unknown\n'
+          printf 'pending_client_collections=Unknown\n'
+        fi
+        if [ -f "${MERV_BASE%/}/dev-tools/safety/mervlan_live_test_guard.sh" ]; then
+          /bin/sh "${MERV_BASE%/}/dev-tools/safety/mervlan_live_test_guard.sh" status 2>&1
+        else
+          printf 'live_test_guard=Not installed\n'
+          printf 'recovery_pending=Unknown\n'
+        fi
+
+        printf 'build=%s\n' "$_dt_version_marker"
+        printf 'hardware=%s\n' "$_dt_hardware"
+        printf 'boot_enabled=%s\n' "$_dt_boot"
+        printf 'addon_loader=%s\n' "$_dt_loader"
+        printf 'service_event=%s\n' "$_dt_service_event"
+        printf 'periodic_recovery_cron=%s\n' "$_dt_cron"
+        printf 'mac_shield=%s\n' "$_dt_mac_state"
+        printf 'mac_rule_count=%s\n' "$_dt_mac_rule_count"
+        printf 'observation_worker=unknown\n'
+        printf 'pending_snapshots=unknown\n'
+        printf 'pending_client_collections=unknown\n'
+        printf 'live_test_guard=unknown\n'
+        printf 'recovery_pending=unknown\n'
+        printf 'MAIN hw=%s boot=%s addon=%s service-event=%s cron=%s is_node=no mac_shield=%s\n' \
+          "$_dt_hardware" "$_dt_boot" "$_dt_loader" "$_dt_service_event" "$_dt_cron" "$_dt_mac_state"
+      } >"$_dt_capture" 2>&1
+      _dt_rc=$?
+      ;;
+    cronenable|crondisable)
+      /bin/sh "${MERV_BASE%/}/functions/mervlan_boot.sh" "$_dt_operation" >"$_dt_capture" 2>&1
+      _dt_rc=$?
+      _dt_cron_observed="$(devtools_cron_state)"
+      printf 'cron_verification=%s\n' "$_dt_cron_observed" >>"$_dt_capture"
+      if [ "$_dt_rc" -eq 0 ] 2>/dev/null; then
+        if [ "$_dt_operation" = "cronenable" ] && [ "$_dt_cron_observed" != "present" ]; then
+          printf 'Developer Tools cron verification failed: cru l did not show the configured heal entry\n' >>"$_dt_capture"
+          _dt_rc=1
+        elif [ "$_dt_operation" = "crondisable" ] && [ "$_dt_cron_observed" != "absent" ]; then
+          printf 'Developer Tools cron verification failed: cru l still shows the configured heal entry\n' >>"$_dt_capture"
+          _dt_rc=1
+        fi
+      fi
+      ;;
+    selftest)
+      /bin/sh "${MERV_BASE%/}/dev-tools/tests/router/mervlan_selftest.sh" "$_dt_case" >"$_dt_capture" 2>&1
+      _dt_rc=$?
+      ;;
+    *) return 1 ;;
+  esac
+  devtools_publish_result "$_dt_request_id" "$_dt_operation" "$_dt_case" "$_dt_rc" "$_dt_capture"
+  _dt_publish_rc=$?
+  rm -f "$_dt_capture" 2>/dev/null || :
+  [ "$_dt_publish_rc" -eq 0 ] || return 1
+  return "$_dt_rc"
+}
+
+# Route every Developer Tools-looking action into the isolated path.  This
+# prevents malformed requests from falling through to normal event handling.
+case "$DEVTOOLS_RAW_ACTION" in
+  devtools_vlanmgr_*)
+    devtools_fast_path
+    exit $?
+    ;;
+esac
+
+# ========================================================================== #
 # PAUSE GUARD — Suppress router-triggered events when PAUSE is active        #
 # ========================================================================== #
 # APP_EVENT=1 (UI buttons) always pass through so the UI remains responsive.
@@ -427,6 +785,14 @@ dispatch_if_executable() {
   # malformed owner metadata is treated as busy and is never reclaimed by age.
   _se_key=$(printf '%s' "${RAW:-${SCRIPT_PATH##*/}}" | tr -cd 'A-Za-z0-9._-')
   [ -n "$_se_key" ] || return 1
+  # Progress-token actions carry the token in their dispatch spelling, but the
+  # correlated acknowledgement is a public action contract.  Keep lock
+  # refusals observable by the browser under the same base action it requested.
+  # (For example, save_vlanmgr_pgt_<token> acknowledges as save_vlanmgr.)
+  case "$_se_key" in
+    *_pgt_*) _se_ack_action="${_se_key%%_pgt_*}" ;;
+    *) _se_ack_action="$_se_key" ;;
+  esac
   _se_event_lock="${LOCKDIR%/}/${_se_key}.lock"
   merv_action_lock_enter "$_se_event_lock"
   _se_event_rc=$?
@@ -438,7 +804,7 @@ dispatch_if_executable() {
       merv_action_progress_fail "The event action owner could not be verified; no work was started."
     fi
     if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
-      action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_event_rc" event >/dev/null 2>&1 || \
+      action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_ack_action" "$_se_event_rc" event >/dev/null 2>&1 || \
         logger -t "VLANMgr" "handler: lock-failure acknowledgement failed for $_se_key"
     fi
     logger -t "VLANMgr" "handler: $_se_key owner lock unavailable (rc=$_se_event_rc); refusing dispatch"
@@ -463,7 +829,7 @@ dispatch_if_executable() {
         merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
         merv_action_progress_fail "The action lock could not be reconciled; recovery is required."
         if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
-          action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+          action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" \
             '{"reason":"cleanup-failed","lock":"event"}' \
             "The event action lock could not be cleaned up; recovery is required." \
             '["action-lock-cleanup-failed"]' action-lock-cleanup-failed >/dev/null 2>&1 || :
@@ -477,7 +843,7 @@ dispatch_if_executable() {
         merv_action_progress_fail "The global action owner could not be verified; no work was started."
       fi
       if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_lock_failure >/dev/null 2>&1; then
-        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_key" "$_se_global_rc" global >/dev/null 2>&1 || \
+        action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_se_ack_action" "$_se_global_rc" global >/dev/null 2>&1 || \
           logger -t "VLANMgr" "handler: global lock-failure acknowledgement failed for $_se_key"
       fi
       logger -t "VLANMgr" "handler: global action lock unavailable (rc=$_se_global_rc); refusing $_se_key"
@@ -523,19 +889,19 @@ dispatch_if_executable() {
       _se_worker_pid=""
       return 0
     fi
-    if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+    if merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
       kill -TERM "$_se_worker_pid" 2>/dev/null || :
       _se_n=0
-      while [ "$_se_n" -lt 5 ] && merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; do
+      while [ "$_se_n" -lt 5 ] && merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; do
         sleep 1
         _se_n=$((_se_n + 1))
       done
-      if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+      if merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
         kill -KILL "$_se_worker_pid" 2>/dev/null || :
         sleep 1
       fi
     fi
-    if merv_process_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
+    if merv_identity_matches "$_se_worker_pid" "$_se_worker_start" 2>/dev/null; then
       return 1
     fi
     wait "$_se_worker_pid" 2>/dev/null || :
@@ -594,7 +960,7 @@ dispatch_if_executable() {
       merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
       merv_action_progress_fail "The action owner context was invalid; no work was started."
       if [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_error >/dev/null 2>&1; then
-        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" \
+        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" \
           '{"reason":"child-context-export-failed"}' \
           "The action owner context was invalid; no work was started." \
           '["child-context-export-failed"]' child-context-export-failed >/dev/null 2>&1 || :
@@ -611,7 +977,10 @@ dispatch_if_executable() {
       # signal reconciliation without descendant-wide kills.
       sh "$SCRIPT_PATH" "$@" &
       _se_worker_pid=$!
-      _se_worker_start=$(merv_proc_start_time "$_se_worker_pid" 2>/dev/null || printf '')
+      # lib_action_lock loads lib_identity; use that lightweight, authoritative
+      # identity API directly.  merv_proc_start_time is a lib_mervqt wrapper
+      # and is intentionally not loaded by this DHCP-sensitive dispatcher.
+      _se_worker_start=$(merv_identity_proc_start "$_se_worker_pid" 2>/dev/null || printf '')
       case "$_se_worker_start" in
         ''|*[!0-9]*)
           # Never issue an unauthenticated PID kill.  The direct child is
@@ -676,9 +1045,31 @@ dispatch_if_executable() {
     if [ "$_se_script_rc" -eq 0 ]; then
       _se_script_rc=75
       if [ "$_se_ack_finalized" -eq 0 ] && type action_ack_error >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
-        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_key" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
+        action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
       fi
     fi
+  fi
+  # A successful WebUI Save may have published a durable node-settings
+  # generation.  The browser can accelerate it, but browser transport must
+  # never be the only way convergence starts.  Kick the existing due worker
+  # only after this dispatcher has conclusively released its event/global
+  # ownership.  The worker rechecks AUTO_SYNC, Update eligibility, marker
+  # state, and the normal global owner lock before it launches SSH work.
+  case "${RAW:-}" in
+    save_vlanmgr|save_vlanmgr_pgt_*) _se_successful_save=1 ;;
+    *) _se_successful_save=0 ;;
+  esac
+  if [ "$_se_successful_save" -eq 1 ] && [ "$_se_script_rc" -eq 0 ] && [ "$_se_release_rc" -eq 0 ] && \
+     [ -f "$MERV_BASE/functions/settings_reconcile.sh" ]; then
+    (
+      unset MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
+        MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
+        MERV_PROGRESS_TOKEN MERV_ACTION_ACK_STAGE
+      exec </dev/null
+      exec >/dev/null 2>&1
+      sh "$MERV_BASE/functions/settings_reconcile.sh" due
+    ) &
+    logger -t "VLANMgr" "handler: settings reconciliation kick scheduled after save"
   fi
   return "$_se_script_rc"
 

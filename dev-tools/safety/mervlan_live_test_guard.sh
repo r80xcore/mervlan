@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # ============================================================================ #
-#         - File: mervlan_live_test_guard.sh || version="0.1"                  #
+#         - File: mervlan_live_test_guard.sh || version="0.3"                  #
 # ============================================================================ #
 # Persistent safety timer for deliberately disruptive live tests. ASUSWRT cru
 # invokes `expire` independently of the initiating SSH session.
@@ -20,6 +20,10 @@ GUARD_ARMED="$GUARD_ROOT/armed"
 GUARD_HISTORY="$GUARD_ROOT/history"
 GUARD_RECOVERY_PENDING="${MERV_DHCP_HOLD_STATE_ROOT:-$LOCKDIR/dhcp_hold}/recovery.pending"
 GUARD_CRON="${MERV_LIVE_TEST_GUARD_CRON_NAME:-MerVLANLiveTestGuard}"
+# The scheduler must not execute a path inside MERV_BASE: Update replaces that
+# tree while a live test may still be active. Stage a private executable only
+# when arming; it is removed on every terminal guard path.
+GUARD_EXECUTABLE="${MERV_LIVE_TEST_GUARD_EXECUTABLE:-$GUARD_ROOT/mervlan_live_test_guard.sh}"
 
 guard_log() {
   _gl_level="$1"
@@ -68,6 +72,65 @@ guard_write_history() {
   mv "$_gwh_tmp" "$_gwh_dst" 2>/dev/null
 }
 
+guard_path_outside_addon() {
+  case "$1" in
+    "$MERV_BASE"|"$MERV_BASE"/*|'') return 1 ;;
+    /*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+guard_validate_executable_path() {
+  _gve_path="$1"
+  guard_path_outside_addon "$_gve_path" || return 1
+  case "$_gve_path" in
+    /tmp/mervlan_tmp/*) ;;
+    *) return 1 ;;
+  esac
+  case "$_gve_path" in
+    "$GUARD_ROOT"/*) ;;
+    *) return 1 ;;
+  esac
+  case "$_gve_path" in
+    */) return 1 ;;
+    *..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+guard_cleanup_executable() {
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || return 1
+  rm -f "$GUARD_EXECUTABLE" "${GUARD_EXECUTABLE}.tmp.$$" 2>/dev/null || return 1
+  _gce_parent=${GUARD_EXECUTABLE%/*}
+  [ "$_gce_parent" != "$GUARD_EXECUTABLE" ] && rmdir "$_gce_parent" 2>/dev/null || :
+  return 0
+}
+
+guard_remove_empty_state() {
+  [ -f "$GUARD_ARMED" ] && return 0
+  rmdir "$GUARD_HISTORY" 2>/dev/null || :
+  rmdir "$GUARD_ROOT" 2>/dev/null || :
+}
+
+guard_stage_executable() {
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || return 1
+  [ -f "$LIVE_TEST_GUARD_SCRIPT" ] || return 1
+  [ -L "$LIVE_TEST_GUARD_SCRIPT" ] && return 1
+  _gse_parent=${GUARD_EXECUTABLE%/*}
+  [ "$_gse_parent" != "$GUARD_EXECUTABLE" ] || _gse_parent=.
+  mkdir -p "$_gse_parent" 2>/dev/null || return 1
+  _gse_tmp="${GUARD_EXECUTABLE}.tmp.$$"
+  rm -f "$_gse_tmp" 2>/dev/null || return 1
+  cp -p "$LIVE_TEST_GUARD_SCRIPT" "$_gse_tmp" 2>/dev/null || return 1
+  chmod 755 "$_gse_tmp" 2>/dev/null || return 1
+  [ -x "$_gse_tmp" ] || return 1
+  mv -f "$_gse_tmp" "$GUARD_EXECUTABLE" 2>/dev/null || {
+    rm -f "$_gse_tmp" 2>/dev/null || :
+    return 1
+  }
+  [ -x "$GUARD_EXECUTABLE" ]
+}
+
 guard_queue_recovery() {
   _gqr_reason="$1"
   _gqr_parent=${GUARD_RECOVERY_PENDING%/*}
@@ -82,14 +145,15 @@ guard_queue_recovery() {
 }
 
 guard_schedule() {
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || return 1
   guard_cru d "$GUARD_CRON" 2>/dev/null || :
-  guard_cru a "$GUARD_CRON" "* * * * * sh $LIVE_TEST_GUARD_SCRIPT expire" ||
+  guard_cru a "$GUARD_CRON" "* * * * * sh $GUARD_EXECUTABLE expire" ||
     return 1
-  guard_cru l 2>/dev/null | grep -q "$LIVE_TEST_GUARD_SCRIPT expire"
+  guard_cru l 2>/dev/null | grep -Fq "$GUARD_EXECUTABLE expire"
 }
 
 guard_unschedule() {
-  guard_cru d "$GUARD_CRON" 2>/dev/null || :
+  guard_cru d "$GUARD_CRON" 2>/dev/null || return 1
   return 0
 }
 
@@ -107,7 +171,17 @@ guard_arm() {
     *) guard_log error "unknown arm option: $_ga_mode"; return 1 ;;
   esac
 
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || {
+    guard_log error "refusing an unsafe staged executable path"
+    return 2
+  }
   mkdir -p "$GUARD_ROOT" "$GUARD_HISTORY" 2>/dev/null || return 2
+  guard_stage_executable || {
+    guard_cleanup_executable
+    guard_remove_empty_state
+    guard_log error "could not stage an executable guard outside the addon tree"
+    return 2
+  }
   _ga_now=$(guard_now)
   _ga_deadline=$((_ga_now + _ga_seconds))
   _ga_tmp="${GUARD_ARMED}.tmp.$$"
@@ -117,11 +191,28 @@ guard_arm() {
     printf 'duration_seconds=%s\n' "$_ga_seconds"
     printf 'mode=%s\n' "$_ga_mode"
     printf 'pid=%s\n' "$$"
-  } > "$_ga_tmp" 2>/dev/null || return 2
-  mv "$_ga_tmp" "$GUARD_ARMED" 2>/dev/null || return 2
+  } > "$_ga_tmp" 2>/dev/null || {
+    rm -f "$_ga_tmp" 2>/dev/null || :
+    guard_cleanup_executable
+    guard_remove_empty_state
+    return 2
+  }
+  mv "$_ga_tmp" "$GUARD_ARMED" 2>/dev/null || {
+    rm -f "$_ga_tmp" 2>/dev/null || :
+    guard_cleanup_executable
+    guard_remove_empty_state
+    return 2
+  }
 
   if ! guard_schedule; then
     rm -f "$GUARD_ARMED" 2>/dev/null || :
+    if guard_unschedule; then
+      guard_cleanup_executable ||
+        guard_log error "staged executable cleanup failed after scheduler setup failure"
+    else
+      guard_log error "scheduler setup failed and cleanup is deferred; staged executable retained"
+    fi
+    guard_remove_empty_state
     guard_log error "ASUSWRT cru scheduler is unavailable; guard was not armed"
     return 3
   fi
@@ -161,18 +252,62 @@ guard_status() {
 }
 
 guard_disarm() {
-  guard_unschedule
-  if [ -f "$GUARD_ARMED" ]; then
-    _gd_now=$(guard_now)
-    mv "$GUARD_ARMED" "$GUARD_HISTORY/disarmed.${_gd_now}.$$" 2>/dev/null || rm -f "$GUARD_ARMED"
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || {
+    guard_log error "refusing an unsafe staged executable path"
+    return 1
+  }
+  if [ ! -f "$GUARD_ARMED" ]; then
+    if ! guard_unschedule; then
+      guard_log error "ASUSWRT cru scheduler could not be disarmed; staged executable retained"
+      return 1
+    fi
+    guard_cleanup_executable || {
+      guard_log error "staged executable cleanup failed after scheduler removal"
+      return 1
+    }
+    guard_remove_empty_state
+    printf 'armed=no\n'
+    return 0
   fi
+  mkdir -p "$GUARD_HISTORY" 2>/dev/null || {
+    guard_log error "could not prepare the disarmed guard history; guard remains armed"
+    return 1
+  }
+  _gd_now=$(guard_now)
+  mv "$GUARD_ARMED" "$GUARD_HISTORY/disarmed.${_gd_now}.$$" 2>/dev/null || {
+    guard_log error "could not record the disarmed guard state; guard remains armed"
+    return 1
+  }
+  guard_unschedule || {
+    guard_log error "guard was durably disarmed but scheduler cleanup failed; staged executable retained"
+    return 1
+  }
+  guard_cleanup_executable || {
+    guard_log error "staged executable cleanup failed after scheduler removal"
+    return 1
+  }
   guard_write_history disarmed "operator-requested=yes" || :
   printf 'armed=no\n'
   return 0
 }
 
 guard_expire() {
-  [ -f "$GUARD_ARMED" ] || { guard_unschedule; return 0; }
+  guard_validate_executable_path "$GUARD_EXECUTABLE" || {
+    guard_log error "refusing an unsafe staged executable path"
+    return 2
+  }
+  if [ ! -f "$GUARD_ARMED" ]; then
+    if ! guard_unschedule; then
+      guard_log error "ASUSWRT cru scheduler cleanup is unavailable; staged executable retained"
+      return 2
+    fi
+    guard_cleanup_executable || {
+      guard_log error "staged executable cleanup failed after scheduler removal"
+      return 2
+    }
+    guard_remove_empty_state
+    return 0
+  fi
   _ge_now=$(guard_now)
   _ge_deadline=$(guard_value deadline_epoch "$GUARD_ARMED")
   _ge_mode=$(guard_value mode "$GUARD_ARMED")
@@ -181,8 +316,16 @@ guard_expire() {
 
   mkdir -p "$GUARD_HISTORY" 2>/dev/null || return 2
   _ge_claim="$GUARD_HISTORY/expiring.${_ge_now}.$$"
-  mv "$GUARD_ARMED" "$_ge_claim" 2>/dev/null || return 0
-  guard_unschedule
+  mv "$GUARD_ARMED" "$_ge_claim" 2>/dev/null || {
+    guard_log error "could not claim the expired guard state; scheduler and staged executable remain installed"
+    return 2
+  }
+  if guard_unschedule; then
+    guard_cleanup_executable ||
+      guard_log error "staged executable cleanup failed after scheduler removal"
+  else
+    guard_log error "guard expiry state was claimed; scheduler cleanup deferred and staged executable retained"
+  fi
   guard_log warn "deadline expired; running known-good manager recovery"
 
   _ge_recovered=0

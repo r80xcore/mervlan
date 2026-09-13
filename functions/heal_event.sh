@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                  - File: heal_event.sh || version="0.70"                     #
+#                  - File: heal_event.sh || version="0.72"                     #
 # ============================================================================ #
 # - Purpose:    Automated healing of VLAN configurations called by with        #
 #               cooldown to avoid rapid retriggers. Called if invoked by       #
@@ -35,6 +35,7 @@ fi
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
 [ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
+[ -n "${LIB_SETTINGS_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_settings_reconcile.sh" 2>/dev/null || true
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh" 2>/dev/null || true
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
@@ -75,20 +76,6 @@ fi
 # Initialize SSID filter based on node identity (affects which VLAN slots we consider)
 MERV_NODE_ID="$(json_get_flag NODE_ID "" "$SETTINGS_FILE")"
 ssid_filter_init "$MERV_NODE_ID"
-# ====================================================== Bootstrap Tick Probe
-# Determine sub-second or fallback tick command dynamically.
-# 100,000 microseconds = 100ms (0.1s). Fallback is 1 second.
-if usleep 1 2>/dev/null; then
-  export TICK_CMD="usleep 100000"
-  export TICKS_PER_SEC=10
-  TICK_LABEL="usleep (100ms)"
-else
-  export TICK_CMD="sleep 1"
-  export TICKS_PER_SEC=1
-  TICK_LABEL="sleep (1s)"
-fi
-# ================================================= End of Bootstrap Tick Probe
-
 # ============================================================================ #
 #                          INITIALIZATION & SETUP                              #
 # Establish locks to prevent concurrent execution, implement cooldown and      #
@@ -128,32 +115,34 @@ sanitize_epoch() {
 
 # ============================================================================ #
 # any_vlan_configured                                                          #
-# Scan settings.json for any numeric VLAN assignments (2–4094) on Ethernet     #
-# ports or SSIDs. Returns 0 if at least one valid VLAN is found, 1 if none.    #
-# Used as early guard to skip processing if no VLANs are configured.           #
+# Scan settings.json for any numeric VLAN assignments (2–4094) on logical      #
+# Ethernet ports or SSIDs. Returns 0 if found, 1 for known-empty, and 2 when   #
+# configuration state is unknown. Used as the early Heal guard.                #
 # ============================================================================ #
 any_vlan_configured() {
   # Ensure MAX_SSIDS is numeric; fallback to 12 if unset
-  local max_ssids
+  local max_ssids idx i vlan token
   max_ssids=$(sanitize_epoch "$MAX_SSIDS")
   [ "$max_ssids" -ge 1 ] 2>/dev/null || max_ssids=12
 
-  # Check Ethernet port VLANs (VLAN.Ethernet_ports.ETHx_VLAN)
-  local idx=1 vlan token
-  for eth in $ETH_PORTS; do
-    # Use nested structure first, fallback to flat
-    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
-    fi
+  # Check logical Ethernet policy independently from the physical ETH_PORTS map.
+  idx=1
+  while [ "$idx" -le 8 ]; do
+    vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
+      error -c vlan "Heal: Ethernet policy is unknown for logical port $idx"
+      return 2
+    }
     vlan=$(trim_spaces "$vlan")
     token=$(to_lower "$vlan")
-    # Ignore unconfigured, trunk, or non-numeric entries
     case "$token" in
-      ''|none) ;;                      # not configured
-      trunk) ;;                        # not a specific VLAN ID
-      # Valid VLAN ID range is 2–4094 (excluding default VLAN 1)
-      *) if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then return 0; fi ;;
+      none|trunk) ;;
+      *)
+        if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+          return 0
+        fi
+        error -c vlan "Heal: invalid Ethernet policy for logical port $idx"
+        return 2
+        ;;
     esac
     idx=$((idx+1))
   done
@@ -167,7 +156,7 @@ any_vlan_configured() {
     # Check for fatal filter condition after first accessor call
     if [ "$i" -eq 1 ] && [ "${SSID_FILTER_FATAL:-0}" = "1" ]; then
       error -c vlan "Heal: aborting due to SSID filter fatal condition (MAX_SSIDS not set)"
-      return 1
+      return 2
     fi
     vlan=$(trim_spaces "$vlan")
     if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
@@ -185,11 +174,21 @@ any_vlan_configured() {
 # execution, and initialize cooldown/debounce mechanisms.                      #
 # ============================================================================ #
 
-# Fast path: if settings define no numeric VLANs, do nothing
-if ! any_vlan_configured; then
-  info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
-  exit 0
-fi
+# Fast path: distinguish known-empty settings from unknown configuration state.
+_any_vlan_rc=0
+any_vlan_configured || _any_vlan_rc=$?
+case "$_any_vlan_rc" in
+  0)
+    ;;
+  1)
+    info -c cli,vlan "Heal: no VLANs configured in settings; exiting"
+    exit 0
+    ;;
+  *)
+    error -c vlan "Heal: VLAN configuration state is unknown; refusing to run"
+    exit 1
+    ;;
+esac
 
 # Skip if vlan manager already busy (avoid holding our lock needlessly).
 # Uses the shared lock-state helper so a CRASHED manager (lock dir left behind
@@ -234,9 +233,19 @@ LOCK="$LOCKDIR/vlan_event.lock"
 HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-${MERV_HEAL_LOCK_STALE_SEC:-180}}"
 HEAL_DHCP_TOKEN=""
 HEAL_EXIT_REASON="process-exit"
+HEAL_IFACE_VID_CACHE_ENABLED=0
 heal_cleanup_on_exit() {
   _heal_cleanup_rc=$?
   _heal_cleanup_failed=0
+  if [ "${HEAL_IFACE_VID_CACHE_ENABLED:-0}" -eq 1 ]; then
+    if type merv_iface_vid_cache_disable >/dev/null 2>&1 &&
+       merv_iface_vid_cache_disable >/dev/null 2>&1; then
+      HEAL_IFACE_VID_CACHE_ENABLED=0
+    else
+      _heal_cleanup_failed=1
+      error -c vlan "Heal cleanup could not disable its iface-to-VID cache; best-effort state cleanup failed"
+    fi
+  fi
   if [ -n "${HEAL_DHCP_TOKEN:-}" ]; then
     if merv_dhcp_hold_abandon "$HEAL_DHCP_TOKEN" "${HEAL_EXIT_REASON}-${_heal_cleanup_rc}" >/dev/null 2>&1; then
       HEAL_DHCP_TOKEN=""
@@ -253,7 +262,11 @@ heal_cleanup_on_exit() {
     _heal_cleanup_failed=1
     error -c vlan "Heal cleanup could not release its owner lock; recovery is required"
   fi
-  [ "$_heal_cleanup_failed" -eq 0 ] || _heal_cleanup_rc=1
+  # Preserve an original failure code when cleanup also fails. A successful
+  # path still reports cleanup failure so retained protection is not hidden.
+  if [ "$_heal_cleanup_failed" -ne 0 ] && [ "$_heal_cleanup_rc" -eq 0 ]; then
+    _heal_cleanup_rc=1
+  fi
   return "$_heal_cleanup_rc"
 }
 if type merv_owner_lock_acquire >/dev/null 2>&1; then
@@ -484,7 +497,10 @@ check_wl_iface_placements() {
   local pairs iface vid ok
 
   ok=1
-  pairs=$(merv_mac_build_expected_iface_vid 2>/dev/null) || return 0
+  pairs=$(merv_iface_vid_list 2>/dev/null) || {
+    error -c vlan "Placement: expected managed VAP state is unknown"
+    return 1
+  }
   [ -n "$pairs" ] || return 0
 
   while IFS=' ' read -r iface vid; do
@@ -511,6 +527,33 @@ _PAIRS_
   [ "$ok" -eq 1 ]
 }
 
+# A live VLAN bridge alone is not evidence that its configured physical
+# access port is on that bridge. Resolve node-aware Ethernet policy and prove
+# exclusive bridge membership for every numeric managed port.
+check_managed_eth_placements() {
+  local pairs iface vid bad
+
+  pairs=$(merv_managed_eth_iface_vid_list "$SETTINGS_FILE" "${MERV_NODE_ID:-none}" 2>/dev/null) || {
+    error -c vlan "Placement: expected managed Ethernet state is unknown"
+    return 1
+  }
+  [ -n "$pairs" ] || return 0
+  bad=0
+  while IFS=' ' read -r iface vid; do
+    [ -n "$iface" ] && [ -n "$vid" ] || continue
+    if [ ! -d "/sys/class/net/$iface" ]; then
+      warn -c vlan "Placement: managed Ethernet $iface is absent"
+      bad=1
+    elif ! merv_exact_bridge_membership "$iface" "$vid"; then
+      warn -c vlan "Placement: managed Ethernet $iface is not exclusively in br${vid}"
+      bad=1
+    fi
+  done <<_ETH_PAIRS_
+$pairs
+_ETH_PAIRS_
+  [ "$bad" -eq 0 ]
+}
+
 # ============================================================================ #
 # evict_wl_from_br0                                                            #
 # Pre-eviction guard: immediately removes wl subinterfaces from br0 before    #
@@ -530,7 +573,8 @@ evict_wl_from_br0() {
   # Only these can leak to br0; firmware-owned AiMesh SSIDs must be left alone.
   managed_ifaces=""
   if type merv_mac_build_expected_iface_vid >/dev/null 2>&1; then
-    managed_ifaces=$(merv_mac_build_expected_iface_vid 2>/dev/null | awk '{print $1}')
+    pairs=$(merv_iface_vid_list 2>/dev/null) || return 1
+    managed_ifaces=$(printf '%s\n' "$pairs" | awk '{print $1}')
   fi
   # Nothing to evict if no MERVLAN-managed wl interfaces are configured.
   [ -n "$managed_ifaces" ] || return 0
@@ -564,62 +608,292 @@ rc_proc_busy() {
   ps w 2>/dev/null | grep -E "[s]ervice" | grep -E "$1" >/dev/null 2>&1
 }
 
-wait_for_rc_quiet() {
-  local need_sec max_wait_sec quiet_ticks max_ticks quiet current_tick _rules
+heal_wall_clock_now() {
+  _heal_now=$(date +%s 2>/dev/null) || return 1
+  case "$_heal_now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$_heal_now"
+}
 
-  need_sec="${1:-6}"
-  max_wait_sec="${2:-45}"
-  quiet_ticks=$(( need_sec * TICKS_PER_SEC ))
-  max_ticks=$(( max_wait_sec * TICKS_PER_SEC ))
-  quiet=0
-  current_tick=0
+heal_rc_busy() {
+  rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
+    rc_proc_busy 'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1
+}
 
-  info -c vlan "wait_for_rc_quiet: watching rc (need=${need_sec}s quiet, method=${TICK_LABEL})"
+# Use the same consolidated strict guard coordinator as manager. The fallback
+# keeps heal compatible with older partial installs while preserving the
+# existing QT/MAC/DHCP guard ordering when the coordinator is available.
+heal_guard_tick() {
+  local _hgt_rules=""
+  if type merv_guard_tick >/dev/null 2>&1; then
+    merv_guard_tick
+    return $?
+  fi
+  if type _merv_ebtables_get_dump >/dev/null 2>&1; then
+    _hgt_rules=$(_merv_ebtables_get_dump 2>/dev/null) || return 1
+  elif type ebtables >/dev/null 2>&1; then
+    _hgt_rules=$(ebtables -t filter -L 2>/dev/null) || return 1
+  else
+    return 1
+  fi
+  type restore_merv_qt_shield >/dev/null 2>&1 || return 1
+  restore_merv_qt_shield "$_hgt_rules" || return $?
+  if type restore_merv_mac_shield >/dev/null 2>&1; then
+    restore_merv_mac_shield "$_hgt_rules" || return $?
+  fi
+  if type merv_dhcp_hold_restore_if_active >/dev/null 2>&1; then
+    merv_dhcp_hold_restore_if_active || return $?
+  fi
+  return 0
+}
 
-  # Enforce expected MERV_QT rules once before entering the tick loop.
-  # merv_qt_ensure_expected_rules calls merv_mac_build_expected_iface_vid which
-  # is expensive (~2-5s). Calling it per-tick at 100ms cadence multiplies each
-  # tick into seconds. restore_merv_qt_shield handles per-tick chain/jump repair.
-  merv_qt_ensure_expected_rules
-  while :; do
-    # Fetch ebtables filter table once per tick; pass to both restore functions
-    # to avoid redundant netlink reads at tick rate. Gate on ebtables presence
-    # to avoid spawning a missing binary on every tick.
-    # During rc/wlconf we only restore L2 shields.
-    # Do NOT run brctl delif or wl down here.
-    # Bridge surgery inside this loop makes restart_wireless take far longer because
-    # rc/wlconf and MerVLAN fight over bridge membership.
-    _rules=""
-    type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
-    restore_merv_qt_shield "$_rules"
-    type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
-    merv_dhcp_hold_restore_if_active
-
-    # If either queue or process is busy, reset quiet counter
-    if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
-       rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
-      quiet=0
+# merv_iface_vid_cache_invalidate() also invalidates the process-scoped NVRAM
+# inventory. If this invocation could not enable the derived cache, invalidate
+# the underlying inventory directly so a post-restart mapping is still fresh.
+heal_refresh_iface_vid_state() {
+  if [ "${HEAL_IFACE_VID_CACHE_ENABLED:-0}" -eq 1 ]; then
+    if type merv_iface_vid_cache_invalidate >/dev/null 2>&1; then
+      merv_iface_vid_cache_invalidate || return $?
     else
-      quiet=$((quiet + 1))
-      if [ "$quiet" -ge "$quiet_ticks" ]; then
-        info -c vlan "wait_for_rc_quiet: rc quiet threshold satisfied; proceeding"
-        return 0
-      fi
+      warn -c vlan "Heal: iface-to-VID cache invalidation helper unavailable after rc idle"
+      return 1
     fi
+  elif type merv_nvram_inventory_invalidate >/dev/null 2>&1; then
+    merv_nvram_inventory_invalidate || return $?
+  else
+    warn -c vlan "Heal: NVRAM inventory invalidation helper unavailable after rc idle"
+    return 1
+  fi
+  heal_guard_tick || return $?
+  return 0
+}
 
-    current_tick=$((current_tick + 1))
-    if [ "$current_tick" -ge "$max_ticks" ]; then
-      if rc_queue_has 'restart_wireless|start_lan|stop_lan|switch|httpd' >/dev/null 2>&1 || \
-         rc_proc_busy  'restart_wireless|wlconf|start_lan|switch|httpd' >/dev/null 2>&1; then
-        warn -c vlan "wait_for_rc_quiet: timeout reached while rc remains active; retaining DHCP protection"
-        return 1
-      fi
-      warn -c vlan "wait_for_rc_quiet: timeout reached with rc idle; continuing to stable verification"
+# This is only a cheap restart/teardown signal. It deliberately does not
+# replace strict exact QT verification performed by heal_guard_tick().
+heal_qt_structure_teardown_observed() {
+  local _hqsto_dump="${1:-}"
+  [ -n "$_hqsto_dump" ] || return 1
+  type merv_ebtables_verify_parent_jumps >/dev/null 2>&1 || return 1
+  if merv_ebtables_verify_parent_jumps "$_hqsto_dump" "$MERV_QT_CHAIN" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# Poll for wireless teardown with a real wall-clock budget. Structural/RC
+# observations are cheap; the strict guard runs once per one-second polling
+# interval and the post-guard timestamp makes one slow guard unable to hide an
+# exceeded deadline.
+heal_wireless_preentry_wait() {
+  local max_sec start now elapsed rules structural rc_active
+  max_sec="${1:-5}"
+  case "$max_sec" in ''|*[!0-9]*) max_sec=5 ;; esac
+  start=$(heal_wall_clock_now) || {
+    warn -c vlan "Heal: pre-entry wait could not acquire timestamp; failing closed"
+    return 1
+  }
+
+  while :; do
+    now=$(heal_wall_clock_now) || {
+      warn -c vlan "Heal: pre-entry wait could not acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    elapsed=$((now - start))
+    if [ "$elapsed" -ge "$max_sec" ]; then
+      info -c vlan "Heal: pre-entry timeout (${max_sec}s) — proceeding to rc wait"
       return 0
     fi
 
-    # Unquoted: intentional POSIX word-split for two-token command
-    $TICK_CMD
+    rules=""
+    if type _merv_ebtables_get_dump >/dev/null 2>&1; then
+      rules=$(_merv_ebtables_get_dump 2>/dev/null || printf '')
+    elif type ebtables >/dev/null 2>&1; then
+      rules=$(ebtables -t filter -L 2>/dev/null || printf '')
+    fi
+    now=$(heal_wall_clock_now) || {
+      warn -c vlan "Heal: pre-entry wait could not acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    elapsed=$((now - start))
+    if [ "$elapsed" -ge "$max_sec" ]; then
+      info -c vlan "Heal: pre-entry timeout (${max_sec}s) — proceeding to rc wait"
+      return 0
+    fi
+
+    structural=0
+    [ -n "$rules" ] && heal_qt_structure_teardown_observed "$rules" && structural=1
+    rc_active=0
+    heal_rc_busy && rc_active=1
+
+    now=$(heal_wall_clock_now) || {
+      warn -c vlan "Heal: pre-entry wait could not acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    elapsed=$((now - start))
+    [ "$elapsed" -ge "$max_sec" ] && {
+      info -c vlan "Heal: pre-entry timeout (${max_sec}s) — proceeding to rc wait"
+      return 0
+    }
+
+    heal_guard_tick || return $?
+    now=$(heal_wall_clock_now) || {
+      warn -c vlan "Heal: pre-entry wait could not acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    elapsed=$((now - start))
+
+    if [ "$structural" -eq 1 ]; then
+      info -c vlan "Heal: structural MERV_QT teardown detected after ${elapsed}s"
+      return 0
+    fi
+    if [ "$rc_active" -eq 1 ] || heal_rc_busy; then
+      info -c vlan "Heal: rc restart activity detected after ${elapsed}s"
+      return 0
+    fi
+    if [ "$elapsed" -ge "$max_sec" ]; then
+      info -c vlan "Heal: pre-entry timeout (${max_sec}s) — proceeding to rc wait"
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+# Wall-clock protected delay for VLAN validation. A strict guard is performed
+# at most once per second; the deadline is checked before and after each guard.
+heal_protected_wait() {
+  local duration start now elapsed
+  duration="${1:-1}"
+  case "$duration" in ''|*[!0-9]*) duration=1 ;; esac
+  [ "$duration" -gt 0 ] || return 0
+  start=$(heal_wall_clock_now) || return 1
+  while :; do
+    now=$(heal_wall_clock_now) || return 1
+    [ "$now" -lt "$start" ] && start="$now"
+    elapsed=$((now - start))
+    [ "$elapsed" -ge "$duration" ] && return 0
+    heal_guard_tick || return $?
+    now=$(heal_wall_clock_now) || return 1
+    [ "$now" -lt "$start" ] && start="$now"
+    elapsed=$((now - start))
+    [ "$elapsed" -ge "$duration" ] && return 0
+    sleep 1
+  done
+}
+
+wait_for_rc_quiet() {
+  local need_sec max_wait_sec quiet_since start now elapsed_wait elapsed_quiet
+  local refresh_pending busy_before busy_after
+
+  need_sec="${1:-6}"
+  max_wait_sec="${2:-45}"
+  case "$need_sec" in ''|*[!0-9]*) need_sec=6 ;; esac
+  case "$max_wait_sec" in ''|*[!0-9]*) max_wait_sec=45 ;; esac
+
+  info -c vlan "wait_for_rc_quiet: watching rc (need=${need_sec}s quiet, max=${max_wait_sec}s)"
+
+  # Build/repair the pre-restart expected state once before timing starts.
+  merv_qt_ensure_expected_rules || return $?
+  start=$(heal_wall_clock_now) || {
+    warn -c vlan "wait_for_rc_quiet: failed to acquire initial timestamp; failing closed"
+    return 1
+  }
+  quiet_since=""
+  refresh_pending=1
+
+  while :; do
+    now=$(heal_wall_clock_now) || {
+      warn -c vlan "wait_for_rc_quiet: failed to acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    [ -n "$quiet_since" ] && [ "$now" -lt "$quiet_since" ] && quiet_since="$now"
+    elapsed_wait=$((now - start))
+
+    busy_before=0
+    heal_rc_busy && busy_before=1
+    if [ "$busy_before" -eq 1 ]; then
+      quiet_since=""
+      refresh_pending=1
+    elif [ "$refresh_pending" -eq 0 ] && [ -n "$quiet_since" ] &&
+         [ $((now - quiet_since)) -ge "$need_sec" ]; then
+      elapsed_quiet=$((now - quiet_since))
+      info -c vlan "wait_for_rc_quiet: rc quiet for ${elapsed_quiet}s; proceeding"
+      return 0
+    fi
+
+    # A required first/post-RC refresh is allowed to complete even if the
+    # deadline was reached at the preceding observation. Other idle work stops
+    # at the deadline before another synchronous guard starts.
+    if [ "$busy_before" -eq 0 ] && [ "$refresh_pending" -eq 1 ]; then
+      heal_refresh_iface_vid_state || return $?
+      refresh_pending=0
+    elif [ "$elapsed_wait" -ge "$max_wait_sec" ]; then
+      if [ "$busy_before" -eq 1 ]; then
+        warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s with rc idle; continuing to stable verification"
+      return 0
+    else
+      heal_guard_tick || return $?
+    fi
+
+    # Sample after synchronous guard work. A busy->idle transition does not
+    # start the quiet timer until the next pass invalidates/rebuilds mapping.
+    now=$(heal_wall_clock_now) || {
+      warn -c vlan "wait_for_rc_quiet: failed to acquire timestamp; failing closed"
+      return 1
+    }
+    [ "$now" -lt "$start" ] && start="$now"
+    [ -n "$quiet_since" ] && [ "$now" -lt "$quiet_since" ] && quiet_since="$now"
+    busy_after=0
+    heal_rc_busy && busy_after=1
+    if [ "$busy_after" -eq 1 ]; then
+      quiet_since=""
+      refresh_pending=1
+    elif [ "$busy_before" -eq 1 ]; then
+      quiet_since=""
+      refresh_pending=1
+      continue
+    else
+      if [ -z "$quiet_since" ]; then
+        quiet_since="$now"
+      elif [ $((now - quiet_since)) -ge "$need_sec" ]; then
+        elapsed_quiet=$((now - quiet_since))
+        elapsed_wait=$((now - start))
+        if [ "$elapsed_wait" -lt "$max_wait_sec" ]; then
+          info -c vlan "wait_for_rc_quiet: rc quiet for ${elapsed_quiet}s; proceeding"
+          return 0
+        fi
+      fi
+      refresh_pending=0
+    fi
+
+    elapsed_wait=$((now - start))
+    if [ "$elapsed_wait" -ge "$max_wait_sec" ]; then
+      if [ "$busy_after" -eq 1 ]; then
+        warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s while rc remains active; retaining DHCP protection"
+        return 1
+      fi
+      if [ "$refresh_pending" -eq 1 ]; then
+        heal_refresh_iface_vid_state || return $?
+        refresh_pending=0
+        now=$(heal_wall_clock_now) || return 1
+        heal_rc_busy && {
+          warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s while rc remains active; retaining DHCP protection"
+          return 1
+        }
+      fi
+      warn -c vlan "wait_for_rc_quiet: timeout after ${elapsed_wait}s with rc idle; continuing to stable verification"
+      return 0
+    fi
+
+    sleep 1
   done
 }
 
@@ -636,7 +910,7 @@ expected_vlans_from_settings() {
   #  - VLAN.Ethernet_ports (ETHx_VLAN) - Access port VLANs  
   #  - VLAN.Trunks (TAGGED/UNTAGGED_TRUNKx) - Trunk VLANs
   # using section-aware JSON helpers for nested structure.
-  local vids tmp i idx vlan
+  local vids tmp i idx vlan token
 
   # SSID VLAN pool from VLAN.Pool section (filtered by node assignment)
   i=1
@@ -657,20 +931,29 @@ $vlan"
     i=$((i+1))
   done
 
-  # Access-port VLANs from VLAN.Ethernet_ports section
+  # Access-port VLANs from logical ETH1..ETH8 policy slots. Do not infer
+  # physical interface names here; placement is proven separately.
   idx=1
-  for eth in $ETH_PORTS; do
-    # Use json_get_section2_value for VLAN->Ethernet_ports->ETHx_VLAN nested structure
-    vlan=$(json_get_section2_value "VLAN" "Ethernet_ports" "ETH${idx}_VLAN" "$SETTINGS_FILE" 2>/dev/null)
-    # Fallback to old flat structure for backwards compatibility
-    if [ -z "$vlan" ] || [ "$vlan" = "none" ]; then
-      vlan=$(json_get_flag "ETH${idx}_VLAN" "" "$SETTINGS_FILE")
-    fi
+  while [ "$idx" -le 8 ]; do
+    vlan=$(merv_effective_eth_vlan "$idx" "$SETTINGS_FILE" "${MERV_NODE_ID:-none}") || {
+      error -c vlan "expected_vlans_from_settings: Ethernet policy is unknown for port $idx"
+      return 1
+    }
     vlan=$(trim_spaces "$vlan")
-    if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
-      vids="$vids
+    token=$(to_lower "$vlan")
+    case "$token" in
+      none|trunk)
+        ;;
+      *)
+        if is_number "$vlan" && [ "$vlan" -ge 2 ] && [ "$vlan" -le 4094 ]; then
+          vids="$vids
 $vlan"
-    fi
+        else
+          error -c vlan "expected_vlans_from_settings: invalid Ethernet policy for port $idx"
+          return 1
+        fi
+        ;;
+    esac
     idx=$((idx+1))
   done
 
@@ -743,10 +1026,29 @@ $untagged"
 # mismatch to persist across 2 checks with delay to avoid false positives      #
 # during transient rc states.                                                  #
 # ============================================================================ #
+check_wan_native_health() {
+  # The WAN helper's health mode is strictly observational: it validates the
+  # expected br0 native transport (and configured MAIN DHCP state) without
+  # creating an upper, touching bridge membership, or signalling DHCP. Heal
+  # itself continues to hand all mutation to the normal manager owner.
+  _cwnh_helper="$MERV_BASE/functions/mervlan_wan.sh"
+  [ -x "$_cwnh_helper" ] || {
+    warn -c vlan "WAN Native health: helper is unavailable or not executable"
+    return 1
+  }
+  sh "$_cwnh_helper" health >/dev/null 2>&1 || {
+    warn -c vlan "WAN Native health mismatch detected"
+    return 1
+  }
+  return 0
+}
+
 check_vlan_config() {
   local exp cur exp_str cur_str missing extra mismatch_count
 
-  exp=$(expected_vlans_from_settings)
+  check_wan_native_health || return 1
+
+  exp=$(expected_vlans_from_settings) || return 1
   if [ -z "$exp" ]; then
     info -c vlan "VLAN check OK: no VLANs configured in settings"
     return 0
@@ -764,6 +1066,10 @@ check_vlan_config() {
       warn -c vlan "wl subinterfaces already misplaced at check entry — skipping monitoring window"
       return 1
     fi
+  fi
+  if ! check_managed_eth_placements; then
+    warn -c vlan "managed Ethernet already misplaced at check entry — skipping monitoring window"
+    return 1
   fi
 
   # Multi-check validation with full monitoring window
@@ -815,22 +1121,9 @@ check_vlan_config() {
 
     # Continue to next check (unless this was the last one)
     if [ "$check" -lt "$max_checks" ]; then
-      # Active settle: restore L2 shields on every tick so rc cannot flush
-      # and leak traffic during the inter-check pause. Mirrors the dump+restore
-      # pattern in wait_for_rc_quiet to avoid redundant netlink reads per tick.
-      local s=0
-      local tick_target=$(( settle_delay * TICKS_PER_SEC ))
-      # Enforce expected rules once before the settle tick loop (expensive NVRAM call).
-      merv_qt_ensure_expected_rules
-      while [ "$s" -lt "$tick_target" ]; do
-        _rules=""
-        type ebtables >/dev/null 2>&1 && _rules=$(ebtables -t filter -L 2>/dev/null)
-        restore_merv_qt_shield "$_rules"
-        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_rules"
-        merv_dhcp_hold_restore_if_active
-        $TICK_CMD
-        s=$((s + 1))
-      done
+      # Active settle keeps the strict L2 shields in place, but the duration is
+      # wall-clock bounded and the expensive guard runs at most once per second.
+      heal_protected_wait "$settle_delay" || return $?
     fi
     check=$((check + 1))
   done
@@ -854,13 +1147,20 @@ check_vlan_config() {
     fi
   fi
 
+  if ! check_managed_eth_placements; then
+    warn -c vlan "VLAN bridges present but managed Ethernet access port is misplaced"
+    return 1
+  fi
+
   return 0
 }
 
 check_vlan_config_fast() {
   local exp cur exp_str cur_str missing extra
 
-  exp=$(expected_vlans_from_settings)
+  check_wan_native_health || return 1
+
+  exp=$(expected_vlans_from_settings) || return 1
   if [ -z "$exp" ]; then
     return 0
   fi
@@ -870,7 +1170,8 @@ check_vlan_config_fast() {
   cur_str=$(printf '%s\n' "$cur" | xargs 2>/dev/null)
 
   if [ "$(printf '%s\n' "$exp")" = "$(printf '%s\n' "$cur")" ]; then
-    return 0
+    check_managed_eth_placements
+    return $?
   fi
 
   missing=""
@@ -1099,6 +1400,14 @@ printf '%s\n' "$event_now" > "$EVENT_DEBOUNCE"
 
 # --- Periodic CRU-driven check (EVENT=cron) ---------------------------------
 if [ "$EVENT" = "cron" ]; then
+  # This is deliberately only a cheap persistent due check.  The separately
+  # owned worker takes the global action lock before any SSH work, so this
+  # health lock is never retained across a node synchronization.
+  if [ -x "$MERV_BASE/functions/settings_reconcile.sh" ] &&
+      { { type merv_settings_reconcile_active >/dev/null 2>&1 && merv_settings_reconcile_active; } || \
+        [ -e "${MERV_SETTINGS_RECONCILE_FILE:-$MERV_STATE_ROOT/settings_reconcile.state}" ]; }; then
+    sh "$MERV_BASE/functions/settings_reconcile.sh" due >/dev/null 2>&1 || :
+  fi
   if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ] &&
      type merv_node_reconcile_active >/dev/null 2>&1 && merv_node_reconcile_active; then
     sh "$MERV_BASE/functions/mervlan_boot.sh" reconcile-pending >/dev/null 2>&1 ||
@@ -1281,6 +1590,20 @@ if should_heal_event "$EVENT"; then
   fi
   HEAL_DHCP_TOKEN="$MERV_DHCP_HOLD_TOKEN"
 
+  # Keep repeated strict guard work on the existing derived iface-to-VID cache.
+  # The cache is scoped to this heal invocation and is invalidated on each
+  # observed busy-to-idle transition below; a partial install can still fall
+  # back to the uncached strict path.
+  if type merv_iface_vid_cache_enable >/dev/null 2>&1; then
+    if merv_iface_vid_cache_enable; then
+      HEAL_IFACE_VID_CACHE_ENABLED=1
+    else
+      warn -c vlan "Heal: iface-to-VID cache initialization failed; continuing with strict uncached guards"
+    fi
+  else
+    warn -c vlan "Heal: iface-to-VID cache helper unavailable; continuing with strict uncached guards"
+  fi
+
   # For wireless restart events, wait for rc to settle BEFORE reading kernel
   # state. Firmware's restart_wireless can take several minutes on some
   # hardware; checking mid-restart produces a false-positive healthy result
@@ -1299,41 +1622,16 @@ if should_heal_event "$EVENT"; then
       # begun rather than relying on a blind sleep in service-event-handler.
       # service-event-handler uses delay=0 for wireless events, so heal
       # starts immediately (~50ms) but holds here until either:
-      #   1. ebtables is flushed (_MERV_QT_SHIELD_STATE transitions from ok)
+      #   1. ebtables loses the MERV_QT chain or a required parent jump
       #   2. rc shows restart_wireless / wlconf as active
-      # restore_merv_qt_shield + restore_merv_mac_shield run every tick so
-      # any orphaned chains are repaired continuously while waiting.
-      # 5s max fallback covers the case where nothing is detectable (same
-      # worst-case latency as the old 3s sleep + heal init time).
+      # Strict guards run at a sane one-second cadence while the deadline is
+      # measured from the wall clock.
       info -c vlan "Heal: wireless event [$EVENT_LABEL] — pre-entry wait (max 5s)"
-      _pw_ticks=0
-      _pw_max=$((5 * TICKS_PER_SEC))
-      # Enforce expected rules once before the pre-entry tick loop (expensive NVRAM call).
-      merv_qt_ensure_expected_rules
-      while [ "$_pw_ticks" -lt "$_pw_max" ]; do
-        _pw_rules=""
-        type ebtables >/dev/null 2>&1 && _pw_rules=$(ebtables -t filter -L 2>/dev/null)
-        restore_merv_qt_shield "$_pw_rules"
-        type restore_merv_mac_shield >/dev/null 2>&1 && restore_merv_mac_shield "$_pw_rules"
-        merv_dhcp_hold_restore_if_active
-        # ebtables was flushed this tick — firmware restart has begun
-        case "$_MERV_QT_SHIELD_STATE" in
-          orphaned|wiped)
-            info -c vlan "Heal: ebtables flush detected (${_MERV_QT_SHIELD_STATE}) after ${_pw_ticks} ticks"
-            break
-            ;;
-        esac
-        # rc visibly processing wireless restart
-        if rc_queue_has 'restart_wireless|start_lan|stop_lan' || \
-           rc_proc_busy  'restart_wireless|wlconf'; then
-          info -c vlan "Heal: rc restart activity detected after ${_pw_ticks} ticks"
-          break
-        fi
-        $TICK_CMD
-        _pw_ticks=$((_pw_ticks + 1))
-      done
-      [ "$_pw_ticks" -ge "$_pw_max" ] && \
-        info -c vlan "Heal: pre-entry timeout (5s) — proceeding to rc wait"
+      if ! heal_wireless_preentry_wait 5; then
+        warn -c vlan "Heal: pre-entry strict guard failed; retaining DHCP protection"
+        HEAL_EXIT_REASON="pre-entry-guard-failed"
+        exit 1
+      fi
       info -c vlan "Heal: wireless event — waiting for rc to settle before VLAN check (max 120s)"
       if ! wait_for_rc_quiet 6 120; then
         warn -c vlan "Heal: rc remained active after wireless settle timeout; retaining DHCP protection"

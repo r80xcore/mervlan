@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.62"                      #
+#                    - File: install.sh || version="0.65"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -160,6 +160,37 @@ case "$MODE" in
     *) MERV_MAINTENANCE_ENTRY_REQUIRED=1 ;;
 esac
 MERV_MAINTENANCE_ENTRY_ADMITTED=0
+MERV_INSTALL_BOOTSTRAP_FRESH=0
+
+# A first online or staged-offline install starts with only this downloaded
+# install.sh. There is no installed library tree from which to load the normal
+# owner contract yet. Admit exactly that empty bootstrap shape, but never use
+# it for a partial or existing installation, or when durable maintenance state
+# is present.
+install_bootstrap_full_fresh_context() {
+    local _ibfc_path
+    case "$MODE" in full|tarball) ;; *) return 1 ;; esac
+    [ "$TEST_RUN" != "1" ] || return 1
+    [ -f "$MERV_BASE/install.sh" ] || return 1
+    for _ibfc_path in \
+        "$MERV_BASE/uninstall.sh" \
+        "$MERV_BASE/mervlan.asp" \
+        "$MERV_BASE/functions" \
+        "$MERV_BASE/settings" \
+        "$MERV_BASE/www" \
+        "$MERV_BASE/.ssh"; do
+        [ ! -e "$_ibfc_path" ] || return 1
+    done
+    for _ibfc_path in \
+        "$TMP_DIR/locks/mervlan_maintenance.lock" \
+        "$TMP_DIR/update.journal" \
+        "$TMP_DIR/update.quiesce" \
+        "$MERV_STATE_ROOT/update.journal" \
+        "$MERV_STATE_ROOT/update.quiesce"; do
+        [ ! -e "$_ibfc_path" ] || return 1
+    done
+    return 0
+}
 
 install_maintenance_admit() {
     [ "$MERV_MAINTENANCE_ENTRY_REQUIRED" = "1" ] || return 0
@@ -178,11 +209,22 @@ install_maintenance_admit() {
     fi
 
     type merv_maintenance_direct_admit >/dev/null 2>&1 || {
+        if install_bootstrap_full_fresh_context; then
+            MERV_INSTALL_BOOTSTRAP_FRESH=1
+            echo "[install] Fresh bootstrap detected; normal maintenance ownership begins after the package is installed"
+            return 0
+        fi
         echo "[install] ERROR: maintenance ownership support is unavailable; refusing tree mutation" >&2
         return 1
     }
     if ! merv_maintenance_direct_admit; then
         echo "[install] ERROR: another MerVLAN maintenance operation is live or unverifiable; refusing install" >&2
+        return 1
+    fi
+    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
+       ! merv_maintenance_direct_export_install_context; then
+        merv_maintenance_direct_release >/dev/null 2>&1 || :
+        echo "[install] ERROR: could not export authenticated maintenance context to installer children" >&2
         return 1
     fi
     MERV_MAINTENANCE_ENTRY_ADMITTED=1
@@ -1031,6 +1073,10 @@ detect_existing_installation() {
     local required marker
     INSTALL_STATE="absent"
     if settings_file_looks_valid "$ACTIVE_MERV_BASE/settings/settings.json"; then
+        # Keep the classifier anchored to the last complete runtime shape.
+        # Newly introduced reconcile helpers are package requirements, but
+        # their absence alone must not turn an otherwise valid pre-correction
+        # installation into a damaged tree before the package is downloaded.
         for required in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh; do
             [ -f "$ACTIVE_MERV_BASE/$required" ] || { INSTALL_STATE="partial"; return 0; }
         done
@@ -1092,15 +1138,63 @@ select_install_source() {
     echo "Select the MerVLAN source:"
     echo "  1) Latest stable release (recommended)"
     echo "  2) Development branch"
+    echo "  3) Custom branch (advanced)"
     while :; do
-        printf 'Enter choice [1-2, default %s]: ' "$default_choice"
+        printf 'Enter choice [1-3, default %s]: ' "$default_choice"
         IFS= read -r choice || choice=""
         [ -n "$choice" ] || choice="$default_choice"
         case "$choice" in
             1) BRANCH="main"; SOURCE_DESCRIPTION="latest stable release"; return 0 ;;
             2) BRANCH="dev"; SOURCE_DESCRIPTION="development branch"; return 0 ;;
-            *) echo "[install] Invalid choice. Please enter 1 or 2." ;;
+            3) prompt_custom_install_branch && return 0 ;;
+            *) echo "[install] Invalid choice. Please enter 1, 2, or 3." ;;
         esac
+    done
+}
+
+install_custom_branch_name_valid() {
+    _icbv_branch="${1:-}"
+    case "$_icbv_branch" in
+        ""|/*|*..*|*//*|*/|*/.|*.lock|*[!A-Za-z0-9._/-]*) return 1 ;;
+    esac
+    return 0
+}
+
+prompt_custom_install_branch() {
+    local branch curl_bin probe version
+    curl_bin="$(merv_cmd /usr/sbin/curl 2>/dev/null || merv_cmd curl 2>/dev/null)"
+    [ -n "$curl_bin" ] || {
+        echo "[install] ERROR: curl is required to validate a custom branch" >&2
+        return 1
+    }
+    mkdir -p "$TMP_DIR" 2>/dev/null || return 1
+    probe="$TMP_DIR/install-custom-branch.$$.txt"
+    while :; do
+        echo ""
+        echo "Custom branches are for directed development or recovery testing."
+        printf 'Enter branch name (blank to return): '
+        IFS= read -r branch || branch=""
+        [ -n "$branch" ] || { rm -f "$probe" 2>/dev/null || :; return 1; }
+        if ! install_custom_branch_name_valid "$branch"; then
+            echo "[install] Invalid branch name. Use letters, numbers, . _ - and single / separators."
+            continue
+        fi
+        if "$curl_bin" -fsL --retry 2 --connect-timeout 15 --max-time 60 \
+            "https://raw.githubusercontent.com/r80xcore/mervlan/$branch/changelog.txt" \
+            -o "$probe" 2>/dev/null; then
+            version="$(sed -n '1s/\r$//;1p' "$probe" 2>/dev/null)"
+            case "$version" in
+                mervlan\ v[0-9]*)
+                    BRANCH="$branch"
+                    SOURCE_DESCRIPTION="custom branch $branch ($version)"
+                    RESULT_SOURCE="PASS - custom branch $branch"
+                    rm -f "$probe" 2>/dev/null || :
+                    return 0
+                    ;;
+            esac
+        fi
+        rm -f "$probe" 2>/dev/null || :
+        echo "[install] Branch was not found or does not publish a readable MerVLAN version."
     done
 }
 
@@ -1252,6 +1346,17 @@ resolve_download_source() {
         RESULT_SOURCE="PASS - dev branch"
         return 0
     fi
+    if [ "$BRANCH" != "main" ]; then
+        install_custom_branch_name_valid "$BRANCH" || {
+            installer_warning "The selected custom branch name is unsafe."
+            return 1
+        }
+        SOURCE_REF="refs/heads/$BRANCH"
+        SOURCE_DESCRIPTION="custom branch $BRANCH"
+        GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$SOURCE_REF"
+        RESULT_SOURCE="PASS - custom branch $BRANCH"
+        return 0
+    fi
     curl_bin="$(merv_cmd /usr/sbin/curl 2>/dev/null || merv_cmd curl 2>/dev/null)"
     release_file="$TMP_DIR/latest-release.$$"
     tags_file="$TMP_DIR/latest-tags.$$"
@@ -1368,7 +1473,7 @@ install_tree_valid() {
     [ -d "$_itv_root" ] || return 1
     for _itv_required in \
         install.sh uninstall.sh mervlan.asp www/index.html \
-        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
         settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
         functions/ssh_trust_action.sh
     do
@@ -1669,6 +1774,18 @@ installer_exit_handler() {
     exit "$status"
 }
 
+# Tarball mode keeps the user-owned archive but creates an installer-owned
+# extraction child beneath TMP_DIR. Full mode already uses the richer handler
+# above; tarball needs its own EXIT path so an invalid archive, interruption,
+# or failed copy cannot leave that RAM workspace behind.
+installer_tarball_exit_handler() {
+    local status=$?
+    trap - EXIT INT TERM
+    cleanup_install_download_work >/dev/null 2>&1 || :
+    install_maintenance_release || status=1
+    exit "$status"
+}
+
 run_install_hardware_probe() {
     local detected_product
     if [ ! -x "$MERV_BASE/functions/hw_probe.sh" ]; then
@@ -1716,7 +1833,7 @@ run_install_hardware_probe() {
 # Explanation: Lists available tarballs, allows selection and deletion
 select_and_validate_tarball() {
   local staging_dir="$1"
-  local tarballs idx sel chosen action
+  local tarballs idx sel chosen action base size branch version topname
   
   while :; do
     # Find all mervlan-*.tar.gz files
@@ -1728,7 +1845,10 @@ select_and_validate_tarball() {
       return 1
     fi
     
-    # Display menu
+    # Display menu. Preserve the known main/dev channel encoded by archives
+    # retained by this installer; otherwise derive custom metadata from the
+    # archive's codeload top-level directory. Store metadata beside each menu
+    # entry so the selected item cannot inherit the final loop iteration.
     echo ""
     echo "Available MerVLAN tarballs:"
     idx=0
@@ -1736,11 +1856,35 @@ select_and_validate_tarball() {
       idx=$((idx + 1))
       base="$(basename "$tarball")"
       size="$(wc -c < "$tarball" 2>/dev/null)"
-      # Extract branch and version from filename: mervlan-main-v0.48.tar.gz
-      branch=$(echo "$base" | sed 's/mervlan-\([^-]*\)-.*/\1/')
-      version=$(echo "$base" | sed 's/.*-\(v[^.]*\.[^.]*\)\.tar\.gz/\1/')
+      topname="$(tar -tzf "$tarball" 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
+      if [ -z "$topname" ]; then
+        topname="$(gzip -dc "$tarball" 2>/dev/null | tar -t 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
+      fi
+      # Installer-retained archives encode the selected public channel in the
+      # filename. A stable tag's codeload top directory is the tag (not
+      # "main"), so preserve known main/dev channel names there. For manually
+      # staged/custom codeload archives, fall back to the real top directory.
+      case "$base" in
+        mervlan-main-*.tar.gz) branch="main" ;;
+        mervlan-dev-*.tar.gz) branch="dev" ;;
+        *)
+          case "$topname" in
+            mervlan-*) branch="${topname#mervlan-}" ;;
+            *) branch="unknown" ;;
+          esac
+          ;;
+      esac
+      version="unknown"
+      case "$base" in
+        "mervlan-${branch}-"*.tar.gz)
+          version="${base#"mervlan-${branch}-"}"
+          version="${version%.tar.gz}"
+          ;;
+      esac
       printf '  %d) %s  [%s | %s | %d bytes]\n' "$idx" "$base" "$branch" "$version" "$size"
       eval "TARBALL_$idx=\"$tarball\""
+      eval "TARBALL_BRANCH_$idx=\"$branch\""
+      eval "TARBALL_VERSION_$idx=\"$version\""
     done
     
     echo ""
@@ -1761,7 +1905,8 @@ select_and_validate_tarball() {
             read action
             case "$action" in
               y|Y|yes|YES)
-                BRANCH="$branch"
+                eval "BRANCH=\${TARBALL_BRANCH_$sel}"
+                eval "SELECTED_TARBALL_VERSION=\${TARBALL_VERSION_$sel}"
                 SELECTED_TARBALL="$chosen"
                 return 0
                 ;;
@@ -1824,6 +1969,29 @@ select_and_validate_tarball() {
 #   injects service-event hooks, and runs hardware probe on new installs
 #   Supports 'download' mode (fetch only) and 'tarball' mode (install from existing)
 INSTALL_DOWNLOAD_WORK=""
+
+normalize_install_script_permissions() {
+    local f depth
+    # Preserve the historical default: runtime shell entry points are
+    # executable.  Libraries and configuration shells are data-only sources.
+    for depth in "" "*/" "*/*/"; do
+        for f in $MERV_BASE/${depth}*.sh; do
+            [ -f "$f" ] 2>/dev/null || continue
+            case "$f" in
+                "$MERV_BASE"/settings/lib_*.sh|\
+                "$MERV_BASE"/settings/log_settings.sh|\
+                "$MERV_BASE"/settings/var_settings.sh|\
+                "$MERV_BASE"/settings/mac_shield_snapshot.sh|\
+                "$MERV_BASE"/templates/mervlan_templates.sh)
+                    chmod 644 "$f" 2>/dev/null || :
+                    ;;
+                *)
+                    chmod 755 "$f" 2>/dev/null || :
+                    ;;
+            esac
+        done
+    done
+}
 
 cleanup_install_download_work() {
   [ -n "$INSTALL_DOWNLOAD_WORK" ] || return 0
@@ -1960,15 +2128,31 @@ download_mervlan() {
       return 1
     fi
 
-    # Extract version from changelog.txt inside the tarball
-    local version=""
-    if tar -tzf "$archive_dir/mervlan_temp.tar.gz" >/dev/null 2>&1; then
-      version=$(tar -xzf "$archive_dir/mervlan_temp.tar.gz" -O "*/changelog.txt" 2>/dev/null | head -1 | sed 's/^mervlan[[:space:]]*//')
-    else
-      version=$(gzip -dc "$archive_dir/mervlan_temp.tar.gz" | tar -x -O "*/changelog.txt" 2>/dev/null | head -1 | sed 's/^mervlan[[:space:]]*//')
+    # Extract the version without wildcard member-to-stdout tar syntax. Older
+    # ASUSWRT BusyBox tar builds can list/extract the archive normally but do
+    # not reliably support `-O "*/member"`. Extract the exact changelog member
+    # into a private probe directory instead.
+    local version="" version_top="" version_probe=""
+    version_top="$(tar -tzf "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
+    if [ -z "$version_top" ]; then
+      version_top="$(gzip -dc "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | tar -t 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
     fi
+    case "$version_top" in
+      mervlan-*)
+        version_probe="$work_dir/.version-probe"
+        rm -rf "$version_probe" 2>/dev/null || return 1
+        mkdir -p "$version_probe" 2>/dev/null || return 1
+        if tar -xzf "$archive_dir/mervlan_temp.tar.gz" -C "$version_probe" "$version_top/changelog.txt" 2>/dev/null ||
+           gzip -dc "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | tar -x -C "$version_probe" "$version_top/changelog.txt" 2>/dev/null; then
+          if [ -f "$version_probe/$version_top/changelog.txt" ]; then
+            version=$(sed -n '1p' "$version_probe/$version_top/changelog.txt" 2>/dev/null | sed 's/^mervlan[[:space:]]*//')
+          fi
+        fi
+        rm -rf "$version_probe" 2>/dev/null || return 1
+        ;;
+    esac
     version=$(printf '%s' "$version" | tr -d '\r\n')
-    
+
     if [ -z "$version" ]; then
       version="unknown"
     fi
@@ -2061,8 +2245,8 @@ download_mervlan() {
         }
         echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
-            functions/mervlan_boot.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
-            settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            functions/mervlan_boot.sh functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
+            settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
@@ -2082,29 +2266,10 @@ download_mervlan() {
     return 1
   fi
 
-        # Permissions: BusyBox-safe glob (no find). Default 755 for all .sh; case statement
-    # overrides library/config files (settings/lib_*.sh, mac_shield_snapshot.sh,
-    # mervlan_templates.sh, log_settings.sh, var_settings.sh) to 644.
+        # Permissions: BusyBox-safe glob (no find). Default 755 for runtime
+        # scripts; every settings library is explicitly normalized to 644.
         echo "[download_mervlan] adjusting file permissions (.sh)"
-    for depth in "" "*/" "*/*/"; do
-        for f in $MERV_BASE/${depth}*.sh; do
-            [ -f "$f" ] 2>/dev/null || continue
-            base="$(basename "$f")"
-            case "$base" in
-                log_settings.sh|var_settings.sh|\
-                lib_debug.sh|lib_json.sh|lib_ssh.sh|lib_action_ack.sh|\
-                lib_ssid_filter.sh|lib_stp.sh|lib_mervqt.sh|lib_owner_lock.sh|\
-                lib_radio.sh|\
-                mervlan_templates.sh|mac_shield_snapshot.sh|\
-                lib_br0_guard.sh)
-                    chmod 644 "$f" 2>/dev/null || :
-                    ;;
-                *)
-                    chmod 755 "$f" 2>/dev/null || :
-                    ;;
-            esac
-        done
-    done
+        normalize_install_script_permissions
         echo "[download_mervlan] permission step complete"
     RESULT_FILES="PASS"
 
@@ -2151,6 +2316,7 @@ create_dirs() {
         "$PUBLIC_DIR/settings" \
         "$PUBLIC_DIR/docs" \
         "$PUBLIC_DIR/diagrams" \
+		"$PUBLIC_DIR/images" \
         "$PUBLIC_DIR/vendor" \
         "$PUBLIC_DIR/.ssh" \
         "$PUBLIC_DIR/tmp/results" \
@@ -2253,6 +2419,7 @@ verify_reinstall_projection() {
         "$PUBLIC_DIR/diagrams/topology-2_aimesh.svg" \
         "$PUBLIC_DIR/diagrams/topology-3_standalone-ap.svg" \
         "$PUBLIC_DIR/diagrams/topology-4_node-to-main.svg" \
+		"$PUBLIC_DIR/images/mervlan_help.svg" \
         "$TMP_DIR/logs/cli_output.log" \
         "$TMP_DIR/logs/vlan_manager.log" \
         "$TMP_DIR/logs/boot_wrap.log"
@@ -2392,6 +2559,9 @@ case "$MODE" in
         ;;
     tarball)
         # Install from previously downloaded tarball
+        trap 'installer_tarball_exit_handler' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
         logger -t "$ADDON" "Tarball mode: installing from previously downloaded package"
         create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
@@ -2418,9 +2588,13 @@ case "$MODE" in
             www/vlan_index_style.css \
             www/vlan_form_style.css \
             settings/lib_action_ack.sh \
+            functions/mervlan_wan.sh \
             settings/settings.json
         do
-            [ -f "$MERV_BASE/$_req" ] || {
+            case "$_req" in
+                functions/mervlan_wan.sh) [ -x "$MERV_BASE/$_req" ] ;;
+                *) [ -f "$MERV_BASE/$_req" ] ;;
+            esac || {
                 echo "[install] ERROR: Missing required file: $MERV_BASE/$_req" >&2
                 echo "[install] The addon files are not installed yet." >&2
                 echo "[install] For a first install, run: sh install.sh full" >&2
@@ -2438,7 +2612,8 @@ case "$MODE" in
             docs/diagrams/topology-1_local.svg \
             docs/diagrams/topology-2_aimesh.svg \
             docs/diagrams/topology-3_standalone-ap.svg \
-            docs/diagrams/topology-4_node-to-main.svg
+            docs/diagrams/topology-4_node-to-main.svg \
+			docs/images/mervlan_help.svg
         do
             [ -f "$MERV_BASE/$_optional" ] || \
                 echo "[install] WARNING: Optional file missing: $MERV_BASE/$_optional" >&2
@@ -2536,6 +2711,7 @@ cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-1_local.svg" "$PUBLIC_DIR/diagra
 cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-2_aimesh.svg" "$PUBLIC_DIR/diagrams/topology-2_aimesh.svg" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-3_standalone-ap.svg" "$PUBLIC_DIR/diagrams/topology-3_standalone-ap.svg" 2>/dev/null
 cp -p "$ADDON_DIR/$ADDON/docs/diagrams/topology-4_node-to-main.svg" "$PUBLIC_DIR/diagrams/topology-4_node-to-main.svg" 2>/dev/null
+cp -p "$ADDON_DIR/$ADDON/docs/images/mervlan_help.svg" "$PUBLIC_DIR/images/mervlan_help.svg" 2>/dev/null
 if [ "$TEST_RUN" = "1" ]; then
     cp -p "$ADDON_DIR/$ADDON/www/installer-test.html" "$PUBLIC_DIR/installer-test.html" 2>/dev/null || {
         RESULT_WEBUI="FAIL - diagnostic asset publication"
@@ -2628,14 +2804,17 @@ mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js 2>/dev/null || {
 if [ "$TEST_RUN" = "1" ]; then
     TEST_MENU_ENTRY_ADDED=1
 else
-    am_settings_set mervlan_page "$am_webui_page"
-    am_settings_set mervlan_state "enabled"
+    am_settings_set mervlan_page "$am_webui_page" || { RESULT_MENU="FAIL - metadata page"; exit 1; }
+    am_settings_set mervlan_state "enabled" || { RESULT_MENU="FAIL - metadata state"; exit 1; }
     MERVLAN_VERSION="$(awk 'NF { print $NF; exit }' "$MERV_BASE/changelog.txt" 2>/dev/null)"
     case "$MERVLAN_VERSION" in
         v*) : ;;
         *) MERVLAN_VERSION="unknown" ;;
     esac
-    am_settings_set mervlan_version "$MERVLAN_VERSION"
+    am_settings_set mervlan_version "$MERVLAN_VERSION" || { RESULT_MENU="FAIL - metadata version"; exit 1; }
+    [ "$(am_settings_get mervlan_page 2>/dev/null)" = "$am_webui_page" ] || { RESULT_MENU="FAIL - metadata page verification"; exit 1; }
+    [ "$(am_settings_get mervlan_state 2>/dev/null)" = "enabled" ] || { RESULT_MENU="FAIL - metadata state verification"; exit 1; }
+    [ "$(am_settings_get mervlan_version 2>/dev/null)" = "$MERVLAN_VERSION" ] || { RESULT_MENU="FAIL - metadata version verification"; exit 1; }
 fi
 
 if grep -q "tabName: \"$MENU_LABEL\"" /tmp/menuTree.js 2>/dev/null; then
@@ -2692,21 +2871,24 @@ elif [ "$MODE" = "reinstall" ]; then
     fi
     logger -t "$ADDON" "Reinstall mode: public/runtime provisioning complete; hook reconciliation deferred to caller"
     echo "[install] Reinstall provisioning complete; hooks preserved for caller reconciliation"
-    RESULT_HOOKS="SKIPPED - deferred to update/restore caller"
-    RESULT_NODES="SKIPPED - deferred to update/restore caller"
+    RESULT_HOOKS="PRESERVED - reinstall does not modify hooks"
+    RESULT_NODES="PRESERVED - reinstall does not modify node state"
 else
     # Ensure boot/service-event hooks are present even on non-full installs
     echo "[install] Installing service-event hooks"
     if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
-        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1; then
+        _install_hook_log="${TMP_DIR:-/tmp}/install-hooks.$$"
+        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >"$_install_hook_log" 2>&1; then
             logger -t "$ADDON" "addon setupenable completed (post-install)"
             echo "[install] Service-event hooks installed"
             RESULT_HOOKS="PASS"
         else
             logger -t "$ADDON" "WARNING: setupenable failed during post-install"
             echo "[install] WARNING: Service-event hook installation failed" >&2
+            [ ! -s "$_install_hook_log" ] || sed -n '1,80p' "$_install_hook_log" >&2
             RESULT_HOOKS="FAIL"
         fi
+        rm -f "$_install_hook_log" 2>/dev/null || :
     else
         logger -t "$ADDON" "WARNING: mervlan_boot.sh not executable; skipping post-install setupenable"
         echo "[install] WARNING: mervlan_boot.sh not executable" >&2
@@ -2754,11 +2936,14 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh functions/settings_reconcile.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do
-    [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; }
+    case "$_req" in
+        functions/mervlan_wan.sh) [ -x "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing or non-executable $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
+        *) [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
+    esac
 done
 settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings validation failed"; FINAL_STATUS=1; }
 [ -d "$MERV_STATE_ROOT/ssh_trust" ] || { RESULT_DETAIL="durable SSH trust state root missing"; FINAL_STATUS=1; }

@@ -322,7 +322,20 @@
       function enhanceRenderedHelp() {
         styleGitHubAlerts();
         prepareLinks();
-        contentEl.scrollTop = 0;
+        var sectionId = "";
+        try {
+          sectionId = decodeURIComponent((window.location.hash || "").replace(/^#/, ""));
+        } catch (error) {
+          // A malformed user-provided fragment must not turn a rendered help
+          // document into a fetch error. Fall back to the document top.
+          sectionId = "";
+        }
+        var target = sectionId ? document.getElementById(sectionId) : null;
+        if (target && typeof target.scrollIntoView === "function") {
+          target.scrollIntoView({ block: "start" });
+        } else {
+          contentEl.scrollTop = 0;
+        }
       }
 
       function prepareDiagramImages(root) {

@@ -5,7 +5,23 @@
 The addon normally lives below `/jffs/addons/mervlan/` on a device.
 
 - `settings/settings.json`: user configuration; preserve during deployment.
+  `General.NODE_PARALLELISM` is a MAIN-local node-operation scheduler control:
+  it accepts integer values 1–5 and defaults to 2 when absent. It is not part
+  of node-sync change detection; malformed runtime or persisted input is
+  resolved fail-closed to one worker. The node-operation policy is consumed by
+  MAIN; normal staged settings payloads remain governed by the Sync workflow.
+  `VLAN.WAN_Native` stores the per-device native uplink request as
+  `WAN_NATIVE_MAIN`, `MAIN_WAN_NATIVE_IP`, `MAIN_ASUS_IP`, `PERSISTENT_DEBUG_LOGGING`, and
+  `WAN_NATIVE_NODE1..NODE10`;
+  the MAIN endpoints are the exact DHCP IPv4s required after numeric and
+  ASUS/default MAIN handoffs. ASUS/default is supported only when `br0` uses
+  the positively identified physical WAN uplink; unknown tagged-native topology
+  is not inferred. `Nodes.NODE<n>_ROLE` is `aimesh` or `standalone`; AiMesh
+  derives effective WAN Native from MAIN while Standalone uses its own value.
+  Legacy role-less nodes read as Standalone for compatibility.
 - `settings/`: shared libraries and runtime defaults.
+- `logs/debug/`: bounded persistent WAN Native diagnostic records, created only
+  when the explicitly opt-in setting is enabled.
 - `tmp/`: persistent databases and generated addon data where configured,
   including MAC Shield and metadata stores.
 - `www/`: main-router WebUI and static assets.
@@ -21,8 +37,13 @@ Runtime state is normally below `/tmp/mervlan_tmp/`:
 | `progress/` | Atomic WebUI action progress records. |
 | `results/` | Public merged client JSON and action status results. |
 | `client_collection/` | Local/node observation artifacts and temporary files. |
-| `node_jobs/` | Isolated per-run node worker directories and terminal results. |
+| `node_jobs/` | Isolated per-run node worker directories and terminal results for the shared 1–5-worker node-operation pool. |
 | `selftest.<run-id>/` | Fake backend and state for deterministic tests. |
+
+`locks/dhcp_hold/` is a fail-closed protocol state, not disposable temporary
+data. A retained recovery marker and DHCP hold may be cleared only by the
+token-owned MerVLAN recovery API after its final topology verification; direct
+file or ebtables deletion is not a supported recovery action.
 
 ## Ownership and publication
 
@@ -38,15 +59,27 @@ Runtime state is normally below `/tmp/mervlan_tmp/`:
   owner record before returning failure.
 - Worker completion is an explicit validated terminal result, not merely a
   missing PID or lock.
+- Complete-node SSH trust preflight is a serial gate before node workers run.
+  Workers write private artifacts/results; the MAIN parent validates and
+  aggregates them serially. MAIN-local work does not consume a remote pool
+  slot.
+- For MAC Shield synchronization, MAIN applies the authoritative database
+  locally before the bounded node push; a failed MAIN enforcement suppresses
+  node propagation.
 - Shared files are written to a same-directory temporary file and published by
   atomic rename.
-- Client JSON must remain readable if a new generation fails.
+- Client JSON must remain readable if a new generation fails; a required
+  collector failure must not publish a partial replacement generation.
 - Progress and result files are parsed as data, never executed as shell.
 - Update maintenance has a journal-bound owner/quiesce marker under the
   maintenance state root; ordinary mutation and observation requests remain
   blocked until terminal cleanup. Observation ownership uses the generic
   identity/owner primitives but keeps generation and coalescing state local to
   the observation worker.
+- Restore and standalone Recovery publish a strict `.mervlan.recovery` marker
+  beside persistent backups. A successor Update preserves any unresolved or
+  malformed marker; only the known pre-activation `prepared` marker with no
+  displaced old tree may be retired as abandoned staging.
 
 ## Useful diagnostics
 
@@ -74,6 +107,11 @@ are:
 - client generations: `/tmp/mervlan_tmp/client_collection`;
 - selftest state: `/tmp/mervlan_tmp/selftest.<run-id>`;
 - evidence: `/tmp/mervlan_tmp/evidence/<run-id>/...`.
+
+The effective node-operation width is read from `General.NODE_PARALLELISM`
+(1–5, default 2) by `lib_node_jobs.sh`; `MERV_NODE_PARALLELISM` is an
+optional runtime override. The setting is MAIN-local and excluded from
+node-sync change detection.
 
 The full Sync Nodes runtime manifest stages `settings/lib_owner_lock.sh` as a
 0644 library and verifies it on the node. Settings-only Sync intentionally

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="100%">
+  <style>
+    text {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 14px;
+      font-weight: bold;
+      white-space: pre;
+    }
+    /* Adapts automatically to GitHub Dark Mode */
+    @media (prefers-color-scheme: dark) {
+      text { fill: #c9d1d9; }
+    }
+    /* Adapts automatically to GitHub Light Mode */
+    @media (prefers-color-scheme: light) {
+      text { fill: #24292f; }
+    }
+  </style>
+
+  <text x="50%" y="20" text-anchor="middle" xml:space="preserve">
+    <tspan x="50%" dy="1.2em">   /$$      /$$    W E L C O M E    /$$    /$$ /$$        /$$$$$$  /$$   /$$   </tspan>
+    <tspan x="50%" dy="1.2em">  | $$$    /$$$     T O   T H E    | $$   | $$| $$       /$$__  $$| $$$ | $$   </tspan>
+    <tspan x="50%" dy="1.2em">  | $$$$  /$$$$  /$$$$$$   /$$$$$$ | $$   | $$| $$      | $$  \ $$| $$$$| $$   </tspan>
+    <tspan x="50%" dy="1.2em">  | $$ $$/$$ $$ /$$__  $$ /$$__  $$|  $$ / $$/| $$      | $$$$$$$$| $$ $$ $$   </tspan>
+    <tspan x="50%" dy="1.2em">  | $$  $$$| $$| $$$$$$$$| $$  \__/ \  $$ $$/ | $$      | $$__  $$| $$  $$$$   </tspan>
+    <tspan x="50%" dy="1.2em">  | $$\  $ | $$| $$_____/| $$        \  $$$/  | $$      | $$  | $$| $$\  $$$   </tspan>
+    <tspan x="50%" dy="1.2em">  | $$ \/  | $$|  $$$$$$$| $$         \  $/   | $$$$$$$$| $$  | $$| $$ \  $$   </tspan>
+    <tspan x="50%" dy="1.2em">  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/   </tspan>
+    <tspan x="50%" dy="1.5em" dx="-10px" font-size="25px">V I R T U A L  L A N  M A N A G E R</tspan>
+  </text>
+</svg>

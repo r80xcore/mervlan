@@ -8,6 +8,11 @@ Tests are separated by execution target:
 - `specs/` — test matrices and coverage requirements, never copied to
   devices.
 
+Files named `deep_audit_*.sh` under `local/` are historical reproduction
+fixtures. They preserve evidence for previously fixed defects and are not part
+of the maintained green regression gate unless a current plan explicitly names
+one as a reproduction diagnostic.
+
 Run the narrowest applicable test first. A shell result on Windows does not
 prove ASUSWRT BusyBox compatibility; affected shell files must also pass
 `sh -n` and focused tests in a POSIX/BusyBox-capable environment.

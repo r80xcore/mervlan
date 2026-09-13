@@ -1,4 +1,4 @@
-# File: lib_node_jobs.sh || version="0.72.3"
+# File: lib_node_jobs.sh || version="0.72.6"
 # Bounded POSIX/BusyBox node-job helper.  Parents own locks and aggregation;
 # workers own only their job directories and one atomic terminal result.
 [ -n "${LIB_NODE_JOBS_LOADED:-}" ] && return 0 2>/dev/null
@@ -11,10 +11,44 @@ mnj_safe_token() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; return 0
 mnj_positive() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -gt 0 ] 2>/dev/null; }
 
 mnj_parallelism() {
-  case "${1:-}" in 1|2) printf '%s\n' "$1" ;; *)
+  case "${1:-}" in 1|2|3|4|5) printf '%s\n' "$1" ;; *)
     type warn >/dev/null 2>&1 && warn -c vlan "Node jobs: invalid parallelism '${1:-}'; using 1"
     printf '1\n' ;;
   esac
+}
+
+# Resolve the effective node-operation pool width.  A caller may pass an
+# explicit runtime value (for example an environment override in a test or a
+# maintenance wrapper); malformed runtime values fail closed to one worker.
+# Normal callers omit the argument so the persisted General setting is used
+# unless an explicit runtime environment override is present.
+# Older settings files do not contain NODE_PARALLELISM and retain the legacy
+# width of two.  This function emits a value that is always safe for pool
+# arithmetic; it never silently accepts an out-of-range explicit value.
+mnj_effective_parallelism() {
+  _mnj_ep_raw="${1:-}"
+  if [ "$#" -eq 0 ] || [ -z "$_mnj_ep_raw" ]; then
+    # An explicitly set runtime variable is an override, including malformed
+    # input (which mnj_parallelism intentionally reduces to one).  The
+    # var_settings default is empty so it cannot mask the persisted setting.
+    if [ -n "${MERV_NODE_PARALLELISM:-}" ]; then
+      _mnj_ep_raw="$MERV_NODE_PARALLELISM"
+    else
+      _mnj_ep_raw=""
+    fi
+  fi
+  if [ -z "$_mnj_ep_raw" ]; then
+    _mnj_ep_raw=""
+    if [ -n "${SETTINGS_FILE:-}" ] && [ -f "$SETTINGS_FILE" ]; then
+      [ -n "${LIB_JSON_LOADED:-}" ] || . "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_json.sh" 2>/dev/null || :
+      if type json_get_section_value >/dev/null 2>&1; then
+        _mnj_ep_raw=$(json_get_section_value General NODE_PARALLELISM "$SETTINGS_FILE" 2>/dev/null || printf '')
+      fi
+    fi
+    [ -n "$_mnj_ep_raw" ] || _mnj_ep_raw="${MERV_NODE_PARALLELISM:-2}"
+    [ -n "$_mnj_ep_raw" ] || _mnj_ep_raw=2
+  fi
+  mnj_parallelism "$_mnj_ep_raw"
 }
 
 mnj_root_valid() {
@@ -26,6 +60,25 @@ mnj_root_valid() {
 mnj_job_dir() {
   mnj_root_valid "$1" && merv_is_valid_node_id "$2" && mnj_safe_token "$3" || return 1
   printf '%s/node_%s\n' "$1" "$2"
+}
+
+# The pool marker is process-local, but it is authoritative for every parent
+# that can invoke another node operation in the same shell.  A marker is
+# unresolved when the active bit is anything other than an explicit clean
+# value, or when any pending/slot metadata remains.  Callers must check this
+# before initializing a new pool and must retain the old root on failure.
+mnj_pool_state_unresolved() {
+  case "${MNJ_POOL_ACTIVE:-0}" in
+    ''|0) ;;
+    *) return 0 ;;
+  esac
+  [ -n "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ] && return 0
+  [ -n "${MNJ_S1_PID:-}${MNJ_S1_START:-}${MNJ_S1_DIR:-}${MNJ_S1_NODE:-}${MNJ_S1_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S2_PID:-}${MNJ_S2_START:-}${MNJ_S2_DIR:-}${MNJ_S2_NODE:-}${MNJ_S2_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S3_PID:-}${MNJ_S3_START:-}${MNJ_S3_DIR:-}${MNJ_S3_NODE:-}${MNJ_S3_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S4_PID:-}${MNJ_S4_START:-}${MNJ_S4_DIR:-}${MNJ_S4_NODE:-}${MNJ_S4_DEADLINE:-}" ] && return 0
+  [ -n "${MNJ_S5_PID:-}${MNJ_S5_START:-}${MNJ_S5_DIR:-}${MNJ_S5_NODE:-}${MNJ_S5_DEADLINE:-}" ] && return 0
+  return 1
 }
 
 mnj_nodes_validate() {
@@ -120,9 +173,10 @@ mnj_worker_stop_child() {
   _mnj_dir="$1"
   if mnj_child_identity_live "$_mnj_dir"; then
     _mnj_pid=$(cat "$_mnj_dir/child.pid")
-    kill -TERM "$_mnj_pid" 2>/dev/null || :
-    sleep 1
-    mnj_child_identity_live "$_mnj_dir" && kill -KILL "$_mnj_pid" 2>/dev/null || :
+    _mnj_start=$(cat "$_mnj_dir/child.proc_start_time" 2>/dev/null || printf '')
+    # Re-check PID plus start identity through the shared signalling helper;
+    # never turn the verified child PID into a PID-only kill.
+    mnj_stop_identity_process "$_mnj_pid" "$_mnj_start" 1 || :
   fi
   [ -n "${MNJ_CHILD_PID:-}" ] && wait "$MNJ_CHILD_PID" 2>/dev/null || :
 }
@@ -164,7 +218,18 @@ mnj_worker() {
   "$@" > "$MNJ_WORK_DIR/stdout.log" 2>&1 &
   MNJ_CHILD_PID=$!
   MNJ_CHILD_START=$(merv_proc_start_time "$MNJ_CHILD_PID" 2>/dev/null || printf '')
-  case "$MNJ_CHILD_START" in ''|*[!0-9]*) mnj_worker_stop_child "$MNJ_WORK_DIR"; return 2;; esac
+  case "$MNJ_CHILD_START" in
+    ''|*[!0-9]*)
+      # A very short-lived handler can exit before its /proc identity is
+      # observable.  Reap that child directly; no signal is attempted without
+      # a verified identity, while the wait status still determines its result.
+      wait "$MNJ_CHILD_PID"; _mnj_rc=$?
+      if [ "$_mnj_rc" -eq 0 ]; then mnj_publish_result "$MNJ_WORK_DIR" "$MNJ_WORK_NODE" "$MNJ_WORK_PHASE" ok "$MNJ_WORK_STARTED" worker-ok || return 2
+      else mnj_publish_result "$MNJ_WORK_DIR" "$MNJ_WORK_NODE" "$MNJ_WORK_PHASE" failed "$MNJ_WORK_STARTED" worker-failed || return 2; fi
+      MNJ_WORK_FINAL=1
+      return "$_mnj_rc"
+      ;;
+  esac
   printf '%s\n' "$MNJ_CHILD_PID" > "$MNJ_WORK_DIR/child.pid"
   printf '%s\n' "$MNJ_CHILD_START" > "$MNJ_WORK_DIR/child.proc_start_time"
   wait "$MNJ_CHILD_PID"; _mnj_rc=$?
@@ -176,26 +241,186 @@ mnj_worker() {
 
 mnj_slot_set() {
   case "$1" in 1) MNJ_S1_PID="$2"; MNJ_S1_START="$3"; MNJ_S1_DIR="$4"; MNJ_S1_NODE="$5"; MNJ_S1_DEADLINE="$6";;
-                     2) MNJ_S2_PID="$2"; MNJ_S2_START="$3"; MNJ_S2_DIR="$4"; MNJ_S2_NODE="$5"; MNJ_S2_DEADLINE="$6";; esac
+                     2) MNJ_S2_PID="$2"; MNJ_S2_START="$3"; MNJ_S2_DIR="$4"; MNJ_S2_NODE="$5"; MNJ_S2_DEADLINE="$6";;
+                     3) MNJ_S3_PID="$2"; MNJ_S3_START="$3"; MNJ_S3_DIR="$4"; MNJ_S3_NODE="$5"; MNJ_S3_DEADLINE="$6";;
+                     4) MNJ_S4_PID="$2"; MNJ_S4_START="$3"; MNJ_S4_DIR="$4"; MNJ_S4_NODE="$5"; MNJ_S4_DEADLINE="$6";;
+                     5) MNJ_S5_PID="$2"; MNJ_S5_START="$3"; MNJ_S5_DIR="$4"; MNJ_S5_NODE="$5"; MNJ_S5_DEADLINE="$6";; esac
 }
 mnj_slot_get() {
-  case "$1" in 1) MNJ_GP="$MNJ_S1_PID"; MNJ_GS="$MNJ_S1_START"; MNJ_GD="$MNJ_S1_DIR"; MNJ_GN="$MNJ_S1_NODE"; MNJ_GL="$MNJ_S1_DEADLINE";;
-                     2) MNJ_GP="$MNJ_S2_PID"; MNJ_GS="$MNJ_S2_START"; MNJ_GD="$MNJ_S2_DIR"; MNJ_GN="$MNJ_S2_NODE"; MNJ_GL="$MNJ_S2_DEADLINE";; esac
+  case "$1" in 1) MNJ_GP="${MNJ_S1_PID:-}"; MNJ_GS="${MNJ_S1_START:-}"; MNJ_GD="${MNJ_S1_DIR:-}"; MNJ_GN="${MNJ_S1_NODE:-}"; MNJ_GL="${MNJ_S1_DEADLINE:-}";;
+                     2) MNJ_GP="${MNJ_S2_PID:-}"; MNJ_GS="${MNJ_S2_START:-}"; MNJ_GD="${MNJ_S2_DIR:-}"; MNJ_GN="${MNJ_S2_NODE:-}"; MNJ_GL="${MNJ_S2_DEADLINE:-}";;
+                     3) MNJ_GP="${MNJ_S3_PID:-}"; MNJ_GS="${MNJ_S3_START:-}"; MNJ_GD="${MNJ_S3_DIR:-}"; MNJ_GN="${MNJ_S3_NODE:-}"; MNJ_GL="${MNJ_S3_DEADLINE:-}";;
+                     4) MNJ_GP="${MNJ_S4_PID:-}"; MNJ_GS="${MNJ_S4_START:-}"; MNJ_GD="${MNJ_S4_DIR:-}"; MNJ_GN="${MNJ_S4_NODE:-}"; MNJ_GL="${MNJ_S4_DEADLINE:-}";;
+                     5) MNJ_GP="${MNJ_S5_PID:-}"; MNJ_GS="${MNJ_S5_START:-}"; MNJ_GD="${MNJ_S5_DIR:-}"; MNJ_GN="${MNJ_S5_NODE:-}"; MNJ_GL="${MNJ_S5_DEADLINE:-}";; esac
 }
 
 mnj_reconcile_slot() {
   _mnj_slot="$1" _mnj_state="$2" _mnj_reason="$3"
   mnj_slot_get "$_mnj_slot"
-  merv_process_identity_matches "$MNJ_GP" "$MNJ_GS" && kill -TERM "$MNJ_GP" 2>/dev/null || :
-  _mnj_n=0; while [ "$_mnj_n" -lt 2 ] && merv_process_identity_matches "$MNJ_GP" "$MNJ_GS"; do sleep 1; _mnj_n=$((_mnj_n+1)); done
-  merv_process_identity_matches "$MNJ_GP" "$MNJ_GS" && kill -KILL "$MNJ_GP" 2>/dev/null || :
-  mnj_child_identity_live "$MNJ_GD" && { _mnj_cp=$(cat "$MNJ_GD/child.pid"); kill -TERM "$_mnj_cp" 2>/dev/null || :; sleep 1; mnj_child_identity_live "$MNJ_GD" && kill -KILL "$_mnj_cp" 2>/dev/null || :; }
-  merv_process_identity_matches "$MNJ_GP" "$MNJ_GS" && return 1
+  mnj_stop_identity_process "$MNJ_GP" "$MNJ_GS" 2 || return 1
+  if mnj_child_identity_live "$MNJ_GD"; then
+    _mnj_cp=$(cat "$MNJ_GD/child.pid" 2>/dev/null || printf '')
+    _mnj_cs=$(cat "$MNJ_GD/child.proc_start_time" 2>/dev/null || printf '')
+    mnj_stop_identity_process "$_mnj_cp" "$_mnj_cs" 1 || return 1
+  fi
   mnj_child_identity_live "$MNJ_GD" && return 1
   mnj_result_validate "$MNJ_GD/result" "$MNJ_GN" "$MNJ_POOL_PHASE" || mnj_publish_result "$MNJ_GD" "$MNJ_GN" "$MNJ_POOL_PHASE" "$_mnj_state" "$(cat "$MNJ_GD/started_epoch" 2>/dev/null || date +%s)" "$_mnj_reason" || return 1
   wait "$MNJ_GP" 2>/dev/null || :
   mnj_slot_set "$_mnj_slot" '' '' '' '' ''
   return 0
+}
+
+# Stop a process only when its PID and recorded start identity still match.
+# A missing or malformed identity is a hard failure: callers must not fall
+# back to signalling by PID alone because the PID may already have been
+# recycled.
+mnj_stop_identity_process() {
+  _mnj_sip_pid="$1"; _mnj_sip_start="$2"; _mnj_sip_rounds="${3:-2}"
+  case "$_mnj_sip_pid:$_mnj_sip_start" in
+    ''|*[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  case "$_mnj_sip_rounds" in ''|*[!0-9]*|0) _mnj_sip_rounds=2 ;; esac
+  if ! merv_process_identity_matches "$_mnj_sip_pid" "$_mnj_sip_start"; then
+    # A failed match is not proof that the process is gone: identity lookup
+    # can fail transiently and a reused/live PID must remain unresolved.
+    # Never let that condition be mistaken for a completed reconciliation.
+    kill -0 "$_mnj_sip_pid" 2>/dev/null && return 1
+    return 0
+  fi
+  kill -TERM "$_mnj_sip_pid" 2>/dev/null || :
+  _mnj_sip_n=0
+  while [ "$_mnj_sip_n" -lt "$_mnj_sip_rounds" ] && merv_process_identity_matches "$_mnj_sip_pid" "$_mnj_sip_start"; do
+    sleep 1
+    _mnj_sip_n=$((_mnj_sip_n+1))
+  done
+  if merv_process_identity_matches "$_mnj_sip_pid" "$_mnj_sip_start"; then
+    kill -KILL "$_mnj_sip_pid" 2>/dev/null || :
+    _mnj_sip_n=0
+    while [ "$_mnj_sip_n" -lt "$_mnj_sip_rounds" ] && merv_process_identity_matches "$_mnj_sip_pid" "$_mnj_sip_start"; do
+      sleep 1
+      _mnj_sip_n=$((_mnj_sip_n+1))
+    done
+  fi
+  if merv_process_identity_matches "$_mnj_sip_pid" "$_mnj_sip_start"; then
+    return 1
+  fi
+  kill -0 "$_mnj_sip_pid" 2>/dev/null && return 1
+  return 0
+}
+
+# Reconcile a worker that was launched before its slot metadata was published.
+# The generic pool-abort entry point below also uses this path for parent
+# interruption/exit, so the pending wrapper is never left outside a slot.
+mnj_pool_abort_unpublished() {
+  _mnj_pau_pid="$1"; _mnj_pau_start="$2"; _mnj_pau_dir="$3"; _mnj_pau_node="$4"; _mnj_pau_phase="$5"
+  _mnj_pau_state="${6:-failed}"; _mnj_pau_reason="${7:-pool-aborted}"
+  case "$_mnj_pau_state" in failed|timeout) ;; *) return 2 ;; esac
+  mnj_safe_token "$_mnj_pau_reason" || return 2
+  # Pending publication is meaningful only with its private job directory and
+  # node identity.  If an interruption caught a partial publication, retain
+  # all metadata and fail closed; never clear a claim that cannot be inspected.
+  [ -n "$_mnj_pau_pid" ] && [ -n "$_mnj_pau_dir" ] && [ -d "$_mnj_pau_dir" ] || return 1
+  mnj_root_valid "${_mnj_pau_dir%/node_*}" &&
+    merv_is_valid_node_id "$_mnj_pau_node" &&
+    mnj_safe_token "$_mnj_pau_phase" || return 1
+  mnj_positive "$_mnj_pau_pid" || return 1
+  case "$_mnj_pau_start" in
+    ''|*[!0-9]*)
+      # A signal may arrive after $! is published but before the parent has
+      # recorded the wrapper start identity.  Try to establish it now.  When
+      # that cannot be done, a live PID is deliberately retained as
+      # unresolved: PID-only termination and a potentially indefinite wait
+      # would both violate the identity contract.
+      _mnj_pau_start=$(merv_proc_start_time "$_mnj_pau_pid" 2>/dev/null || printf '')
+      case "$_mnj_pau_start" in
+        *[!0-9]*|'')
+          kill -0 "$_mnj_pau_pid" 2>/dev/null && return 1
+          # A non-live direct child can be reaped without signalling it.  The
+          # wait is terminal here, rather than a wait on an unknown live PID.
+          wait "$_mnj_pau_pid" 2>/dev/null || :
+          ;;
+        *)
+          merv_process_identity_matches "$_mnj_pau_pid" "$_mnj_pau_start" || {
+            kill -0 "$_mnj_pau_pid" 2>/dev/null && return 1
+            wait "$_mnj_pau_pid" 2>/dev/null || :
+          }
+          ;;
+      esac
+      # The identity may have disappeared between lookup and authentication.
+      # In that terminal case the preceding reap is sufficient; otherwise the
+      # authenticated identity-safe stop path below remains required.
+      if merv_process_identity_matches "$_mnj_pau_pid" "$_mnj_pau_start"; then
+        mnj_stop_identity_process "$_mnj_pau_pid" "$_mnj_pau_start" 2 || return 1
+        wait "$_mnj_pau_pid" 2>/dev/null || :
+      fi
+      ;;
+    *)
+      mnj_stop_identity_process "$_mnj_pau_pid" "$_mnj_pau_start" 2 || return 1
+      wait "$_mnj_pau_pid" 2>/dev/null || :
+      ;;
+  esac
+  if [ -n "$_mnj_pau_dir" ] && [ -d "$_mnj_pau_dir" ]; then
+    _mnj_pau_child_pid=$(cat "$_mnj_pau_dir/child.pid" 2>/dev/null || printf '')
+    _mnj_pau_child_start=$(cat "$_mnj_pau_dir/child.proc_start_time" 2>/dev/null || printf '')
+    case "$_mnj_pau_child_pid:$_mnj_pau_child_start" in
+      ''|*[!0-9:]*|:*|*:)
+        # No child identity was published.  A stopped wrapper cannot safely
+        # justify a PID-only child sweep, so retain this job as unresolved.
+        [ -n "$_mnj_pau_child_pid$_mnj_pau_child_start" ] && return 1
+        ;;
+      *)
+        # Do not predicate reconciliation on a preliminary liveness lookup:
+        # a transient identity-read failure must fail closed rather than make
+        # a surviving handler look terminal.
+        mnj_stop_identity_process "$_mnj_pau_child_pid" "$_mnj_pau_child_start" 1 || return 1
+        ;;
+    esac
+    if ! mnj_result_validate "$_mnj_pau_dir/result" "$_mnj_pau_node" "$_mnj_pau_phase"; then
+      _mnj_pau_started=$(cat "$_mnj_pau_dir/started_epoch" 2>/dev/null || printf '')
+      mnj_positive "$_mnj_pau_started" || _mnj_pau_started=$(date +%s 2>/dev/null || printf '')
+      mnj_publish_result "$_mnj_pau_dir" "$_mnj_pau_node" "$_mnj_pau_phase" "$_mnj_pau_state" "$_mnj_pau_started" "$_mnj_pau_reason" || return 1
+    fi
+  fi
+  return 0
+}
+
+mnj_pool_abort_active() {
+  # <state> and <reason> are the terminal result contract for every worker
+  # that did not publish one before the parent stopped the pool.  Keep the
+  # historical setup-failure defaults for callers that do not pass arguments.
+  _mnj_paa_state="${1:-failed}"; _mnj_paa_reason="${2:-pool-setup-failed}"
+  case "$_mnj_paa_state" in failed|timeout) ;; *) return 2 ;; esac
+  mnj_safe_token "$_mnj_paa_reason" || return 2
+  case "${MNJ_POOL_ACTIVE:-0}" in ''|0|1) ;; *) return 1 ;; esac
+  _mnj_paa_rc=0
+  if [ -n "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ]; then
+    if mnj_pool_abort_unpublished "$MNJ_POOL_PENDING_PID" "$MNJ_POOL_PENDING_START" "$MNJ_POOL_PENDING_DIR" "$MNJ_POOL_PENDING_NODE" "$MNJ_POOL_PHASE" "$_mnj_paa_state" "$_mnj_paa_reason"; then
+      MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+    else
+      _mnj_paa_rc=1
+    fi
+  fi
+  _mnj_paa_pass=1; _mnj_paa_live=0
+  while [ "$_mnj_paa_pass" -le 2 ]; do
+    _mnj_paa_live=0
+    for _mnj_paa_slot in 1 2 3 4 5; do
+      mnj_slot_get "$_mnj_paa_slot"
+      [ -n "$MNJ_GP" ] || continue
+      mnj_reconcile_slot "$_mnj_paa_slot" "$_mnj_paa_state" "$_mnj_paa_reason" || _mnj_paa_live=1
+    done
+    [ "$_mnj_paa_live" -eq 0 ] && break
+    _mnj_paa_pass=$((_mnj_paa_pass+1))
+  done
+  [ "$_mnj_paa_live" -eq 0 ] || _mnj_paa_rc=1
+  # A failed identity reconciliation intentionally leaves the slot/pending
+  # metadata intact so a later owner can retry safely; do not make the pool
+  # appear idle while an authenticated child may still be alive.
+  if [ "$_mnj_paa_live" -eq 0 ] && [ -z "${MNJ_POOL_PENDING_PID:-}${MNJ_POOL_PENDING_START:-}${MNJ_POOL_PENDING_DIR:-}${MNJ_POOL_PENDING_NODE:-}" ]; then
+    MNJ_POOL_ACTIVE=0
+  else
+    _mnj_paa_rc=1
+  fi
+  return "$_mnj_paa_rc"
 }
 
 mnj_poll_slot() {
@@ -207,9 +432,21 @@ mnj_poll_slot() {
     return 0
   fi
   _mnj_now=$(date +%s 2>/dev/null || printf 0)
-  if ! merv_process_identity_matches "$MNJ_GP" "$MNJ_GS"; then mnj_reconcile_slot "$_mnj_slot" failed missing-result
-  elif [ "$_mnj_now" -ge "$MNJ_GL" ] 2>/dev/null; then mnj_reconcile_slot "$_mnj_slot" timeout parent-deadline
+  if ! merv_process_identity_matches "$MNJ_GP" "$MNJ_GS"; then
+    mnj_reconcile_slot "$_mnj_slot" failed missing-result || return 1
+  elif [ "$_mnj_now" -ge "$MNJ_GL" ] 2>/dev/null; then
+    mnj_reconcile_slot "$_mnj_slot" timeout parent-deadline || return 1
   fi
+  return 0
+}
+
+mnj_pool_poll_all() {
+  mnj_poll_slot 1 || return 1
+  mnj_poll_slot 2 || return 1
+  mnj_poll_slot 3 || return 1
+  mnj_poll_slot 4 || return 1
+  mnj_poll_slot 5 || return 1
+  return 0
 }
 
 # Parents may opt into a small progress callback while a pool is running.
@@ -225,44 +462,114 @@ mnj_pool_progress() {
 
 # mnj_pool_run <job-root> <phase> <parallelism> <timeout> <nodes-file> <handler>
 mnj_pool_run() {
-  MNJ_POOL_ROOT="$1"; MNJ_POOL_PHASE="$2"; MNJ_POOL_PAR=$(mnj_parallelism "$3"); MNJ_POOL_TIMEOUT="$4"; MNJ_POOL_NODES="$5"; MNJ_POOL_HANDLER="$6"
-  mnj_root_valid "$MNJ_POOL_ROOT" && mnj_safe_token "$MNJ_POOL_PHASE" && mnj_positive "$MNJ_POOL_TIMEOUT" && [ -f "$MNJ_POOL_NODES" ] || return 2
-  MNJ_POOL_FAILURES=0; MNJ_S1_PID=''; MNJ_S2_PID=''; mkdir -p "$MNJ_POOL_ROOT" || return 2
+  _mnj_run_root="$1"; _mnj_run_phase="$2"; _mnj_run_par=$(mnj_effective_parallelism "${3:-}"); _mnj_run_timeout="$4"; _mnj_run_nodes="$5"; _mnj_run_handler="$6"
+  mnj_root_valid "$_mnj_run_root" && mnj_safe_token "$_mnj_run_phase" && mnj_positive "$_mnj_run_timeout" && [ -f "$_mnj_run_nodes" ] || return 2
+  # Do not overwrite an active, pending, or partially published prior pool.
+  # This check deliberately precedes every MNJ_* assignment and mkdir so the
+  # retained metadata/root remain available for identity-safe reconciliation.
+  mnj_pool_state_unresolved
+  _mnj_state_rc=$?
+  case "$_mnj_state_rc" in
+    1) ;;
+    0|*)
+      type warn >/dev/null 2>&1 && warn -c vlan "Node jobs: refusing new pool while prior pool state is unresolved"
+      return 2
+      ;;
+  esac
+  MNJ_POOL_ROOT="$_mnj_run_root"; MNJ_POOL_PHASE="$_mnj_run_phase"; MNJ_POOL_PAR="$_mnj_run_par"; MNJ_POOL_TIMEOUT="$_mnj_run_timeout"; MNJ_POOL_NODES="$_mnj_run_nodes"; MNJ_POOL_HANDLER="$_mnj_run_handler"
+  MNJ_POOL_FAILURES=0
+  MNJ_S1_PID=''; MNJ_S2_PID=''; MNJ_S3_PID=''; MNJ_S4_PID=''; MNJ_S5_PID=''
+  MNJ_S1_START=''; MNJ_S2_START=''; MNJ_S3_START=''; MNJ_S4_START=''; MNJ_S5_START=''
+  MNJ_S1_DIR=''; MNJ_S2_DIR=''; MNJ_S3_DIR=''; MNJ_S4_DIR=''; MNJ_S5_DIR=''
+  MNJ_S1_NODE=''; MNJ_S2_NODE=''; MNJ_S3_NODE=''; MNJ_S4_NODE=''; MNJ_S5_NODE=''
+  MNJ_S1_DEADLINE=''; MNJ_S2_DEADLINE=''; MNJ_S3_DEADLINE=''; MNJ_S4_DEADLINE=''; MNJ_S5_DEADLINE=''
+  MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+  MNJ_POOL_SETUP_FAILED=0
+  MNJ_POOL_ACTIVE=0
+  mkdir -p "$MNJ_POOL_ROOT" || return 2
   MNJ_POOL_INPUT="$MNJ_POOL_ROOT/.nodes.$$"
   umask 077
   cat "$MNJ_POOL_NODES" > "$MNJ_POOL_INPUT" || return 2
   mnj_nodes_validate "$MNJ_POOL_INPUT" || return 2
+  MNJ_POOL_ACTIVE=1
   while IFS=' ' read -r MNJ_POOL_NODE MNJ_POOL_IP MNJ_POOL_EXTRA || [ -n "$MNJ_POOL_NODE" ]; do
+    _mnj_slot=""
     while :; do
-      mnj_poll_slot 1; mnj_poll_slot 2
+      if ! mnj_pool_poll_all; then
+        MNJ_POOL_SETUP_FAILED=1
+        break
+      fi
       mnj_pool_progress
-      mnj_slot_get 1; _mnj_busy1="$MNJ_GP"; mnj_slot_get 2; _mnj_busy2="$MNJ_GP"
-      if [ -z "$_mnj_busy1" ]; then _mnj_slot=1; break; fi
-      if [ "$MNJ_POOL_PAR" = 2 ] && [ -z "$_mnj_busy2" ]; then _mnj_slot=2; break; fi
+      _mnj_slot=""
+      for _mnj_try_slot in 1 2 3 4 5; do
+        [ "$_mnj_try_slot" -le "$MNJ_POOL_PAR" ] 2>/dev/null || break
+        mnj_slot_get "$_mnj_try_slot"
+        if [ -z "$MNJ_GP" ]; then _mnj_slot="$_mnj_try_slot"; break; fi
+      done
+      [ -n "$_mnj_slot" ] && break
       sleep 1
     done
-    MNJ_POOL_DIR=$(mnj_job_dir "$MNJ_POOL_ROOT" "$MNJ_POOL_NODE" "$MNJ_POOL_PHASE") || return 2
-    [ ! -e "$MNJ_POOL_DIR" ] || return 2
-    mkdir -p "$MNJ_POOL_DIR" || return 2
+    [ "$MNJ_POOL_SETUP_FAILED" -eq 0 ] && [ -n "$_mnj_slot" ] || break
+    if ! MNJ_POOL_DIR=$(mnj_job_dir "$MNJ_POOL_ROOT" "$MNJ_POOL_NODE" "$MNJ_POOL_PHASE"); then
+      MNJ_POOL_SETUP_FAILED=1
+      break
+    fi
+    if [ -e "$MNJ_POOL_DIR" ]; then
+      MNJ_POOL_SETUP_FAILED=1
+      break
+    fi
+    if ! mkdir -p "$MNJ_POOL_DIR"; then
+      MNJ_POOL_SETUP_FAILED=1
+      break
+    fi
     ( mnj_worker "$MNJ_POOL_DIR" "$MNJ_POOL_NODE" "$MNJ_POOL_PHASE" "$MNJ_POOL_HANDLER" "$MNJ_POOL_NODE" "$MNJ_POOL_IP" ) </dev/null &
-    _mnj_pid=$!; _mnj_start=$(merv_proc_start_time "$_mnj_pid" 2>/dev/null || printf '')
+    _mnj_pid=$!
+    # Publish the complete pending claim immediately after $!.  The identity
+    # lookup is intentionally after this publication so a signal or test hook
+    # cannot observe a launched wrapper without its job/node ownership.
+    MNJ_POOL_PENDING_PID="$_mnj_pid"; MNJ_POOL_PENDING_START=""; MNJ_POOL_PENDING_DIR="$MNJ_POOL_DIR"; MNJ_POOL_PENDING_NODE="$MNJ_POOL_NODE"
+    if [ -n "${MNJ_POOL_PENDING_HOOK:-}" ] && mnj_safe_token "$MNJ_POOL_PENDING_HOOK" && type "$MNJ_POOL_PENDING_HOOK" >/dev/null 2>&1; then
+      "$MNJ_POOL_PENDING_HOOK" "$_mnj_pid" "$MNJ_POOL_DIR" "$MNJ_POOL_NODE"
+    fi
+    _mnj_start=$(merv_proc_start_time "$_mnj_pid" 2>/dev/null || printf '')
     case "$_mnj_start" in
       ''|*[!0-9]*)
-        kill -TERM "$_mnj_pid" 2>/dev/null || :
-        wait "$_mnj_pid" 2>/dev/null || :
-        return 2
+        MNJ_POOL_SETUP_FAILED=1
+        break
         ;;
     esac
+    if ! merv_process_identity_matches "$_mnj_pid" "$_mnj_start"; then
+      MNJ_POOL_SETUP_FAILED=1
+      break
+    fi
+    MNJ_POOL_PENDING_START="$_mnj_start"
     if ! printf '%s\n' "$_mnj_pid" > "$MNJ_POOL_DIR/wrapper.pid" ||
        ! printf '%s\n' "$_mnj_start" > "$MNJ_POOL_DIR/wrapper.proc_start_time"; then
-      merv_process_identity_matches "$_mnj_pid" "$_mnj_start" && kill -TERM "$_mnj_pid" 2>/dev/null || :
-      wait "$_mnj_pid" 2>/dev/null || :
+      MNJ_POOL_SETUP_FAILED=1
+      break
+    fi
+    _mnj_now=$(date +%s 2>/dev/null || printf '')
+    if ! mnj_positive "$_mnj_now"; then
+      MNJ_POOL_SETUP_FAILED=1
+      break
+    fi
+    mnj_slot_set "$_mnj_slot" "$_mnj_pid" "$_mnj_start" "$MNJ_POOL_DIR" "$MNJ_POOL_NODE" $((_mnj_now + MNJ_POOL_TIMEOUT))
+    MNJ_POOL_PENDING_PID=''; MNJ_POOL_PENDING_START=''; MNJ_POOL_PENDING_DIR=''; MNJ_POOL_PENDING_NODE=''
+  done < "$MNJ_POOL_INPUT"
+  if [ "$MNJ_POOL_SETUP_FAILED" -eq 1 ]; then
+    mnj_pool_abort_active failed pool-setup-failed || :
+    return 2
+  fi
+  while [ -n "$MNJ_S1_PID$MNJ_S2_PID$MNJ_S3_PID$MNJ_S4_PID$MNJ_S5_PID" ]; do
+    if ! mnj_pool_poll_all; then
+      mnj_pool_abort_active failed pool-poll-failed || :
       return 2
     fi
-    _mnj_now=$(date +%s); mnj_slot_set "$_mnj_slot" "$_mnj_pid" "$_mnj_start" "$MNJ_POOL_DIR" "$MNJ_POOL_NODE" $((_mnj_now + MNJ_POOL_TIMEOUT))
-  done < "$MNJ_POOL_INPUT"
-  while [ -n "$MNJ_S1_PID$MNJ_S2_PID" ]; do mnj_poll_slot 1; mnj_poll_slot 2; mnj_pool_progress; [ -n "$MNJ_S1_PID$MNJ_S2_PID" ] && sleep 1; done
+    mnj_pool_progress
+    [ -n "$MNJ_S1_PID$MNJ_S2_PID$MNJ_S3_PID$MNJ_S4_PID$MNJ_S5_PID" ] && sleep 1
+  done
   mnj_pool_progress
+  MNJ_POOL_ACTIVE=0
   for _mnj_dir in "$MNJ_POOL_ROOT"/node_*; do [ -d "$_mnj_dir" ] || continue; mnj_result_validate "$_mnj_dir/result" "${_mnj_dir##*/node_}" "$MNJ_POOL_PHASE" && [ "$MNJ_RESULT_STATE" = ok ] || MNJ_POOL_FAILURES=$((MNJ_POOL_FAILURES+1)); done
   [ "$MNJ_POOL_FAILURES" -eq 0 ]
 }

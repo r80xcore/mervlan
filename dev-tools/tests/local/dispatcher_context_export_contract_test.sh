@@ -57,4 +57,16 @@ _dispatch_rc=$?
 [ -s "$PROGRESS" ] || exit 1
 [ -s "$ACK" ] || exit 1
 [ "$(wc -l < "$RELEASES" 2>/dev/null)" -eq 2 ] || exit 1
+
+# A normal dispatched worker must use the identity API loaded by
+# lib_action_lock, rather than the unavailable lib_mervqt compatibility
+# wrappers.  This is the same path a router service-event invocation takes.
+merv_action_lock_export_child_context() { return 0; }
+merv_identity_proc_start() { printf '1\n'; }
+merv_identity_matches() { return 0; }
+dispatch_if_executable "$WORKER"
+_dispatch_rc=$?
+[ "$_dispatch_rc" -eq 0 ] || exit 1
+[ -e "$MARKER" ] || exit 1
+[ "$(wc -l < "$RELEASES" 2>/dev/null)" -eq 4 ] || exit 1
 printf 'DISPATCHER_CONTEXT_EXPORT_CONTRACT_OK\n'
