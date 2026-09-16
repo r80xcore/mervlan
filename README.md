@@ -249,7 +249,6 @@ See [Device Support and mapper instructions](docs/HELP.md#10-device-support) for
 - GT-BE19000AI
 
 **ROG & high-performance series:**
-- GT-AXE11000 *(Note: GT-AX11000, GT-AX11000 Pro, and GT-AXE16000 are supported)*
 
 **TUF Gaming series:**
 - TUF-AX3000 v1 *(Note: TUF-AX3000_V2 is supported, but v1 remains unverified)*
@@ -312,7 +311,7 @@ Thanks to everyone who ran the hardware mapper and submitted a device profile. T
 
 **Model collection from GitHub:**
 
-bieniu, pxdl, davittoncat, RikshaDriver, Mudcrab353, franzatkiermeyereu, mdraco11, tooty-1135, getBoolean, piratak, kashif789us, bigadron, MathNerd28, peternovakovster, MrKlausz, jameshavel-0805, AtlasVector
+bieniu, pxdl, davittoncat, RikshaDriver, Mudcrab353, franzatkiermeyereu, mdraco11, tooty-1135, getBoolean, piratak, kashif789us, bigadron, MathNerd28, peternovakovster, MrKlausz, jameshavel-0805, AtlasVector, Alacard
 
 
 **Model collection from SNBForums:**
