@@ -1073,6 +1073,10 @@ fi
 
   export LOCKDIR="$CASE_DIR/locks"
   export TMPDIR="$CASE_DIR/tmp"
+  MERV_STATE_ROOT="$CASE_DIR/state"
+  MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+  MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
+  mkdir -p "$MERV_STATE_ROOT"
   SETTINGS_FILE="$CASE_DIR/settings.json"
   LOG_chan_boot="$CASE_DIR/boot_wrap.log"
 

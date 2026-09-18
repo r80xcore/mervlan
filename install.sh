@@ -53,6 +53,19 @@ fi
 # Capture the caller-owned staging directory before selecting the runtime
 # profile. download/tarball mode intentionally retain this historical contract.
 INSTALL_STAGING_DIR="${TMP_DIR:-}"
+MERV_INSTALL_SUPPORT_HANDOFF="${MERV_INSTALL_SUPPORT_HANDOFF:-0}"
+MERV_INSTALL_STAGED_ROOT="${MERV_INSTALL_STAGED_ROOT:-}"
+MERV_INSTALL_STAGED_WORK="${MERV_INSTALL_STAGED_WORK:-}"
+MERV_INSTALL_STAGED_ARCHIVE="${MERV_INSTALL_STAGED_ARCHIVE:-}"
+MERV_INSTALL_STAGED_READY="${MERV_INSTALL_STAGED_READY:-0}"
+MERV_INSTALL_HANDOFF_BRANCH="${MERV_INSTALL_HANDOFF_BRANCH:-}"
+MERV_INSTALL_HANDOFF_POLICY="${MERV_INSTALL_HANDOFF_POLICY:-}"
+MERV_INSTALL_HANDOFF_SSH_USER="${MERV_INSTALL_HANDOFF_SSH_USER:-}"
+MERV_INSTALL_HANDOFF_SSH_PORT="${MERV_INSTALL_HANDOFF_SSH_PORT:-}"
+MERV_INSTALL_HANDOFF_TOKEN="${MERV_INSTALL_HANDOFF_TOKEN:-}"
+MERV_INSTALL_WIZARD_DONE="${MERV_INSTALL_WIZARD_DONE:-0}"
+MERV_INSTALL_HANDOFF_ADOPTED=0
+MERV_INSTALL_HANDOFF_FILE=""
 
 MODE=""
 BRANCH="main"
@@ -63,6 +76,7 @@ INTERACTIVE_INSTALL=0
 INSTALL_POLICY="fresh"
 INSTALL_STATE="absent"
 INSTALL_CANCELLED=0
+INSTALL_ARCHIVE_SEQ=0
 
 parse_install_args() {
     local arg
@@ -108,6 +122,13 @@ parse_install_args() {
 
 parse_install_args "$@" || exit $?
 
+if [ "$MERV_INSTALL_SUPPORT_HANDOFF" = "1" ]; then
+    [ -n "$MERV_INSTALL_HANDOFF_BRANCH" ] && BRANCH="$MERV_INSTALL_HANDOFF_BRANCH"
+    [ -n "$MERV_INSTALL_HANDOFF_POLICY" ] && INSTALL_POLICY="$MERV_INSTALL_HANDOFF_POLICY"
+    [ -n "$MERV_INSTALL_HANDOFF_SSH_USER" ] && INSTALL_SSH_USER="$MERV_INSTALL_HANDOFF_SSH_USER"
+    [ -n "$MERV_INSTALL_HANDOFF_SSH_PORT" ] && INSTALL_SSH_PORT="$MERV_INSTALL_HANDOFF_SSH_PORT"
+fi
+
 ADDON_DIR="/jffs/addons"
 ACTIVE_ADDON="mervlan"
 ACTIVE_MERV_BASE="$ADDON_DIR/$ACTIVE_ADDON"
@@ -130,33 +151,184 @@ else
     MERV_STATE_ROOT="${MERV_STATE_ROOT_OVERRIDE:-/jffs/addons/mervlan_state}"
 fi
 
-# Maintenance admission is available from either the active installation or
-# this source tree.  The latter keeps a fresh install fail-closed when no
-# active addon tree exists yet.
+install_staged_support_root_valid() {
+    _isrsv_root="${1:-}"
+    case "$_isrsv_root" in
+        "$TMP_DIR"/install.[0-9]*/*) ;;
+        *) return 1 ;;
+    esac
+    case "$_isrsv_root" in
+        ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    esac
+    [ ! -L "$_isrsv_root" ] && [ -d "$_isrsv_root" ] || return 1
+    for _isrsv_file in \
+        install.sh uninstall.sh changelog.txt mervlan.asp \
+        settings/lib_identity.sh settings/lib_owner_lock.sh \
+        settings/lib_update_state.sh settings/lib_maintenance_recovery.sh \
+        settings/lib_json.sh settings/var_settings.sh \
+        settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh \
+        functions/update_mervlan.sh functions/mervlan_recover.sh \
+        functions/mervlan_backup.sh functions/mervlan_wan.sh; do
+        [ ! -L "$_isrsv_root/$_isrsv_file" ] &&
+            [ -f "$_isrsv_root/$_isrsv_file" ] || return 1
+    done
+    [ -x "$_isrsv_root/functions/mervlan_wan.sh" ] || return 1
+    return 0
+}
+
+# A staged full/tarball install re-execs the installer from its private,
+# already-validated package.  The environment only carries a locator; this
+# record binds that locator, the acquisition workspace/archive and the chosen
+# policy to the transaction.  It deliberately lives inside the private work
+# directory, is exact-format, and is rechecked by the staged child before any
+# maintenance admission or active-tree mutation.
+install_handoff_scalar_valid() {
+    case "${1:-}" in ''|*..*|*//*|*[!A-Za-z0-9_./:-]*) return 1 ;; esac
+    return 0
+}
+
+install_handoff_path_chain_safe() {
+    _ihpcs_path="${1:-}" _ihpcs_current=/ _ihpcs_rest="" _ihpcs_component=""
+    install_handoff_scalar_valid "$_ihpcs_path" || return 1
+    case "$_ihpcs_path" in /*) ;; *) return 1 ;; esac
+    _ihpcs_rest=${_ihpcs_path#/}
+    while [ -n "$_ihpcs_rest" ]; do
+        case "$_ihpcs_rest" in
+            */*) _ihpcs_component=${_ihpcs_rest%%/*}; _ihpcs_rest=${_ihpcs_rest#*/} ;;
+            *) _ihpcs_component=$_ihpcs_rest; _ihpcs_rest='' ;;
+        esac
+        [ -n "$_ihpcs_component" ] || return 1
+        _ihpcs_current="$_ihpcs_current$_ihpcs_component"
+        if ls -ld "$_ihpcs_current" >/dev/null 2>&1; then
+            [ ! -L "$_ihpcs_current" ] && [ -d "$_ihpcs_current" ] || return 1
+        fi
+        _ihpcs_current="$_ihpcs_current/"
+    done
+    return 0
+}
+
+install_handoff_token_valid() {
+    case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ "${#1}" -le 160 ]
+}
+
+install_handoff_archive_fingerprint() {
+    _ihaf_archive="${1:-}"
+    [ -f "$_ihaf_archive" ] && [ ! -L "$_ihaf_archive" ] || return 1
+    # ASUSWRT builds in the supported lab omit cksum.  Keep this transaction
+    # binding labelled so an md5sum result can never be compared as though it
+    # were produced by a different fallback algorithm.
+    if type md5sum >/dev/null 2>&1; then
+        _ihaf_hex=$(md5sum "$_ihaf_archive" 2>/dev/null | awk '{print $1}')
+        case "$_ihaf_hex" in *[!0-9A-Fa-f]*|'') : ;; *)
+            [ "${#_ihaf_hex}" -eq 32 ] && { printf 'md5:%s\n' "$_ihaf_hex"; return 0; }
+            ;;
+        esac
+    fi
+    if type openssl >/dev/null 2>&1; then
+        _ihaf_hex=$(openssl dgst -md5 "$_ihaf_archive" 2>/dev/null | awk '{print $NF}')
+        case "$_ihaf_hex" in *[!0-9A-Fa-f]*|'') : ;; *)
+            [ "${#_ihaf_hex}" -eq 32 ] && { printf 'md5:%s\n' "$_ihaf_hex"; return 0; }
+            ;;
+        esac
+    fi
+    return 1
+}
+
+install_staged_handoff_record_valid() {
+    _ishrv_file="$1" _ishrv_fingerprint=""
+    [ -f "$_ishrv_file" ] && [ ! -L "$_ishrv_file" ] || return 1
+    [ "$(wc -l <"$_ishrv_file" 2>/dev/null | tr -d '[:space:]')" = 12 ] || return 1
+    _ishrv_fingerprint=$(install_handoff_archive_fingerprint "$MERV_INSTALL_STAGED_ARCHIVE" 2>/dev/null || printf '')
+    [ -n "$_ishrv_fingerprint" ] || return 1
+    for _ishrv_line in \
+        'format=1' \
+        "root=$MERV_INSTALL_STAGED_ROOT" \
+        "work=$MERV_INSTALL_STAGED_WORK" \
+        "archive=$MERV_INSTALL_STAGED_ARCHIVE" \
+        "mode=$MODE" \
+        "test_run=$TEST_RUN" \
+        "branch=$MERV_INSTALL_HANDOFF_BRANCH" \
+        "policy=$MERV_INSTALL_HANDOFF_POLICY" \
+        "ssh_user=$MERV_INSTALL_HANDOFF_SSH_USER" \
+        "ssh_port=$MERV_INSTALL_HANDOFF_SSH_PORT" \
+        "archive_fingerprint=$_ishrv_fingerprint" \
+        "token=$MERV_INSTALL_HANDOFF_TOKEN"; do
+        grep -Fqx "$_ishrv_line" "$_ishrv_file" 2>/dev/null || return 1
+    done
+    return 0
+}
+
+install_staged_handoff_adopt() {
+    [ "$MERV_INSTALL_SUPPORT_HANDOFF" = 1 ] || return 1
+    [ "$MERV_INSTALL_STAGED_READY" = 1 ] || return 1
+    case "$MODE" in full|tarball) ;; *) return 1 ;; esac
+    case "$TEST_RUN" in 0|1) ;; *) return 1 ;; esac
+    case "$MERV_INSTALL_HANDOFF_POLICY" in fresh|preserve|clean) ;; *) return 1 ;; esac
+    case "$MERV_INSTALL_HANDOFF_BRANCH" in ''|/*|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+    case "$MERV_INSTALL_HANDOFF_SSH_USER" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    case "$MERV_INSTALL_HANDOFF_SSH_PORT" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$MERV_INSTALL_HANDOFF_SSH_PORT" -ge 1 ] 2>/dev/null &&
+        [ "$MERV_INSTALL_HANDOFF_SSH_PORT" -le 65535 ] 2>/dev/null || return 1
+    install_handoff_token_valid "$MERV_INSTALL_HANDOFF_TOKEN" || return 1
+    install_handoff_scalar_valid "$MERV_INSTALL_STAGED_WORK" || return 1
+    install_handoff_scalar_valid "$MERV_INSTALL_STAGED_ROOT" || return 1
+    install_handoff_scalar_valid "$MERV_INSTALL_STAGED_ARCHIVE" || return 1
+    install_handoff_path_chain_safe "$MERV_INSTALL_STAGED_WORK" || return 1
+    install_handoff_path_chain_safe "$MERV_INSTALL_STAGED_ROOT" || return 1
+    install_handoff_path_chain_safe "${MERV_INSTALL_STAGED_ARCHIVE%/*}" || return 1
+    case "$MERV_INSTALL_STAGED_WORK" in "$TMP_DIR"/install.[0-9]*) ;; *) return 1 ;; esac
+    case "$MERV_INSTALL_STAGED_ROOT" in "$MERV_INSTALL_STAGED_WORK"/*) ;; *) return 1 ;; esac
+    [ -d "$MERV_INSTALL_STAGED_WORK" ] && [ ! -L "$MERV_INSTALL_STAGED_WORK" ] || return 1
+    [ -f "$MERV_INSTALL_STAGED_ARCHIVE" ] && [ ! -L "$MERV_INSTALL_STAGED_ARCHIVE" ] || return 1
+    [ "$MERV_INSTALL_SCRIPT_PATH" = "$MERV_INSTALL_STAGED_ROOT/install.sh" ] || return 1
+    install_staged_support_root_valid "$MERV_INSTALL_STAGED_ROOT" || return 1
+    MERV_INSTALL_HANDOFF_FILE="$MERV_INSTALL_STAGED_WORK/.mervlan-install-handoff"
+    install_staged_handoff_record_valid "$MERV_INSTALL_HANDOFF_FILE" || return 1
+    MERV_INSTALL_HANDOFF_ADOPTED=1
+    return 0
+}
+
+# Maintenance admission must come from one coherent support root. A detached
+# installer may be newer than the active addon, so never source owner and
+# update-state libraries from different revisions.
 MERV_INSTALL_SCRIPT_DIR=""
 MERV_SELECTED_MERV_BASE="$MERV_BASE"
 case "$0" in
     */*) MERV_INSTALL_SCRIPT_DIR=$(CDPATH= cd -- "${0%/*}" 2>/dev/null && pwd) ;;
     *) MERV_INSTALL_SCRIPT_DIR=$(pwd 2>/dev/null) ;;
 esac
-if [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ]; then
-    . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || :
-elif [ -n "$MERV_INSTALL_SCRIPT_DIR" ] && [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" ]; then
-    MERV_BASE="$MERV_INSTALL_SCRIPT_DIR"
-    . "$MERV_INSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" 2>/dev/null || :
+MERV_INSTALL_SCRIPT_PATH="$MERV_INSTALL_SCRIPT_DIR/install.sh"
+MERV_SUPPORT_ROOT=""
+if [ "$MERV_INSTALL_SUPPORT_HANDOFF" = "1" ]; then
+    install_staged_handoff_adopt || {
+        echo "[install] ERROR: staged installer handoff is missing, mismatched, or unsafe" >&2
+        exit 1
+    }
+    MERV_SUPPORT_ROOT="$MERV_INSTALL_STAGED_ROOT"
+elif [ -n "$MERV_INSTALL_SCRIPT_DIR" ] &&
+   [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" ] &&
+   [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_update_state.sh" ] &&
+   [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_maintenance_recovery.sh" ]; then
+    MERV_SUPPORT_ROOT="$MERV_INSTALL_SCRIPT_DIR"
+elif [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ] &&
+     [ -r "$MERV_BASE/settings/lib_update_state.sh" ] &&
+     [ -r "$MERV_BASE/settings/lib_maintenance_recovery.sh" ]; then
+    MERV_SUPPORT_ROOT="$MERV_BASE"
+fi
+if [ -n "$MERV_SUPPORT_ROOT" ]; then
+    MERV_BASE="$MERV_SUPPORT_ROOT"
+    . "$MERV_SUPPORT_ROOT/settings/lib_owner_lock.sh" 2>/dev/null || :
+    . "$MERV_SUPPORT_ROOT/settings/lib_update_state.sh" 2>/dev/null || :
+    . "$MERV_SUPPORT_ROOT/settings/lib_maintenance_recovery.sh" 2>/dev/null || :
     MERV_BASE="$MERV_SELECTED_MERV_BASE"
 fi
-if [ -r "$MERV_BASE/settings/lib_update_state.sh" ]; then
-    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || :
-elif [ -n "$MERV_INSTALL_SCRIPT_DIR" ] && [ -r "$MERV_INSTALL_SCRIPT_DIR/settings/lib_update_state.sh" ]; then
-    MERV_BASE="$MERV_INSTALL_SCRIPT_DIR"
-    . "$MERV_INSTALL_SCRIPT_DIR/settings/lib_update_state.sh" 2>/dev/null || :
-    MERV_BASE="$MERV_SELECTED_MERV_BASE"
-fi
+MERV_MAINTENANCE_RECOVERY_ROOT="${MERV_MAINTENANCE_RECOVERY_ROOT:-${MERV_BASE%/*}/mervlan_backups}"
+MERV_MAINTENANCE_RECOVERY_MARKER="$MERV_MAINTENANCE_RECOVERY_ROOT/.mervlan.recovery"
 
 MERV_MAINTENANCE_ENTRY_REQUIRED=0
 case "$MODE" in
-    download|credentials) ;;
+    download) ;;
     *) MERV_MAINTENANCE_ENTRY_REQUIRED=1 ;;
 esac
 MERV_MAINTENANCE_ENTRY_ADMITTED=0
@@ -168,26 +340,57 @@ MERV_INSTALL_BOOTSTRAP_FRESH=0
 # it for a partial or existing installation, or when durable maintenance state
 # is present.
 install_bootstrap_full_fresh_context() {
-    local _ibfc_path
+    local _ibfc_path _ibfc_found=0 _ibfc_parent
     case "$MODE" in full|tarball) ;; *) return 1 ;; esac
     [ "$TEST_RUN" != "1" ] || return 1
-    [ -f "$MERV_BASE/install.sh" ] || return 1
-    for _ibfc_path in \
-        "$MERV_BASE/uninstall.sh" \
-        "$MERV_BASE/mervlan.asp" \
-        "$MERV_BASE/functions" \
-        "$MERV_BASE/settings" \
-        "$MERV_BASE/www" \
-        "$MERV_BASE/.ssh"; do
-        [ ! -e "$_ibfc_path" ] || return 1
+    _ibfc_addon_dir="${ADDON_DIR:-/jffs/addons}"
+    case "$_ibfc_addon_dir" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$_ibfc_addon_dir" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+    install_path_chain_safe "$_ibfc_addon_dir" || return 1
+    [ "$MERV_BASE" = "$ACTIVE_MERV_BASE" ] || return 1
+    _ibfc_parent="${MERV_BASE%/*}"
+    [ "$_ibfc_parent" = "$_ibfc_addon_dir" ] || return 1
+    for _ibfc_path in "$_ibfc_addon_dir"; do
+        ls -ld "$_ibfc_path" >/dev/null 2>&1 || return 1
+        [ ! -L "$_ibfc_path" ] && [ -d "$_ibfc_path" ] || return 1
     done
+    # A true online fresh install may have no addon directory yet. A staged
+    # bootstrap may contain exactly the detached installer and nothing else.
+    if install_path_present "$MERV_BASE"; then
+        [ ! -L "$MERV_BASE" ] && [ -d "$MERV_BASE" ] || return 1
+        [ ! -L "$MERV_BASE/install.sh" ] && [ -f "$MERV_BASE/install.sh" ] || return 1
+        for _ibfc_path in "$MERV_BASE"/* "$MERV_BASE"/.[!.]* "$MERV_BASE"/..?*; do
+            if install_path_present "$_ibfc_path"; then
+                [ "$_ibfc_path" = "$MERV_BASE/install.sh" ] || return 1
+                _ibfc_found=1
+            fi
+        done
+        [ "$_ibfc_found" -eq 1 ] || return 1
+    else
+        [ ! -L "$MERV_BASE" ] || return 1
+        _ibfc_found=1
+    fi
+    [ "$_ibfc_found" -eq 1 ] || return 1
     for _ibfc_path in \
         "$TMP_DIR/locks/mervlan_maintenance.lock" \
+        "$TMP_DIR/locks/mervlan_action.lock" \
+        "$TMP_DIR/locks/mervlan_manager.lock" \
+        "$TMP_DIR/locks/vlan_event.lock" \
+        "$TMP_DIR/locks/execute_nodes.lock" \
+        "$TMP_DIR/locks/client_collect.lock" \
         "$TMP_DIR/update.journal" \
         "$TMP_DIR/update.quiesce" \
         "$MERV_STATE_ROOT/update.journal" \
-        "$MERV_STATE_ROOT/update.quiesce"; do
-        [ ! -e "$_ibfc_path" ] || return 1
+        "$MERV_STATE_ROOT/update.quiesce" \
+        "$MERV_STATE_ROOT" \
+        "$MERV_MAINTENANCE_RECOVERY_ROOT"; do
+        install_path_present "$_ibfc_path" && return 1
+    done
+    for _ibfc_path in "$ADDON_DIR"/.mervlan-install-rollback.* "$ADDON_DIR"/.mervlan-install-incomplete.*; do
+        install_path_present "$_ibfc_path" && return 1
     done
     return 0
 }
@@ -209,7 +412,7 @@ install_maintenance_admit() {
     fi
 
     type merv_maintenance_direct_admit >/dev/null 2>&1 || {
-        if install_bootstrap_full_fresh_context; then
+        if [ "$MERV_INSTALL_SUPPORT_HANDOFF" != "1" ] && install_bootstrap_full_fresh_context; then
             MERV_INSTALL_BOOTSTRAP_FRESH=1
             echo "[install] Fresh bootstrap detected; normal maintenance ownership begins after the package is installed"
             return 0
@@ -231,6 +434,37 @@ install_maintenance_admit() {
     return 0
 }
 
+# A proven fresh bootstrap cannot remain outside the canonical owner contract
+# after the first coherent package is staged. Re-read every maintenance helper
+# from that package, authenticate the new owner record, and only then continue
+# with settings, hardware, WebUI, and hook mutations.
+install_bootstrap_transition() {
+    [ "${MERV_INSTALL_BOOTSTRAP_FRESH:-0}" = "1" ] || return 0
+    [ "$MODE" = full ] || [ "$MODE" = tarball ] || return 1
+    [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || return 1
+    install_tree_valid "$MERV_BASE" || return 1
+    [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ] &&
+        [ -r "$MERV_BASE/settings/lib_update_state.sh" ] &&
+        [ -r "$MERV_BASE/settings/lib_maintenance_recovery.sh" ] || return 1
+    unset LIB_OWNER_LOCK_LOADED LIB_UPDATE_STATE_LOADED LIB_MAINTENANCE_RECOVERY_LOADED
+    . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || return 1
+    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || return 1
+    . "$MERV_BASE/settings/lib_maintenance_recovery.sh" 2>/dev/null || return 1
+    MERV_SUPPORT_ROOT="$MERV_BASE"
+    if ! merv_maintenance_direct_admit; then
+        echo "[install] ERROR: fresh package could not enter canonical maintenance ownership" >&2
+        return 1
+    fi
+    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
+       ! merv_maintenance_direct_export_install_context; then
+        merv_maintenance_direct_release >/dev/null 2>&1 || :
+        return 1
+    fi
+    MERV_MAINTENANCE_ENTRY_ADMITTED=1
+    MERV_INSTALL_BOOTSTRAP_FRESH=0
+    return 0
+}
+
 install_maintenance_release() {
     [ "$MERV_MAINTENANCE_ENTRY_ADMITTED" = "1" ] || return 0
     merv_maintenance_direct_release || {
@@ -244,6 +478,9 @@ install_maintenance_release() {
 install_maintenance_exit_handler() {
     local _ime_status=$?
     trap - EXIT
+    if [ "$_ime_status" != "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
+        install_external_restore_projection || _ime_status=1
+    fi
     if ! install_maintenance_release; then
         _ime_status=1
     fi
@@ -263,6 +500,8 @@ INSTALL_PRESERVE_DIR=""
 INSTALL_ROLLBACK_DIR=""
 INSTALL_ROLLBACK_NEEDED=0
 INSTALL_FAILED_TREE=""
+INSTALL_ORIGINAL_CONTRACT_FILE=""
+INSTALL_TRANSACTION_SUFFIX=""
 INSTALL_FINISHED=0
 TEST_MENU_TREE_CREATED=0
 TEST_MENU_ENTRY_ADDED=0
@@ -271,6 +510,19 @@ TEST_VALIDATION_FAILED=0
 ACTIVE_SETTINGS_DIGEST=""
 ACTIVE_MENU_SNAPSHOT=""
 ACTIVE_METADATA_SNAPSHOT=""
+INSTALL_EXTERNAL_PRESERVE_DIR=""
+INSTALL_EXTERNAL_CAPTURED=0
+INSTALL_EXTERNAL_RESTORED=0
+INSTALL_EXTERNAL_INCOMPLETE=0
+INSTALL_EXTERNAL_MENU_BOUND=0
+INSTALL_EXTERNAL_PAGE=""
+INSTALL_EXTERNAL_PAGE_CAPTURED=0
+INSTALL_EXTERNAL_NODE_ATTEMPTED=0
+INSTALL_EXTERNAL_WWW_ROOT="${MERV_INSTALL_WWW_USER_ROOT:-/www/user}"
+INSTALL_EXTERNAL_MENU_TMP="${MERV_INSTALL_MENU_TREE:-/tmp/menuTree.js}"
+INSTALL_EXTERNAL_MENU_TARGET="${MERV_INSTALL_MENU_TARGET:-/www/require/modules/menuTree.js}"
+INSTALL_EXTERNAL_SERVICE_EVENT="${MERV_INSTALL_SERVICE_EVENT:-/jffs/scripts/service-event}"
+INSTALL_EXTERNAL_SERVICES_START="${MERV_INSTALL_SERVICES_START:-/jffs/scripts/services-start}"
 
 RESULT_SOURCE="SKIPPED"
 RESULT_DOWNLOAD="SKIPPED"
@@ -1086,7 +1338,7 @@ detect_existing_installation() {
     # A directory containing only the freshly downloaded install.sh is a
     # bootstrap, not a damaged installation.
     for marker in uninstall.sh mervlan.asp changelog.txt settings/settings.json functions www tmp .ssh; do
-        [ -e "$ACTIVE_MERV_BASE/$marker" ] && { INSTALL_STATE="partial"; return 0; }
+        install_path_present "$ACTIVE_MERV_BASE/$marker" && { INSTALL_STATE="partial"; return 0; }
     done
 }
 
@@ -1426,6 +1678,347 @@ prepare_preserved_files() {
     RESULT_EXISTING="PASS - user data preserved"
 }
 
+install_path_present() {
+    ls -ld "$1" >/dev/null 2>&1
+}
+
+install_path_chain_safe() {
+    local _ipcs_path="$1" _ipcs_current=/ _ipcs_rest _ipcs_component
+    case "$_ipcs_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$_ipcs_path" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+    _ipcs_rest=${_ipcs_path#/}
+    while [ -n "$_ipcs_rest" ]; do
+        case "$_ipcs_rest" in
+            */*) _ipcs_component=${_ipcs_rest%%/*}; _ipcs_rest=${_ipcs_rest#*/} ;;
+            *) _ipcs_component=$_ipcs_rest; _ipcs_rest="" ;;
+        esac
+        [ -n "$_ipcs_component" ] || return 1
+        _ipcs_current="$_ipcs_current$_ipcs_component"
+        if install_path_present "$_ipcs_current"; then
+            [ ! -L "$_ipcs_current" ] && [ -d "$_ipcs_current" ] || return 1
+        fi
+        _ipcs_current="$_ipcs_current/"
+    done
+    return 0
+}
+
+# External installer projections are captured only after maintenance admission
+# and are restored before the owner is released.  The active addon tree is not
+# sufficient evidence for rollback: WebUI files, the bind-mounted menu, Merlin
+# metadata, and service hooks live outside it.
+install_external_owner_current() {
+    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ]; then
+        type merv_owner_v2_matches >/dev/null 2>&1 || return 1
+        merv_owner_v2_matches "${MERV_MAINTENANCE_ENTRY_LOCK:-}" "$$" \
+            "${MERV_MAINTENANCE_ENTRY_START:-}" "${MERV_MAINTENANCE_ENTRY_NONCE:-}"
+        return $?
+    fi
+    type merv_maintenance_delegation_valid >/dev/null 2>&1 || return 1
+    merv_maintenance_delegation_valid
+}
+
+install_external_parent_safe() {
+    _ieps_path="$1"
+    case "$_ieps_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$_ieps_path" in
+        ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    esac
+    _ieps_parent=${_ieps_path%/*}
+    [ -n "$_ieps_parent" ] || _ieps_parent=/
+    install_path_chain_safe "$_ieps_parent" || return 1
+    [ -d "$_ieps_parent" ] && [ ! -L "$_ieps_parent" ] &&
+        [ -r "$_ieps_parent" ] && [ -x "$_ieps_parent" ]
+}
+
+install_external_copy_object() {
+    _ieco_src="$1" _ieco_dest="$2" _ieco_kind="$3"
+    case "$_ieco_kind" in dir|file) ;; *) return 1 ;; esac
+    case "$_ieco_src" in
+        ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    esac
+    case "$_ieco_dest" in
+        ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    esac
+    if [ "$_ieco_kind" = "dir" ]; then
+        cp -a "$_ieco_src" "$_ieco_dest" 2>/dev/null && return 0
+        [ ! -e "$_ieco_dest" ] && [ ! -L "$_ieco_dest" ] || return 1
+        mkdir "$_ieco_dest" 2>/dev/null || return 1
+        ( cd "$_ieco_src" 2>/dev/null && tar -cf - . ) |
+            ( cd "$_ieco_dest" 2>/dev/null && tar -xpf - ) || return 1
+    else
+        cp -p "$_ieco_src" "$_ieco_dest" 2>/dev/null || return 1
+    fi
+    return 0
+}
+
+install_external_remove_object() {
+    _iero_path="$1" _iero_kind="$2"
+    install_external_parent_safe "$_iero_path" || return 1
+    case "$_iero_kind" in dir|file) ;; *) return 1 ;; esac
+    if [ -L "$_iero_path" ]; then
+        rm -f "$_iero_path" 2>/dev/null || return 1
+    elif [ -d "$_iero_path" ]; then
+        [ "$_iero_kind" = "dir" ] || return 1
+        rm -rf "$_iero_path" 2>/dev/null || return 1
+    elif [ -f "$_iero_path" ]; then
+        [ "$_iero_kind" = "file" ] || return 1
+        rm -f "$_iero_path" 2>/dev/null || return 1
+    elif install_path_present "$_iero_path"; then
+        return 1
+    fi
+    return 0
+}
+
+install_external_capture_object() {
+    _ieco_key="$1" _ieco_src="$2" _ieco_kind="$3"
+    case "$_ieco_key" in
+        public|menu_tmp|menu_target|page|service_event|services_start) ;;
+        *) return 1 ;;
+    esac
+    install_external_parent_safe "$_ieco_src" || return 1
+    _ieco_state="$INSTALL_EXTERNAL_PRESERVE_DIR/$_ieco_key.state"
+    _ieco_copy="$INSTALL_EXTERNAL_PRESERVE_DIR/$_ieco_key"
+    [ ! -e "$_ieco_state" ] && [ ! -L "$_ieco_state" ] || return 1
+    [ ! -e "$_ieco_copy" ] && [ ! -L "$_ieco_copy" ] || return 1
+    if install_path_present "$_ieco_src"; then
+        case "$_ieco_kind" in
+            dir) [ ! -L "$_ieco_src" ] && [ -d "$_ieco_src" ] || return 1 ;;
+            file) [ ! -L "$_ieco_src" ] && [ -f "$_ieco_src" ] || return 1 ;;
+            *) return 1 ;;
+        esac
+        install_external_copy_object "$_ieco_src" "$_ieco_copy" "$_ieco_kind" || return 1
+        printf 'present\n' >"$_ieco_state" || return 1
+    else
+        printf 'absent\n' >"$_ieco_state" || return 1
+    fi
+    chmod 600 "$_ieco_state" 2>/dev/null || :
+    return 0
+}
+
+install_external_capture_metadata() {
+    local _iecm_key _iecm_value
+    type am_settings_get >/dev/null 2>&1 || return 1
+    for _iecm_key in mervlan_page mervlan_state mervlan_version; do
+        _iecm_value=$(am_settings_get "$_iecm_key" 2>/dev/null) || return 1
+        case "$_iecm_value" in
+            *[!A-Za-z0-9._:/-]*) return 1 ;;
+        esac
+        printf '%s\n' "$_iecm_value" >"$INSTALL_EXTERNAL_PRESERVE_DIR/metadata.$_iecm_key" || return 1
+        chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/metadata.$_iecm_key" 2>/dev/null || :
+    done
+    return 0
+}
+
+install_external_capture_projection() {
+    local _iecp_epoch _iecp_tmp_inode _iecp_target_inode
+    [ "$INSTALL_EXTERNAL_CAPTURED" = "0" ] || return 0
+    install_external_owner_current || return 1
+    install_external_parent_safe "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" || return 1
+    install_external_parent_safe "$INSTALL_EXTERNAL_MENU_TMP" || return 1
+    install_external_parent_safe "$INSTALL_EXTERNAL_MENU_TARGET" || return 1
+    install_external_parent_safe "$INSTALL_EXTERNAL_SERVICE_EVENT" || return 1
+    install_external_parent_safe "$INSTALL_EXTERNAL_SERVICES_START" || return 1
+    install_path_chain_safe "$TMP_DIR" || return 1
+    [ -d "$TMP_DIR" ] && [ ! -L "$TMP_DIR" ] || return 1
+    _iecp_epoch=$(date +%s 2>/dev/null || printf '0')
+    case "$_iecp_epoch" in ''|*[!0-9]*) return 1 ;; esac
+    INSTALL_EXTERNAL_PRESERVE_DIR="$TMP_DIR/install-external-preserve.$_iecp_epoch.$$"
+    case "$INSTALL_EXTERNAL_PRESERVE_DIR" in
+        "$TMP_DIR"/install-external-preserve.[0-9]*) ;;
+        *) INSTALL_EXTERNAL_PRESERVE_DIR=""; return 1 ;;
+    esac
+    [ ! -e "$INSTALL_EXTERNAL_PRESERVE_DIR" ] &&
+        [ ! -L "$INSTALL_EXTERNAL_PRESERVE_DIR" ] || {
+        INSTALL_EXTERNAL_PRESERVE_DIR=""
+        return 1
+    }
+    ( umask 077; mkdir "$INSTALL_EXTERNAL_PRESERVE_DIR" ) 2>/dev/null || {
+        INSTALL_EXTERNAL_PRESERVE_DIR=""
+        return 1
+    }
+    if ! install_external_capture_object public "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" dir ||
+       ! install_external_capture_object menu_tmp "$INSTALL_EXTERNAL_MENU_TMP" file ||
+       ! install_external_capture_object menu_target "$INSTALL_EXTERNAL_MENU_TARGET" file ||
+       ! install_external_capture_object service_event "$INSTALL_EXTERNAL_SERVICE_EVENT" file ||
+       ! install_external_capture_object services_start "$INSTALL_EXTERNAL_SERVICES_START" file ||
+       ! install_external_capture_metadata; then
+        rm -rf "$INSTALL_EXTERNAL_PRESERVE_DIR" 2>/dev/null || :
+        INSTALL_EXTERNAL_PRESERVE_DIR=""
+        return 1
+    fi
+    INSTALL_EXTERNAL_MENU_BOUND=0
+    if [ -f "$INSTALL_EXTERNAL_MENU_TMP" ] && [ -f "$INSTALL_EXTERNAL_MENU_TARGET" ]; then
+        _iecp_tmp_inode=$(ls -di "$INSTALL_EXTERNAL_MENU_TMP" 2>/dev/null | awk '{print $1}')
+        _iecp_target_inode=$(ls -di "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null | awk '{print $1}')
+        [ -n "$_iecp_tmp_inode" ] && [ "$_iecp_tmp_inode" = "$_iecp_target_inode" ] &&
+            INSTALL_EXTERNAL_MENU_BOUND=1
+    fi
+    printf '%s\n' "$INSTALL_EXTERNAL_MENU_BOUND" >"$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" || return 1
+    chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" 2>/dev/null || :
+    printf 'format=1\n' >"$INSTALL_EXTERNAL_PRESERVE_DIR/format" || return 1
+    chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/format" 2>/dev/null || :
+    INSTALL_EXTERNAL_CAPTURED=1
+    INSTALL_EXTERNAL_RESTORED=0
+    INSTALL_EXTERNAL_INCOMPLETE=0
+    return 0
+}
+
+install_external_capture_webui_page() {
+    local _iecp_page="$1"
+    [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ] || return 1
+    [ "$INSTALL_EXTERNAL_PAGE_CAPTURED" = "0" ] || return 0
+    install_external_owner_current || return 1
+    case "$_iecp_page" in
+        user[0-9]*.asp) ;;
+        *) return 1 ;;
+    esac
+    case "$_iecp_page" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+    install_external_capture_object page "$INSTALL_EXTERNAL_WWW_ROOT/$_iecp_page" file || return 1
+    printf '%s\n' "$_iecp_page" >"$INSTALL_EXTERNAL_PRESERVE_DIR/page.name" || return 1
+    chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/page.name" 2>/dev/null || :
+    INSTALL_EXTERNAL_PAGE="$_iecp_page"
+    INSTALL_EXTERNAL_PAGE_CAPTURED=1
+    return 0
+}
+
+install_external_restore_object() {
+    _iero_key="$1" _iero_dest="$2" _iero_kind="$3"
+    case "$_iero_key" in
+        public|menu_tmp|menu_target|page|service_event|services_start) ;;
+        *) return 1 ;;
+    esac
+    install_external_parent_safe "$_iero_dest" || return 1
+    _iero_state="$INSTALL_EXTERNAL_PRESERVE_DIR/$_iero_key.state"
+    _iero_copy="$INSTALL_EXTERNAL_PRESERVE_DIR/$_iero_key"
+    [ -f "$_iero_state" ] && [ ! -L "$_iero_state" ] || return 1
+    _iero_value=$(sed -n '1p' "$_iero_state" 2>/dev/null)
+    case "$_iero_value" in present|absent) ;; *) return 1 ;; esac
+    install_external_remove_object "$_iero_dest" "$_iero_kind" || return 1
+    if [ "$_iero_value" = "present" ]; then
+        case "$_iero_kind" in
+            dir) [ ! -L "$_iero_copy" ] && [ -d "$_iero_copy" ] || return 1 ;;
+            file) [ ! -L "$_iero_copy" ] && [ -f "$_iero_copy" ] || return 1 ;;
+            *) return 1 ;;
+        esac
+        install_external_copy_object "$_iero_copy" "$_iero_dest" "$_iero_kind" || return 1
+    fi
+    return 0
+}
+
+install_external_restore_metadata() {
+    local _ierm_key _ierm_value
+    type am_settings_set >/dev/null 2>&1 || return 1
+    for _ierm_key in mervlan_page mervlan_state mervlan_version; do
+        _ierm_value=$(sed -n '1p' "$INSTALL_EXTERNAL_PRESERVE_DIR/metadata.$_ierm_key" 2>/dev/null) || return 1
+        case "$_ierm_value" in *[!A-Za-z0-9._:/-]*) return 1 ;; esac
+        am_settings_set "$_ierm_key" "$_ierm_value" || return 1
+        [ "$(am_settings_get "$_ierm_key" 2>/dev/null)" = "$_ierm_value" ] || return 1
+    done
+    return 0
+}
+
+install_external_restore_projection() {
+    local _ier_failed=0 _ier_bound=0
+    [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ] || return 0
+    [ "$INSTALL_EXTERNAL_RESTORED" = "0" ] || return 0
+    install_external_owner_current || return 1
+    [ -f "$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" ] || return 1
+    _ier_bound=$(sed -n '1p' "$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" 2>/dev/null)
+    case "$_ier_bound" in 0|1) ;; *) return 1 ;; esac
+    if [ "$_ier_bound" = "1" ] || [ "${INSTALL_EXTERNAL_MENU_MOUNTED:-0}" = "1" ]; then
+        umount "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || _ier_failed=1
+    fi
+    install_external_restore_object public "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" dir || _ier_failed=1
+    install_external_restore_object menu_target "$INSTALL_EXTERNAL_MENU_TARGET" file || _ier_failed=1
+    install_external_restore_object menu_tmp "$INSTALL_EXTERNAL_MENU_TMP" file || _ier_failed=1
+    if [ "$_ier_bound" = "1" ] && [ "$_ier_failed" = "0" ]; then
+        mount -o bind "$INSTALL_EXTERNAL_MENU_TMP" "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || _ier_failed=1
+    fi
+    if [ "$INSTALL_EXTERNAL_PAGE_CAPTURED" = "1" ]; then
+        install_external_restore_object page "$INSTALL_EXTERNAL_WWW_ROOT/$INSTALL_EXTERNAL_PAGE" file || _ier_failed=1
+    fi
+    install_external_restore_object service_event "$INSTALL_EXTERNAL_SERVICE_EVENT" file || _ier_failed=1
+    install_external_restore_object services_start "$INSTALL_EXTERNAL_SERVICES_START" file || _ier_failed=1
+    install_external_restore_metadata || _ier_failed=1
+    if [ "$INSTALL_EXTERNAL_NODE_ATTEMPTED" = "1" ]; then
+        INSTALL_EXTERNAL_INCOMPLETE=1
+        RESULT_NODES="INCOMPLETE - remote node state requires reconciliation"
+        _ier_failed=1
+    fi
+    if [ "$_ier_failed" != "0" ]; then
+        INSTALL_EXTERNAL_INCOMPLETE=1
+        RESULT_WEBUI="INCOMPLETE - external projection recovery required"
+        RESULT_MENU="INCOMPLETE - external projection recovery required"
+        RESULT_HOOKS="INCOMPLETE - external projection recovery required"
+        RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
+        return 1
+    fi
+    case "$INSTALL_EXTERNAL_PRESERVE_DIR" in
+        "$TMP_DIR"/install-external-preserve.[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    rm -rf "$INSTALL_EXTERNAL_PRESERVE_DIR" 2>/dev/null || {
+        INSTALL_EXTERNAL_INCOMPLETE=1
+        RESULT_DETAIL="external projection restored but recovery evidence cleanup failed"
+        return 1
+    }
+    INSTALL_EXTERNAL_RESTORED=1
+    INSTALL_EXTERNAL_CAPTURED=0
+    INSTALL_EXTERNAL_PRESERVE_DIR=""
+    return 0
+}
+
+install_external_cleanup_projection() {
+    [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ] || return 0
+    install_external_owner_current || return 1
+    case "$INSTALL_EXTERNAL_PRESERVE_DIR" in
+        "$TMP_DIR"/install-external-preserve.[0-9]*) ;;
+        *) return 1 ;;
+    esac
+    rm -rf "$INSTALL_EXTERNAL_PRESERVE_DIR" 2>/dev/null || return 1
+    INSTALL_EXTERNAL_CAPTURED=0
+    INSTALL_EXTERNAL_PRESERVE_DIR=""
+    return 0
+}
+
+install_capture_original_contract() {
+    local _icoc_root="$1" _icoc_path _icoc_mode _icoc_file
+    [ -d "$_icoc_root" ] && [ ! -L "$_icoc_root" ] || return 1
+    _icoc_file="$TMP_DIR/install-original-contract.$$.$INSTALL_TRANSACTION_SUFFIX"
+    install_path_present "$_icoc_file" && return 1
+    mkdir -p "$TMP_DIR" 2>/dev/null || return 1
+    ( umask 077
+      printf 'format|1|1\n'
+      for _icoc_path in \
+          install.sh uninstall.sh mervlan.asp www/index.html \
+          settings/settings.json settings/var_settings.sh settings/lib_json.sh \
+          settings/lib_update_state.sh settings/lib_maintenance_recovery.sh \
+          settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh \
+          functions/settings_reconcile.sh settings/lib_ssh_trust.sh \
+          settings/lib_action_ack.sh functions/ssh_trust_action.sh
+      do
+          _icoc_file_path="$_icoc_root/$_icoc_path"
+          if [ -f "$_icoc_file_path" ] && [ ! -L "$_icoc_file_path" ]; then
+              _icoc_mode=$(ls -l "$_icoc_file_path" 2>/dev/null | awk '{print $1}')
+              printf 'present|%s|%s\n' "$_icoc_path" "$_icoc_mode"
+          elif install_path_present "$_icoc_file_path"; then
+              printf 'obstruction|%s|unknown\n' "$_icoc_path"
+          else
+              printf 'absent|%s|none\n' "$_icoc_path"
+          fi
+      done
+    ) >"$_icoc_file" 2>/dev/null || { rm -f "$_icoc_file" 2>/dev/null || :; return 1; }
+    chmod 600 "$_icoc_file" 2>/dev/null || return 1
+    INSTALL_ORIGINAL_CONTRACT_FILE="$_icoc_file"
+    return 0
+}
+
 cleanup_preserved_files() {
     [ -n "$INSTALL_PRESERVE_DIR" ] || return 0
     case "$INSTALL_PRESERVE_DIR" in
@@ -1443,11 +2036,17 @@ prepare_install_target() {
         esac
         return 0
     fi
-    if [ -d "$MERV_BASE" ]; then
-        INSTALL_ROLLBACK_DIR="$ADDON_DIR/.mervlan-install-rollback.$$"
-        [ ! -e "$INSTALL_ROLLBACK_DIR" ] || return 1
+    INSTALL_TRANSACTION_SUFFIX="$(date +%s 2>/dev/null || printf '0').$$"
+    case "$INSTALL_TRANSACTION_SUFFIX" in *[!0-9.]*) return 1 ;; esac
+    if install_path_present "$MERV_BASE"; then
+        [ ! -L "$MERV_BASE" ] && [ -d "$MERV_BASE" ] || return 1
+        install_capture_original_contract "$MERV_BASE" || return 1
+        INSTALL_ROLLBACK_DIR="$ADDON_DIR/.mervlan-install-rollback.$INSTALL_TRANSACTION_SUFFIX"
+        install_path_present "$INSTALL_ROLLBACK_DIR" && return 1
         mv "$MERV_BASE" "$INSTALL_ROLLBACK_DIR" 2>/dev/null || return 1
         INSTALL_ROLLBACK_NEEDED=1
+    else
+        [ -d "$ADDON_DIR" ] && [ ! -L "$ADDON_DIR" ] || return 1
     fi
 }
 
@@ -1470,16 +2069,104 @@ ensure_durable_state_root() {
 
 install_tree_valid() {
     local _itv_root="$1" _itv_required
-    [ -d "$_itv_root" ] || return 1
+    [ -d "$_itv_root" ] && [ ! -L "$_itv_root" ] || return 1
     for _itv_required in \
         install.sh uninstall.sh mervlan.asp www/index.html \
         settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
         settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
         functions/ssh_trust_action.sh
     do
-        [ -f "$_itv_root/$_itv_required" ] || return 1
+        [ ! -L "$_itv_root/$_itv_required" ] &&
+            [ -f "$_itv_root/$_itv_required" ] || return 1
     done
     settings_file_looks_valid "$_itv_root/settings/settings.json"
+}
+
+# Validate the complete maintenance/support cohort while it is still private.
+# This is intentionally separate from active-tree validation: the detached
+# installer may be running over an older tree that cannot provide these files.
+install_support_cohort_valid() {
+    _iscv_root="$1"
+    install_staged_support_root_valid "$_iscv_root" || return 1
+    install_tree_valid "$_iscv_root" || return 1
+    for _iscv_file in \
+        settings/lib_identity.sh settings/lib_owner_lock.sh \
+        settings/lib_update_state.sh settings/lib_maintenance_recovery.sh \
+        settings/lib_action_lock.sh settings/lib_action_runtime.sh \
+        settings/lib_action_progress.sh settings/lib_progress.sh \
+        settings/lib_node_jobs.sh settings/lib_node_reconcile.sh \
+        settings/lib_settings_reconcile.sh functions/update_mervlan.sh \
+        functions/update_mervlan_repair.sh functions/mervlan_recover.sh \
+        functions/mervlan_backup.sh functions/mervlan_wan.sh; do
+        [ ! -L "$_iscv_root/$_iscv_file" ] && [ -f "$_iscv_root/$_iscv_file" ] || return 1
+    done
+    for _iscv_shell in install.sh uninstall.sh functions/update_mervlan.sh \
+        functions/update_mervlan_repair.sh functions/mervlan_recover.sh \
+        functions/mervlan_backup.sh functions/mervlan_wan.sh; do
+        sh -n "$_iscv_root/$_iscv_shell" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+install_staged_handoff_write() {
+    _ishw_now=$(date +%s 2>/dev/null || printf 1)
+    case "$_ishw_now" in ''|*[!0-9]*) return 1 ;; esac
+    INSTALL_ARCHIVE_SEQ=$((INSTALL_ARCHIVE_SEQ + 1))
+    MERV_INSTALL_HANDOFF_TOKEN="$$.$INSTALL_ARCHIVE_SEQ.$_ishw_now"
+    install_handoff_token_valid "$MERV_INSTALL_HANDOFF_TOKEN" || return 1
+    MERV_INSTALL_HANDOFF_BRANCH="$BRANCH"
+    MERV_INSTALL_HANDOFF_POLICY="${INSTALL_POLICY:-fresh}"
+    MERV_INSTALL_HANDOFF_SSH_USER="${INSTALL_SSH_USER:-admin}"
+    MERV_INSTALL_HANDOFF_SSH_PORT="${INSTALL_SSH_PORT:-22}"
+    MERV_INSTALL_HANDOFF_FILE="$MERV_INSTALL_STAGED_WORK/.mervlan-install-handoff"
+    [ ! -e "$MERV_INSTALL_HANDOFF_FILE" ] && [ ! -L "$MERV_INSTALL_HANDOFF_FILE" ] || return 1
+    _ishw_tmp="$MERV_INSTALL_STAGED_WORK/.mervlan-install-handoff.tmp.$$.$INSTALL_ARCHIVE_SEQ"
+    [ ! -e "$_ishw_tmp" ] && [ ! -L "$_ishw_tmp" ] || return 1
+    _ishw_fingerprint=$(install_handoff_archive_fingerprint "$MERV_INSTALL_STAGED_ARCHIVE" 2>/dev/null || printf '')
+    [ -n "$_ishw_fingerprint" ] || return 1
+    ( umask 077
+      printf '%s\n' \
+        'format=1' \
+        "root=$MERV_INSTALL_STAGED_ROOT" \
+        "work=$MERV_INSTALL_STAGED_WORK" \
+        "archive=$MERV_INSTALL_STAGED_ARCHIVE" \
+        "mode=$MODE" \
+        "test_run=$TEST_RUN" \
+        "branch=$BRANCH" \
+        "policy=${INSTALL_POLICY:-fresh}" \
+        "ssh_user=${INSTALL_SSH_USER:-admin}" \
+        "ssh_port=${INSTALL_SSH_PORT:-22}" \
+        "archive_fingerprint=$_ishw_fingerprint" \
+        "token=$MERV_INSTALL_HANDOFF_TOKEN" >"$_ishw_tmp"
+    ) 2>/dev/null || { rm -f "$_ishw_tmp" 2>/dev/null || :; return 1; }
+    chmod 600 "$_ishw_tmp" 2>/dev/null || { rm -f "$_ishw_tmp" 2>/dev/null || :; return 1; }
+    mv -f "$_ishw_tmp" "$MERV_INSTALL_HANDOFF_FILE" 2>/dev/null || {
+        rm -f "$_ishw_tmp" 2>/dev/null || :
+        return 1
+    }
+    install_staged_handoff_record_valid "$MERV_INSTALL_HANDOFF_FILE" || return 1
+    return 0
+}
+
+install_tree_valid_against_contract() {
+    local _itvac_root="$1" _itvac_state _itvac_path _itvac_mode _itvac_actual
+    [ -n "${INSTALL_ORIGINAL_CONTRACT_FILE:-}" ] &&
+        [ -f "$INSTALL_ORIGINAL_CONTRACT_FILE" ] || return 1
+    [ -d "$_itvac_root" ] && [ ! -L "$_itvac_root" ] || return 1
+    while IFS='|' read -r _itvac_state _itvac_path _itvac_mode; do
+        [ "$_itvac_state" != format ] || continue
+        case "$_itvac_state" in
+            present)
+                [ -f "$_itvac_root/$_itvac_path" ] && [ ! -L "$_itvac_root/$_itvac_path" ] || return 1
+                _itvac_actual=$(ls -l "$_itvac_root/$_itvac_path" 2>/dev/null | awk '{print $1}')
+                [ "$_itvac_actual" = "$_itvac_mode" ] || return 1
+                ;;
+            absent) install_path_present "$_itvac_root/$_itvac_path" && return 1 ;;
+            obstruction) return 1 ;;
+            *) return 1 ;;
+        esac
+    done <"$INSTALL_ORIGINAL_CONTRACT_FILE"
+    return 0
 }
 
 merge_preserved_settings() {
@@ -1602,18 +2289,19 @@ restore_preserved_files() {
 
 rollback_active_installation() {
     [ "$INSTALL_ROLLBACK_NEEDED" = "1" ] || return 0
-    case "$INSTALL_ROLLBACK_DIR" in "$ADDON_DIR"/.mervlan-install-rollback.[0-9]*) ;; *) return 1 ;; esac
+    case "$INSTALL_ROLLBACK_DIR" in "$ADDON_DIR"/.mervlan-install-rollback.[0-9.]*) ;; *) return 1 ;; esac
     [ "$MERV_BASE" = "/jffs/addons/mervlan" ] || return 1
-    if [ -e "$MERV_BASE" ]; then
-        INSTALL_FAILED_TREE="$ADDON_DIR/.mervlan-install-incomplete.$$"
-        [ ! -e "$INSTALL_FAILED_TREE" ] || return 1
+    if install_path_present "$MERV_BASE"; then
+        [ ! -L "$MERV_BASE" ] && [ -d "$MERV_BASE" ] || return 1
+        INSTALL_FAILED_TREE="$ADDON_DIR/.mervlan-install-incomplete.$INSTALL_TRANSACTION_SUFFIX"
+        install_path_present "$INSTALL_FAILED_TREE" && return 1
         mv "$MERV_BASE" "$INSTALL_FAILED_TREE" 2>/dev/null || return 1
     fi
     if ! mv "$INSTALL_ROLLBACK_DIR" "$MERV_BASE" 2>/dev/null; then
-        [ -n "$INSTALL_FAILED_TREE" ] && [ -e "$INSTALL_FAILED_TREE" ] && mv "$INSTALL_FAILED_TREE" "$MERV_BASE" 2>/dev/null || :
+        [ -n "$INSTALL_FAILED_TREE" ] && install_path_present "$INSTALL_FAILED_TREE" && mv "$INSTALL_FAILED_TREE" "$MERV_BASE" 2>/dev/null || :
         return 1
     fi
-    install_tree_valid "$MERV_BASE" || return 1
+    install_tree_valid_against_contract "$MERV_BASE" || return 1
     INSTALL_ROLLBACK_NEEDED=0
 }
 
@@ -1739,10 +2427,6 @@ create_test_webui_page() {
 installer_exit_handler() {
     local status=$?
     trap - EXIT INT TERM
-    if ! install_maintenance_release; then
-        status=1
-        RESULT_DETAIL="maintenance owner cleanup failed; recovery is required"
-    fi
     if [ "$status" != "0" ]; then
         installer_record ERROR "Installer stopped during phase: $INSTALL_CURRENT_PHASE (exit=$status)"
         if [ -n "$RESULT_DETAIL" ]; then
@@ -1753,12 +2437,23 @@ installer_exit_handler() {
         echo "[install] ERROR: Installer stopped during: $INSTALL_CURRENT_PHASE" >&2
         [ -n "$INSTALL_DIAGNOSTIC_LOG" ] && echo "[install] Diagnostic log: $INSTALL_DIAGNOSTIC_LOG" >&2
         cleanup_install_download_work >/dev/null 2>&1 || :
-        cleanup_preserved_files >/dev/null 2>&1 || :
         if [ "$INSTALL_ROLLBACK_NEEDED" = "1" ]; then
             if rollback_active_installation >/dev/null 2>&1; then
                 RESULT_FILES="ROLLBACK - previous tree restored"
+                cleanup_preserved_files >/dev/null 2>&1 || RESULT_DETAIL="rollback completed but preservation staging cleanup failed"
             else
                 RESULT_FILES="FAIL - rollback failed"
+                RESULT_DETAIL="installer rollback failed; preserved transaction evidence requires recovery"
+            fi
+        else
+            cleanup_preserved_files >/dev/null 2>&1 || :
+        fi
+        if [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
+            if install_external_restore_projection >/dev/null 2>&1; then
+                :
+            else
+                status=1
+                RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
             fi
         fi
         if [ "$TEST_RUN" = "1" ]; then
@@ -1769,8 +2464,17 @@ installer_exit_handler() {
             fi
         fi
         [ "$RESULT_VERIFY" = "SKIPPED" ] && RESULT_VERIFY="FAIL - installer exited early"
-        print_install_report "$status"
     fi
+    # Release the canonical maintenance owner only after rollback, external
+    # projection cleanup, and evidence decisions have finished.
+    if ! install_maintenance_release; then
+        status=1
+        RESULT_DETAIL="maintenance owner cleanup failed; recovery is required"
+    fi
+    if [ "$status" != "0" ] && [ -n "${INSTALL_DIAGNOSTIC_LOG:-}" ]; then
+        echo "[install] Maintenance owner cleanup was the final protected step; inspect retained evidence if it failed." >&2
+    fi
+    [ "$status" = "0" ] || print_install_report "$status"
     exit "$status"
 }
 
@@ -1782,6 +2486,13 @@ installer_tarball_exit_handler() {
     local status=$?
     trap - EXIT INT TERM
     cleanup_install_download_work >/dev/null 2>&1 || :
+    if [ "$status" != "0" ] && [ "$INSTALL_ROLLBACK_NEEDED" = "1" ]; then
+        rollback_active_installation >/dev/null 2>&1 || status=1
+    fi
+    if [ "$status" != "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
+        install_external_restore_projection >/dev/null 2>&1 || status=1
+    fi
+    [ "$status" = "0" ] && cleanup_preserved_files >/dev/null 2>&1 || :
     install_maintenance_release || status=1
     exit "$status"
 }
@@ -1827,51 +2538,97 @@ run_install_hardware_probe() {
 # DOWNLOAD & BOOTSTRAP UTILITIES — Fetch repo and prepare fresh install      #
 # ========================================================================== #
 
+validate_install_archive() {
+    local _via_archive="$1" _via_members _via_verbose _via_seen _via_raw _via_member _via_norm _via_root _via_type _via_count=0
+    INSTALL_ARCHIVE_SEQ=$((INSTALL_ARCHIVE_SEQ + 1))
+    mkdir -p "$TMP_DIR" 2>/dev/null || return 1
+    _via_members="$TMP_DIR/install-archive.members.$$.$INSTALL_ARCHIVE_SEQ"
+    _via_verbose="$TMP_DIR/install-archive.verbose.$$.$INSTALL_ARCHIVE_SEQ"
+    _via_seen="$TMP_DIR/install-archive.seen.$$.$INSTALL_ARCHIVE_SEQ"
+    _via_raw="$TMP_DIR/install-archive.raw.$$.$INSTALL_ARCHIVE_SEQ"
+    rm -f "$_via_members" "$_via_verbose" "$_via_seen" "$_via_raw" 2>/dev/null || return 1
+    if tar -tzf "$_via_archive" >"$_via_members" 2>/dev/null &&
+       tar -tvzf "$_via_archive" >"$_via_verbose" 2>/dev/null; then
+        :
+    else
+        gzip -dc "$_via_archive" >"$_via_raw" 2>/dev/null || return 1
+        tar -tf "$_via_raw" >"$_via_members" 2>/dev/null || return 1
+        tar -tvf "$_via_raw" >"$_via_verbose" 2>/dev/null || return 1
+    fi
+    [ -s "$_via_members" ] || return 1
+    : >"$_via_seen" || return 1
+    INSTALL_ARCHIVE_TOPDIR=""
+    while IFS= read -r _via_member || [ -n "$_via_member" ]; do
+        _via_norm="$_via_member"
+        case "$_via_norm" in */) _via_norm=${_via_norm%/} ;; esac
+        case "$_via_norm" in
+            ''|/*|*'\\'*|*//*|*' '*|*'	'*|*..*|.|./*|*/.|*/./*|..|../*|*/..|*/../*|*[!A-Za-z0-9._/-]*) return 1 ;;
+        esac
+        _via_root=${_via_norm%%/*}
+        case "$_via_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        if [ -z "$INSTALL_ARCHIVE_TOPDIR" ]; then INSTALL_ARCHIVE_TOPDIR="$_via_root"; fi
+        [ "$INSTALL_ARCHIVE_TOPDIR" = "$_via_root" ] || return 1
+        case "$_via_norm" in "$INSTALL_ARCHIVE_TOPDIR"|"$INSTALL_ARCHIVE_TOPDIR"/*) : ;; *) return 1 ;; esac
+        grep -Fqx "$_via_norm" "$_via_seen" 2>/dev/null && return 1
+        printf '%s\n' "$_via_norm" >>"$_via_seen" || return 1
+        _via_count=$((_via_count + 1))
+        [ "$_via_count" -le 4096 ] || return 1
+    done <"$_via_members"
+    case "$INSTALL_ARCHIVE_TOPDIR" in
+        mervlan-[A-Za-z0-9._-]*) ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r _via_verbose_line || [ -n "$_via_verbose_line" ]; do
+        _via_type=$(printf '%s' "$_via_verbose_line" | cut -c1)
+        case "$_via_type" in -|d) ;; *) return 1 ;; esac
+        case "$_via_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
+    done <"$_via_verbose"
+    rm -f "$_via_members" "$_via_verbose" "$_via_seen" "$_via_raw" 2>/dev/null || return 1
+    [ -n "$INSTALL_ARCHIVE_TOPDIR" ]
+}
+
 # select_and_validate_tarball — Interactive menu for tarball selection
 # Args: $1 = staging directory path
 # Returns: 0 on success (sets SELECTED_TARBALL), 1 on error/cancel
 # Explanation: Lists available tarballs, allows selection and deletion
 select_and_validate_tarball() {
-  local staging_dir="$1"
-  local tarballs idx sel chosen action base size branch version topname
+  local staging_dir="$1" idx sel chosen action base size branch version topname metadata candidates sorted line rest tarball
+  local selected_branch selected_version
+  case "$staging_dir" in /*) ;; *) return 1 ;; esac
+  case "$staging_dir" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  metadata="$staging_dir/.mervlan-tarball-menu.$$"
+  candidates="$metadata.candidates"
+  sorted="$metadata.sorted"
+  [ ! -e "$metadata" ] && [ ! -L "$metadata" ] || return 1
+  [ ! -e "$candidates" ] && [ ! -L "$candidates" ] || return 1
+  [ ! -e "$sorted" ] && [ ! -L "$sorted" ] || return 1
   
   while :; do
-    # Find all mervlan-*.tar.gz files
-    tarballs=$(ls "$staging_dir"/mervlan-*.tar.gz 2>/dev/null | sort -r)
-    
-    if [ -z "$tarballs" ]; then
-      echo "[install] No mervlan tarballs found in $staging_dir"
-      echo "[install] Run './install.sh download' first"
-      return 1
-    fi
-    
-    # Display menu. Preserve the known main/dev channel encoded by archives
-    # retained by this installer; otherwise derive custom metadata from the
-    # archive's codeload top-level directory. Store metadata beside each menu
-    # entry so the selected item cannot inherit the final loop iteration.
-    echo ""
-    echo "Available MerVLAN tarballs:"
+    : >"$metadata" || return 1
+    : >"$candidates" || return 1
     idx=0
-    for tarball in $tarballs; do
+    echo "Available MerVLAN tarballs:"
+    for tarball in "$staging_dir"/mervlan-*.tar.gz; do
+      [ -f "$tarball" ] && [ ! -L "$tarball" ] || continue
+      base="${tarball##*/}"
+      case "$base" in mervlan-*.tar.gz) ;; *) continue ;; esac
+      case "$base" in *[!A-Za-z0-9._-]*) continue ;; esac
+      validate_install_archive "$tarball" || continue
+      printf '%s\n' "$base" >>"$candidates" || return 1
+    done
+    sort -r "$candidates" >"$sorted" 2>/dev/null || return 1
+    while IFS= read -r base || [ -n "$base" ]; do
+      tarball="$staging_dir/$base"
+      [ -f "$tarball" ] && [ ! -L "$tarball" ] || continue
+      validate_install_archive "$tarball" || continue
       idx=$((idx + 1))
-      base="$(basename "$tarball")"
-      size="$(wc -c < "$tarball" 2>/dev/null)"
-      topname="$(tar -tzf "$tarball" 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
-      if [ -z "$topname" ]; then
-        topname="$(gzip -dc "$tarball" 2>/dev/null | tar -t 2>/dev/null | sed -n '1p' | cut -d/ -f1)"
-      fi
-      # Installer-retained archives encode the selected public channel in the
-      # filename. A stable tag's codeload top directory is the tag (not
-      # "main"), so preserve known main/dev channel names there. For manually
-      # staged/custom codeload archives, fall back to the real top directory.
+      size="$(wc -c <"$tarball" 2>/dev/null)"
+      topname="$INSTALL_ARCHIVE_TOPDIR"
       case "$base" in
         mervlan-main-*.tar.gz) branch="main" ;;
         mervlan-dev-*.tar.gz) branch="dev" ;;
         *)
-          case "$topname" in
-            mervlan-*) branch="${topname#mervlan-}" ;;
-            *) branch="unknown" ;;
-          esac
+          case "$topname" in mervlan-*) branch="${topname#mervlan-}" ;; *) branch="unknown" ;; esac
           ;;
       esac
       version="unknown"
@@ -1881,12 +2638,15 @@ select_and_validate_tarball() {
           version="${version%.tar.gz}"
           ;;
       esac
+      printf '%s\t%s\t%s\n' "$base" "$branch" "$version" >>"$metadata" || return 1
       printf '  %d) %s  [%s | %s | %d bytes]\n' "$idx" "$base" "$branch" "$version" "$size"
-      eval "TARBALL_$idx=\"$tarball\""
-      eval "TARBALL_BRANCH_$idx=\"$branch\""
-      eval "TARBALL_VERSION_$idx=\"$version\""
-    done
-    
+    done <"$sorted"
+    if [ "$idx" -eq 0 ]; then
+      echo "[install] No mervlan tarballs found in $staging_dir"
+      echo "[install] Run './install.sh download' first"
+      rm -f "$metadata" "$candidates" "$sorted" 2>/dev/null || :
+      return 1
+    fi
     echo ""
     echo "  d) Delete a tarball"
     echo "  q) Quit without installing"
@@ -1897,17 +2657,23 @@ select_and_validate_tarball() {
     case "$sel" in
       [0-9]|[0-9][0-9])
         if [ "$sel" -ge 1 ] && [ "$sel" -le "$idx" ]; then
-          eval "chosen=\$TARBALL_$sel"
-          if [ -n "$chosen" ] && [ -f "$chosen" ]; then
+          line="$(sed -n "${sel}p" "$metadata" 2>/dev/null)"
+          base="${line%%	*}"
+          rest="${line#*	}"
+          selected_branch="${rest%%	*}"
+          selected_version="${rest#*	}"
+          chosen="$staging_dir/$base"
+          if [ -n "$base" ] && [ -f "$chosen" ] && [ ! -L "$chosen" ]; then
             echo ""
             echo "Selected: $(basename "$chosen")"
             printf "Install this tarball? [y/N]: "
             read action
             case "$action" in
               y|Y|yes|YES)
-                eval "BRANCH=\${TARBALL_BRANCH_$sel}"
-                eval "SELECTED_TARBALL_VERSION=\${TARBALL_VERSION_$sel}"
+                BRANCH="$selected_branch"
+                SELECTED_TARBALL_VERSION="$selected_version"
                 SELECTED_TARBALL="$chosen"
+                rm -f "$metadata" "$candidates" "$sorted" 2>/dev/null || :
                 return 0
                 ;;
               *)
@@ -1926,8 +2692,10 @@ select_and_validate_tarball() {
         printf "Enter number of tarball to delete [1-%d]: " "$idx"
         read sel
         if [ "$sel" -ge 1 ] 2>/dev/null && [ "$sel" -le "$idx" ] 2>/dev/null; then
-          eval "chosen=\$TARBALL_$sel"
-          if [ -n "$chosen" ] && [ -f "$chosen" ]; then
+          line="$(sed -n "${sel}p" "$metadata" 2>/dev/null)"
+          base="${line%%	*}"
+          chosen="$staging_dir/$base"
+          if [ -n "$base" ] && [ -f "$chosen" ] && [ ! -L "$chosen" ]; then
             echo ""
             echo "WARNING: This will permanently delete:"
             echo "  $(basename "$chosen")"
@@ -1952,6 +2720,7 @@ select_and_validate_tarball() {
         ;;
       q|Q)
         echo "[install] Installation cancelled by user"
+        rm -f "$metadata" "$candidates" "$sorted" 2>/dev/null || :
         return 1
         ;;
       *)
@@ -1969,6 +2738,11 @@ select_and_validate_tarball() {
 #   injects service-event hooks, and runs hardware probe on new installs
 #   Supports 'download' mode (fetch only) and 'tarball' mode (install from existing)
 INSTALL_DOWNLOAD_WORK=""
+INSTALL_STAGE_ONLY="0"
+INSTALL_STAGED_ROOT="$MERV_INSTALL_STAGED_ROOT"
+INSTALL_STAGED_WORK="$MERV_INSTALL_STAGED_WORK"
+INSTALL_STAGED_ARCHIVE="$MERV_INSTALL_STAGED_ARCHIVE"
+INSTALL_STAGED_READY="$MERV_INSTALL_STAGED_READY"
 
 normalize_install_script_permissions() {
     local f depth
@@ -2001,6 +2775,27 @@ cleanup_install_download_work() {
       ;;
   esac
   INSTALL_DOWNLOAD_WORK=""
+}
+
+install_activate_staged_package() {
+  [ "$INSTALL_STAGED_READY" = "1" ] || return 1
+  [ -n "$INSTALL_STAGED_ROOT" ] && [ -n "$INSTALL_STAGED_WORK" ] || return 1
+  [ -n "$INSTALL_DOWNLOAD_WORK" ] || INSTALL_DOWNLOAD_WORK="$INSTALL_STAGED_WORK"
+  install_support_cohort_valid "$INSTALL_STAGED_ROOT" || return 1
+  [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || return 1
+  install_path_chain_safe "$MERV_BASE" || return 1
+  if ! cp -a "$INSTALL_STAGED_ROOT"/. "$MERV_BASE"/ 2>/dev/null; then
+    ( cd "$INSTALL_STAGED_ROOT" && tar -cf - . ) |
+      ( cd "$MERV_BASE" && tar -xpf - ) || return 1
+  fi
+  normalize_install_script_permissions
+  install_tree_valid "$MERV_BASE" || return 1
+  RESULT_ARCHIVE="PASS - staged package"
+  RESULT_FILES="PASS"
+  INSTALL_STAGED_READY="0"
+  INSTALL_STAGE_ONLY="0"
+  cleanup_install_download_work || return 1
+  return 0
 }
 
 # Filter the source snapshot before it is copied into the persistent addon.
@@ -2038,6 +2833,13 @@ download_mervlan() {
   local download_only=0 tarball_only=0 branch_choice="" download_valid=0
 
   echo "[download_mervlan] start"
+
+  if [ "$INSTALL_STAGED_READY" = "1" ] &&
+     { [ "$MODE" = full ] || [ "$MODE" = tarball ]; }; then
+    echo "[download_mervlan] activating the already validated private support cohort"
+    install_activate_staged_package || return 1
+    return 0
+  fi
 
   # Detect special modes
   case "$MODE" in
@@ -2086,7 +2888,9 @@ download_mervlan() {
     work_dir="$TMP_DIR/install.$$"
     INSTALL_DOWNLOAD_WORK="$work_dir"
     owned_work=1
-    mkdir -p "$work_dir" 2>/dev/null || { INSTALL_DOWNLOAD_WORK=""; return 1; }
+    install_path_chain_safe "$TMP_DIR" || { INSTALL_DOWNLOAD_WORK=""; return 1; }
+    install_path_present "$work_dir" && { INSTALL_DOWNLOAD_WORK=""; return 1; }
+    mkdir "$work_dir" 2>/dev/null || { INSTALL_DOWNLOAD_WORK=""; return 1; }
     [ -n "$archive_dir" ] || archive_dir="$work_dir"
   fi
   echo "[download_mervlan] archive directory: $archive_dir"
@@ -2102,9 +2906,8 @@ download_mervlan() {
     echo "[download_mervlan] GITHUB_URL=$GITHUB_URL"
     echo "[download_mervlan] downloading archive -> $archive_dir/mervlan_temp.tar.gz"
     /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null || :
-    if [ -s "$archive_dir/mervlan_temp.tar.gz" ]; then
-      tar -tzf "$archive_dir/mervlan_temp.tar.gz" >/dev/null 2>&1 && download_valid=1
-      if [ "$download_valid" = "0" ]; then gzip -dc "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | tar -t >/dev/null 2>&1 && download_valid=1; fi
+    if [ -s "$archive_dir/mervlan_temp.tar.gz" ] && validate_install_archive "$archive_dir/mervlan_temp.tar.gz"; then
+      download_valid=1
     fi
     if [ "$download_valid" = "0" ] && [ "$BRANCH" = "main" ] && [ "$SOURCE_REF" != "refs/heads/main" ]; then
       installer_warning "The selected stable archive could not be downloaded; retrying the main branch fallback."
@@ -2114,9 +2917,8 @@ download_mervlan() {
       GITHUB_URL="https://codeload.github.com/r80xcore/mervlan/tar.gz/$SOURCE_REF"
       RESULT_SOURCE="WARN - main fallback (stable archive unavailable)"
       /usr/sbin/curl -fsL --retry 3 "$GITHUB_URL" -o "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null || :
-      if [ -s "$archive_dir/mervlan_temp.tar.gz" ]; then
-        tar -tzf "$archive_dir/mervlan_temp.tar.gz" >/dev/null 2>&1 && download_valid=1
-        if [ "$download_valid" = "0" ]; then gzip -dc "$archive_dir/mervlan_temp.tar.gz" 2>/dev/null | tar -t >/dev/null 2>&1 && download_valid=1; fi
+      if [ -s "$archive_dir/mervlan_temp.tar.gz" ] && validate_install_archive "$archive_dir/mervlan_temp.tar.gz"; then
+        download_valid=1
       fi
     fi
     if [ "$download_valid" = "1" ]; then
@@ -2153,6 +2955,9 @@ download_mervlan() {
     esac
     version=$(printf '%s' "$version" | tr -d '\r\n')
 
+    case "$version" in
+      ''|*[!A-Za-z0-9._-]*) version="unknown" ;;
+    esac
     if [ -z "$version" ]; then
       version="unknown"
     fi
@@ -2181,22 +2986,20 @@ download_mervlan() {
     return 1
   fi
 
-  if ! tar -tzf "$SELECTED_TARBALL" >/dev/null 2>&1; then
-    if ! gzip -dc "$SELECTED_TARBALL" 2>/dev/null | tar -t >/dev/null 2>&1; then
-      RESULT_ARCHIVE="FAIL - unreadable archive"
-      return 1
-    fi
-  fi
-  if { tar -tzf "$SELECTED_TARBALL" 2>/dev/null || gzip -dc "$SELECTED_TARBALL" 2>/dev/null | tar -t 2>/dev/null; } | \
-      grep -q '^/\|^\.\./\|/\.\./' 2>/dev/null; then
-    echo "[download_mervlan] ERROR: Unsafe archive path detected" >&2
-    RESULT_ARCHIVE="FAIL - unsafe paths"
+  if ! validate_install_archive "$SELECTED_TARBALL"; then
+    echo "[download_mervlan] ERROR: archive failed the strict member/type contract" >&2
+    RESULT_ARCHIVE="FAIL - unsafe or unreadable archive"
     return 1
   fi
   
-  echo "[download_mervlan] MERV_BASE=$MERV_BASE"
-  mkdir -p "$MERV_BASE"
-  echo "[download_mervlan] ensured MERV_BASE exists"
+  # Stage-only acquisition runs before maintenance admission.  It must not
+  # create, follow, or otherwise touch the active addon tree; activation owns
+  # the directory preparation after the staged cohort has been revalidated.
+  if [ "$INSTALL_STAGE_ONLY" != "1" ]; then
+    echo "[download_mervlan] MERV_BASE=$MERV_BASE"
+    mkdir -p "$MERV_BASE" || return 1
+    echo "[download_mervlan] ensured MERV_BASE exists"
+  fi
 
   # Extract: prefer tar -xzf; fallback to gzip -dc | tar -x for BusyBox without -z
   echo "[download_mervlan] Extracting $(basename "$SELECTED_TARBALL")"
@@ -2254,6 +3057,20 @@ download_mervlan() {
                 return 1
             fi
         done
+        if [ "$INSTALL_STAGE_ONLY" = "1" ]; then
+            install_support_cohort_valid "$topdir" || {
+                echo "[download_mervlan] ERROR: staged maintenance/support cohort is incomplete" >&2
+                RESULT_ARCHIVE="FAIL - incomplete support cohort"
+                return 1
+            }
+            INSTALL_STAGED_ROOT="$topdir"
+            INSTALL_STAGED_WORK="$work_dir"
+            INSTALL_STAGED_ARCHIVE="$SELECTED_TARBALL"
+            INSTALL_STAGED_READY="1"
+            INSTALL_DOWNLOAD_WORK="$work_dir"
+            echo "[download_mervlan] package staged privately; active tree was not modified"
+            return 0
+        fi
         RESULT_ARCHIVE="PASS"
         echo "[download_mervlan] copying contents from $topdir -> $MERV_BASE"
         if ! cp -a "$topdir"/. "$MERV_BASE"/ 2>/dev/null; then
@@ -2502,11 +3319,81 @@ verify_reinstall_projection() {
 #
 # ========================================================================== #
 
+install_stage_target_before_admission() {
+    case "$MODE" in full|tarball) ;; *) return 0 ;; esac
+    if [ "$MERV_INSTALL_SUPPORT_HANDOFF" = "1" ]; then
+        [ "$MERV_INSTALL_HANDOFF_ADOPTED" = "1" ] || return 1
+        install_support_cohort_valid "$MERV_INSTALL_STAGED_ROOT" || return 1
+        return 0
+    fi
+    install_path_chain_safe "$TMP_DIR" || return 1
+    [ -d "$TMP_DIR" ] || mkdir -p "$TMP_DIR" 2>/dev/null || return 1
+    INSTALL_STAGE_ONLY="1"
+    download_mervlan || {
+        INSTALL_STAGE_ONLY="0"
+        return 1
+    }
+    INSTALL_STAGE_ONLY="0"
+    [ "$INSTALL_STAGED_READY" = "1" ] || return 1
+    install_support_cohort_valid "$INSTALL_STAGED_ROOT" || return 1
+    MERV_INSTALL_SUPPORT_HANDOFF=1
+    MERV_INSTALL_STAGED_ROOT="$INSTALL_STAGED_ROOT"
+    MERV_INSTALL_STAGED_WORK="$INSTALL_STAGED_WORK"
+    MERV_INSTALL_STAGED_ARCHIVE="$INSTALL_STAGED_ARCHIVE"
+    MERV_INSTALL_STAGED_READY=1
+    MERV_INSTALL_WIZARD_DONE=1
+    install_staged_handoff_write || return 1
+    [ -f "$INSTALL_STAGED_ROOT/install.sh" ] && [ ! -L "$INSTALL_STAGED_ROOT/install.sh" ] || return 1
+    export MERV_INSTALL_SUPPORT_HANDOFF MERV_INSTALL_STAGED_ROOT \
+        MERV_INSTALL_STAGED_WORK MERV_INSTALL_STAGED_ARCHIVE \
+        MERV_INSTALL_STAGED_READY MERV_INSTALL_HANDOFF_BRANCH \
+        MERV_INSTALL_HANDOFF_POLICY MERV_INSTALL_HANDOFF_SSH_USER \
+        MERV_INSTALL_HANDOFF_SSH_PORT MERV_INSTALL_HANDOFF_TOKEN \
+        MERV_INSTALL_WIZARD_DONE
+    if [ "$TEST_RUN" = "1" ]; then
+        exec /bin/sh "$INSTALL_STAGED_ROOT/install.sh" "$MODE" --test-run
+    else
+        exec /bin/sh "$INSTALL_STAGED_ROOT/install.sh" "$MODE"
+    fi
+    return 1
+}
+
 INSTALL_LOG_POLICY="reset"
 [ "$MODE" = "reinstall" ] && INSTALL_LOG_POLICY="preserve"
 
+if [ "$MODE" = "full" ] && [ "$MERV_INSTALL_SUPPORT_HANDOFF" != "1" ] &&
+   [ "$MERV_INSTALL_WIZARD_DONE" != "1" ]; then
+    run_full_install_wizard || {
+        [ "$INSTALL_CANCELLED" = "1" ] && exit 0
+        echo "[install] Installation cancelled before package acquisition."
+        exit 0
+    }
+    MERV_INSTALL_WIZARD_DONE=1
+fi
+
+install_stage_target_before_admission || {
+    echo "[install] ERROR: target package could not be staged and validated before admission" >&2
+    exit 1
+}
 install_maintenance_admit || exit 1
 trap 'install_maintenance_exit_handler' EXIT
+
+# All tree-mutating installer modes also touch projections outside the addon
+# root.  Capture them while the canonical owner is still held, before the
+# active tree is moved or any WebUI/hook/metadata operation is attempted.
+case "$MODE" in
+    credentials|download) ;;
+    *)
+        mkdir -p "$TMP_DIR" 2>/dev/null || {
+            RESULT_DETAIL="cannot create external-projection staging"
+            exit 1
+        }
+        install_external_capture_projection || {
+            RESULT_DETAIL="could not capture external projection under maintenance ownership"
+            exit 1
+        }
+        ;;
+esac
 
 # Legacy installations may predate the durable SSH trust-state root.  The
 # installed-source and public/runtime-reinstall paths must create that
@@ -2523,9 +3410,12 @@ case "$MODE" in
 esac
 
 if [ "$MODE" = "full" ]; then
-    if ! run_full_install_wizard; then
-        echo "[install] Installation cancelled. No changes were made."
-        exit 0
+    if [ "$MERV_INSTALL_WIZARD_DONE" != "1" ]; then
+        if ! run_full_install_wizard; then
+            echo "[install] Installation cancelled. No changes were made."
+            exit 0
+        fi
+        MERV_INSTALL_WIZARD_DONE=1
     fi
     trap 'installer_exit_handler' EXIT
     trap 'RESULT_DETAIL="interrupted by user"; exit 130' INT
@@ -2577,8 +3467,11 @@ case "$MODE" in
         trap 'exit 130' INT
         trap 'exit 143' TERM
         logger -t "$ADDON" "Tarball mode: installing from previously downloaded package"
+        prepare_preserved_files || { logger -t "$ADDON" "ERROR: could not preserve existing data"; exit 1; }
+        prepare_install_target || { logger -t "$ADDON" "ERROR: could not prepare target"; exit 1; }
         create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
+        install_bootstrap_transition || { logger -t "$ADDON" "ERROR: fresh bootstrap ownership transition failed"; exit 1; }
         ;;
     full)
         # Full install: create dirs + download + setup
@@ -2586,6 +3479,8 @@ case "$MODE" in
         logger -t "$ADDON" "Full install mode: creating base dirs and downloading package"
         create_dirs_first_install || { logger -t "$ADDON" "ERROR: create_dirs_first_install failed"; exit 1; }
         download_mervlan || { logger -t "$ADDON" "ERROR: download_mervlan failed"; exit 1; }
+        install_bootstrap_transition || { logger -t "$ADDON" "ERROR: fresh bootstrap ownership transition failed"; exit 1; }
+        ensure_durable_state_root || { RESULT_DETAIL="cannot initialize durable state root"; exit 1; }
         installer_phase_end
         installer_phase_begin "Restoring settings and user data"
         restore_preserved_files || { RESULT_SETTINGS="FAIL - restore/configuration"; exit 1; }
@@ -2670,7 +3565,11 @@ if [ "$WEBUI_ENABLED" = "1" ]; then
     fi
     logger -t "$ADDON" "Mounting $ADDON as $am_webui_page"
     echo "[install] Mounting web UI page: $am_webui_page"
-    cp "$WEBUI_SOURCE_PAGE" "/www/user/$am_webui_page" || { RESULT_WEBUI="FAIL - ASP publication"; exit 1; }
+    install_external_capture_webui_page "$am_webui_page" || {
+        RESULT_WEBUI="FAIL - ASP rollback capture"
+        exit 1
+    }
+    cp "$WEBUI_SOURCE_PAGE" "$INSTALL_EXTERNAL_WWW_ROOT/$am_webui_page" || { RESULT_WEBUI="FAIL - ASP publication"; exit 1; }
     [ "$TEST_RUN" = "1" ] && TEST_WEBUI_PAGE="$am_webui_page"
     RESULT_WEBUI="PASS - $am_webui_page"
 else
@@ -2788,9 +3687,10 @@ fi
 
 if [ "$WEBUI_ENABLED" = "1" ]; then
 # 4. Copy menuTree.js (if not already bind-mounted) so we can modify it
-if [ ! -f /tmp/menuTree.js ]; then
-    cp /www/require/modules/menuTree.js /tmp/
-    mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js || { RESULT_MENU="FAIL - bind mount"; exit 1; }
+if [ ! -f "$INSTALL_EXTERNAL_MENU_TMP" ]; then
+    cp "$INSTALL_EXTERNAL_MENU_TARGET" "$INSTALL_EXTERNAL_MENU_TMP"
+    mount -o bind "$INSTALL_EXTERNAL_MENU_TMP" "$INSTALL_EXTERNAL_MENU_TARGET" || { RESULT_MENU="FAIL - bind mount"; exit 1; }
+    INSTALL_EXTERNAL_MENU_MOUNTED=1
     [ "$TEST_RUN" = "1" ] && TEST_MENU_TREE_CREATED=1
 fi
 
@@ -2798,20 +3698,21 @@ fi
 # Clean only the entry owned by this profile.
 if [ "$TEST_RUN" = "1" ]; then
     MENU_LABEL="MerVLAN Test"
-    sed -i '/tabName: "MerVLAN Test"/d' /tmp/menuTree.js
+    sed -i '/tabName: "MerVLAN Test"/d' "$INSTALL_EXTERNAL_MENU_TMP"
 else
     MENU_LABEL="MerVLAN"
-    sed -i '/tabName: "MerVLAN"/d' /tmp/menuTree.js
+    sed -i '/tabName: "MerVLAN"/d' "$INSTALL_EXTERNAL_MENU_TMP"
 fi
 
 # Append our MerVLAN tab just before the LAN menu's __INHERIT__ sentinel
 sed -i "/index: \"menu_LAN\"/,/{url: \"NULL\", tabName: \"__INHERIT__\"}/ {/{url: \"NULL\", tabName: \"__INHERIT__\"}/i \\
 {url: \"$am_webui_page\", tabName: \"$MENU_LABEL\"},
-}" /tmp/menuTree.js
+}" "$INSTALL_EXTERNAL_MENU_TMP"
 
 # 6. Remount after sed (bind+sed quirk)
-umount /www/require/modules/menuTree.js 2>/dev/null || :
-mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js 2>/dev/null || { RESULT_MENU="FAIL - menu remount"; exit 1; }
+umount "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || :
+mount -o bind "$INSTALL_EXTERNAL_MENU_TMP" "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || { RESULT_MENU="FAIL - menu remount"; exit 1; }
+INSTALL_EXTERNAL_MENU_MOUNTED=1
 
 # 7. Record metadata for real installs only. Test mode must not overwrite the
 # active addon's page, state, or version keys.
@@ -2831,7 +3732,7 @@ else
     [ "$(am_settings_get mervlan_version 2>/dev/null)" = "$MERVLAN_VERSION" ] || { RESULT_MENU="FAIL - metadata version verification"; exit 1; }
 fi
 
-if grep -q "tabName: \"$MENU_LABEL\"" /tmp/menuTree.js 2>/dev/null; then
+if grep -q "tabName: \"$MENU_LABEL\"" "$INSTALL_EXTERNAL_MENU_TMP" 2>/dev/null; then
     RESULT_MENU="PASS - $MENU_LABEL"
 else
     RESULT_MENU="FAIL - menu entry missing"
@@ -2912,6 +3813,7 @@ else
     # If nodes are configured and SSH keys are ready, propagate nodeenable now
     if has_configured_nodes && ssh_keys_effectively_installed; then
         if [ -x "$BOOT_SCRIPT" ]; then
+            INSTALL_EXTERNAL_NODE_ATTEMPTED=1
             echo "[install] Propagating setup to $(count_configured_nodes) configured node(s)"
             logger -t "$ADDON" "Propagating nodeenable to configured nodes"
             if sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then
@@ -2965,7 +3867,7 @@ settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings va
 [ -f "$TMP_DIR/logs/vlan_manager.log" ] || { RESULT_DETAIL="runtime manager log missing"; FINAL_STATUS=1; }
 
 if [ "$WEBUI_ENABLED" = "1" ]; then
-    [ -n "$am_webui_page" ] && [ -f "/www/user/$am_webui_page" ] || { RESULT_WEBUI="FAIL - published ASP missing"; FINAL_STATUS=1; }
+    [ -n "$am_webui_page" ] && [ -f "$INSTALL_EXTERNAL_WWW_ROOT/$am_webui_page" ] || { RESULT_WEBUI="FAIL - published ASP missing"; FINAL_STATUS=1; }
     for _public_req in index.html vlan_index_style.css vlan_form_style.css settings/loading_actions.json settings/hardware_profiles.json; do
         [ -f "$PUBLIC_DIR/$_public_req" ] || { RESULT_WEBUI="FAIL - public asset missing: $_public_req"; FINAL_STATUS=1; }
     done
@@ -2973,17 +3875,17 @@ if [ "$WEBUI_ENABLED" = "1" ]; then
     [ -L "$PUBLIC_DIR/tmp/logs/node_workers" ] || { RESULT_WEBUI="FAIL - worker-log link missing"; FINAL_STATUS=1; }
     if [ "$TEST_RUN" = "1" ]; then
         [ -f "$PUBLIC_DIR/installer-test.html" ] || { RESULT_WEBUI="FAIL - diagnostic asset missing"; FINAL_STATUS=1; }
-        grep -q '/user/mervlan-test-run/installer-test.html' "/www/user/$am_webui_page" 2>/dev/null || {
+        grep -q '/user/mervlan-test-run/installer-test.html' "$INSTALL_EXTERNAL_WWW_ROOT/$am_webui_page" 2>/dev/null || {
             RESULT_WEBUI="FAIL - diagnostic iframe missing"
             FINAL_STATUS=1
         }
     fi
-    grep -q "tabName: \"$MENU_LABEL\"" /tmp/menuTree.js 2>/dev/null || { RESULT_MENU="FAIL - verification"; FINAL_STATUS=1; }
+    grep -q "tabName: \"$MENU_LABEL\"" "$INSTALL_EXTERNAL_MENU_TMP" 2>/dev/null || { RESULT_MENU="FAIL - verification"; FINAL_STATUS=1; }
 fi
 
 if [ "$RESULT_HOOKS" = "PASS" ]; then
-    grep -q '/jffs/addons/mervlan/functions/service-event-handler.sh' /jffs/scripts/service-event 2>/dev/null || { RESULT_HOOKS="FAIL - service-event verification"; FINAL_STATUS=1; }
-    grep -q '/jffs/addons/mervlan/functions/mervlan_boot_wrap.sh install' /jffs/scripts/services-start 2>/dev/null || { RESULT_HOOKS="FAIL - services-start verification"; FINAL_STATUS=1; }
+    grep -q '/jffs/addons/mervlan/functions/service-event-handler.sh' "$INSTALL_EXTERNAL_SERVICE_EVENT" 2>/dev/null || { RESULT_HOOKS="FAIL - service-event verification"; FINAL_STATUS=1; }
+    grep -q '/jffs/addons/mervlan/functions/mervlan_boot_wrap.sh install' "$INSTALL_EXTERNAL_SERVICES_START" 2>/dev/null || { RESULT_HOOKS="FAIL - services-start verification"; FINAL_STATUS=1; }
 fi
 
 case "$RESULT_HOOKS" in FAIL*) FINAL_STATUS=1 ;; esac
@@ -3017,23 +3919,57 @@ if [ "$TEST_RUN" = "1" ]; then
     fi
 fi
 
+if [ "$FINAL_STATUS" = "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
+    if ! install_external_cleanup_projection; then
+        FINAL_STATUS=1
+        RESULT_WEBUI="INCOMPLETE - external projection evidence cleanup"
+        RESULT_MENU="INCOMPLETE - external projection evidence cleanup"
+        RESULT_HOOKS="INCOMPLETE - external projection evidence cleanup"
+        RESULT_DETAIL="installation verified but external projection evidence could not be retired"
+        install_external_restore_projection >/dev/null 2>&1 || :
+    fi
+fi
+
 if [ "$FINAL_STATUS" = "0" ]; then
     RESULT_VERIFY="PASS"
 else
     RESULT_VERIFY="FAIL"
 fi
 
-if [ "$FINAL_STATUS" != "0" ] && [ "$MODE" = "full" ]; then
+if [ "$FINAL_STATUS" != "0" ] && { [ "$MODE" = "full" ] || [ "$MODE" = "tarball" ]; }; then
     exit 1
+fi
+
+# Standard/reinstall modes do not take the full installer EXIT path above, so
+# restore their captured external projection explicitly before releasing the
+# maintenance owner.
+if [ "$FINAL_STATUS" != "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
+    install_external_restore_projection >/dev/null 2>&1 || {
+        RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
+    }
 fi
 
 if [ "$INSTALL_ROLLBACK_NEEDED" = "1" ]; then
     case "$INSTALL_ROLLBACK_DIR" in
-        "$ADDON_DIR"/.mervlan-install-rollback.[0-9]*) rm -rf "$INSTALL_ROLLBACK_DIR" 2>/dev/null || : ;;
+        "$ADDON_DIR"/.mervlan-install-rollback.[0-9.]*)
+            if install_path_present "$INSTALL_ROLLBACK_DIR" &&
+               [ ! -L "$INSTALL_ROLLBACK_DIR" ] && [ -d "$INSTALL_ROLLBACK_DIR" ]; then
+                rm -rf "$INSTALL_ROLLBACK_DIR" 2>/dev/null || FINAL_STATUS=1
+            else
+                FINAL_STATUS=1
+            fi
+            ;;
+        *) FINAL_STATUS=1 ;;
     esac
-    INSTALL_ROLLBACK_NEEDED=0
+    [ "$FINAL_STATUS" = "0" ] && INSTALL_ROLLBACK_NEEDED=0
 fi
-[ "$TEST_RUN" = "1" ] || cleanup_preserved_files >/dev/null 2>&1 || RESULT_DETAIL="installation succeeded but preservation staging cleanup failed"
+if [ "$TEST_RUN" != "1" ]; then
+    cleanup_preserved_files >/dev/null 2>&1 || {
+        FINAL_STATUS=1
+        RESULT_DETAIL="installation succeeded but preservation staging cleanup failed"
+    }
+fi
+[ -n "${INSTALL_ORIGINAL_CONTRACT_FILE:-}" ] && rm -f "$INSTALL_ORIGINAL_CONTRACT_FILE" 2>/dev/null || :
 
 [ "$RESULT_FILES" = "SKIPPED" ] && RESULT_FILES="PASS - installed source verified"
 [ "$RESULT_SETTINGS" = "SKIPPED" ] && RESULT_SETTINGS="PASS - settings verified"
@@ -3052,6 +3988,8 @@ if ! install_maintenance_release; then
     RESULT_VERIFY="FAIL - maintenance owner cleanup"
 fi
 trap - EXIT INT TERM
-echo "[install] Installation complete!"
+if [ "$FINAL_STATUS" = "0" ]; then
+    echo "[install] Installation complete!"
+fi
 print_install_report "$FINAL_STATUS"
 exit "$FINAL_STATUS"

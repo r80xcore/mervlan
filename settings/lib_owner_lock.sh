@@ -268,7 +268,54 @@ merv_owner_lock_absent_authoritative() {
   [ -n "$_molaa_lock" ] || return 1
   ls -ld "$_molaa_lock" >/dev/null 2>&1 && return 1
   _molaa_parent=${_molaa_lock%/*}
-  [ -d "$_molaa_parent" ] && [ -r "$_molaa_parent" ] && [ -x "$_molaa_parent" ]
+  [ ! -L "$_molaa_parent" ] && [ -d "$_molaa_parent" ] &&
+    [ -r "$_molaa_parent" ] && [ -x "$_molaa_parent" ]
+}
+
+merv_owner_lock_path_chain_safe() {
+  _molpc_path="${1:-}"
+  case "$_molpc_path" in
+    ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    /*) : ;;
+    *) return 1 ;;
+  esac
+  _molpc_current=/
+  _molpc_rest=${_molpc_path#/}
+  while [ -n "$_molpc_rest" ]; do
+    case "$_molpc_rest" in
+      */*) _molpc_component=${_molpc_rest%%/*}; _molpc_rest=${_molpc_rest#*/} ;;
+      *) _molpc_component=$_molpc_rest; _molpc_rest="" ;;
+    esac
+    case "$_molpc_component" in ''|.|..) return 1 ;; esac
+    _molpc_current="$_molpc_current$_molpc_component"
+    if ls -ld "$_molpc_current" >/dev/null 2>&1; then
+      [ ! -L "$_molpc_current" ] && [ -d "$_molpc_current" ] || return 1
+    fi
+    _molpc_current="$_molpc_current/"
+  done
+  return 0
+}
+
+merv_owner_lock_parent_prepare() {
+  _molpp_path="${1:-}"
+  _molpp_parent=${_molpp_path%/*}
+  [ -n "$_molpp_parent" ] || _molpp_parent=/
+  merv_owner_lock_path_chain_safe "$_molpp_parent" || return 1
+  _molpp_current=/
+  _molpp_rest=${_molpp_parent#/}
+  while [ -n "$_molpp_rest" ]; do
+    case "$_molpp_rest" in
+      */*) _molpp_component=${_molpp_rest%%/*}; _molpp_rest=${_molpp_rest#*/} ;;
+      *) _molpp_component=$_molpp_rest; _molpp_rest='' ;;
+    esac
+    _molpp_current="$_molpp_current$_molpp_component"
+    if ! ls -ld "$_molpp_current" >/dev/null 2>&1; then
+      mkdir "$_molpp_current" 2>/dev/null || return 1
+    fi
+    [ ! -L "$_molpp_current" ] && [ -d "$_molpp_current" ] || return 1
+    _molpp_current="$_molpp_current/"
+  done
+  return 0
 }
 
 # Read and validate a directory mtime without following a symlink. Keeping the
@@ -446,6 +493,10 @@ merv_owner_lock_state() {
   _mols_lock="${1:-}"; _mols_proc="${2:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}"
   MERV_OWNER_LOCK_STATE=unknown
   [ -n "$_mols_lock" ] || { merv_owner_lock_state_emit unknown; return 1; }
+  merv_owner_lock_path_chain_safe "$_mols_lock" || {
+    merv_owner_lock_state_emit unknown
+    return 0
+  }
   # Probe the lock path itself without following it. Owner-lock state must
   # distinguish true absence from fail-closed obstructions such as regular
   # files and dangling symlinks; `ls -ld` preserves that distinction.
@@ -566,6 +617,7 @@ merv_owner_lock_acquire() {
   _mola_proc="${MERV_OWNER_LOCK_PROC_ROOT:-/proc}"
   MERV_LOCK_NONCE=''; MERV_LOCK_START=''
   [ -n "$_mola_lock" ] || return 1
+  merv_owner_lock_path_chain_safe "$_mola_lock" || return 1
   case "$_mola_max" in ''|*[!0-9]*) _mola_max=30 ;; esac
   _mola_parent=${_mola_lock%/*}
   [ -n "$_mola_parent" ] && [ "$_mola_parent" != "$_mola_lock" ] || return 1
@@ -575,7 +627,7 @@ merv_owner_lock_acquire() {
   merv_identity_nonce_next || return 1
   _mola_nonce="$MERV_IDENTITY_NONCE"
   merv_owner_v2_nonce_valid "$_mola_nonce" || return 1
-  mkdir -p "$_mola_parent" 2>/dev/null || return 1
+  merv_owner_lock_parent_prepare "$_mola_lock" || return 1
   while ! mkdir "$_mola_lock" 2>/dev/null; do
     # Keep the parsed owner identity in this shell. Command substitution would
     # hide it and allow quarantine to snapshot a replacement owner instead of
@@ -637,21 +689,71 @@ merv_owner_lock_owner_matches() {
 merv_owner_lock_release() {
   _molr_lock="${1:-}"; _molr_nonce="${2:-${MERV_LOCK_NONCE:-}}"
   [ -n "$_molr_lock" ] || return 0
-  [ -d "$_molr_lock" ] || return 0
+  merv_owner_lock_path_chain_safe "$_molr_lock" || return 1
+  # Only an authoritative absence is an already-completed release. A regular
+  # file, symlink, or unreadable parent is an obstruction and remains a
+  # failing lifecycle state.
+  if ! ls -ld "$_molr_lock" >/dev/null 2>&1; then
+    merv_owner_lock_absent_authoritative "$_molr_lock" && return 0
+    return 1
+  fi
+  [ ! -L "$_molr_lock" ] && [ -d "$_molr_lock" ] || return 1
+  [ ! -L "$_molr_lock/owner" ] && [ -f "$_molr_lock/owner" ] || return 1
   merv_owner_lock_owner_matches "$_molr_lock" "$_molr_nonce" || return 1
+  # Capture the complete record. The nonce alone is not enough protection
+  # against a replacement owner appearing between validation and removal.
+  merv_owner_v2_read "$_molr_lock" || return 1
+  _molr_pid="$MERV_OWNER_V2_PID"
+  _molr_start="$MERV_OWNER_V2_PROC_START_TIME"
+  _molr_record_nonce="$MERV_OWNER_V2_NONCE"
+  _molr_created="$MERV_OWNER_V2_CREATED"
+  _molr_heartbeat="$MERV_OWNER_V2_HEARTBEAT"
   _molr_parent=${_molr_lock%/*}; _molr_base=${_molr_lock##*/}
+  [ ! -L "$_molr_parent" ] && [ -d "$_molr_parent" ] || return 1
+  for _molr_sidecar in pid proc_start_time owner_nonce created heartbeat; do
+    if ls -ld "$_molr_lock/$_molr_sidecar" >/dev/null 2>&1; then
+      [ ! -L "$_molr_lock/$_molr_sidecar" ] &&
+        [ -f "$_molr_lock/$_molr_sidecar" ] || return 1
+    fi
+  done
   merv_owner_lock_tmp_next || return 1
   _molr_restore="$_molr_parent/.${_molr_base}.owner.restore.$$.$MERV_OWNER_LOCK_TMP_SUFFIX"
   cp -p "$_molr_lock/owner" "$_molr_restore" 2>/dev/null || return 1
   merv_owner_v2_read "$_molr_restore" 2>/dev/null || { rm -f "$_molr_restore" 2>/dev/null; return 1; }
+  # Re-read the authoritative file immediately before deleting any part of
+  # the claim. If a successor replaced it, do not touch that successor.
+  [ ! -L "$_molr_lock" ] && [ -d "$_molr_lock" ] || { rm -f "$_molr_restore" 2>/dev/null || :; return 1; }
+  [ ! -L "$_molr_lock/owner" ] && [ -f "$_molr_lock/owner" ] || { rm -f "$_molr_restore" 2>/dev/null || :; return 1; }
+  merv_owner_v2_read "$_molr_lock" 2>/dev/null || { rm -f "$_molr_restore" 2>/dev/null || :; return 1; }
+  [ "$MERV_OWNER_V2_PID" = "$_molr_pid" ] &&
+    [ "$MERV_OWNER_V2_PROC_START_TIME" = "$_molr_start" ] &&
+    [ "$MERV_OWNER_V2_NONCE" = "$_molr_record_nonce" ] &&
+    [ "$MERV_OWNER_V2_CREATED" = "$_molr_created" ] &&
+    [ "$MERV_OWNER_V2_HEARTBEAT" = "$_molr_heartbeat" ] || {
+      rm -f "$_molr_restore" 2>/dev/null || :
+      return 1
+    }
   rm -f "$_molr_lock/owner" "$_molr_lock/pid" \
     "$_molr_lock/proc_start_time" "$_molr_lock/owner_nonce" \
     "$_molr_lock/created" "$_molr_lock/heartbeat" 2>/dev/null || {
-    mv -f "$_molr_restore" "$_molr_lock/owner" 2>/dev/null || :
+    if [ -d "$_molr_lock" ] && [ ! -L "$_molr_lock" ] &&
+       ! ls -ld "$_molr_lock/owner" >/dev/null 2>&1; then
+      mv -f "$_molr_restore" "$_molr_lock/owner" 2>/dev/null || return 1
+    else
+      rm -f "$_molr_restore" 2>/dev/null || :
+    fi
     return 1
   }
   if merv_owner_lock_fault release-rmdir || ! rmdir "$_molr_lock" 2>/dev/null; then
-    mv -f "$_molr_restore" "$_molr_lock/owner" 2>/dev/null || return 1
+    # Restore only into the exact lock directory while it is still the empty
+    # claim we observed. Never overwrite a replacement obstruction.
+    if [ -d "$_molr_lock" ] && [ ! -L "$_molr_lock" ] &&
+       ! ls -ld "$_molr_lock/owner" >/dev/null 2>&1; then
+      mv -f "$_molr_restore" "$_molr_lock/owner" 2>/dev/null || return 1
+    else
+      rm -f "$_molr_restore" 2>/dev/null || :
+      return 1
+    fi
     return 1
   fi
   rm -f "$_molr_restore" 2>/dev/null || :

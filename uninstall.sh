@@ -125,24 +125,37 @@ SSH_PUBKEY="$MERV_BASE/.ssh/vlan_manager.pub"
 if [ -f "$MERV_BASE/settings/var_settings.sh" ]; then . "$MERV_BASE/settings/var_settings.sh" 2>/dev/null || :; fi
 if [ -f "$MERV_BASE/settings/lib_ssh.sh" ]; then . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || :; fi
 
-# Tree-removing entry points must share the canonical maintenance owner.  A
-# recovery/update staged tree can supply these libraries even when the active
-# tree is temporarily absent.
+# Tree-removing entry points must share one coherent support cohort for owner,
+# update-state, and recovery admission. A recovery/update staged tree can
+# supply these libraries even when the active tree is temporarily absent.
 MERV_UNINSTALL_SCRIPT_DIR=""
 case "$0" in
     */*) MERV_UNINSTALL_SCRIPT_DIR=$(CDPATH= cd -- "${0%/*}" 2>/dev/null && pwd) ;;
     *) MERV_UNINSTALL_SCRIPT_DIR=$(pwd 2>/dev/null) ;;
 esac
-if [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ]; then
-    . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || :
-elif [ -n "$MERV_UNINSTALL_SCRIPT_DIR" ] && [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" ]; then
-    . "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" 2>/dev/null || :
+MERV_UNINSTALL_ACTIVE_BASE="$MERV_BASE"
+MERV_SUPPORT_ROOT=""
+if [ -n "$MERV_UNINSTALL_SCRIPT_DIR" ] &&
+   [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_owner_lock.sh" ] &&
+   [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_update_state.sh" ] &&
+   [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_maintenance_recovery.sh" ]; then
+    MERV_SUPPORT_ROOT="$MERV_UNINSTALL_SCRIPT_DIR"
+elif [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ] &&
+     [ -r "$MERV_BASE/settings/lib_update_state.sh" ] &&
+     [ -r "$MERV_BASE/settings/lib_maintenance_recovery.sh" ]; then
+    MERV_SUPPORT_ROOT="$MERV_BASE"
 fi
-if [ -r "$MERV_BASE/settings/lib_update_state.sh" ]; then
-    . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || :
-elif [ -n "$MERV_UNINSTALL_SCRIPT_DIR" ] && [ -r "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_update_state.sh" ]; then
-    . "$MERV_UNINSTALL_SCRIPT_DIR/settings/lib_update_state.sh" 2>/dev/null || :
+if [ -n "$MERV_SUPPORT_ROOT" ]; then
+    unset LIB_OWNER_LOCK_LOADED LIB_UPDATE_STATE_LOADED \
+        LIB_MAINTENANCE_RECOVERY_LOADED LIB_IDENTITY_LOADED
+    MERV_BASE="$MERV_SUPPORT_ROOT"
+    . "$MERV_SUPPORT_ROOT/settings/lib_owner_lock.sh" 2>/dev/null || :
+    . "$MERV_SUPPORT_ROOT/settings/lib_update_state.sh" 2>/dev/null || :
+    . "$MERV_SUPPORT_ROOT/settings/lib_maintenance_recovery.sh" 2>/dev/null || :
+    MERV_BASE="$MERV_UNINSTALL_ACTIVE_BASE"
 fi
+MERV_MAINTENANCE_RECOVERY_ROOT="${MERV_MAINTENANCE_RECOVERY_ROOT:-${MERV_BASE%/*}/mervlan_backups}"
+MERV_MAINTENANCE_RECOVERY_MARKER="$MERV_MAINTENANCE_RECOVERY_ROOT/.mervlan.recovery"
 
 MERV_MAINTENANCE_ENTRY_ADMITTED=0
 uninstall_maintenance_admit() {

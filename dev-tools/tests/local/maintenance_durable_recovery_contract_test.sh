@@ -33,6 +33,16 @@ extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_install_recovery_hel
   "$TEST_ROOT/extracted/mb_install_recovery_helper.sh" || fail 'Recovery helper publisher extraction'
 extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_reconcile_stale_stages \
   "$TEST_ROOT/extracted/recovery_reconcile.sh" || fail 'Recovery reconciler extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_path_present \
+  "$TEST_ROOT/extracted/recovery_path_present.sh" || fail 'Recovery path probe extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_path_chain_safe \
+  "$TEST_ROOT/extracted/recovery_path_chain_safe.sh" || fail 'Recovery path-chain extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_path_parent_prepare \
+  "$TEST_ROOT/extracted/recovery_path_parent_prepare.sh" || fail 'Recovery parent preparation extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_path_absent_authoritative \
+  "$TEST_ROOT/extracted/recovery_path_absent_authoritative.sh" || fail 'Recovery absence probe extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_workspace_prepare \
+  "$TEST_ROOT/extracted/recovery_workspace_prepare.sh" || fail 'Recovery workspace extraction'
 extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_update_recovery_status \
   "$TEST_ROOT/extracted/recovery_update_state.sh" || fail 'Recovery Update-state extraction'
 extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_drop_update_recorded_stages \
@@ -54,6 +64,8 @@ MB_BACKUP_ROOT="$TEST_ROOT/backups"
 MB_RECOVERY_SCRIPT="$TEST_ROOT/backups/recover.sh"
 MERVLAN_RECOVERY_BACKUP_ROOT="$TEST_ROOT/backups"
 MERVLAN_RECOVERY_ACTIVE_ROOT="$TEST_ROOT/active"
+MERVLAN_RECOVERY_TMP_ROOT="$TEST_ROOT/recovery-tmp"
+MERVLAN_RECOVERY_STATE_ROOT="$TEST_ROOT/state"
 MERVLAN_BACKUP_DIR="$TEST_ROOT/backups"
 mkdir -p "$MERV_MAINTENANCE_RECOVERY_ROOT" "$MERV_STATE_ROOT" || exit 1
 
@@ -82,6 +94,11 @@ update_remove_jffs_stage() { rm -rf "$1"; }
 . "$TEST_ROOT/extracted/recovery_update_state.sh" || fail 'Recovery Update-state load'
 . "$TEST_ROOT/extracted/recovery_drop_update_stages.sh" || fail 'Recovery Update-stage cleanup load'
 . "$TEST_ROOT/extracted/recovery_reconcile.sh" || fail 'Recovery reconciler load'
+. "$TEST_ROOT/extracted/recovery_path_present.sh" || fail 'Recovery path probe load'
+. "$TEST_ROOT/extracted/recovery_path_chain_safe.sh" || fail 'Recovery path-chain load'
+. "$TEST_ROOT/extracted/recovery_path_parent_prepare.sh" || fail 'Recovery parent preparation load'
+. "$TEST_ROOT/extracted/recovery_path_absent_authoritative.sh" || fail 'Recovery absence probe load'
+. "$TEST_ROOT/extracted/recovery_workspace_prepare.sh" || fail 'Recovery workspace load'
 . "$TEST_ROOT/extracted/update_reconcile.sh" || fail 'Update reconciler load'
 . "$TEST_ROOT/extracted/recovery_archive_id_valid.sh" || fail 'Recovery archive-id load'
 
@@ -128,6 +145,10 @@ if update_reconcile_stale_stages; then fail 'Update admitted unresolved Restore 
 [ -e "$old/sentinel" ] && [ -e "$stage/sentinel" ] && [ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Update deleted Restore-protected stages'
 pass 'successor Update preserves Restore-protected stages without Update state'
 
+# Reset the fixture's prior Restore marker before representing a separate
+# authenticated Recovery transaction. Production code never overwrites an
+# active marker; each scenario must model its predecessor as already consumed.
+merv_maintenance_recovery_clear || fail 'prior durable marker fixture cleanup'
 merv_maintenance_recovery_write recovery displaced "$old" "$stage" || fail 'Recovery durable marker write'
 if update_reconcile_stale_stages; then fail 'Update admitted unresolved standalone Recovery transaction'; fi
 [ -e "$old/sentinel" ] && [ -e "$stage/sentinel" ] && [ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Update deleted Recovery-protected stages'
@@ -196,9 +217,9 @@ if update_reconcile_stale_stages; then fail 'malformed durable marker admitted U
 pass 'malformed durable metadata fails closed without arbitrary deletion'
 
 rm -f "$MERV_MAINTENANCE_RECOVERY_MARKER"
-update_reconcile_stale_stages || fail 'Update did not clean normal stale stages without durable state'
-[ ! -e "$old" ] && [ ! -e "$stage" ] || fail 'Update retained normal stale stages without durable state'
-pass 'Update normal stale-stage cleanup remains available without durable state'
+if update_reconcile_stale_stages; then fail 'Update admitted unbound stale stages without durable state'; fi
+[ -e "$old" ] && [ -e "$stage" ] || fail 'Update deleted unbound stale stages without durable state'
+pass 'Update preserves unbound stale stages without durable state'
 
 mkdir -p "$old" "$stage" || exit 1
 : > "$old/sentinel"

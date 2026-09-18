@@ -20,4 +20,4 @@ Required pre-integration coverage adds serial `execute_nodes` status outcomes
 (Round 4), configured-width `execute_nodes` preparation/launch/query failures
 (Round 5), and staged-sync success/failure/rollback isolation (Round 6).
 Every affected runtime shell file must pass `sh -n` on a POSIX/BusyBox-capable
-environment; a Windows shell result is not evidence of ASUSWRT compatibility.
+environment; a host-shell result is not evidence of ASUSWRT compatibility.

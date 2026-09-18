@@ -291,7 +291,10 @@ run_collector_sandboxed() {
   _fail_dir_create="${12:-0}"
   _fail_header_write="${13:-0}"
 
-  if type unshare >/dev/null 2>&1; then
+  # The executable may exist while the host or runner denies mount namespace
+  # creation. Probe the capability before selecting the isolated branch.
+  if type unshare >/dev/null 2>&1 &&
+     unshare -m /bin/sh -c 'exit 0' >/dev/null 2>&1; then
     unshare -m /bin/sh "$COLLECTOR_FIXTURE" "$_sys" "$_out" "$_node" "$_ip" "$BASE_DIR" "$MOCK_BRCTL_SCRIPT" "$_force_reject" "$_fail_identity" "$_fail_scratch" "$_fail_candidate" "$_fail_escape" "$_fail_meta_chmod" "$_fail_meta_mv" "$_fail_dir_create" "$_fail_header_write"
   else
     /bin/sh "$COLLECTOR_FIXTURE" "$_sys" "$_out" "$_node" "$_ip" "$BASE_DIR" "$MOCK_BRCTL_SCRIPT" "$_force_reject" "$_fail_identity" "$_fail_scratch" "$_fail_candidate" "$_fail_escape" "$_fail_meta_chmod" "$_fail_meta_mv" "$_fail_dir_create" "$_fail_header_write"

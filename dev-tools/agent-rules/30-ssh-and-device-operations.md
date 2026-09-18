@@ -2,7 +2,9 @@
 
 Use for SSH, node sync, deployment, or device diagnostics.
 
-- Coding PC: Windows PowerShell with native OpenSSH (`ssh.exe`). Router/node runtime: ASUSWRT Dropbear/BusyBox.
+- Coding PC: native Linux/OpenSSH by default; Windows PowerShell with native
+  OpenSSH is the alternate host workflow. Router/node runtime: ASUSWRT
+  Dropbear/BusyBox.
 - When an SSH or device task requires connection details, check whether
   `dev-tools/mervlan_ssh_credentials.md` exists and is populated. If it is
   missing, tell the user to copy
@@ -14,10 +16,13 @@ Use for SSH, node sync, deployment, or device diagnostics.
   configuration in it, or copy a private key into the repository. The
   `SSH_KEY_PATH` must point to a key outside the repository. Inspect only the
   fields needed for the current task.
+- Keep the populated profile private (`chmod 600
+  dev-tools/mervlan_ssh_credentials.md`). Git ignore status prevents staging;
+  it does not make the file safe to share.
 - Before committing or sharing work, verify the populated profile is not
   staged and delete it when the task is complete. The exact local filename is
   ignored by Git, but ignored does not mean safe to share.
-- The example includes Windows and Linux/WSL2 path formats and ten node
+- The profile includes native Linux and Windows path examples plus ten node
   slots. Treat `none` as an intentionally unused node slot; do not connect to
   it. Verify the target host, account, port, and key path before every
   deployment or test.
@@ -33,6 +38,18 @@ Use for SSH, node sync, deployment, or device diagnostics.
 
 These commands create an Ed25519 key pair on the development computer. They
 do not install it on a router and do not change MerVLAN's router-to-node key.
+
+### Native Linux / OpenSSH
+
+```sh
+key_path="$HOME/.ssh/mervlan_dev_ed25519"
+umask 077
+ssh-keygen -t ed25519 -f "$key_path" -C 'mervlan-development'
+test -f "$key_path" && test -f "$key_path.pub"
+```
+
+Keep the private key mode at `600`. Use the path visible to the shell that
+will run `ssh` or `scp`.
 
 ### Windows PowerShell / native OpenSSH
 
@@ -50,18 +67,9 @@ Test-Path -LiteralPath $keyPath
 Test-Path -LiteralPath ($keyPath + '.pub')
 ```
 
-### Linux or WSL2 Ubuntu
-
-```sh
-key_path="$HOME/.ssh/mervlan_dev_ed25519"
-umask 077
-ssh-keygen -t ed25519 -f "$key_path" -C 'mervlan-development'
-test -f "$key_path" && test -f "$key_path.pub"
-```
-
-Keep the private key mode at `600`. Use the path visible to the shell that
-will run `ssh` or `scp`; a Windows path and a WSL2 path may refer to different
-filesystems.
+WSL2 uses the path visible inside its distro; a Windows path and a WSL2 path
+may refer to different filesystems. The complete Windows/WSL2 setup and
+recovery notes are in `docs/platform-windows-wsl.md`.
 
 ## Installing the MerVLAN key through the ASUS UI
 
@@ -102,15 +110,17 @@ that belongs in Authorized Keys. Never paste the private key, the contents of
   `templates/`, `mervlan.asp`, `www/index.html`, and the matching test and
   safety scripts. Preserve executable mode on shell scripts; do not treat a
   partial library copy as a full-suite validation.
-- When building a remote command in PowerShell, do not put router-side `$(...)` or unescaped `$variables` inside an outer double-quoted PowerShell string. PowerShell can expand them locally. Prefer a single-quoted remote command or a prebuilt command variable.
+- When building a remote command, preserve the router-side quoting and check
+  both output and exit status. The Windows/PowerShell quoting exception is
+  documented in the host-specific section below.
 - When invoking router libraries directly over SSH, export `MERV_BASE` before
   sourcing `settings/var_settings.sh`; otherwise the settings loader can abort
   before diagnostics run.
-- Lab observation (2026-07-27): quote-heavy remote commands sent through
-  PowerShell/OpenSSH caused patterns containing spaces, pipes, or JSON quotes to
-  split into separate router-shell arguments. Prefer simple exact patterns or a
-  carefully built single-quoted remote command, and check both output and exit
-  status rather than assuming the intended quoting survived.
+- Windows lab observation (2026-07-27): quote-heavy remote commands sent
+  through PowerShell/OpenSSH caused patterns containing spaces, pipes, or JSON
+  quotes to split into separate router-shell arguments. Prefer simple exact
+  patterns or a carefully built single-quoted remote command, and check both
+  output and exit status rather than assuming the intended quoting survived.
 - Lab observation (2026-08-01): the lab router does not provide `sha256sum`.
   Use `openssl dgst -sha256 <file> | awk '{print $NF}'` for staged-transfer
   hash checks after confirming OpenSSL is available; do not assume GNU/BusyBox
@@ -131,24 +141,25 @@ that belongs in Authorized Keys. Never paste the private key, the contents of
 - A router-only UI/logging deployment does not authorize node synchronization. Deploy nodes only through the approved Sync Nodes flow when the task explicitly includes node rollout.
 - Before a disruptive device action, verify target, management path, current locks, manager/heal/watchdog/worker state, DHCP/MAC Shield state, and expected client placement.
 
-## Proven Windows-to-ASUSWRT transfer workflow
+## Proven Linux-to-ASUSWRT transfer workflow
 
-- Edit and validate files locally first. Do not use a remote editor, PowerShell
-  redirection, or an in-place shell rewrite as the normal deployment method.
+- Edit and validate files locally first. Do not use a remote editor,
+  shell redirection, or an in-place shell rewrite as the normal deployment
+  method.
 - Probe the exact target and destination before copying:
-  `ssh.exe -i <key> -o BatchMode=yes -o ConnectTimeout=10 <user>@<host>
+  `ssh -i <key> -o BatchMode=yes -o ConnectTimeout=10 <user>@<host>
   "test -d '<remote-parent>' || mkdir -p '<remote-parent>'; test -x /bin/sh"`.
   Confirm the result is the intended router/node. Do not require the router's
-  absent `command` builtin or a remote `scp` binary for this Windows-to-router
+  absent `command` builtin or a remote `scp` binary for this host-to-router
   transfer workflow.
-- Copy with native Windows `scp.exe` and uppercase `-O` (legacy SCP protocol):
-  `scp.exe -O -i <key> -o ConnectTimeout=10 <local-file>
+- Copy with `scp` and uppercase `-O` (legacy SCP protocol):
+  `scp -O -i <key> -o ConnectTimeout=10 <local-file>
   <user>@<host>:<exact-remote-path>`. The uppercase `-O` is significant;
   default OpenSSH SCP may select SFTP, which Dropbear on ASUSWRT can reject.
 - For local-to-router deployment, the local source comes first and the remote
   destination comes second. For router-to-PC evidence collection, reverse
-  those operands. Keep the remote `host:/absolute/path` together as one quoted
-  PowerShell argument.
+  those operands. Keep the remote `host:/absolute/path` together as one shell
+  argument.
 - Transfer explicit files to an exact path. Do not rely on wildcards, `rsync`,
   SFTP, or a directory destination whose existence has not been checked.
   Create a unique remote staging directory first, and keep the staging path
@@ -174,3 +185,12 @@ that belongs in Authorized Keys. Never paste the private key, the contents of
   to 3 minutes for a focused test group, and up to 10 minutes for the complete
   `mervlan_selftest.sh all` suite. If a command exceeds its limit, isolate the
   test cases before treating the timeout as a failure.
+
+### Windows/PowerShell variant
+
+Use the same staged-transfer sequence with `ssh.exe` and `scp.exe -O`. Keep
+the remote destination together as one quoted PowerShell argument. Do not put
+router-side `$(...)` or unescaped `$variables` inside an outer double-quoted
+PowerShell string; use a single-quoted remote command or a prebuilt command
+variable. Quote-heavy PowerShell/OpenSSH commands have previously split
+spaces, pipes, and JSON quotes into separate router-shell arguments.

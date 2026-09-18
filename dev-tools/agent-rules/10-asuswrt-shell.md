@@ -4,17 +4,17 @@ Use when editing or reviewing runtime shell files.
 
 - Production runs on ASUSWRT BusyBox `/bin/sh`; write POSIX shell only.
 - Do not use Bash arrays, `wait -n`, process substitution, `flock`, or assumed GNU options.
-- Run `sh -n` on every changed shell file. A Windows/Git Bash pass does not prove BusyBox compatibility.
-- On Windows, if a native POSIX shell is unavailable, use an installed
-  Ubuntu/WSL2 environment for shell validation, for example:
-  `wsl.exe -d Ubuntu --exec sh -lc 'busybox sh -n path/to/file.sh'` from the
-  repository root. Probe WSL first; if it is unavailable, use an available
-  POSIX/BusyBox shell or disposable Linux environment, and do not claim
-  BusyBox compatibility without an equivalent check.
-- If WSL launch or service access fails, Git for Windows `sh -n` is a useful
-  POSIX syntax fallback, but it is not BusyBox validation. If router deployment
-  is not authorized, report BusyBox validation as unavailable; after an
-  authorized deployment, use router-side `/bin/sh -n`.
+- Run both `sh -n` and `busybox sh -n` on every changed shell file when the
+  host provides the tools. A native Ubuntu check is the default local
+  validation path; a Windows/Git Bash pass alone does not prove BusyBox
+  compatibility.
+- On Windows, if a native POSIX shell is unavailable, use the registered
+  Ubuntu/WSL2 workflow in `dev-tools/docs/platform-windows-wsl.md`. If WSL2 is
+  unavailable, use another equivalent POSIX/BusyBox environment and record
+  the limitation rather than claiming BusyBox compatibility.
+- If router deployment is not authorized, report router-side BusyBox
+  validation as unavailable. After authorized deployment, use the router's
+  `/bin/sh -n` as the final compatibility check.
 - The Codex host may limit a foreground command to about one minute. If the broad self-test exceeds that limit, do not call it failed without a test result; run the narrow affected test first and capture a longer suite separately when justified.
 - Before depending on a router command or option, verify it read-only on the target: `nohup`, `timeout`, `mktemp`, `/proc`, `find`, `tar`, or similar.
 - Lab observation (2026-08-16, ASUSWRT-Merlin offline install): a modern desktop
@@ -40,7 +40,7 @@ Use when editing or reviewing runtime shell files.
   retain the hard timeout. Dropbear emitted `failed creating //.ssh` only with
   `HOME=/`; a writable temporary HOME removed that warning without changing
   connection success.
-- WSL2 BusyBox 1.37.0 validation (2026-08-08) confirmed
+- BusyBox 1.37.0 validation (2026-08-08) confirmed
   `date -r <directory> +%s` returns a numeric epoch. DHCP incomplete-lock
   recovery may use that form only when the result is validated; an unreadable
   timestamp must remain fail-closed and must never be replaced with `now`.

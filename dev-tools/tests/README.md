@@ -13,22 +13,33 @@ fixtures. They preserve evidence for previously fixed defects and are not part
 of the maintained green regression gate unless a current plan explicitly names
 one as a reproduction diagnostic.
 
-Run the narrowest applicable test first. A shell result on Windows does not
-prove ASUSWRT BusyBox compatibility; affected shell files must also pass
-`sh -n` and focused tests in a POSIX/BusyBox-capable environment.
+Run the narrowest applicable test first. Native Ubuntu is the default host for
+local tests. A host-shell result does not prove ASUSWRT BusyBox compatibility;
+affected shell files must also pass `busybox sh -n` and focused tests in the
+router-capable environment.
 
-## WSL2 preflight
+## Native Linux preflight
 
-On Windows, perform the POSIX-capable local test phase in the registered
-Ubuntu WSL2 distro. Do not use `wsl.exe --version` alone as proof: it verifies
-only the client. Confirm the exact distro and `VERSION 2` with
-`wsl.exe --list --verbose`, then run a harmless command in that named distro.
+See `dev-tools/docs/platform-linux.md` for the Ubuntu package baseline.
 
-If the normal agent runner returns `E_ACCESSDENIED` or
-`WSL/.../E_ACCESSDENIED`, classify it as `HOST_RUNNER_ACCESS_DENIED` and retry
-the same read-only probe through the approved host/elevated execution path.
-Do not report WSL2 as unavailable merely because the runner lacks access to
-the WSL service. A distro listed as `Stopped` is installed and may be started
-for the probe. If no approved host path can access WSL, mark POSIX tests
-`INCONCLUSIVE` and state that the runner could not access WSL; never report
-those tests as passed.
+From the repository root, verify the host and required tools before running the
+maintained local suite:
+
+```sh
+uname -a
+cat /etc/os-release
+for tool in sh busybox node ssh scp openssl; do
+    type "$tool" >/dev/null 2>&1 || exit 1
+done
+```
+
+Run `dev-tools/tests/local/run_all.sh` for the complete local gate. It runs the
+maintained shell tests and the checked-in Node.js behavior tests sequentially;
+it does not run historical `deep_audit_*.sh` fixtures.
+
+## Windows/WSL2 preflight
+
+Windows users should follow the conditional workflow in
+`dev-tools/docs/platform-windows-wsl.md`. WSL2 is not a prerequisite for a
+native Linux checkout, and a WSL2 or host-shell result still does not replace
+router-side BusyBox validation.

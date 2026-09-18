@@ -14,16 +14,24 @@ sh dev-tools/tests/local/action_progress_test.sh
 sh dev-tools/tests/local/loading_progress_test.sh
 ```
 
+For the complete local gate, run the host-neutral runner from the repository
+root:
+
+```sh
+sh dev-tools/tests/local/run_all.sh
+```
+
 Run both after changing action tokens, polling, terminal state, button locks,
 or loading text. If a harness needs production paths, set an explicit
 `MERV_BASE`; do not rely on the current directory.
 
 ## 2. Static shell checks
 
-For every changed shell file, run `sh -n functions/changed_file.sh`. On a
-device, use the installed path and the device's `/bin/sh`. Passing on
-PowerShell, Bash, or a modern Linux shell does not prove ASUSWRT BusyBox
-compatibility. Check command availability before adding a dependency.
+For every changed shell file, run both `sh -n functions/changed_file.sh` and
+`busybox sh -n functions/changed_file.sh` when the host provides BusyBox. On a
+device, use the installed path and the device's `/bin/sh`. Passing on a host
+shell does not prove ASUSWRT BusyBox compatibility. Check command availability
+before adding a dependency.
 
 For an ownership/lifecycle round, also sweep for duplicate identity/nonce,
 v2 owner, unsafe trap, unsupported `stat`, and unvalidated lock-cleanup
@@ -87,11 +95,23 @@ selftest case has the word “apply” in its name.
 
 ## 4. Node validation after Sync Nodes
 
-Verify on the node:
+Verify on the node. ASUSWRT builds may not include `sha256sum`, so use the
+first available hash implementation and treat the final branch as unavailable
+rather than as a successful verification:
 
 ```sh
-sha256sum /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh
-sha256sum /jffs/addons/mervlan/dev-tools/safety/mervlan_live_test_guard.sh
+for file in \
+    /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh \
+    /jffs/addons/mervlan/dev-tools/safety/mervlan_live_test_guard.sh; do
+    if type sha256sum >/dev/null 2>&1; then
+        sha256sum "$file"
+    elif type openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$file" | awk '{print $NF}'
+    else
+        printf 'HASH_UNAVAILABLE %s\n' "$file" >&2
+        exit 1
+    fi
+done
 sh -n /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh
 sh /jffs/addons/mervlan/dev-tools/tests/router/mervlan_selftest.sh shell-syntax
 ```

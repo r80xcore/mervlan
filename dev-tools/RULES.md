@@ -33,47 +33,24 @@ confirm callers and behavior before editing.
 
 ## Environment guidance
 
-### WSL2 capability probe and permission handling
+### Host capability and permission handling
 
-- On Windows, prefer WSL2 Ubuntu for POSIX shell checks and local test
-  harnesses. Probe it from the Windows host, not from inside another shell.
-- Do not infer WSL2 availability from one failed command. Run the checks in
-  this order: verify `wsl.exe` exists; run `wsl.exe --version` (client only);
-  run `wsl.exe --list --verbose`; then run a harmless command in the exact
-  registered Ubuntu distro, for example
-  `wsl.exe -d <registered-distro-name> -- sh -lc 'uname -a; cat /etc/os-release'`.
-- A distro listed as `Stopped` is installed and valid. Starting it for the
-  harmless probe is allowed. Confirm that the selected distro reports
-  `VERSION 2`; `Default Version: 2` alone does not convert an existing
-  distro.
-- If enumeration or startup returns `E_ACCESSDENIED` or
-  `WSL/.../E_ACCESSDENIED`, classify the result as
-  `HOST_RUNNER_ACCESS_DENIED`, not `WSL_UNAVAILABLE`. Retry the same
-  read-only probe through the approved host/elevated execution path when
-  available. If that retry succeeds, use WSL2 and record that the normal
-  runner required host permission.
-- If the current runner cannot access WSL even after an approved host-level
-  retry, report that WSL2 is present or unverified but inaccessible to this
-  runner. Do not claim Ubuntu is absent. Continue static analysis and mark
-  POSIX tests as blocked or `INCONCLUSIVE`; do not report them as passed.
-- Use the exact distro name returned by `wsl.exe --list --verbose`; do not
-  assume the default distro. Treat the process exit code as authoritative and
-  normalize NUL-padded Windows output before parsing its text.
-- Never run `wsl --install`, `wsl --unregister`, `wsl --shutdown`, or other
-  WSL reconfiguration commands automatically while probing the environment.
-- WSL2 checks do not replace final ASUSWRT BusyBox validation on the router.
-- Lab observation (2026-08-01): this workspace's normal runner returned
-  `WSL/EnumerateDistros/Service/E_ACCESSDENIED`, while the same approved,
-  read-only host probe successfully used the registered Ubuntu WSL2 distro.
-  Retry WSL probes/tests through that path before treating WSL as inaccessible.
-- Lab observation (2026-09-08): a registered Ubuntu 26.04 WSL2 VHD mounted
-  cleanly but its root filesystem had lost `/etc`, `/bin/sh`, and `/bin/mount`;
-  the resulting `getpwuid(0)` and mount/path-translation cascade required a
-  verified VHD export followed by a clean same-release rebuild. Follow the
-  worst-case runbook in `docs/90-testing-and-evidence.md`; never restore damaged
-  system directories over the clean distro.
-- Use PowerShell and native OpenSSH for Windows-side deployment, SSH, and
-  evidence transfer workflows.
+- Native Linux/Ubuntu is the default host for POSIX shell checks, local test
+  harnesses, SSH, and evidence collection. From the repository root, verify
+  the host with `uname -a; cat /etc/os-release` and probe required commands
+  before using them. See `docs/platform-linux.md` for the package baseline.
+- Probe capabilities, not only command names. For example, `unshare` may be
+  installed while mount-namespace creation is denied by the kernel or runner;
+  local tests must use their documented fallback or report the result as
+  `INCONCLUSIVE`.
+- Run `/bin/sh -n` and `busybox sh -n` for changed shell files, run the
+  maintained local host suite, then use router-side `/bin/sh` and focused
+  selftests for final ASUSWRT evidence.
+- On Windows, use the conditional WSL2 workflow in
+  `docs/platform-windows-wsl.md`. WSL2 is an optional Windows-host path, not a
+  prerequisite for native Linux development.
+- Never infer router capabilities from host utilities. Probe required tools
+  and options on the target device before depending on them.
 - Never run disruptive Apply, Restore, Update, or recovery actions without the
   required human preparation and approval.
 - After each implementation round, run the relevant validations and review the

@@ -9,8 +9,10 @@ development and device testing.
    `dev-tools/mervlan_ssh_credentials.md`
 2. Replace every placeholder with the values for the current test network.
 3. Keep the private key itself outside the repository.
-4. Check the target host and account before every deployment or test.
-5. Delete the populated file before committing, even though Git ignores it.
+4. Set the populated profile mode to `600`:
+   `chmod 600 dev-tools/mervlan_ssh_credentials.md`
+5. Check the target host and account before every deployment or test.
+6. Delete the populated file before committing, even though Git ignores it.
 
 This profile contains connection metadata only. Never add a private key,
 public-key contents, password, passphrase, token, or router configuration to
@@ -39,7 +41,37 @@ SSH_KEY_PATH=
 Use `none` for a node slot that is not configured. Do not leave a configured
 host blank. `SSH_PORT` must be a numeric TCP port, normally `22`.
 
-## Windows example
+## Native Linux example
+
+```text
+SSH_USER=admin
+SSH_PORT=22
+MAIN_ROUTER_HOST=192.168.50.1
+NODE1_HOST=192.168.50.2
+NODE2_HOST=192.168.50.3
+NODE3_HOST=none
+NODE4_HOST=none
+NODE5_HOST=none
+NODE6_HOST=none
+NODE7_HOST=none
+NODE8_HOST=none
+NODE9_HOST=none
+NODE10_HOST=none
+SSH_KEY_PATH=/home/your-user/.ssh/mervlan_router_ed25519
+```
+
+Use a POSIX path when running from Linux. Verify it exists and has appropriate
+permissions with:
+
+```sh
+key_path="$HOME/.ssh/mervlan_router_ed25519"
+test -f "$key_path" && test "$(stat -c '%a' "$key_path")" = 600
+```
+
+Replace `key_path` with the `SSH_KEY_PATH` value used by the current Linux or
+profile.
+
+## Windows PowerShell example
 
 ```text
 SSH_USER=admin
@@ -64,38 +96,9 @@ Use a Windows path for `SSH_KEY_PATH`. In PowerShell, verify it exists with:
 Test-Path -LiteralPath 'C:\Users\your-user\.ssh\mervlan_router_ed25519'
 ```
 
-## Linux or WSL2 example
-
-```text
-SSH_USER=admin
-SSH_PORT=22
-MAIN_ROUTER_HOST=192.168.50.1
-NODE1_HOST=192.168.50.2
-NODE2_HOST=192.168.50.3
-NODE3_HOST=none
-NODE4_HOST=none
-NODE5_HOST=none
-NODE6_HOST=none
-NODE7_HOST=none
-NODE8_HOST=none
-NODE9_HOST=none
-NODE10_HOST=none
-SSH_KEY_PATH=/home/your-user/.ssh/mervlan_router_ed25519
-```
-
-Use a POSIX path when running from Linux or WSL2. Verify it exists and has
-appropriate permissions with:
-
-```sh
-key_path="$HOME/.ssh/mervlan_router_ed25519"
-test -f "$key_path" && test "$(stat -c '%a' "$key_path")" = 600
-```
-
-Replace `key_path` with the `SSH_KEY_PATH` value used by the current Linux or
-WSL2 profile.
-
-WSL2 and Windows do not always refer to the same key using the same path. Use
-the path visible to the shell that will run `ssh` or `scp`.
+WSL2 uses the path visible inside its distro; a Windows path and a WSL2 path
+may refer to different filesystems. Use the path visible to the shell that
+will run `ssh` or `scp`.
 
 ## Key and trust guidance
 

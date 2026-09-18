@@ -10,7 +10,8 @@
 ## Stage and activate on the router
 
 1. Create a unique staging directory below the approved addon root.
-2. Upload explicit files with native Windows `scp.exe -O`.
+2. Upload explicit files with host OpenSSH `scp -O` (use `scp.exe -O` only
+   from Windows PowerShell).
 3. Check size, mode/owner, hashes, and `/bin/sh -n` in staging.
 4. Retain exact backups of live files.
 5. Activate with same-filesystem `mv` only after validation.

@@ -9,7 +9,7 @@
 
 PATH="/sbin:/bin:/usr/sbin:/usr/bin:${PATH:-}"
 export PATH
-# Some WSL2 images provide the BusyBox usleep applet without installing a
+# Some host images provide the BusyBox usleep applet without installing a
 # standalone usleep command.  Expose that applet only inside this test
 # process so the production library sees the same fast-sleep capability as an
 # ASUSWRT router, without modifying the host or router environment.
@@ -18,7 +18,7 @@ if ! type usleep >/dev/null 2>&1 &&
    busybox usleep 1 >/dev/null 2>&1; then
   usleep() { busybox usleep "$@"; }
 fi
-# Some WSL2 images use uutils coreutils, whose mkdir does not reliably retain
+# Some host images use uutils coreutils, whose mkdir does not reliably retain
 # mutual exclusion for simultaneous creators in this test environment.  Use
 # BusyBox only there, matching the router's mkdir/rmdir behavior.
 if type busybox >/dev/null 2>&1 &&

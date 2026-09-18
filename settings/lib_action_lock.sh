@@ -31,7 +31,9 @@ merv_action_lock_path_valid() {
   case "$_malp_path" in
     ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;;
   esac
-  case "$_malp_path" in */*) return 0 ;; *) return 1 ;; esac
+  case "$_malp_path" in */*) : ;; *) return 1 ;; esac
+  type merv_owner_lock_path_chain_safe >/dev/null 2>&1 || return 1
+  merv_owner_lock_path_chain_safe "$_malp_path"
 }
 
 # Validate only the authenticated parent context.  A present but invalid

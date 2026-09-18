@@ -1016,10 +1016,10 @@ The Web UI's **Repair update components before update** option runs the same rep
 If the Web UI repair cannot start because the installed event handler or its lock/action support is damaged, bootstrap the standalone repair script over SSH first. For `main`:
 
 ```sh
-mkdir -p /jffs/addons/mervlan/functions && tmp="/tmp/update_mervlan_repair.sh.$$" && /usr/sbin/curl -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/main/functions/update_mervlan_repair.sh" -o "$tmp" && sh -n "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" /jffs/addons/mervlan/functions/update_mervlan_repair.sh && sh /jffs/addons/mervlan/functions/update_mervlan_repair.sh main
+umask 077; c="${MERV_REPAIR_BOOTSTRAP_CURL:-/usr/sbin/curl}"; t="${MERV_REPAIR_BOOTSTRAP_TMP_ROOT:-/tmp}"; case "$c" in /*) ;; *) exit 1 ;; esac; case "$c" in *..*|*//*|*[!A-Za-z0-9_./-]*) exit 1 ;; esac; case "$t" in /*) ;; *) exit 1 ;; esac; case "$t" in *..*|*//*|*[!A-Za-z0-9_./-]*) exit 1 ;; esac; [ -x "$c" ] && [ -d "$t" ] && [ ! -L "$t" ] || exit 1; d=""; n=0; while [ "$n" -lt 8 ]; do d="$t/mervlan-repair-bootstrap.$$.$n"; if [ ! -e "$d" ] && [ ! -L "$d" ] && mkdir "$d" 2>/dev/null; then break; fi; d=""; n=$((n+1)); done; [ -n "$d" ] || exit 1; "$c" -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/functions/update_mervlan_repair.sh" -o "$d/entry.sh" && [ -f "$d/entry.sh" ] && [ ! -L "$d/entry.sh" ] && sh -n "$d/entry.sh" && chmod 0755 "$d/entry.sh" && MERV_REPAIR_BOOTSTRAP_DIR="$d" /bin/sh "$d/entry.sh" main; rc=$?; if [ "$rc" -eq 0 ]; then rm -f "$d/entry.sh" 2>/dev/null && rmdir "$d" 2>/dev/null || exit 1; fi; exit "$rc"
 ```
 
-For `dev`, replace the `main` URL segment and final `main` argument with `dev`. The bootstrap installs the rescue command before running it, so it remains available for future recovery.
+This command keeps the downloaded entrypoint and any failed-repair evidence in a private `/tmp` workspace. It does not create or replace anything under the active addon before repair admission. After archive validation, the bootstrap process hands off to the repair engine from that same validated snapshot. For `dev`, replace both the `refs/heads/main` URL segment and the final `main` argument with `dev`.
 
 #### Backup
 

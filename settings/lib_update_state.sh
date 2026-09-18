@@ -22,10 +22,124 @@
 
 merv_update_state_path_valid() {
   local _mus_path="${1:-}"
-  case "$_mus_path" in
-    "$MERV_STATE_ROOT"/*) return 0 ;;
+  case "$MERV_STATE_ROOT" in
+    /*) : ;;
     *) return 1 ;;
   esac
+  case "$MERV_STATE_ROOT" in
+    ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    *) : ;;
+  esac
+  case "$_mus_path" in
+    "$MERV_STATE_ROOT/update.journal"|"$MERV_STATE_ROOT/update.quiesce") : ;;
+    *) return 1 ;;
+  esac
+  _mus_current=/
+  _mus_rest=${MERV_STATE_ROOT#/}
+  while [ -n "$_mus_rest" ]; do
+    case "$_mus_rest" in
+      */*) _mus_component=${_mus_rest%%/*}; _mus_rest=${_mus_rest#*/} ;;
+      *) _mus_component=$_mus_rest; _mus_rest='' ;;
+    esac
+    case "$_mus_component" in ''|.|..) return 1 ;; esac
+    _mus_current="$_mus_current$_mus_component"
+    if ls -ld "$_mus_current" >/dev/null 2>&1; then
+      [ ! -L "$_mus_current" ] && [ -d "$_mus_current" ] || return 1
+    fi
+    _mus_current="$_mus_current/"
+  done
+  return 0
+}
+
+merv_update_state_parent_prepare() {
+  merv_update_state_path_valid "$MERV_UPDATE_JOURNAL" || return 1
+  _mus_current=/
+  _mus_rest=${MERV_STATE_ROOT#/}
+  while [ -n "$_mus_rest" ]; do
+    case "$_mus_rest" in
+      */*) _mus_component=${_mus_rest%%/*}; _mus_rest=${_mus_rest#*/} ;;
+      *) _mus_component=$_mus_rest; _mus_rest='' ;;
+    esac
+    _mus_current="$_mus_current$_mus_component"
+    if ! ls -ld "$_mus_current" >/dev/null 2>&1; then
+      mkdir "$_mus_current" 2>/dev/null || return 1
+    fi
+    [ ! -L "$_mus_current" ] && [ -d "$_mus_current" ] || return 1
+    _mus_current="$_mus_current/"
+  done
+  return 0
+}
+
+merv_update_state_absent_authoritative() {
+  _mus_absent_path="${1:-}"
+  ls -ld "$_mus_absent_path" >/dev/null 2>&1 && return 1
+  _mus_absent_parent=${_mus_absent_path%/*}
+  [ -n "$_mus_absent_parent" ] || _mus_absent_parent=/
+  # A first modern maintenance run may legitimately have no durable-state
+  # root yet (for example, an exact v0.53.15 installation).  Walk to the
+  # nearest existing ancestor without following links; absence is authoritative
+  # when that ancestor is a readable/searchable directory.  An existing but
+  # unsafe component remains an obstruction and is never treated as absent.
+  while [ -n "$_mus_absent_parent" ]; do
+    if ls -ld "$_mus_absent_parent" >/dev/null 2>&1; then
+      [ ! -L "$_mus_absent_parent" ] && [ -d "$_mus_absent_parent" ] &&
+        [ -r "$_mus_absent_parent" ] && [ -x "$_mus_absent_parent" ]
+      return $?
+    fi
+    [ "$_mus_absent_parent" != / ] || return 1
+    _mus_absent_parent=${_mus_absent_parent%/*}
+    [ -n "$_mus_absent_parent" ] || _mus_absent_parent=/
+  done
+  return 1
+}
+
+# Ordinary direct maintenance admission is not recovery authorization.  The
+# canonical owner must be followed by a complete Update-state classification:
+# any active/malformed/unobservable journal or quiesce marker blocks, and a
+# completed journal is safe only when every recorded transaction tree is gone.
+merv_update_direct_admission_gate() {
+  local _mudag_quiesce_rc _mudag_journal_rc _mudag_key _mudag_path
+
+  merv_update_quiesce_state
+  _mudag_quiesce_rc=$?
+  case "${MERV_UPDATE_QUIESCE_STATE:-unknown}" in
+    absent) [ "$_mudag_quiesce_rc" -eq 1 ] || return 1 ;;
+    *) return 1 ;;
+  esac
+
+  merv_update_journal_state
+  _mudag_journal_rc=$?
+  case "${MERV_UPDATE_JOURNAL_STATE:-unknown}" in
+    absent)
+      [ "$_mudag_journal_rc" -eq 1 ] || return 1
+      return 0
+      ;;
+    completed)
+      [ "$_mudag_journal_rc" -eq 0 ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+
+  # These are the durable trees that can still contain the previous
+  # transaction's source or rollback projection.  Archives and diagnostics
+  # are not ownership authority; recorded stage/original trees are.
+  for _mudag_key in stage_path original_path jffs_stage_path jffs_old_path; do
+    _mudag_path=$(merv_update_journal_get "$_mudag_key" none 2>/dev/null) || return 1
+    case "$_mudag_path" in
+      none|'') continue ;;
+      /*) ;;
+      *) return 1 ;;
+    esac
+    case "$_mudag_path" in
+      *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    esac
+    if ls -ld "$_mudag_path" >/dev/null 2>&1; then
+      [ ! -L "$_mudag_path" ] && [ -d "$_mudag_path" ] || return 1
+      return 1
+    fi
+    merv_update_state_absent_authoritative "$_mudag_path" || return 1
+  done
+  return 0
 }
 
 merv_update_state_value() {
@@ -69,7 +183,7 @@ merv_update_journal_write() {
   _muj_jffs_old=$(merv_update_state_value "${_muj_jffs_old:-none}") || return 1
   _muj_old_version=$(merv_update_state_value "${_muj_old_version:-unknown}") || return 1
   _muj_new_version=$(merv_update_state_value "${_muj_new_version:-unknown}") || return 1
-  mkdir -p "$MERV_STATE_ROOT" 2>/dev/null || return 1
+  merv_update_state_parent_prepare || return 1
   chmod 700 "$MERV_STATE_ROOT" 2>/dev/null || return 1
   : "${MERV_UPDATE_STATE_SEQ:=0}"
   MERV_UPDATE_STATE_SEQ=$((MERV_UPDATE_STATE_SEQ + 1))
@@ -107,8 +221,9 @@ merv_update_journal_write() {
 
 merv_update_journal_get() {
   local _muj_key="$1" _muj_default="${2:-}"
+  merv_update_state_path_valid "$MERV_UPDATE_JOURNAL" || { printf '%s' "$_muj_default"; return 1; }
   [ ! -L "$MERV_UPDATE_JOURNAL" ] || { printf '%s' "$_muj_default"; return 1; }
-  [ -f "$MERV_UPDATE_JOURNAL" ] || { printf '%s' "$_muj_default"; return 1; }
+  [ ! -L "$MERV_UPDATE_JOURNAL" ] && [ -f "$MERV_UPDATE_JOURNAL" ] || { printf '%s' "$_muj_default"; return 1; }
   _muj_value=$(sed -n "s/^${_muj_key}=//p" "$MERV_UPDATE_JOURNAL" 2>/dev/null | tail -n 1)
   [ -n "$_muj_value" ] || _muj_value="$_muj_default"
   printf '%s' "$_muj_value"
@@ -144,7 +259,8 @@ merv_update_journal_state() {
     MERV_UPDATE_JOURNAL_STATE=malformed
     return 2
   }
-  [ -e "$MERV_UPDATE_JOURNAL" ] || return 1
+  merv_update_state_path_valid "$MERV_UPDATE_JOURNAL" || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
+  merv_update_state_absent_authoritative "$MERV_UPDATE_JOURNAL" && return 1
   [ -f "$MERV_UPDATE_JOURNAL" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
   _mujs_lines=$(wc -l < "$MERV_UPDATE_JOURNAL" 2>/dev/null | tr -d '[:space:]')
   [ "$_mujs_lines" = "19" ] || { MERV_UPDATE_JOURNAL_STATE=malformed; return 2; }
@@ -193,6 +309,12 @@ merv_update_maintenance_lock_state() {
     return 1
   }
   [ -n "$_muls_lock" ] || { printf 'unknown'; return 1; }
+  if type merv_owner_lock_path_chain_safe >/dev/null 2>&1; then
+    merv_owner_lock_path_chain_safe "$_muls_lock" || {
+      printf 'unknown'
+      return 1
+    }
+  fi
 
   # Probe the object itself without following it.  A failed probe is absent
   # only when its parent is readable/searchable; otherwise the state is
@@ -376,6 +498,21 @@ merv_maintenance_direct_admit() {
   MERV_MAINTENANCE_ENTRY_NONCE="${MERV_LOCK_NONCE:-}"
   MERV_MAINTENANCE_ENTRY_START="${MERV_LOCK_START:-}"
   MERV_MAINTENANCE_ENTRY_OWNED=1
+  # Ownership is necessary but not sufficient for ordinary install/uninstall
+  # entry. An interrupted Update/Restore marker or unbound activation tree is
+  # owned by the explicit recovery path, not by this new caller.
+  if type merv_maintenance_recovery_direct_gate >/dev/null 2>&1 &&
+     ! merv_maintenance_recovery_direct_gate; then
+    merv_maintenance_direct_release >/dev/null 2>&1 || :
+    MERV_MAINTENANCE_ENTRY_OWNED=0
+    return 1
+  fi
+  if type merv_update_direct_admission_gate >/dev/null 2>&1 &&
+     ! merv_update_direct_admission_gate; then
+    merv_maintenance_direct_release >/dev/null 2>&1 || :
+    MERV_MAINTENANCE_ENTRY_OWNED=0
+    return 1
+  fi
   return 0
 }
 
@@ -458,7 +595,7 @@ merv_update_quiesce_begin() {
   [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
   [ -n "$_muq_run" ] || return 1
   _muq_run=$(merv_update_state_value "$_muq_run") || return 1
-  mkdir -p "$MERV_STATE_ROOT" 2>/dev/null || return 1
+  merv_update_state_parent_prepare || return 1
   : "${MERV_UPDATE_STATE_SEQ:=0}"
   MERV_UPDATE_STATE_SEQ=$((MERV_UPDATE_STATE_SEQ + 1))
   _muq_tmp="$MERV_UPDATE_QUIESCE_FILE.tmp.$$.$MERV_UPDATE_STATE_SEQ"
@@ -479,12 +616,16 @@ merv_update_quiesce_active() {
 
 merv_update_quiesce_state() {
   MERV_UPDATE_QUIESCE_STATE=absent
+  merv_update_state_path_valid "$MERV_UPDATE_QUIESCE_FILE" || {
+    MERV_UPDATE_QUIESCE_STATE=malformed
+    return 2
+  }
   [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || {
     MERV_UPDATE_QUIESCE_STATE=malformed
     return 2
   }
-  [ -e "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
-  [ -f "$MERV_UPDATE_QUIESCE_FILE" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
+  merv_update_state_absent_authoritative "$MERV_UPDATE_QUIESCE_FILE" && return 1
+  [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] && [ -f "$MERV_UPDATE_QUIESCE_FILE" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
   _muqs_lines=$(wc -l < "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null | tr -d '[:space:]')
   [ "$_muqs_lines" = "3" ] || { MERV_UPDATE_QUIESCE_STATE=malformed; return 2; }
   for _muqs_key in format run_id created_epoch; do
@@ -503,16 +644,16 @@ merv_update_quiesce_state() {
 }
 
 merv_update_quiesce_clear() {
-  [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
-  [ -e "$MERV_UPDATE_QUIESCE_FILE" ] || return 0
   merv_update_state_path_valid "$MERV_UPDATE_QUIESCE_FILE" || return 1
+  [ ! -L "$MERV_UPDATE_QUIESCE_FILE" ] || return 1
+  merv_update_state_absent_authoritative "$MERV_UPDATE_QUIESCE_FILE" && return 0
   rm -f "$MERV_UPDATE_QUIESCE_FILE" 2>/dev/null
 }
 
 merv_update_journal_clear() {
-  [ ! -L "$MERV_UPDATE_JOURNAL" ] || return 1
-  [ -e "$MERV_UPDATE_JOURNAL" ] || return 0
   merv_update_state_path_valid "$MERV_UPDATE_JOURNAL" || return 1
+  [ ! -L "$MERV_UPDATE_JOURNAL" ] || return 1
+  merv_update_state_absent_authoritative "$MERV_UPDATE_JOURNAL" && return 0
   rm -f "$MERV_UPDATE_JOURNAL" 2>/dev/null
 }
 

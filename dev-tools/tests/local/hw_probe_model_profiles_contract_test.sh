@@ -20,7 +20,7 @@ awk '
   /# === Supported Models ===/ { section = "supported"; next }
   /# === Models that needs port layout testing\/verification ===/ { section = "verification"; next }
   /# === Custom Support Mapper ===/ { section = "" }
-  section != "" && match($0, /MODEL="[^"]+"/) {
+  section != "" && $0 !~ /^[[:space:]]*#/ && match($0, /MODEL="[^"]+"/) {
     model = substr($0, RSTART + 7, RLENGTH - 8)
     if (section == "supported") supported[model] = 1
     else if (supported[model]) { print model; duplicate = 1 }

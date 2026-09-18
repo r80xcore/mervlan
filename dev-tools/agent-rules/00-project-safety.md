@@ -34,40 +34,20 @@ Use for every task.
   Keep the note short and actionable. Do not turn a transient failure or an
   unverified assumption into a rule.
 - Separate portable project requirements from host-specific capabilities. Use
-  conditional wording and capability probes (`Get-Command`, `wsl.exe
-  --version`, `wsl.exe --list --verbose`, `ssh -V`, remote `command -v`, or an
-  equivalent read-only check) before using a host/device-specific tool. If a
-  capability is absent, adapt to the documented fallback instead of requiring
-  installation or blocking the task.
-- When shell or router-runtime debugging is performed on Windows, recommend
-  WSL2 with Ubuntu for POSIX tests and local shell harnesses. `wsl.exe
-  --version` verifies only the client. Confirm a registered distro with
-  `wsl.exe --list --verbose`, confirm `VERSION 2`, and run a harmless command
-  in the exact distro name returned by that listing. A `Stopped` distro is
-  installed and valid; it may be started for the probe. `Default Version: 2`
-  alone does not convert an existing distro.
-- If the normal agent runner returns `E_ACCESSDENIED` from WSL enumeration or
-  startup, classify it as `HOST_RUNNER_ACCESS_DENIED`, not as proof that WSL2
-  is unavailable. Retry the same read-only probe through the approved
-  host/elevated execution path when available. If the elevated probe works,
-  use WSL2 and record the runner permission limitation. If no approved host
-  path can access it, report WSL2 as present or unverified but inaccessible to
-  the runner, continue static analysis, and mark POSIX tests `INCONCLUSIVE`.
-  Do not report them as passed and do not claim Ubuntu is missing.
-- Use PowerShell for Windows-side deployment/SSH workflows and WSL2 for POSIX
-  checks. Treat WSL process exit status as authoritative and normalize
-  NUL-padded Windows output before parsing. Do not automatically install,
-  unregister, shut down, or reconfigure WSL while probing. WSL2 does not
-  replace final ASUSWRT BusyBox validation on the router.
-- Never generalize this host's WSL/virtualization, Windows tooling, network
+  conditional wording and read-only capability probes before using a
+  host/device-specific tool. If a capability is absent, adapt to the
+  documented fallback instead of requiring installation or blocking the task.
+- Native Linux/Ubuntu is the default host for local shell, test, SSH, and
+  evidence work. On Windows, use the registered Ubuntu WSL2 workflow described
+  in `dev-tools/docs/platform-windows-wsl.md`; do not make WSL assumptions in
+  the portable rules.
+- Do not infer that an installed executable is usable: `unshare`, mount
+  namespaces, network capture, and similar capabilities require an actual
+  probe. Preserve a clear fallback or classify the affected result as
+  `INCONCLUSIVE`.
+- Never generalize this host's virtualization, Windows tooling, network
   layout, SSH behavior, or installed utilities to another user's system. A
-  different host must revalidate those facts and may keep the portable rule
-  while replacing only the local implementation note.
-- Lab coding-workspace observation (2026-07-27): with no `index.lock` and no
-  Git process holding the repository, `git add` initially received a Windows
-  permission error writing the worktree index. Retrying the same non-destructive
-  Git command with approved filesystem escalation succeeded. Check for a live
-  lock/process first; do not delete an index lock merely because staging fails.
+  different host must revalidate those facts.
 - When a discovered fact changes safety, compatibility, or the allowed command
   sequence, treat the updated rule as binding for later work and mention the
   change in the task handoff. Do not silently weaken a rule to accommodate a

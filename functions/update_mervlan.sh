@@ -40,8 +40,12 @@ fi
   exit 1
 }
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || {
-  error -c cli,vlan "Unable to load the Update lifecycle state library; refusing update"
-  exit 1
+	error -c cli,vlan "Unable to load the Update lifecycle state library; refusing update"
+	exit 1
+}
+[ -n "${LIB_MAINTENANCE_RECOVERY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_maintenance_recovery.sh" 2>/dev/null || {
+	error -c cli,vlan "Unable to load the maintenance-recovery library; refusing update"
+	exit 1
 }
 # =========================================== End of MerVLAN environment setup #
 if ! cd /tmp 2>/dev/null && ! cd / 2>/dev/null; then
@@ -167,6 +171,7 @@ UPDATE_POOL_ABORT_FAILED="0"
 UPDATE_RECOVERY_REQUIRED="0"
 UPDATE_RUN_ID="update-$(date +%s 2>/dev/null || echo 0)-$$"
 UPDATE_QUIESCE_ACTIVE="0"
+UPDATE_SUCCESS_FINALIZING="0"
 UPDATE_JFFS_RESERVE_KB="${MERV_UPDATE_JFFS_RESERVE_KB:-5120}"
 case "$UPDATE_JFFS_RESERVE_KB" in
 	''|*[!0-9]*|0) UPDATE_JFFS_RESERVE_KB="5120" ;;
@@ -227,7 +232,16 @@ update_wait_for_runtime_idle() {
 		# the exact lock path non-followingly; obstructions and unverifiable
 		# records remain busy rather than looking absent through a symlink.
 		if [ "$_update_maintenance_owned" -ne 1 ]; then
-			_update_maintenance_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
+			_update_maintenance_state=$(merv_update_maintenance_lock_state 2>/dev/null)
+			_update_maintenance_state_rc=$?
+			[ "$_update_maintenance_state_rc" -eq 0 ] || {
+				error -c cli,vlan "Update cannot classify the maintenance owner state"
+				return 1
+			}
+			[ -n "$_update_maintenance_state" ] || {
+				error -c cli,vlan "Update received an empty maintenance owner state"
+				return 1
+			}
 			case "$_update_maintenance_state" in
 				absent|dead|reused) ;;
 				*) _update_busy="1" ;;
@@ -237,20 +251,30 @@ update_wait_for_runtime_idle() {
 			"$LOCKDIR/mervlan_manager.lock" \
 			"$LOCKDIR/vlan_event.lock" \
 			"$LOCKDIR/execute_nodes.lock" \
-			"$LOCKDIR/client_collect.lock"
-		do
-			[ -e "$_update_lock" ] || [ -L "$_update_lock" ] || continue
-			case "$(merv_owner_lock_state "$_update_lock")" in
+			"$LOCKDIR/client_collect.lock" \
+			"$LOCKDIR/sync_nodes.lock" \
+			"$LOCKDIR/mac_client_meta.lock" \
+			"$LOCKDIR/mac_snapshot.lock" \
+			"$LOCKDIR/observation/worker.lock"
+			do
+			ls -ld "$_update_lock" >/dev/null 2>&1 || continue
+			_update_lock_state=$(merv_owner_lock_state "$_update_lock" 2>/dev/null)
+			_update_lock_state_rc=$?
+			[ "$_update_lock_state_rc" -eq 0 ] || {
+				error -c cli,vlan "Update cannot classify runtime lock $_update_lock"
+				return 1
+			}
+			case "$_update_lock_state" in
 				live) _update_busy="1" ;;
 				dead|reused) : ;;
-				unknown) error -c cli,vlan "Update cannot classify runtime lock $_update_lock"; return 1 ;;
+				*) error -c cli,vlan "Update cannot classify runtime lock $_update_lock"; return 1 ;;
 				esac
 		done
-		# The service-event global action lock has a deliberately different
-		# metadata schema from merv_owner_lock_state. Presence is therefore treated as
-		# busy and allowed to drain, while malformed/stale state cannot be
-		# mistaken for an idle runtime.
-		if [ -e "$LOCKDIR/mervlan_action.lock" ] || [ -L "$LOCKDIR/mervlan_action.lock" ]; then
+		# The service-event global action lock uses the canonical owner record, but
+		# its parent-delegation policy is action-specific. Presence is therefore
+		# treated as busy and allowed to drain, while malformed/stale state cannot
+		# be mistaken for an idle runtime.
+		if ls -ld "$LOCKDIR/mervlan_action.lock" >/dev/null 2>&1; then
 			if ! merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"; then
 				_update_busy="1"
 			fi
@@ -260,10 +284,19 @@ update_wait_for_runtime_idle() {
 		fi
 		# A dangling marker is an obstruction, not an idle runtime. Keep the
 		# quiesce gate busy until the marker can be classified authoritatively.
-		if [ -f "$LOCKDIR/merv_boot_shield.active" ] ||
-		   [ -L "$LOCKDIR/merv_boot_shield.active" ]; then
-			_update_busy="1"
-		fi
+		for _update_shield_marker in \
+			"$LOCKDIR/merv_boot_shield.active" \
+			"$LOCKDIR/merv_boot_shield.ready" \
+			"$LOCKDIR/merv_boot_shield.handoff" \
+			"$LOCKDIR/merv_boot_shield.transient.lock" \
+			"$LOCKDIR/merv_dhcp_hold.active"
+		do
+			# ls -ld observes directories, devices, regular files, and dangling
+			# links without following them; every such object is busy/unknown.
+			if ls -ld "$_update_shield_marker" >/dev/null 2>&1; then
+				_update_busy="1"
+			fi
+		done
 		if [ "$_update_busy" = "0" ]; then
 			_update_dhcp_status=$(merv_dhcp_hold_status 2>/dev/null)
 			_update_dhcp_status_rc=$?
@@ -373,6 +406,15 @@ fail_update() {
 	block="$1"
 	shift
 	detail="$*"
+
+	# Rejected pre-admission invocations are not allowed to write an Update
+	# journal, quiesce state, rollback marker, or recovery result belonging to a
+	# different transaction. The canonical owner is the lifecycle authority.
+	if [ "${UPDATE_MAINTENANCE_LOCK_OWNED:-0}" != "1" ]; then
+		[ -n "$detail" ] && error -c cli,vlan "$detail"
+		error -c cli,vlan "Update rejected before maintenance admission; no lifecycle state was changed"
+		exit 1
+	fi
 
 	restored_tree="0"
 	restore_attempted="0"
@@ -530,18 +572,50 @@ update_remove_jffs_stage() {
 	[ -n "$_update_stage_path" ] || return 0
 	case "$_update_stage_path" in
 		"$MERVLAN_BACKUP_DIR"/.mervlan.new.*|"$MERVLAN_BACKUP_DIR"/.mervlan.old.*)
-			[ -e "$_update_stage_path" ] || return 0
+			if ! ls -ld "$_update_stage_path" >/dev/null 2>&1; then
+				[ -d "$MERVLAN_BACKUP_DIR" ] && [ -r "$MERVLAN_BACKUP_DIR" ] && [ -x "$MERVLAN_BACKUP_DIR" ] || return 1
+				return 0
+			fi
+			[ ! -L "$_update_stage_path" ] && [ -d "$_update_stage_path" ] || return 1
 			rm -rf "$_update_stage_path" 2>/dev/null
 			;;
 		*) return 1 ;;
 	esac
 }
 
+update_path_absent_authoritative() {
+	_update_absent_path="$1"
+	ls -ld "$_update_absent_path" >/dev/null 2>&1 && return 1
+	_update_absent_parent=${_update_absent_path%/*}
+	[ -n "$_update_absent_parent" ] || _update_absent_parent=/
+	while :; do
+		if ls -ld "$_update_absent_parent" >/dev/null 2>&1; then
+			[ ! -L "$_update_absent_parent" ] && [ -d "$_update_absent_parent" ] &&
+				[ -r "$_update_absent_parent" ] && [ -x "$_update_absent_parent" ] || return 1
+			return 0
+		fi
+		[ "$_update_absent_parent" != / ] || return 1
+		_update_absent_parent=${_update_absent_parent%/*}
+		[ -n "$_update_absent_parent" ] || _update_absent_parent=/
+	done
+}
+
 update_cleanup_files() {
 	_update_cleanup_file_failed=0
 	for _update_cleanup_file in "$@"; do
 		[ -n "$_update_cleanup_file" ] || continue
-		[ -e "$_update_cleanup_file" ] || continue
+		if ! ls -ld "$_update_cleanup_file" >/dev/null 2>&1; then
+			update_path_absent_authoritative "$_update_cleanup_file" || {
+				warn -c cli,vlan "Could not classify missing update temporary file $_update_cleanup_file"
+				_update_cleanup_file_failed=1
+			}
+			continue
+		fi
+		[ ! -L "$_update_cleanup_file" ] && [ -f "$_update_cleanup_file" ] || {
+			warn -c cli,vlan "Unexpected update temporary path object $_update_cleanup_file"
+			_update_cleanup_file_failed=1
+			continue
+		}
 		if ! rm -f "$_update_cleanup_file" 2>/dev/null; then
 			warn -c cli,vlan "Could not remove update temporary file $_update_cleanup_file"
 			_update_cleanup_file_failed=1
@@ -553,7 +627,11 @@ update_cleanup_files() {
 update_cleanup_tree() {
 	_update_cleanup_tree_path="$1"
 	[ -n "$_update_cleanup_tree_path" ] || return 0
-	[ -e "$_update_cleanup_tree_path" ] || return 0
+	if ! ls -ld "$_update_cleanup_tree_path" >/dev/null 2>&1; then
+		update_path_absent_authoritative "$_update_cleanup_tree_path" || return 1
+		return 0
+	fi
+	[ ! -L "$_update_cleanup_tree_path" ] && [ -d "$_update_cleanup_tree_path" ] || return 1
 	if ! rm -rf "$_update_cleanup_tree_path" 2>/dev/null; then
 		warn -c cli,vlan "Could not remove update temporary tree $_update_cleanup_tree_path"
 		return 1
@@ -621,13 +699,13 @@ update_filter_source_tree() {
 
 update_tree_valid() {
 	_update_tree="$1"
-	[ -d "$_update_tree" ] || return 1
+	ls -ld "$_update_tree" >/dev/null 2>&1 && [ ! -L "$_update_tree" ] && [ -d "$_update_tree" ] || return 1
 	for _update_required in install.sh uninstall.sh changelog.txt mervlan.asp \
 		functions/update_mervlan.sh functions/mervlan_boot.sh \
 		functions/mervlan_wan.sh \
 		settings/settings.json www/index.html
 	do
-		[ -f "$_update_tree/$_update_required" ] || return 1
+		[ ! -L "$_update_tree/$_update_required" ] && [ -f "$_update_tree/$_update_required" ] || return 1
 	done
 	[ -x "$_update_tree/functions/mervlan_wan.sh" ] || return 1
 	return 0
@@ -639,15 +717,15 @@ update_tree_valid() {
 update_stage_core_valid() {
 	_update_stage_root="$1"
 	_update_stage_missing=0
-	[ -d "$_update_stage_root" ] || return 1
+	[ ! -L "$_update_stage_root" ] && [ -d "$_update_stage_root" ] || return 1
 	for _update_stage_required in $CORE_STAGE_FILES; do
-		if [ ! -f "$_update_stage_root/$_update_stage_required" ]; then
+		if [ -L "$_update_stage_root/$_update_stage_required" ] || [ ! -f "$_update_stage_root/$_update_stage_required" ]; then
 			warn -c cli,vlan "Missing core file in stage: $_update_stage_required"
 			_update_stage_missing=1
 		fi
 	done
 	for _update_stage_dir in $CORE_STAGE_DIRS; do
-		if [ ! -d "$_update_stage_root/$_update_stage_dir" ]; then
+		if [ -L "$_update_stage_root/$_update_stage_dir" ] || [ ! -d "$_update_stage_root/$_update_stage_dir" ]; then
 			warn -c cli,vlan "Missing core directory in stage: $_update_stage_dir/"
 			_update_stage_missing=1
 		fi
@@ -667,8 +745,16 @@ update_reconcile_stale_stages() {
 		0:active)
 			# A prepared marker with no displaced old tree is the one known
 			# abandoned pre-activation state shared with Backup/Recovery.
+			_update_recovery_old_absent=0
+			if ! ls -ld "$MERV_MAINTENANCE_RECOVERY_OLD" >/dev/null 2>&1 &&
+			   [ -d "$MERV_MAINTENANCE_RECOVERY_ROOT" ] &&
+			   [ -r "$MERV_MAINTENANCE_RECOVERY_ROOT" ] &&
+			   [ -x "$MERV_MAINTENANCE_RECOVERY_ROOT" ]; then
+				_update_recovery_old_absent=1
+			fi
 			if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
-			   [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+			   [ "$_update_recovery_old_absent" -eq 1 ] && \
+			   [ ! -L "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
 			   [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
 			   update_tree_valid "$MERV_BASE"; then
 				if ! update_remove_jffs_stage "$MERV_MAINTENANCE_RECOVERY_STAGE" || \
@@ -691,28 +777,26 @@ update_reconcile_stale_stages() {
 		warn -c cli,vlan "Active installation is incomplete; preserving all .mervlan.new/.mervlan.old recovery trees"
 		return 1
 	fi
-	_update_stale_failed=0
+	# Unknown stage trees belong to an interrupted or foreign transaction. A
+	# successor Update may not consume them merely because the active tree looks
+	# complete; preserve the exact evidence and require explicit recovery.
 	for _update_stale in "$MERVLAN_BACKUP_DIR"/.mervlan.new.*; do
-		[ -d "$_update_stale" ] || continue
-		if ! update_remove_jffs_stage "$_update_stale"; then
-			warn -c cli,vlan "Could not remove stale update stage $_update_stale"
-			_update_stale_failed=1
-		fi
+		ls -ld "$_update_stale" >/dev/null 2>&1 || continue
+		warn -c cli,vlan "An unbound update stage is present; preserving $_update_stale for explicit recovery"
+		return 1
 	done
 	for _update_stale in "$MERVLAN_BACKUP_DIR"/.mervlan.old.*; do
-		[ -d "$_update_stale" ] || continue
-		if ! update_remove_jffs_stage "$_update_stale"; then
-			warn -c cli,vlan "Could not remove stale rollback tree $_update_stale"
-			_update_stale_failed=1
-		fi
+		ls -ld "$_update_stale" >/dev/null 2>&1 || continue
+		warn -c cli,vlan "An unbound rollback tree is present; preserving $_update_stale for explicit recovery"
+		return 1
 	done
-	[ "$_update_stale_failed" -eq 0 ]
+	return 0
 }
 
 update_activation_started() {
 	[ "$UPDATE_ACTIVATION_STARTED" = "1" ] && return 0
 	case "$UPDATE_JFFS_OLD" in
-		"$MERVLAN_BACKUP_DIR"/.mervlan.old.*) [ -d "$UPDATE_JFFS_OLD" ] || return 1 ;;
+		"$MERVLAN_BACKUP_DIR"/.mervlan.old.*) [ ! -L "$UPDATE_JFFS_OLD" ] && [ -d "$UPDATE_JFFS_OLD" ] || return 1 ;;
 		*) return 1 ;;
 	esac
 	UPDATE_ACTIVATION_STARTED="1"
@@ -823,10 +907,10 @@ create_durable_preupdate_backup() {
 	UPDATE_BACKUP_PARTIAL="$MERVLAN_BACKUP_DIR/.$UPDATE_BACKUP_ID.partial.$$"
 	UPDATE_BACKUP_META_FINAL="$UPDATE_BACKUP_FINAL.meta"
 	UPDATE_BACKUP_META_PARTIAL="$UPDATE_BACKUP_META_FINAL.partial.$$"
-	mkdir -p "$MERVLAN_BACKUP_DIR" 2>/dev/null || return 1
+	merv_maintenance_recovery_root_prepare || return 1
 	chmod 700 "$MERVLAN_BACKUP_DIR" 2>/dev/null || return 1
 	update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || return 1
-	[ ! -e "$UPDATE_BACKUP_FINAL" ] || return 1
+	update_path_absent_authoritative "$UPDATE_BACKUP_FINAL" || return 1
 	info -c cli,vlan "Creating durable pre-update backup $UPDATE_BACKUP_ID"
 	if ! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "${_update_backup_source%/*}" "${_update_backup_source##*/}" 2>/dev/null; then
 		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
@@ -1289,7 +1373,9 @@ cleanup_tmp() {
 		if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ -n "$TMP_BASE" ] && [ -d "$TMP_BASE" ]; then
 			rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
 		fi
-		if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ]; then
+		if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ] &&
+		   [ "${UPDATE_SUCCESS_FINALIZING:-0}" != "1" ] &&
+		   [ "$UPDATE_RECOVERY_REQUIRED" != "1" ]; then
 			if type merv_owner_lock_release >/dev/null 2>&1 &&
 			   merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" 2>/dev/null; then
 				UPDATE_MAINTENANCE_LOCK_OWNED="0"
@@ -1475,10 +1561,8 @@ consume_gui_update_ref() {
 
 # Acquire the same maintenance lock used by backup/restore/delete operations.
 # The service-event handler locks individual event names, so it cannot by
-# itself prevent an update and a restore from running at the same time.
-mkdir -p "${UPDATE_MAINTENANCE_LOCK%/*}" 2>/dev/null || \
-	fail_update lock "Could not prepare the MerVLAN maintenance lock directory"
-
+# itself prevent an update and a restore from running at the same time. The
+# owner library validates the full parent chain before creating anything.
 if ! type merv_owner_lock_acquire >/dev/null 2>&1; then
 	fail_update lock "Owner-aware maintenance lock support is unavailable"
 fi
@@ -1503,6 +1587,14 @@ if merv_owner_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenanc
 	fi
 else
 	fail_update busy "Another MerVLAN update, backup, restore, or deletion is already running"
+fi
+
+# Canonical ownership is necessary but not recovery authority. Ordinary Update
+# must stop before GUI-ref consumption, log policy, quiesce, or any protected
+# mutation when a prior transaction or foreign stage remains unresolved.
+if ! type merv_maintenance_recovery_direct_gate >/dev/null 2>&1 ||
+   ! merv_maintenance_recovery_direct_gate; then
+	fail_update recovery "Unresolved maintenance-recovery state or foreign stage is present; explicit recovery is required"
 fi
 
 if merv_update_journal_requires_safe_boot; then
@@ -1649,9 +1741,10 @@ validate_update_archive_members() {
 	_update_archive="$1"
 	_update_members="$TMP_BASE/archive.members.$$"
 	_update_verbose="$TMP_BASE/archive.verbose.$$"
+	_update_seen="$TMP_BASE/archive.seen.$$"
 	UPDATE_ARCHIVE_TOPDIR=""
 	UPDATE_ARCHIVE_RAW_READY="0"
-	rm -f "$_update_members" "$_update_verbose" "$RAW_ARCHIVE" 2>/dev/null || return 1
+	rm -f "$_update_members" "$_update_verbose" "$_update_seen" "$RAW_ARCHIVE" 2>/dev/null || return 1
 
 	if tar -tzf "$_update_archive" >"$_update_members" 2>/dev/null &&
 	   tar -tvzf "$_update_archive" >"$_update_verbose" 2>/dev/null; then
@@ -1664,26 +1757,36 @@ validate_update_archive_members() {
 	fi
 
 	[ -s "$_update_members" ] || return 1
+	: >"$_update_seen" || return 1
+	_update_member_count=0
 	while IFS= read -r _update_member || [ -n "$_update_member" ]; do
-		case "$_update_member" in
-			''|/*|*'\\'*|*//*|.|./*|*/.|*/./*|..|../*|*/..|*/../*) return 1 ;;
+		_update_member_normalized="$_update_member"
+		case "$_update_member_normalized" in */) _update_member_normalized=${_update_member_normalized%/} ;; esac
+		case "$_update_member_normalized" in
+			''|/*|*'\\'*|*//*|*' '*|*'	'*|*..*|.|./*|*/.|*/./*|..|../*|*/..|*/../*|*[!A-Za-z0-9._/-]*) return 1 ;;
 		esac
-		_update_member_root="${_update_member%%/*}"
-		case "$_update_member_root" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+		_update_member_root="${_update_member_normalized%%/*}"
+		case "$_update_member_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
 		if [ -z "$UPDATE_ARCHIVE_TOPDIR" ]; then
 			UPDATE_ARCHIVE_TOPDIR="$_update_member_root"
 		elif [ "$UPDATE_ARCHIVE_TOPDIR" != "$_update_member_root" ]; then
 			return 1
 		fi
-		case "$_update_member" in
+		case "$_update_member_normalized" in
 			"$UPDATE_ARCHIVE_TOPDIR"|"$UPDATE_ARCHIVE_TOPDIR"/*) : ;;
 			*) return 1 ;;
 		esac
+		grep -Fqx "$_update_member_normalized" "$_update_seen" 2>/dev/null && return 1
+		printf '%s\n' "$_update_member_normalized" >>"$_update_seen" || return 1
+		_update_member_count=$((_update_member_count + 1))
+		[ "$_update_member_count" -le 4096 ] || return 1
 	done <"$_update_members"
 	[ -n "$UPDATE_ARCHIVE_TOPDIR" ] || return 1
 
 	while IFS= read -r _update_verbose_line || [ -n "$_update_verbose_line" ]; do
-		case "$_update_verbose_line" in l*|h*|*' -> '*|*' link to '*) return 1 ;; esac
+		_update_verbose_type=$(printf '%s' "$_update_verbose_line" | cut -c1)
+		case "$_update_verbose_type" in -|d) ;; *) return 1 ;; esac
+		case "$_update_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
 	done <"$_update_verbose"
 	return 0
 }
@@ -2592,6 +2695,21 @@ if [ -f "$MERV_BASE/changelog.txt" ]; then
 fi
 
 
+# Complete cleanup while the owner and journal are still active. The EXIT trap
+# is deliberately held in a finalization mode so a cleanup failure retains the
+# journal/stage evidence and cannot release a still-ambiguous transaction.
+UPDATE_SUCCESS_FINALIZING="1"
+UPDATE_ACTIVATION_STARTED="0"
+_update_final_cleanup_rc=0
+cleanup_tmp || _update_final_cleanup_rc=$?
+if [ "$_update_final_cleanup_rc" -ne 0 ]; then
+	error -c cli,vlan "Update final cleanup or maintenance-owner release failed; recovery is required"
+	UPDATE_SUCCESS_FINALIZING="0"
+	UPDATE_PRESERVE_TMP="1"
+	UPDATE_PRESERVE_JFFS="1"
+	exit 1
+fi
+
 # Do not report success while the maintenance marker is still suppressing
 # normal manager/heal/boot work. A failed clear leaves the journal intact so
 # the next boot enters the safe recovery path instead of running an ambiguous
@@ -2599,19 +2717,38 @@ fi
 if ! merv_update_quiesce_clear; then
 	update_record_phase finalization-failed "quiesce_marker_clear_failed" || :
 	error -c cli,vlan "Update could not clear the maintenance-quiesce marker; recovery is required"
+	UPDATE_SUCCESS_FINALIZING="0"
+	UPDATE_PRESERVE_TMP="1"
+	UPDATE_PRESERVE_JFFS="1"
 	type log_maintain_all >/dev/null 2>&1 && log_maintain_all
 	exit 1
 fi
 UPDATE_QUIESCE_ACTIVE="0"
-UPDATE_ACTIVATION_STARTED="0"
 update_record_phase completed || {
 	error -c cli,vlan "Update completed, but the final lifecycle journal could not be written"
+	UPDATE_SUCCESS_FINALIZING="0"
+	UPDATE_PRESERVE_TMP="1"
+	UPDATE_PRESERVE_JFFS="1"
 	exit 1
 }
 if ! merv_update_journal_clear; then
 	error -c cli,vlan "Update completed, but the lifecycle journal could not be cleared"
+	UPDATE_SUCCESS_FINALIZING="0"
+	UPDATE_PRESERVE_TMP="1"
+	UPDATE_PRESERVE_JFFS="1"
 	exit 1
 fi
+
+# Owner release is the last protected lifecycle mutation. No success text or
+# nonessential reporting is emitted until this exact owner record is gone.
+UPDATE_SUCCESS_FINALIZING="0"
+if ! merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE"; then
+	error -c cli,vlan "Update completed, but maintenance-owner release failed; recovery is required"
+	UPDATE_MAINTENANCE_LOCK_OWNED="1"
+	exit 1
+fi
+UPDATE_MAINTENANCE_LOCK_OWNED="0"
+trap - EXIT INT TERM
 
 if [ "$UPDATE_PARTIAL" = "1" ] && [ -f "$UPDATE_UNDO_MARKER" ]; then
 	warn -c cli,vlan "MerVLAN update completed successfully with warnings. Undo Update is available until the router reboots; review the named warning entries above."

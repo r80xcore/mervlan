@@ -71,6 +71,8 @@ MERV_MAINTENANCE_RECOVERY_MARKER="$MB_BACKUP_ROOT/.mervlan.recovery"
 }
 
 MB_LOCK_OWNED=0
+MB_LOCK_DELEGATED=0
+MB_WORK_PREPARED=0
 MB_REQUEST_TOKEN=""
 MB_OPERATION=""
 MB_TARGET=""
@@ -144,7 +146,11 @@ mb_remove_jffs_stage() {
   _mb_stage_path="$1"
     case "$_mb_stage_path" in
     "$MB_BACKUP_ROOT"/.mervlan.new.*|"$MB_BACKUP_ROOT"/.mervlan.old.*)
-      [ -e "$_mb_stage_path" ] || return 0
+      if ! ls -ld "$_mb_stage_path" >/dev/null 2>&1; then
+        [ -d "$MB_BACKUP_ROOT" ] && [ -r "$MB_BACKUP_ROOT" ] && [ -x "$MB_BACKUP_ROOT" ] || return 1
+        return 0
+      fi
+      [ ! -L "$_mb_stage_path" ] && [ -d "$_mb_stage_path" ] || return 1
       rm -rf "$_mb_stage_path" 2>/dev/null
       ;;
     *) return 1 ;;
@@ -160,8 +166,16 @@ mb_reconcile_stale_stages() {
   _mb_recovery_state_rc=$?
   case "$_mb_recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
     0:active)
+      _mb_prepared_old_absent=0
+      if ! ls -ld "$MERV_MAINTENANCE_RECOVERY_OLD" >/dev/null 2>&1 &&
+         [ -d "$MERV_MAINTENANCE_RECOVERY_ROOT" ] &&
+         [ -r "$MERV_MAINTENANCE_RECOVERY_ROOT" ] &&
+         [ -x "$MERV_MAINTENANCE_RECOVERY_ROOT" ]; then
+        _mb_prepared_old_absent=1
+      fi
       if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
-         [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
+         [ "$_mb_prepared_old_absent" -eq 1 ] && \
+         [ ! -L "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
          [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
         _mb_prepared_recovery=1
       else
@@ -198,21 +212,15 @@ mb_reconcile_stale_stages() {
     fi
     MB_DURABLE_RECOVERY_OWNED=0
   fi
-  for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.new.*; do
-    [ -d "$_mb_stale" ] || continue
-    if ! mb_remove_jffs_stage "$_mb_stale"; then
-      warn -c cli,vlan "Could not remove stale restore stage $_mb_stale"
-      _mb_stale_cleanup_failed=1
-    fi
+  # A backup/restore successor may consume only the exact prepared record
+  # above. Any other stage belongs to an unknown or foreign transaction and is
+  # preserved for explicit Recovery inspection.
+  for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.new.* "$MB_BACKUP_ROOT"/.mervlan.old.*; do
+    ls -ld "$_mb_stale" >/dev/null 2>&1 || continue
+    warn -c cli,vlan "An unbound recovery stage is present; preserving $_mb_stale"
+    return 1
   done
-  for _mb_stale in "$MB_BACKUP_ROOT"/.mervlan.old.*; do
-    [ -d "$_mb_stale" ] || continue
-    if ! mb_remove_jffs_stage "$_mb_stale"; then
-      warn -c cli,vlan "Could not remove stale rollback tree $_mb_stale"
-      _mb_stale_cleanup_failed=1
-    fi
-  done
-  [ "$_mb_stale_cleanup_failed" -eq 0 ]
+  return 0
 }
 
 mb_cleanup() {
@@ -248,12 +256,18 @@ mb_cleanup() {
     if [ "$MB_DURABLE_RECOVERY_OWNED" = "1" ] && \
        merv_maintenance_recovery_read && \
        [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
-       [ ! -e "$MERV_MAINTENANCE_RECOVERY_OLD" ] && \
-       [ ! -e "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
+       ! merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_OLD" && \
+       ! merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_STAGE"; then
       mb_clear_durable_recovery || _mb_cleanup_failed=1
     fi
-    if [ "$MB_PRESERVE_WORK" != "1" ] && [ -d "$MB_WORK_ROOT" ]; then
-      rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
+    if [ "$MB_PRESERVE_WORK" != "1" ] && ls -ld "$MB_WORK_ROOT" >/dev/null 2>&1; then
+      if [ ! -L "$MB_WORK_ROOT" ] && [ -d "$MB_WORK_ROOT" ]; then
+        rm -rf "$MB_WORK_ROOT" 2>/dev/null || _mb_cleanup_failed=1
+      else
+        _mb_cleanup_failed=1
+        MB_PRESERVE_WORK=1
+        error -c cli,vlan "Maintenance workspace became an unexpected path object; preserving it for inspection"
+      fi
     fi
     if [ "$MB_LOCK_OWNED" = "1" ]; then
       if type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
@@ -438,7 +452,16 @@ mb_verify_archive_integrity() {
 mb_install_recovery_helper() {
   [ -f "$MB_RECOVERY_SOURCE" ] && [ -f "$MB_RECOVERY_STATE_SOURCE" ] && \
     [ -f "$MB_UPDATE_STATE_SOURCE" ] || return 1
-  mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || return 1
+  _mb_helper_saved_root="${MERV_MAINTENANCE_RECOVERY_ROOT:-}"
+  _mb_helper_saved_marker="${MERV_MAINTENANCE_RECOVERY_MARKER:-}"
+  MERV_MAINTENANCE_RECOVERY_ROOT="$MB_BACKUP_ROOT"
+  MERV_MAINTENANCE_RECOVERY_MARKER="$MB_BACKUP_ROOT/.mervlan.recovery"
+  _mb_helper_root_rc=0
+  merv_maintenance_recovery_root_prepare || _mb_helper_root_rc=$?
+  MERV_MAINTENANCE_RECOVERY_ROOT="$_mb_helper_saved_root"
+  MERV_MAINTENANCE_RECOVERY_MARKER="$_mb_helper_saved_marker"
+  [ "$_mb_helper_root_rc" -eq 0 ] || return 1
+  [ ! -L "$MB_BACKUP_ROOT" ] && [ -d "$MB_BACKUP_ROOT" ] || return 1
   chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || return 1
   _mb_recovery_state_tmp="$MB_BACKUP_ROOT/.recovery_state.sh.partial.$$"
   rm -f "$_mb_recovery_state_tmp" 2>/dev/null || return 1
@@ -630,6 +653,23 @@ mb_write_result() {
   return 0
 }
 
+mb_prepare_work_root() {
+  [ "$MB_WORK_PREPARED" = "1" ] && {
+    [ ! -L "$MB_WORK_ROOT" ] && [ -d "$MB_WORK_ROOT" ] || return 1
+    return 0
+  }
+  case "$MB_WORK_ROOT" in
+    "$MB_TMP_ROOT"/backup_manager.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  ls -ld "$MB_WORK_ROOT" >/dev/null 2>&1 && return 1
+  merv_owner_lock_parent_prepare "$MB_WORK_ROOT" || return 1
+  mkdir "$MB_WORK_ROOT" 2>/dev/null || return 1
+  chmod 700 "$MB_WORK_ROOT" 2>/dev/null || return 1
+  MB_WORK_PREPARED=1
+  return 0
+}
+
 mb_fail() {
   _mb_phase="$1"
   shift
@@ -642,7 +682,20 @@ mb_fail() {
 }
 
 mb_acquire_lock() {
-  mkdir -p "${MB_LOCK%/*}" 2>/dev/null || return 1
+  # Update's inventory refresh is a child of the already-quiesced Update
+  # transaction.  Authenticate that exact owner instead of attempting a
+  # second acquisition of the same lock.
+  if [ "${MERV_MAINTENANCE_DELEGATION_KIND:-}" = update ] && \
+     type merv_update_owner_context_valid >/dev/null 2>&1 && \
+     merv_update_owner_context_valid && \
+     type merv_update_quiesce_active >/dev/null 2>&1 && \
+     merv_update_quiesce_active && \
+     type merv_update_journal_active >/dev/null 2>&1 && \
+     merv_update_journal_active; then
+    MB_LOCK_DELEGATED=1
+    MB_LOCK_NONCE="${MERV_UPDATE_OWNER_NONCE:-}"
+    return 0
+  fi
   type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
   if merv_owner_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
     MB_LOCK_OWNED=1
@@ -666,9 +719,12 @@ mb_acquire_lock() {
 
 mb_require_lock() {
   if mb_acquire_lock; then
+    [ "$MB_LOCK_DELEGATED" = "1" ] && return 0
     if ! mb_reconcile_stale_stages; then
       error -c cli,vlan "Stale restore or rollback trees could not be reconciled; maintenance is blocked"
-      if type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
+      if [ "$MB_LOCK_DELEGATED" = "1" ]; then
+        error -c cli,vlan "Delegated maintenance owner remains held by the parent transaction"
+      elif type merv_owner_lock_release >/dev/null 2>&1 && merv_owner_lock_release "$MB_LOCK" "${MERV_LOCK_NONCE:-}" 2>/dev/null; then
         MB_LOCK_OWNED=0
       else
         error -c cli,vlan "Maintenance cleanup could not release its owner lock after stale-tree failure"
@@ -776,7 +832,7 @@ mb_resolve_selection() {
 
 mb_archive_member_types_safe() {
   _mb_archive="$1"
-  mkdir -p "$MB_WORK_ROOT" 2>/dev/null || return 1
+  mb_prepare_work_root || return 1
   LC_ALL=C tar -tvzf "$_mb_archive" > "$MB_WORK_ROOT/archive.verbose" 2>/dev/null || return 1
   [ -s "$MB_WORK_ROOT/archive.verbose" ] || return 1
   # Restore archives only need directories and regular files. Reject links,
@@ -793,7 +849,12 @@ mb_archive_member_types_safe() {
 
 mb_archive_version() {
   _mb_archive="$1"
-  mkdir -p "$MB_WORK_ROOT/version" 2>/dev/null || { printf 'unknown'; return; }
+  mb_prepare_work_root || { printf 'unknown'; return; }
+  if ls -ld "$MB_WORK_ROOT/version" >/dev/null 2>&1; then
+    [ ! -L "$MB_WORK_ROOT/version" ] && [ -d "$MB_WORK_ROOT/version" ] || { printf 'unknown'; return; }
+  else
+    mkdir "$MB_WORK_ROOT/version" 2>/dev/null || { printf 'unknown'; return; }
+  fi
   rm -rf "$MB_WORK_ROOT/version"/* 2>/dev/null || { printf 'unknown'; return; }
   mb_archive_member_types_safe "$_mb_archive" || { printf 'unknown'; return; }
   _mb_changelog=$(tar -tzf "$_mb_archive" 2>/dev/null | awk '/(^|\/)changelog\.txt$/ { print; exit }')
@@ -806,7 +867,8 @@ mb_archive_version() {
 
 mb_write_inventory() {
   _mb_output="${1:-$MB_INVENTORY_FILE}"
-  mkdir -p "$MB_PUBLIC_RESULTS" "$MB_WORK_ROOT" 2>/dev/null || return 1
+  mkdir -p "$MB_PUBLIC_RESULTS" 2>/dev/null || return 1
+  mb_prepare_work_root || return 1
   _mb_tmp="$MB_WORK_ROOT/inventory.json"
   _mb_first=1
   _mb_auto=$(mb_count_type automatic)
@@ -1002,7 +1064,8 @@ mb_create_manual() {
     mb_fail limit "Manual backup limit reached ($MB_MANUAL_LIMIT). Delete a manual backup before creating another."
     return 1
   fi
-  mkdir -p "$MB_BACKUP_ROOT" "$MB_WORK_ROOT" 2>/dev/null || { mb_fail workspace "Could not prepare the backup directory."; return 1; }
+  merv_maintenance_recovery_root_prepare || { mb_fail workspace "Could not prepare the backup directory."; return 1; }
+  mb_prepare_work_root || { mb_fail workspace "Could not prepare the backup workspace."; return 1; }
   _mb_source_kb=$(mb_path_size_kb "$MERV_BASE")
   if ! mb_require_space_kb "$MB_BACKUP_ROOT" "$_mb_source_kb" "persistent backup"; then
     mb_fail space "$MB_SPACE_MESSAGE"
@@ -1113,7 +1176,7 @@ mb_delete_one() {
   _mb_path=$(mb_resolve_selection "$_mb_id") || { mb_fail selection "Selected backup no longer exists."; return 1; }
   mb_write_result running deleting "Deleting $_mb_id."
   mb_remove_archive_artifacts "$_mb_path" 2>/dev/null || { mb_fail deleting "Failed to delete $_mb_id."; return 1; }
-  [ ! -e "$_mb_path" ] || { mb_fail deleting "Backup still exists after deletion attempt."; return 1; }
+  ls -ld "$_mb_path" >/dev/null 2>&1 && { mb_fail deleting "Backup still exists after deletion attempt."; return 1; }
   if [ "$(mb_meta_line "$MB_UNDO_UPDATE_MARKER" 1)" = "$_mb_id" ]; then
     if ! rm -f "$MB_UNDO_UPDATE_MARKER" 2>/dev/null; then
       mb_fail deleting "Backup was deleted, but its Undo Update marker could not be removed."
@@ -1140,7 +1203,7 @@ mb_delete_all() {
   fi
   mb_require_lock || return 1
   mb_write_result running deleting "Deleting all persistent MerVLAN backups."
-  mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail deleting "Backup directory is unavailable."; return 1; }
+  merv_maintenance_recovery_root_prepare || { mb_fail deleting "Backup directory is unavailable."; return 1; }
   chmod 700 "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail deleting "Could not secure the backup directory."; return 1; }
   _mb_delete_failed=0
   for _mb_delete_path in $(mb_list_paths); do
@@ -1549,7 +1612,7 @@ mb_restore() {
       [ -n "$_mb_archive" ] || { mb_fail selection "The Undo Update source is no longer available."; return 1; }
       ;;
   esac
-  mkdir -p "$MB_WORK_ROOT" 2>/dev/null || { mb_fail workspace "Could not prepare restore workspace."; return 1; }
+  mb_prepare_work_root || { mb_fail workspace "Could not prepare restore workspace."; return 1; }
   if ! mb_verify_archive_integrity "$_mb_archive"; then
     mb_fail validation "Backup integrity metadata does not match the selected archive."
     return 1
@@ -1561,7 +1624,8 @@ mb_restore() {
     mb_fail recovery "Could not remove the previous restore staging tree; no recovery data was removed."
     return 1
   fi
-  if [ -e "$MB_JFFS_STAGE" ] || [ -e "$_mb_old" ]; then
+  if merv_maintenance_recovery_object_present "$MB_JFFS_STAGE" || \
+     merv_maintenance_recovery_object_present "$_mb_old"; then
     MB_PRESERVE_JFFS=1
     mb_fail recovery "A preserved activation tree uses this process slot. No recovery data was removed; run $MB_BACKUP_ROOT/recover.sh after inspection."
     return 1
@@ -1603,7 +1667,10 @@ mb_restore() {
   _mb_current_boot=$(mb_read_boot_state "$MERV_BASE")
   _mb_current_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
   _mb_target_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MB_RESTORE_TREE/changelog.txt" 2>/dev/null)
-  if ! mkdir -p "$MB_WORK_ROOT/preserve" 2>/dev/null; then
+  if ! ls -ld "$MB_WORK_ROOT/preserve" >/dev/null 2>&1 &&
+     mkdir "$MB_WORK_ROOT/preserve" 2>/dev/null; then
+    :
+  elif [ ! -d "$MB_WORK_ROOT/preserve" ] || [ -L "$MB_WORK_ROOT/preserve" ]; then
     MB_PRESERVE_WORK=1
     mb_fail preservation "Could not prepare the restore preservation area."
     return 1
@@ -1616,12 +1683,13 @@ mb_restore() {
     fi
   done
   mb_write_result running preparing_activation "Creating the validated temporary JFFS activation stage."
-  mkdir -p "$MB_BACKUP_ROOT" 2>/dev/null || { mb_fail preparing_activation "Could not prepare the persistent backup directory."; return 1; }
+  merv_maintenance_recovery_root_prepare || { mb_fail preparing_activation "Could not prepare the persistent backup directory."; return 1; }
   if ! mb_require_space_kb "$MB_BACKUP_ROOT" "$_mb_expanded_kb" "temporary JFFS activation stage"; then
     mb_fail space "$MB_SPACE_MESSAGE"
     return 1
   fi
-  if [ -e "$MB_JFFS_STAGE" ] || [ -e "$MB_JFFS_OLD" ]; then
+  if merv_maintenance_recovery_object_present "$MB_JFFS_STAGE" || \
+     merv_maintenance_recovery_object_present "$MB_JFFS_OLD"; then
     MB_PRESERVE_JFFS=1
     mb_fail recovery "A preserved activation tree blocks this restore. No recovery data was removed; run $MB_BACKUP_ROOT/recover.sh after inspection."
     return 1
@@ -1869,6 +1937,7 @@ case "$1" in
   inventory)
     MB_REQUEST_TOKEN=$(mb_make_token "$2")
     MB_OPERATION=backup_inventory
+    mb_require_lock || exit 1
     mb_install_recovery_helper || warn -c cli,vlan "Emergency recovery helper is unavailable"
     mb_write_inventory "$MB_INVENTORY_FILE" || { mb_fail inventory "Could not generate backup inventory."; exit 1; }
     mb_write_result success complete "Backup inventory refreshed."

@@ -1,28 +1,8 @@
-format=1
+format=2
+cohort=control-plane
 0644 changelog.txt
-0644 docs/diagrams-src/topology-1_local.mmd
-0644 docs/diagrams-src/topology-2_aimesh.mmd
-0644 docs/diagrams-src/topology-3_standalone-ap.mmd
-0644 docs/diagrams-src/topology-4_node-to-main.mmd
-0644 docs/diagrams/topology-1_local.svg
-0644 docs/diagrams/topology-2_aimesh.svg
-0644 docs/diagrams/topology-3_standalone-ap.svg
-0644 docs/diagrams/topology-4_node-to-main.svg
-0644 docs/HELP.md
-0644 docs/images/mervlan_help.svg
-0644 docs/images/mervlan_manager.svg
-0644 LICENSE
 0644 mervlan.asp
-0644 README.md
-0644 www/help.html
 0644 www/index.html
-0644 www/settings/loading_actions.json
-0644 www/vendor/github-markdown-dark.css
-0644 www/vendor/marked.umd.js
-0644 www/vendor/THIRD_PARTY_LICENSES.md
-0644 www/view_logs.html
-0644 www/vlan_form_style.css
-0644 www/vlan_index_style.css
 0755 functions/collect_clients.sh
 0755 functions/collect_local_clients.sh
 0755 functions/device_support_mapper.sh

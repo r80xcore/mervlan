@@ -29,6 +29,29 @@ merv_maintenance_direct_release || fail standalone-release
 [ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = "absent" ] || fail owner-leaked
 pass standalone-admission-and-release
 
+# Direct maintenance admission must not claim a new owner over a live or
+# malformed Update transaction.  Rejection also has to release the owner it
+# briefly acquired, while preserving the durable evidence for recovery.
+merv_update_journal_write run-direct extracting refs/heads/test 0 0 1 0 0 direct || fail direct-journal-write
+merv_update_quiesce_begin run-direct || fail direct-quiesce-write
+if merv_maintenance_direct_admit; then fail direct-active-state-bypass; fi
+[ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = "absent" ] || fail direct-active-owner-leaked
+[ "$(merv_update_quiesce_state >/dev/null 2>&1; printf '%s' "$MERV_UPDATE_QUIESCE_STATE")" = active ] || fail direct-quiesce-disappeared
+[ "$(merv_update_journal_state >/dev/null 2>&1; printf '%s' "$MERV_UPDATE_JOURNAL_STATE")" = active ] || fail direct-journal-disappeared
+merv_update_quiesce_clear || fail direct-quiesce-clear
+if merv_maintenance_direct_admit; then fail direct-journal-active-bypass; fi
+[ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = "absent" ] || fail direct-journal-owner-leaked
+merv_update_journal_clear || fail direct-journal-clear
+printf 'malformed\n' > "$MERV_UPDATE_JOURNAL" || fail direct-malformed-journal-write
+if merv_maintenance_direct_admit; then fail direct-malformed-journal-bypass; fi
+[ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = "absent" ] || fail direct-malformed-owner-leaked
+rm -f "$MERV_UPDATE_JOURNAL"
+printf 'format=1\nrun_id=broken\n' > "$MERV_UPDATE_QUIESCE_FILE" || fail direct-malformed-quiesce-write
+if merv_maintenance_direct_admit; then fail direct-malformed-quiesce-bypass; fi
+[ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = "absent" ] || fail direct-malformed-quiesce-owner-leaked
+rm -f "$MERV_UPDATE_QUIESCE_FILE"
+pass direct-admission-update-state-gate
+
 # A bare Boolean update hint cannot bypass a live owner.
 merv_owner_lock_acquire "$MERV_UPDATE_MAINTENANCE_LOCK" 60 1 maintenance-test || fail owner-acquire
 MERV_UPDATE_OWNER=1

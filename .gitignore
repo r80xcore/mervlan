@@ -9,6 +9,8 @@ agent.md
 agents.md
 AGENT.md
 AGENTS.md
+# Keep the repository-level normal-development guide versioned.
+!/AGENTS.md
 dev-tools/mervlan_ssh_credentials.md
 .github/copilot-instructions.md
 dev-tools/backup/*

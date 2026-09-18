@@ -32,10 +32,56 @@ merv_maintenance_recovery_path_component() {
   esac
 }
 
+# A non-following presence probe used by every durable-state mutation. `-e`
+# would hide dangling links and turn an obstruction into apparent absence.
+merv_maintenance_recovery_object_present() {
+  ls -ld "${1:-}" >/dev/null 2>&1
+}
+
+merv_maintenance_recovery_root_chain_safe() {
+  case "$MERV_MAINTENANCE_RECOVERY_ROOT" in
+    /|''|/tmp|/jffs|/jffs/addons|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  _mmr_current=/
+  _mmr_rest=${MERV_MAINTENANCE_RECOVERY_ROOT#/}
+  while [ -n "$_mmr_rest" ]; do
+    case "$_mmr_rest" in
+      */*) _mmr_component=${_mmr_rest%%/*}; _mmr_rest=${_mmr_rest#*/} ;;
+      *) _mmr_component=$_mmr_rest; _mmr_rest="" ;;
+    esac
+    [ -n "$_mmr_component" ] || return 1
+    _mmr_current="$_mmr_current$_mmr_component"
+    if merv_maintenance_recovery_object_present "$_mmr_current"; then
+      [ ! -L "$_mmr_current" ] && [ -d "$_mmr_current" ] || return 1
+    fi
+    _mmr_current="$_mmr_current/"
+  done
+  return 0
+}
+
+merv_maintenance_recovery_root_prepare() {
+  merv_maintenance_recovery_root_chain_safe || return 1
+  _mmr_current=/
+  _mmr_rest=${MERV_MAINTENANCE_RECOVERY_ROOT#/}
+  while [ -n "$_mmr_rest" ]; do
+    case "$_mmr_rest" in
+      */*) _mmr_component=${_mmr_rest%%/*}; _mmr_rest=${_mmr_rest#*/} ;;
+      *) _mmr_component=$_mmr_rest; _mmr_rest="" ;;
+    esac
+    _mmr_current="$_mmr_current$_mmr_component"
+    if ! merv_maintenance_recovery_object_present "$_mmr_current"; then
+      mkdir "$_mmr_current" 2>/dev/null || return 1
+    fi
+    [ ! -L "$_mmr_current" ] && [ -d "$_mmr_current" ] || return 1
+    _mmr_current="$_mmr_current/"
+  done
+  return 0
+}
+
 merv_maintenance_recovery_write() {
   _mmr_kind="$1" _mmr_phase="$2" _mmr_old="$3" _mmr_stage="$4"
-  case "$MERV_MAINTENANCE_RECOVERY_ROOT" in /|''|/tmp|/jffs|/jffs/addons) return 1 ;; esac
   case "$MERV_MAINTENANCE_RECOVERY_MARKER" in "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.recovery) ;; *) return 1 ;; esac
+  merv_maintenance_recovery_root_prepare || return 1
   case "$_mmr_kind:$_mmr_phase" in
     restore:prepared|restore:displaced|recovery:prepared|recovery:displaced) ;;
     *) return 1 ;;
@@ -43,7 +89,9 @@ merv_maintenance_recovery_write() {
   _mmr_old=$(merv_maintenance_recovery_path_component "$_mmr_old") || return 1
   _mmr_stage=$(merv_maintenance_recovery_path_component "$_mmr_stage") || return 1
   case "$_mmr_old:$_mmr_stage" in .mervlan.old.*:.mervlan.new.*) ;; *) return 1 ;; esac
-  mkdir -p "$MERV_MAINTENANCE_RECOVERY_ROOT" 2>/dev/null || return 1
+  merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_ROOT" || return 1
+  [ ! -L "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || return 1
+  merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_MARKER" && return 1
   chmod 700 "$MERV_MAINTENANCE_RECOVERY_ROOT" 2>/dev/null || return 1
   : "${MERV_MAINTENANCE_RECOVERY_SEQ:=0}"
   MERV_MAINTENANCE_RECOVERY_SEQ=$((MERV_MAINTENANCE_RECOVERY_SEQ + 1))
@@ -70,9 +118,23 @@ merv_maintenance_recovery_read() {
   MERV_MAINTENANCE_RECOVERY_PHASE=""
   MERV_MAINTENANCE_RECOVERY_OLD=""
   MERV_MAINTENANCE_RECOVERY_STAGE=""
+  merv_maintenance_recovery_root_chain_safe || {
+    MERV_MAINTENANCE_RECOVERY_STATUS=malformed
+    return 2
+  }
   case "$MERV_MAINTENANCE_RECOVERY_MARKER" in "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.recovery) ;; *) MERV_MAINTENANCE_RECOVERY_STATUS=malformed; return 2 ;; esac
-  [ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || return 1
-  [ -f "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || { MERV_MAINTENANCE_RECOVERY_STATUS=malformed; return 2; }
+  if ! merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_MARKER"; then
+    _mmr_parent=${MERV_MAINTENANCE_RECOVERY_MARKER%/*}
+    [ -d "$_mmr_parent" ] && [ -r "$_mmr_parent" ] && [ -x "$_mmr_parent" ] || {
+      MERV_MAINTENANCE_RECOVERY_STATUS=malformed
+      return 2
+    }
+    return 1
+  fi
+  [ ! -L "$MERV_MAINTENANCE_RECOVERY_MARKER" ] && [ -f "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || {
+    MERV_MAINTENANCE_RECOVERY_STATUS=malformed
+    return 2
+  }
   _mmr_seen=""
   _mmr_format="" _mmr_kind="" _mmr_phase="" _mmr_old="" _mmr_stage=""
   while IFS= read -r _mmr_line || [ -n "$_mmr_line" ]; do
@@ -120,8 +182,14 @@ merv_maintenance_recovery_matches() {
 }
 
 merv_maintenance_recovery_clear() {
-  [ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || return 0
+  merv_maintenance_recovery_root_chain_safe || return 1
   case "$MERV_MAINTENANCE_RECOVERY_MARKER" in "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.recovery) ;; *) return 1 ;; esac
+  if ! merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_MARKER"; then
+    _mmr_parent=${MERV_MAINTENANCE_RECOVERY_MARKER%/*}
+    [ -d "$_mmr_parent" ] && [ -r "$_mmr_parent" ] && [ -x "$_mmr_parent" ] || return 1
+    return 0
+  fi
+  [ ! -L "$MERV_MAINTENANCE_RECOVERY_MARKER" ] && [ -f "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || return 1
   rm -f "$MERV_MAINTENANCE_RECOVERY_MARKER" 2>/dev/null
 }
 
@@ -130,12 +198,39 @@ merv_maintenance_recovery_drop_recorded_stages() {
   for _mmr_path in "$MERV_MAINTENANCE_RECOVERY_STAGE" "$MERV_MAINTENANCE_RECOVERY_OLD"; do
     case "$_mmr_path" in
       "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.new.*|"$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.old.*)
-        [ ! -e "$_mmr_path" ] || rm -rf "$_mmr_path" 2>/dev/null || return 1
+        if merv_maintenance_recovery_object_present "$_mmr_path"; then
+          [ ! -L "$_mmr_path" ] && [ -d "$_mmr_path" ] || return 1
+          rm -rf "$_mmr_path" 2>/dev/null || return 1
+        fi
         ;;
       *) return 1 ;;
     esac
   done
   merv_maintenance_recovery_clear
+}
+
+# Ordinary install/uninstall entry points may acquire the canonical owner, but
+# they do not own an interrupted Update/Restore transaction. They must stop
+# while any durable record or unbound activation tree is present and leave the
+# evidence for the explicit recovery path.
+merv_maintenance_recovery_direct_gate() {
+  merv_maintenance_recovery_root_chain_safe || return 1
+  merv_maintenance_recovery_read
+  _mmr_gate_rc=$?
+  case "$_mmr_gate_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
+    1:absent) ;;
+    *) return 1 ;;
+  esac
+  if merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_ROOT"; then
+    [ ! -L "$MERV_MAINTENANCE_RECOVERY_ROOT" ] && [ -d "$MERV_MAINTENANCE_RECOVERY_ROOT" ] || return 1
+    for _mmr_gate_stage in "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.new.* \
+      "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.old.*
+    do
+      merv_maintenance_recovery_object_present "$_mmr_gate_stage" || continue
+      return 1
+    done
+  fi
+  return 0
 }
 
 LIB_MAINTENANCE_RECOVERY_LOADED=1

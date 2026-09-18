@@ -25,6 +25,10 @@ type merv_action_progress_fail >/dev/null 2>&1 || merv_action_progress_fail() { 
 SSH_TRUST_ACTION="${1:-}"
 SSH_TRUST_TOKEN="${2:-${MERV_PROGRESS_TOKEN:-}}"
 case "$SSH_TRUST_ACTION" in
+  probe|enroll|resume|status|revoke|abort) : ;;
+  *) exit 2 ;;
+esac
+case "$SSH_TRUST_ACTION" in
   status) : ;;
   *)
     if merv_update_mutation_blocked; then

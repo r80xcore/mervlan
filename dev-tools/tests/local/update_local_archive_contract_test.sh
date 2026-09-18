@@ -92,6 +92,29 @@ tar -czf "$WORK/hardlink-member.tar.gz" -C "$WORK/links" root
 expect_reject validate_update_archive_members "$WORK/hardlink-member.tar.gz"
 pass link-members-rejected
 
+# Other tar entry types and repeated names are rejected before extraction.  A
+# duplicate member can otherwise make a later archive entry silently replace a
+# previously validated file.
+mkdir -p "$WORK/special/root"
+printf x >"$WORK/special/root/regular"
+if mkfifo "$WORK/special/root/fifo" 2>/dev/null; then
+  tar -czf "$WORK/fifo-member.tar.gz" -C "$WORK/special" root
+  expect_reject validate_update_archive_members "$WORK/fifo-member.tar.gz"
+else
+  pass fifo-fixture-skipped
+fi
+tar -cf "$WORK/duplicate.raw" -C "$WORK/special" root
+tar -rf "$WORK/duplicate.raw" -C "$WORK/special" root/regular
+gzip -c "$WORK/duplicate.raw" >"$WORK/duplicate-member.tar.gz"
+expect_reject validate_update_archive_members "$WORK/duplicate-member.tar.gz"
+if command -v mknod >/dev/null 2>&1 && mknod "$WORK/special/root/device" c 1 7 2>/dev/null; then
+  tar -czf "$WORK/device-member.tar.gz" -C "$WORK/special" root
+  expect_reject validate_update_archive_members "$WORK/device-member.tar.gz"
+else
+  pass device-fixture-skipped
+fi
+pass special-entry-and-duplicate-members-rejected
+
 # ASUSWRT-Merlin BusyBox v1.25.1 target qualification (NODE1, 2026-08-24):
 # verbose symlinks begin with `l`, and hardlinks are rendered as a normal file
 # with ` -> target`. Exercise the exact production validator against that

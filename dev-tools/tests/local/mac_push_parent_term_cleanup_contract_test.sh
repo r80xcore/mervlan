@@ -89,9 +89,9 @@ export MERV_NODE_PARALLELISM=3
 . "$MERV_BASE/settings/lib_node_jobs.sh" || exit 2
 
 FAKE_TRACE="$CASE_ROOT/trace"
-FAKE_POOL_ROOT="$TMPDIR/node_jobs/c2-parent-term-$CASE_NAME-$$"
+FAKE_POOL_ROOT="$CASE_ROOT/node_jobs/c2-parent-term-$CASE_NAME-$$"
 export FAKE_TRACE FAKE_POOL_ROOT
-mkdir -p "$TMPDIR/node_jobs" "$FAKE_POOL_ROOT" || exit 2
+mkdir -p "$CASE_ROOT/node_jobs" "$FAKE_POOL_ROOT" || exit 2
 
 info() { :; }
 warn() { printf 'warn:%s\n' "$*" >> "$FAKE_TRACE"; }
@@ -253,11 +253,11 @@ DRIVER
   done
   [ -e "$_md_case_root/driver-ready" ] || { cat "$_md_case_root/stdout" >&2; kill "$_md_pid" 2>/dev/null || :; wait "$_md_pid" 2>/dev/null || :; return 1; }
   _md_wait=0
-  while [ "$(grep -c '^worker-start$' "$_md_case_root/trace" 2>/dev/null || printf 0)" -lt 3 ] && [ "$_md_wait" -lt 50 ]; do
+  while [ "$(awk '/^worker-start$/{n++} END{print n+0}' "$_md_case_root/trace" 2>/dev/null || printf '0\n')" -lt 3 ] && [ "$_md_wait" -lt 50 ]; do
     sleep 0.1
     _md_wait=$((_md_wait + 1))
   done
-  [ "$(grep -c '^worker-start$' "$_md_case_root/trace" 2>/dev/null || printf 0)" -ge 3 ] || {
+  [ "$(awk '/^worker-start$/{n++} END{print n+0}' "$_md_case_root/trace" 2>/dev/null || printf '0\n')" -ge 3 ] || {
     cat "$_md_case_root/trace" >&2; kill -TERM "$_md_pid" 2>/dev/null || :; wait "$_md_pid" 2>/dev/null || :; return 1;
   }
   kill -TERM "$_md_pid" 2>/dev/null || :
