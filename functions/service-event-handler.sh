@@ -779,7 +779,12 @@ dispatch_if_executable() {
   case "$MERV_PROGRESS_TOKEN" in
     ''|*[!A-Za-z0-9._-]*) MERV_PROGRESS_TOKEN="" ;;
   esac
+  [ "${#MERV_PROGRESS_TOKEN}" -le 96 ] || MERV_PROGRESS_TOKEN=""
   export MERV_PROGRESS_TOKEN
+
+  # Do not inherit a capability marker from the service environment. Only an
+  # authenticated repair launch below may export this one-purpose handoff.
+  unset MERV_REPAIR_DEFER_WEBUI_TERMINAL
 
   # Every dispatched script receives a parent-owned identity lock. Unknown or
   # malformed owner metadata is treated as busy and is never reclaimed by age.
@@ -792,6 +797,11 @@ dispatch_if_executable() {
   case "$_se_key" in
     *_pgt_*) _se_ack_action="${_se_key%%_pgt_*}" ;;
     *) _se_ack_action="$_se_key" ;;
+  esac
+  _se_repair_action=""
+  case "$_se_ack_action:$SCRIPT_PATH" in
+    repairmain_vlanmgr:"${MERV_BASE:-/jffs/addons/mervlan}/functions/update_mervlan_repair.sh") _se_repair_action=repairmain_vlanmgr ;;
+    repairdev_vlanmgr:"${MERV_BASE:-/jffs/addons/mervlan}/functions/update_mervlan_repair.sh") _se_repair_action=repairdev_vlanmgr ;;
   esac
   _se_event_lock="${LOCKDIR%/}/${_se_key}.lock"
   merv_action_lock_enter "$_se_event_lock"
@@ -876,6 +886,65 @@ dispatch_if_executable() {
     return "$_se_release_rc"
   }
   _se_cleanup_done=0
+  _se_repair_deferred=0
+  # Publish a terminal repair result after the worker has deferred its own
+  # terminal record. Prefer the shared helper, but keep this narrow fallback
+  # independent of the pre-repair helper copy that the repair may just have
+  # replaced. It accepts only the already validated repair token/action and
+  # writes a fixed format-v2 record in the approved transient progress root.
+  _se_repair_terminal_progress() {
+    _se_rtp_state="$1"
+    case "${_se_repair_deferred:-0}:$_se_rtp_state:${_se_repair_action:-}" in
+      1:complete:repairmain_vlanmgr|1:complete:repairdev_vlanmgr|1:failed:repairmain_vlanmgr|1:failed:repairdev_vlanmgr) : ;;
+      *) return 1 ;;
+    esac
+    case "${MERV_PROGRESS_TOKEN:-}" in
+      ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ "${#MERV_PROGRESS_TOKEN}" -le 96 ] || return 1
+    if type merv_action_progress_init >/dev/null 2>&1 && \
+       { [ "$_se_rtp_state" = complete ] && type merv_action_progress_complete >/dev/null 2>&1 || \
+         [ "$_se_rtp_state" = failed ] && type merv_action_progress_fail >/dev/null 2>&1; }; then
+      MERV_ACTION_PROGRESS_ENABLED=0
+      MERV_ACTION_PROGRESS_LAST_RC=1
+      merv_action_progress_init "$MERV_PROGRESS_TOKEN" "$_se_repair_action" \
+        'Emergency MerVLAN Repair' 'Finalizing WebUI action ownership...' >/dev/null 2>&1 || :
+      if [ "${MERV_ACTION_PROGRESS_ENABLED:-0}" -eq 1 ]; then
+        case "$_se_rtp_state" in
+          complete) merv_action_progress_complete 'Emergency repair completed' >/dev/null 2>&1 || : ;;
+          failed) merv_action_progress_fail 'Repair action did not reach safe WebUI completion.' >/dev/null 2>&1 || : ;;
+        esac
+        [ "${MERV_ACTION_PROGRESS_LAST_RC:-1}" -eq 0 ] && return 0
+      fi
+    fi
+    _se_rtp_root="${MERV_PROGRESS_ROOT:-/tmp/mervlan_tmp/progress}"
+    case "$_se_rtp_root" in
+      /tmp/mervlan_tmp/progress|/tmp/mervlan_tmp/progress/*|/tmp/mervlan_tmp/selftest.*|/tmp/mervlan_tmp/selftest.*/*) : ;;
+      *) return 1 ;;
+    esac
+    case "$_se_rtp_state" in
+      complete) _se_rtp_phase=complete; _se_rtp_message='Emergency repair completed'; _se_rtp_error=null ;;
+      failed) _se_rtp_phase=failed; _se_rtp_message='Repair action did not reach safe WebUI completion.'; _se_rtp_error='"Repair action did not reach safe WebUI completion."' ;;
+      *) return 1 ;;
+    esac
+    mkdir -p "$_se_rtp_root" 2>/dev/null || return 1
+    _se_rtp_now=$(date +%s 2>/dev/null || printf '0')
+    case "$_se_rtp_now" in ''|*[!0-9]*) _se_rtp_now=0 ;; esac
+    _se_rtp_path="$_se_rtp_root/$MERV_PROGRESS_TOKEN.json"
+    _se_rtp_tmp="$_se_rtp_path.tmp.$$.repair-finalize"
+    {
+      printf '{"format_version":2,"token":"%s","action":"%s","label":"Emergency MerVLAN Repair"' \
+        "$MERV_PROGRESS_TOKEN" "$_se_repair_action"
+      printf ',"state":"%s","mode":"determinate","phase":"%s","current":1,"total":1,"percent":100' \
+        "$_se_rtp_state" "$_se_rtp_phase"
+      printf ',"message":"%s","error":%s,"started_at":%s,"owner_pid":0,"owner_start":0,"owner_nonce":"dispatcher"' \
+        "$_se_rtp_message" "$_se_rtp_error" "$_se_rtp_now"
+      printf ',"terminal_state":"%s","updated_at":%s}\n' "$_se_rtp_state" "$_se_rtp_now"
+    } >"$_se_rtp_tmp" 2>/dev/null || { rm -f "$_se_rtp_tmp" 2>/dev/null || :; return 1; }
+    chmod 644 "$_se_rtp_tmp" 2>/dev/null || { rm -f "$_se_rtp_tmp" 2>/dev/null || :; return 1; }
+    mv -f "$_se_rtp_tmp" "$_se_rtp_path" 2>/dev/null || { rm -f "$_se_rtp_tmp" 2>/dev/null || :; return 1; }
+    return 0
+  }
   _se_worker_pid=""
   _se_worker_start=""
   _se_reconcile_worker() {
@@ -921,11 +990,13 @@ dispatch_if_executable() {
     _se_worker_rc=$?
     if [ "$_se_worker_rc" -ne 0 ]; then
       logger -t "VLANMgr" "handler: supervised worker identity could not be reconciled; retaining dispatcher locks"
+      [ "${_se_repair_deferred:-0}" -eq 1 ] && _se_repair_terminal_progress failed || :
       trap - EXIT
       exit 75
     fi
     _se_release_owner_locks
     _se_release_rc=$?
+    [ "${_se_repair_deferred:-0}" -eq 1 ] && _se_repair_terminal_progress failed || :
     if [ "${_se_ack_stage:-0}" -eq 1 ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ] && type action_ack_discard_staged >/dev/null 2>&1; then
       action_ack_discard_staged "$MERV_PROGRESS_TOKEN" >/dev/null 2>&1 || :
       action_ack_error "$MERV_PROGRESS_TOKEN" "save_vlanmgr" \
@@ -968,9 +1039,15 @@ dispatch_if_executable() {
       _se_script_rc=75
     else
       MERV_ACTION_ACK_STAGE="$_se_ack_stage"
+      if [ -n "$_se_repair_action" ] && [ -n "${MERV_PROGRESS_TOKEN:-}" ] && \
+         [ "$_se_global_needed" -eq 1 ] && [ -n "$_se_global_nonce" ]; then
+        MERV_REPAIR_DEFER_WEBUI_TERMINAL=v1
+        export MERV_REPAIR_DEFER_WEBUI_TERMINAL
+        _se_repair_deferred=1
+      fi
       export MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID \
         MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE \
-        MERV_ACTION_ACK_STAGE
+        MERV_ACTION_ACK_STAGE MERV_REPAIR_DEFER_WEBUI_TERMINAL
       logger -t "VLANMgr" "handler: worker start action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} global=$_se_global_needed"
       # Execute the script as the supervised child itself.  The dispatcher
       # records its authenticated PID/start identity before waiting, allowing
@@ -1004,6 +1081,7 @@ dispatch_if_executable() {
     _se_script_rc=1
   fi
   _se_script_rc=${_se_script_rc:-$?}
+  _se_worker_result_rc=$_se_script_rc
   [ "$_se_script_rc" -eq 0 ] || logger -t "VLANMgr" "handler: $_se_key script failed (rc=$_se_script_rc)"
   logger -t "VLANMgr" "handler: worker return action=$_se_key token=${MERV_PROGRESS_TOKEN:-none} rc=$_se_script_rc"
   _se_release_owner_locks
@@ -1047,6 +1125,16 @@ dispatch_if_executable() {
       if [ "$_se_ack_finalized" -eq 0 ] && type action_ack_error >/dev/null 2>&1 && [ -n "${MERV_PROGRESS_TOKEN:-}" ]; then
         action_ack_error "$MERV_PROGRESS_TOKEN" "$_se_ack_action" '{"reason":"cleanup-failed"}' "Action completed but backend ownership cleanup failed; recovery is required." '[]' cleanup-failed >/dev/null 2>&1 || logger -t "VLANMgr" "handler: cleanup-failure acknowledgement could not be published"
       fi
+    fi
+  fi
+  if [ "${_se_repair_deferred:-0}" -eq 1 ]; then
+    if [ "$_se_worker_result_rc" -eq 0 ] && [ "$_se_release_rc" -eq 0 ] && [ "$_se_script_rc" -eq 0 ]; then
+      if ! _se_repair_terminal_progress complete; then
+        logger -t "VLANMgr" "handler: repair terminal progress publication failed after lock release"
+        _se_script_rc=75
+      fi
+    else
+      _se_repair_terminal_progress failed || logger -t "VLANMgr" "handler: repair cleanup-failure progress publication failed"
     fi
   fi
   # A successful WebUI Save may have published a durable node-settings

@@ -454,6 +454,17 @@ repair_action_parent_valid() {
     "$MERV_ACTION_LOCK_PARENT_START" "$MERV_ACTION_LOCK_PARENT_NONCE"
 }
 
+# WebUI repair terminal success is normally published by this standalone
+# worker.  A supervising dispatcher may take that final publication over, but
+# only with an explicit capability and its still-authenticated global owner.
+# The parent-held marker alone is deliberately insufficient: older dispatchers
+# do not know to complete a deferred progress record after releasing locks.
+repair_webui_terminal_deferred() {
+  [ "${MERV_REPAIR_DEFER_WEBUI_TERMINAL:-}" = v1 ] || return 1
+  token_valid "$REPAIR_PROGRESS_TOKEN" || return 1
+  repair_action_parent_valid
+}
+
 # The old .15 dispatcher used per-event `.lock` directories with pid/created
 # metadata and no canonical maintenance owner.  Repair never deletes those
 # objects.  Repair also scans only the exact historical mutator entrypoints
@@ -1203,7 +1214,12 @@ main() {
     return 1
   fi
   REPAIR_SUCCESS=1
-  progress complete complete 100 'Emergency repair completed'
+  if repair_webui_terminal_deferred; then
+    progress running dispatcher-finalize 99 'Repair completed; finalizing WebUI action ownership'
+    log 'Repair completed; dispatcher will finalize WebUI action ownership.'
+  else
+    progress complete complete 100 'Emergency repair completed'
+  fi
   log "MerVLAN update components repaired successfully from branch: $REF"
   log 'No update was started.'
   return 0

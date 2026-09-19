@@ -1,39 +1,38 @@
-.agent
-.agents
-.tmp/
-tmp/
-.agent_docs/
-.codex-remote-attachments/
-agent_docs/
-agent.md
-agents.md
-AGENT.md
-AGENTS.md
-# Keep the repository-level normal-development guide versioned.
-!/AGENTS.md
-dev-tools/mervlan_ssh_credentials.md
-.github/copilot-instructions.md
+# =============================================================================
+# Directories and generated directory contents
+# =============================================================================
+/.agent/
+/.agents/
+/.agent_docs/
+/.codex/
+/.codex-remote-attachments/
+/.tmp/
+/agent_docs/
 dev-tools/backup/*
 !dev-tools/backup/README.md
-dev-tools/to-do/*
-!dev-tools/to-do/README.md
 dev-tools/evidence/*
 !dev-tools/evidence/README.md
-evidence/
-# Local Codex workflow wrapper and one-off qualification observer; neither is
-# MerVLAN product source nor release evidence.
-UNINSTALL_CODEX_WORKFLOW.ps1
+dev-tools/to-do/*
+!dev-tools/to-do/README.md
+/evidence/
+/tmp/
+/tools/
+
+# =============================================================================
+# Files
+# =============================================================================
+/.github/copilot-instructions.md
+/AGENT.md
+AGENTS.md
+# Keep the repository-level normal-development guide versioned.
+#!/AGENTS.md
+/agent.md
+/agents.md
+dev-tools/mervlan_ssh_credentials.md
 dev-tools/safety/observe_wan_native_main.ps1
-# Local audit packaging helper and its generated archive.
-collection_agent/
-collection_agent.cmd
-collection_agent.ps1
-compress-for-audit.ps1
-compress-for-audit.cmd
-reboot_qualification.cmd
-reboot_qualification.ps1
-mervlan-audit.zip
 functions/sync_nodes.sh.bak
 functions/wireless_backhaul.sh
-roadmap.txt
-puppeteer-config.json
+/mervlan-audit.zip
+/puppeteer-config.json
+/roadmap.txt
+/UNINSTALL_CODEX_WORKFLOW.ps1

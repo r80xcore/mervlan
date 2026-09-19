@@ -70,6 +70,13 @@ run_repair() {
   MERV_REPAIR_PROC_ROOT="${MERV_REPAIR_PROC_ROOT:-$CASE/proc}" \
   MERV_REPAIR_TMP_ROOT="$CASE/work" \
   MERV_REPAIR_PROGRESS_ROOT="$CASE/progress" \
+  MERV_PROGRESS_TOKEN="${MERV_PROGRESS_TOKEN:-}" \
+  MERV_REPAIR_DEFER_WEBUI_TERMINAL="${MERV_REPAIR_DEFER_WEBUI_TERMINAL:-}" \
+  MERV_ACTION_LOCK_PATH="${MERV_ACTION_LOCK_PATH:-}" \
+  MERV_ACTION_LOCK_PARENT_HELD="${MERV_ACTION_LOCK_PARENT_HELD:-}" \
+  MERV_ACTION_LOCK_PARENT_PID="${MERV_ACTION_LOCK_PARENT_PID:-}" \
+  MERV_ACTION_LOCK_PARENT_START="${MERV_ACTION_LOCK_PARENT_START:-}" \
+  MERV_ACTION_LOCK_PARENT_NONCE="${MERV_ACTION_LOCK_PARENT_NONCE:-}" \
   sh "$REPAIR" "$1"
 }
 
@@ -92,6 +99,81 @@ assert_eq "$(cksum "$ADDON/.ssh/vlan_manager")" "$before_key" 'SSH key changed'
 assert_eq "$(cksum "$ADDON/tmp/mac_shield.db")" "$before_db" 'database changed'
 [ "$(stat -c %a "$ADDON/functions/update_mervlan.sh")" = 755 ] || fail 'script mode'
 [ "$(stat -c %a "$ADDON/settings/lib_json.sh")" = 644 ] || fail 'library mode'
+
+# A new repair may defer its WebUI terminal record only to a new dispatcher
+# that supplied the explicit capability and an exact live parent action owner.
+# The repair still releases its own maintenance owner before it reaches this
+# nonterminal 99% handoff state.
+prepare_progress_parent() {
+  mkdir -p "$CASE/proc/$$"
+  cp "/proc/$$/stat" "$CASE/proc/$$/stat"
+  printf '%s\000' "$ADDON/functions/unrelated.sh" >"$CASE/proc/$$/cmdline"
+  parent_start=$(awk '{print $22}' "/proc/$$/stat")
+  parent_now=$(date +%s)
+  parent_lock="$CASE/locks/mervlan_action.lock"
+  mkdir -p "$parent_lock"
+  printf 'pid=%s\nproc_start_time=%s\nowner_nonce=dispatcher-parent\ncreated=%s\nheartbeat=%s\n' \
+    "$$" "$parent_start" "$parent_now" "$parent_now" >"$parent_lock/owner"
+}
+
+setup_case progress-deferred main
+prepare_progress_parent
+(
+  MERV_PROGRESS_TOKEN="repair-deferred.$$"
+  MERV_REPAIR_DEFER_WEBUI_TERMINAL=v1
+  MERV_ACTION_LOCK_PATH="$parent_lock"
+  MERV_ACTION_LOCK_PARENT_HELD=1
+  MERV_ACTION_LOCK_PARENT_PID="$$"
+  MERV_ACTION_LOCK_PARENT_START="$parent_start"
+  MERV_ACTION_LOCK_PARENT_NONCE=dispatcher-parent
+  export MERV_PROGRESS_TOKEN MERV_REPAIR_DEFER_WEBUI_TERMINAL MERV_ACTION_LOCK_PATH \
+    MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID MERV_ACTION_LOCK_PARENT_START \
+    MERV_ACTION_LOCK_PARENT_NONCE
+  run_repair main
+) || fail 'authenticated deferred repair failed'
+progress_file="$CASE/progress/repair-deferred.$$.json"
+grep -Fq '"state":"running"' "$progress_file" || fail 'deferred repair did not remain nonterminal'
+grep -Fq '"phase":"dispatcher-finalize"' "$progress_file" || fail 'deferred repair finalizing phase missing'
+grep -Fq '"percent":99' "$progress_file" || fail 'deferred repair did not publish 99 percent'
+grep -Fq 'Repair completed; finalizing WebUI action ownership' "$progress_file" || fail 'deferred repair finalizing message missing'
+! grep -Fq '"state":"complete"' "$progress_file" || fail 'deferred repair published complete itself'
+
+# An authenticated parent without the explicit capability models a new repair
+# under an older dispatcher: terminal ownership remains with the worker.
+setup_case progress-no-capability main
+prepare_progress_parent
+(
+  MERV_PROGRESS_TOKEN="repair-no-capability.$$"
+  MERV_ACTION_LOCK_PATH="$parent_lock"
+  MERV_ACTION_LOCK_PARENT_HELD=1
+  MERV_ACTION_LOCK_PARENT_PID="$$"
+  MERV_ACTION_LOCK_PARENT_START="$parent_start"
+  MERV_ACTION_LOCK_PARENT_NONCE=dispatcher-parent
+  export MERV_PROGRESS_TOKEN MERV_ACTION_LOCK_PATH MERV_ACTION_LOCK_PARENT_HELD \
+    MERV_ACTION_LOCK_PARENT_PID MERV_ACTION_LOCK_PARENT_START MERV_ACTION_LOCK_PARENT_NONCE
+  run_repair main
+) || fail 'old-dispatcher compatible repair failed'
+grep -Fq '"state":"complete"' "$CASE/progress/repair-no-capability.$$.json" || \
+  fail 'repair without capability did not publish complete'
+
+# A capability string without a valid live parent is not a generic bypass.
+setup_case progress-spoofed-capability main
+(
+  MERV_PROGRESS_TOKEN="repair-spoofed.$$"
+  MERV_REPAIR_DEFER_WEBUI_TERMINAL=v1
+  MERV_ACTION_LOCK_PATH="$CASE/locks/mervlan_action.lock"
+  MERV_ACTION_LOCK_PARENT_HELD=1
+  MERV_ACTION_LOCK_PARENT_PID=999999
+  MERV_ACTION_LOCK_PARENT_START=1
+  MERV_ACTION_LOCK_PARENT_NONCE=spoofed-parent
+  export MERV_PROGRESS_TOKEN MERV_REPAIR_DEFER_WEBUI_TERMINAL MERV_ACTION_LOCK_PATH \
+    MERV_ACTION_LOCK_PARENT_HELD MERV_ACTION_LOCK_PARENT_PID MERV_ACTION_LOCK_PARENT_START \
+    MERV_ACTION_LOCK_PARENT_NONCE
+  run_repair main
+) || fail 'spoofed-capability repair failed'
+grep -Fq '"state":"complete"' "$CASE/progress/repair-spoofed.$$.json" || \
+  fail 'spoofed capability enabled deferred terminal semantics'
+printf '%s\n' 'PASS: explicit authenticated WebUI terminal-defer compatibility contract'
 
 setup_case missing-helper main
 manifest="$REMOTE_TREE/functions/update_mervlan_repair.manifest"
