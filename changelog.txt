@@ -1,3 +1,21 @@
+mervlan v0.53.29-dev
+
+Fixed: VLAN duplicate advisory handling
+- Cached duplicate detection now considers only MAIN/node LAN VLAN assignment
+  keys, so unrelated numeric settings cannot create false duplicate warnings.
+- Duplicate VLANs remain an input-level advisory; normal saved, pending, and
+  invalid row statuses are preserved.
+
+Added: Development-only MAC Shield troubleshooting control
+- Developer Tools can temporarily disable or immediately restore MAIN MAC
+  Shield enforcement without changing saved settings, node state, or the
+  Shield database.
+- The volatile override preserves MERV_MAC chain topology while clearing only
+  its per-client DROP rules, and survives normal Heal/Apply reconstruction
+  until reboot or explicit restoration.
+
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.28-dev
 
 Fixed: Legacy-install durable state initialization
@@ -215,6 +233,8 @@ Maintenance: Node-operation regression coverage
   collection deadlines and retention, MAC Shield pool isolation, parent-term
   cleanup ordering, and temporary-workspace cleanup.
 
+################ END OF CURRENT CHANGELOG
+
 mervlan v0.53.27-dev
 
 Fixed: Audit-remediation ownership and recovery contracts
@@ -238,6 +258,8 @@ Maintenance: Focused offline regression coverage
 - Added local contracts for strict MAC Shield propagation, canonical ownership,
   supervised lifecycle and cancellation, transactional settings/UI authority,
   maintenance admission, DHCP watchdog recovery, and SSH cleanup status.
+
+################ END OF CURRENT CHANGELOG
 
 mervlan v0.53.26-dev
 

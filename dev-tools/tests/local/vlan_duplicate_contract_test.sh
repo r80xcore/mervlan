@@ -13,15 +13,16 @@ fail() {
   exit 1
 }
 
-grep -Fq 'const DUPLICATE_VLAN_TOOLTIP = "Duplicate VLAN ID; reuse is allowed when intentional.";' "$UI_FILE" || fail 'approved intentional-duplicate explanation missing'
-grep -Fq 'STATUS_DUP: "🟡 Duplicate VLAN ID; reuse is allowed when intentional"' "$UI_FILE" || fail 'duplicate status wording was not softened'
+grep -Fq 'const DUPLICATE_VLAN_TOOLTIP = "This VLAN ID is already in use. No action is needed if that is intentional.";' "$UI_FILE" || fail 'approved intentional-duplicate explanation missing'
 grep -Fq 'function duplicateVlanTooltip(field)' "$UI_FILE" || fail 'duplicate field tooltip helper missing'
 grep -Fq 'f.title = TOOLTIP.VLAN;' "$UI_FILE" || fail 'VLAN fields are not reset to the standard title before validation'
 grep -Fq 'f.title = duplicateVlanTooltip(f);' "$UI_FILE" || fail 'duplicate fields do not receive the intentional-reuse tooltip'
-grep -Fq 'This value matches the saved configuration.' "$UI_FILE" || fail 'saved duplicate tooltip detail missing'
-grep -Fq 'This is an unsaved current value.' "$UI_FILE" || fail 'unsaved duplicate tooltip detail missing'
-grep -Fq 'setDuplicateStatusSymbol(`status${index}`, vlanInput);' "$UI_FILE" || fail 'SSID duplicate status precedence missing'
-grep -Fq 'setDuplicateStatusSymbol(`statusLAN${index}`, vlanInput);' "$UI_FILE" || fail 'LAN duplicate status precedence missing'
-grep -Fq 'if(el.dataset.statusTooltip)' "$UI_FILE" || fail 'duplicate row tooltip override is not honored'
+grep -Fq 'This duplicate VLAN ID is already saved.' "$UI_FILE" || fail 'saved duplicate tooltip detail missing'
+grep -Fq 'This duplicate VLAN ID has not been saved yet.' "$UI_FILE" || fail 'unsaved duplicate tooltip detail missing'
+grep -Fq '/^(?:NODE\d+_)?ETH\d+_VLAN$/.test(cacheKey)' "$UI_FILE" || fail 'cached VLAN candidates are not restricted to LAN VLAN keys'
+! grep -Fq 'STATUS_DUP:' "$UI_FILE" || fail 'duplicate remains a row-status state'
+! grep -Fq 'STATUS_SYMBOLS.duplicate' "$UI_FILE" || fail 'duplicate status symbol remains in use'
+! grep -Fq 'setDuplicateStatusSymbol(' "$UI_FILE" || fail 'duplicate row-status helper remains'
+grep -Fq 'Yellow dot in a VLAN input:' "$UI_FILE" || fail 'legend does not explain the field-level duplicate marker'
 
 printf 'VLAN_DUPLICATE_CONTRACT_OK\n'

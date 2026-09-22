@@ -153,6 +153,13 @@ merv_mac_best_db() {
   return 1
 }
 
+# merv_mac_shield_debug_disabled
+# Development-only, MAIN-local override.  The public-web tmpfs flag is
+# intentionally the sole interpretation point for MAC Shield enforcement.
+merv_mac_shield_debug_disabled() {
+  [ -f "${MERV_MAC_SHIELD_DEBUG_FLAG:-/tmp/var/wwwext/mervlan/tmp/mac_shield_off}" ]
+}
+
 
 
 # ============================================================================
@@ -2646,6 +2653,12 @@ merv_mac_shield_verify_exact() {
   _mev_dump="${1:-}"
   [ -n "$_mev_dump" ] || _mev_dump=$(_merv_ebtables_get_dump) || return 1
   merv_ebtables_verify_parent_jumps "$_mev_dump" "$MERV_MAC_CHAIN" || return 1
+  # The development-only OFF flag preserves the chain and parent topology but
+  # makes an empty MERV_MAC child chain the exact desired state.
+  if merv_mac_shield_debug_disabled; then
+    [ "$(merv_ebtables_chain_rule_count "$_mev_dump" "$MERV_MAC_CHAIN")" = 0 ]
+    return $?
+  fi
   _mev_db=$(merv_mac_best_db 2>/dev/null || printf '')
   _mev_expected=0
   if [ -n "$_mev_db" ]; then
@@ -2788,6 +2801,9 @@ ebt_mac_shield_apply() {
   [ -f "$_mep_db" ] || return 0
   _mep_dump=$(_merv_ebtables_get_dump) || return 1
   merv_ebtables_verify_parent_jumps "$_mep_dump" "$MERV_MAC_CHAIN" || return 1
+  # Do not tear down the chain or alter the database while the development
+  # override is active; init_and_apply already flushed child DROP rules.
+  merv_mac_shield_debug_disabled && return 0
   _mep_ovr=$(mervqt_override_list_read 2>/dev/null || printf ' ')
   _mep_failed=0; _mep_rules=0
   while IFS=' ' read -r _mep_ts _mep_mac _mep_iface _mep_vid; do

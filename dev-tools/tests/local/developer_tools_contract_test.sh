@@ -30,9 +30,9 @@ trap cleanup EXIT HUP INT TERM
 # Developer Tools is a strict development-build gate on both sides of the
 # transport.  A stable/release marker must not expose or authorize the modal.
 index_version=$(sed -n 's/^[[:space:]]*<!--[[:space:]]*index\.html version="\([^"]*\)"[[:space:]]*-->[[:space:]]*$/\1/p' "$UI" | head -n 1 | tr -d '\r\n')
-[ "$index_version" = "0.53.28-dev" ] || fail "unexpected installed index marker: ${index_version:-missing}"
+[ "$index_version" = "0.53.29-dev" ] || fail "unexpected installed index marker: ${index_version:-missing}"
 changelog_version=$(sed -n '1{s/^[[:space:]]*mervlan[[:space:]]*v\([^[:space:]]*\).*/\1/p;q;}' "$CHANGELOG" | tr -d '\r\n')
-[ "$changelog_version" = "0.53.28-dev" ] || fail "unexpected changelog version: ${changelog_version:-missing}"
+[ "$changelog_version" = "0.53.29-dev" ] || fail "unexpected changelog version: ${changelog_version:-missing}"
 require "$ROOT/functions/update_mervlan.sh" 'update_html_version()' 'updater index-version source missing'
 require "$ROOT/functions/update_mervlan.sh" 'update_changelog_version()' 'updater changelog-version source missing'
 require "$UI" 'version.endsWith("-dev")' 'frontend dev gate missing'
@@ -43,6 +43,7 @@ require "$HANDLER" '_dt_version_marker="$(sed -n' 'backend gate marker extractio
 require "$HANDLER" 'Developer Tools refused without -dev index marker' 'backend dev gate missing'
 require "$HANDLER" '  *-dev) ;;' 'backend gate does not require a -dev suffix'
 require "$ASP" 'devtools_vlanmgr_' 'narrow dev transport missing'
+require "$ASP" 'status|cronenable|crondisable|macshieldoff|macshieldon' 'parent Developer Tools allowlist omits a supported explicit action'
 require "$UI" 'const DEV_TOOLS_RESULT_PATH = "tmp/results/dev_tools_result.json";' 'frontend Developer Tools result path is not web-served JSON'
 require "$HANDLER" '"$_dtp_result_dir/dev_tools_result.json"' 'backend Developer Tools result publication is not web-served JSON'
 ! grep -Fq 'dev_tools_result.txt' "$UI" "$HANDLER" || fail 'Developer Tools still references the raw .txt result path'
@@ -63,9 +64,10 @@ require "$UI" "modal.id === 'developerToolsModal'" 'Developer Tools does not reu
 ! grep -Fq 'startVlanApplyStatusPolling' "$UI" || fail 'transient Apply marker still has background polling'
 ! grep -Fq 'clientsApplyStatusTimer' "$UI" || fail 'unused Apply marker polling timer remains'
 require "$UI" "if (await refreshVlanApplyGuard()) return;" 'page-load client collection is missing its Apply guard'
-require "$UI" "async function refreshClients(btn){" 'manual client refresh handler missing'
-require "$UI" "async function refreshClients(btn){
-  if (await refreshVlanApplyGuard()){" 'manual client refresh no longer guards before collection'
+grep -Eq 'async[[:space:]]+function[[:space:]]+refreshClients[[:space:]]*\([[:space:]]*btn[[:space:]]*\)[[:space:]]*\{' "$UI" || fail 'manual client refresh handler missing'
+refresh_clients_body=$(sed -n '/async[[:space:]]*function[[:space:]]*refreshClients[[:space:]]*(/,/^      \/* ===== Per-action lock/p' "$UI")
+printf '%s\n' "$refresh_clients_body" > "$TMP_ROOT/refresh_clients_body"
+grep -Eq 'if[[:space:]]*\([[:space:]]*await[[:space:]]+refreshVlanApplyGuard\([[:space:]]*\)[[:space:]]*\)[[:space:]]*\{' "$TMP_ROOT/refresh_clients_body" || fail 'manual client refresh no longer guards before collection'
 
 # The browser receives a text result envelope whose output body contains the
 # read-only status lines emitted by the handler.  Exercise the body parser's
@@ -119,6 +121,19 @@ require "$HANDLER" '_dt_mac_rule_count="$(printf' 'MAC probe rule count is not d
 require "$HANDLER" "grep -c '^-s '" 'MAC probe does not count source rules'
 require "$HANDLER" '_dt_mac_state=on' 'MAC probe has no active state'
 require "$HANDLER" '_dt_mac_state=off' 'MAC probe has no empty state'
+require "$ROOT/settings/var_settings.sh" 'MERV_MAC_SHIELD_DEBUG_FLAG:=/tmp/var/wwwext/mervlan/tmp/mac_shield_off' 'MAC Shield debug flag is not volatile public tmpfs state'
+require "$HANDLER" 'devtools_mac_shield_debug_action()' 'MAC Shield debug action helper missing'
+require "$HANDLER" 'devtools_vlanmgr_macshieldoff_rid_*' 'MAC Shield OFF transport grammar missing'
+require "$HANDLER" 'devtools_vlanmgr_macshieldon_rid_*' 'MAC Shield ON transport grammar missing'
+require "$HANDLER" 'ebt_mac_shield_init_and_apply "$_dtm_db"' 'MAC Shield action does not reuse canonical init/apply'
+require "$HANDLER" 'merv_mac_shield_verify_exact' 'MAC Shield action does not run exact verification'
+require "$HANDLER" 'mac_shield_debug=%s' 'Developer Tools status does not publish MAC Shield debug state'
+require "$UI" "runDeveloperMacShieldAction('macshieldoff')" 'MAC Shield OFF UI action missing'
+require "$UI" "runDeveloperMacShieldAction('macshieldon')" 'MAC Shield ON UI action missing'
+require "$UI" 'setDeveloperMacShieldStatus("Status: Failed to " + (disabling ? "disable" : "enable") + " MAC Shield.", "error");' 'MAC Shield action failure feedback missing'
+require "$UI" 'MAC Shield Debug' 'MAC Shield Debug section missing'
+mac_debug_block=$(sed -n '/^devtools_mac_shield_debug_action()/,/^}/p' "$HANDLER")
+! printf '%s\n' "$mac_debug_block" | grep -Eq 'execute_nodes|merv_ssh|node_' || fail 'MAC Shield debug action may fan out to nodes'
 require "$HANDLER" '/bin/sh "${MERV_BASE%/}/functions/post_apply_worker.sh" status 2>&1' 'observation status probe missing'
 require "$HANDLER" '/bin/sh "${MERV_BASE%/}/dev-tools/safety/mervlan_live_test_guard.sh" status 2>&1' 'live-test guard status probe missing'
 
@@ -196,6 +211,7 @@ vm.runInContext(html.slice(start, end) +
   'this.developerResultField = developerResultField;', context);
   const result = {fields: {}, output:
     'MAIN hw=RT-AX86U boot=1 addon=active service-event=active cron=present mac_shield=on\n' +
+    'mac_shield_debug=off\n' +
     'snapshot requested=8 completed=6 pending=2\n' +
     'collection requested=5 completed=3 pending=2\n' +
     'observation_worker=not-installed\n' +
@@ -204,6 +220,7 @@ vm.runInContext(html.slice(start, end) +
   const expected = {
     hardware: 'RT-AX86U', addon_loader: 'active', service_event: 'active',
   periodic_recovery_cron: 'present', mac_shield: 'on',
+  mac_shield_debug: 'off',
   snapshot_requested_generation: '8', snapshot_completed_generation: '6',
     pending_snapshots: '2', collection_requested_generation: '5',
     collection_completed_generation: '3', pending_client_collections: '2',
@@ -281,6 +298,55 @@ if (context.closeDeveloperToolsModal(false) !== true || context.getDraft() !== n
   throw new Error('X/close did not discard the unsaved draft');
 }
 console.log('NODE_SETTINGS_DRAFT_BACK_X_BEHAVIOR_OK');
+NODE
+  node - "$ASP" <<'NODE'
+const fs = require('fs');
+const vm = require('vm');
+const file = process.argv[2];
+const html = fs.readFileSync(file, 'utf8');
+function extractFunction(name) {
+  const start = html.indexOf('function ' + name + '(');
+  if (start < 0) throw new Error(name + ' not found');
+  const open = html.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < html.length; i++) {
+    if (html[i] === '{') depth++;
+    else if (html[i] === '}' && --depth === 0) return html.slice(start, i + 1);
+  }
+  throw new Error(name + ' has unbalanced braces');
+}
+const context = {
+  MVM_ALLOWED_ACTIONS: new Set(),
+  _mvmLast: {name: null, t: 0},
+  Date,
+  Number,
+  Object,
+  String
+};
+vm.createContext(context);
+vm.runInContext(extractFunction('_mvmPrepareAction'), context);
+for (const action of [
+  'devtools_vlanmgr_status_rid_dt-1',
+  'devtools_vlanmgr_cronenable_rid_dt-2',
+  'devtools_vlanmgr_crondisable_rid_dt-3',
+  'devtools_vlanmgr_macshieldoff_rid_dt-4',
+  'devtools_vlanmgr_macshieldon_rid_dt-5'
+]) {
+  context._mvmLast = {name: null, t: 0};
+  const result = context._mvmPrepareAction(action, null, {});
+  if (!result.accepted || result.encodedAction !== action) throw new Error('expected accepted action: ' + action);
+}
+for (const action of [
+  'devtools_vlanmgr_macshield_rid_dt-6',
+  'devtools_vlanmgr_macshieldoff_rid_BAD',
+  'devtools_vlanmgr_macshieldon_rid_dt_7',
+  'devtools_vlanmgr_unknown_rid_dt-8'
+]) {
+  context._mvmLast = {name: null, t: 0};
+  const result = context._mvmPrepareAction(action, null, {});
+  if (result.accepted || result.error !== 'disallowed-action') throw new Error('expected rejected action: ' + action);
+}
+console.log('NODE_DEVELOPER_TOOLS_TRANSPORT_GRAMMAR_OK');
 NODE
 else
   printf 'NODE_STATUS_BODY_BEHAVIOR_SKIPPED (no Node.js runtime)\n'

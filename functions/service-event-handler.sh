@@ -440,6 +440,67 @@ devtools_cron_state() {
   fi
 }
 
+# Source the canonical MAC Shield primitives only after the development and
+# MAIN gates have accepted a local request.  This action is intentionally
+# local-only: it must never enumerate, contact, or modify nodes.
+devtools_load_mac_shield_primitives() {
+  [ -f "${MERV_BASE%/}/settings/var_settings.sh" ] || return 1
+  [ -f "${MERV_BASE%/}/settings/lib_mervqt.sh" ] || return 1
+  . "${MERV_BASE%/}/settings/var_settings.sh" || return 1
+  . "${MERV_BASE%/}/settings/lib_mervqt.sh" || return 1
+  type merv_mac_shield_debug_disabled >/dev/null 2>&1 || return 1
+  type ebt_mac_shield_init_and_apply >/dev/null 2>&1 || return 1
+  type merv_mac_shield_verify_exact >/dev/null 2>&1 || return 1
+  return 0
+}
+
+devtools_mac_shield_debug_state() {
+  devtools_load_mac_shield_primitives || return 1
+  if merv_mac_shield_debug_disabled; then
+    printf 'off\n'
+  else
+    printf 'on\n'
+  fi
+}
+
+devtools_mac_shield_debug_action() {
+  _dtm_mode="$1"
+  _dtm_request_id="$2"
+  devtools_load_mac_shield_primitives || return 1
+  _dtm_flag="${MERV_MAC_SHIELD_DEBUG_FLAG:-/tmp/var/wwwext/mervlan/tmp/mac_shield_off}"
+  case "$_dtm_flag" in
+    /tmp/var/wwwext/mervlan/tmp/mac_shield_off) ;;
+    *) return 1 ;;
+  esac
+  _dtm_dir=${_dtm_flag%/*}
+  [ -n "$_dtm_dir" ] && mkdir -p "$_dtm_dir" 2>/dev/null || return 1
+  _dtm_db=$(merv_mac_best_db 2>/dev/null || printf '')
+
+  case "$_dtm_mode" in
+    off)
+      # Publish the intentional-empty state before flushing any MAC DROP rule.
+      (umask 077; : > "$_dtm_flag") || return 1
+      if ebt_mac_shield_init_and_apply "$_dtm_db" && merv_mac_shield_verify_exact; then
+        printf 'mac_shield_debug=off\n'
+        return 0
+      fi
+      # Do not leave a half-disabled state when the requested transition fails.
+      rm -f "$_dtm_flag" 2>/dev/null || :
+      ebt_mac_shield_init_and_apply "$_dtm_db" >/dev/null 2>&1 || :
+      merv_mac_shield_verify_exact >/dev/null 2>&1 || :
+      return 1
+      ;;
+    on)
+      rm -f "$_dtm_flag" 2>/dev/null || return 1
+      ebt_mac_shield_init_and_apply "$_dtm_db" || return 1
+      merv_mac_shield_verify_exact || return 1
+      printf 'mac_shield_debug=on\n'
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 devtools_publish_result() {
   _dtp_request_id="$1"
   _dtp_operation="$2"
@@ -512,6 +573,14 @@ devtools_fast_path() {
     devtools_vlanmgr_crondisable_rid_*)
       _dt_operation=crondisable
       _dt_request_id="${_dt_action#devtools_vlanmgr_crondisable_rid_}"
+      ;;
+    devtools_vlanmgr_macshieldoff_rid_*)
+      _dt_operation=macshieldoff
+      _dt_request_id="${_dt_action#devtools_vlanmgr_macshieldoff_rid_}"
+      ;;
+    devtools_vlanmgr_macshieldon_rid_*)
+      _dt_operation=macshieldon
+      _dt_request_id="${_dt_action#devtools_vlanmgr_macshieldon_rid_}"
       ;;
     devtools_vlanmgr_selftest_*_rid_*)
       _dt_selftest_tail="${_dt_action#devtools_vlanmgr_selftest_}"
@@ -629,6 +698,7 @@ devtools_fast_path() {
         fi
 
         _dt_cron="$(devtools_cron_state)"
+        _dt_mac_debug="$(devtools_mac_shield_debug_state 2>/dev/null || printf 'unknown')"
         _dt_mac_state=unknown
         _dt_mac_rule_count=unknown
         if type ebtables >/dev/null 2>&1; then
@@ -673,6 +743,7 @@ devtools_fast_path() {
         printf 'periodic_recovery_cron=%s\n' "$_dt_cron"
         printf 'mac_shield=%s\n' "$_dt_mac_state"
         printf 'mac_rule_count=%s\n' "$_dt_mac_rule_count"
+        printf 'mac_shield_debug=%s\n' "$_dt_mac_debug"
         printf 'observation_worker=unknown\n'
         printf 'pending_snapshots=unknown\n'
         printf 'pending_client_collections=unknown\n'
@@ -697,6 +768,14 @@ devtools_fast_path() {
           _dt_rc=1
         fi
       fi
+      ;;
+    macshieldoff)
+      devtools_mac_shield_debug_action off "$_dt_request_id" >"$_dt_capture" 2>&1
+      _dt_rc=$?
+      ;;
+    macshieldon)
+      devtools_mac_shield_debug_action on "$_dt_request_id" >"$_dt_capture" 2>&1
+      _dt_rc=$?
       ;;
     selftest)
       /bin/sh "${MERV_BASE%/}/dev-tools/tests/router/mervlan_selftest.sh" "$_dt_case" >"$_dt_capture" 2>&1

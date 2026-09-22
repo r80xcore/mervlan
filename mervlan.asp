@@ -263,7 +263,7 @@ function _mvmPrepareAction(actionName, settingsObjOrNull, opts) {
   // still authenticates the installed dev marker and MAIN identity; this
   // client-side check only prevents the generic parent transport from
   // accepting arbitrary dynamic action names.
-  var isDevToolsAction = /^devtools_vlanmgr_(?:status|cronenable|crondisable)_rid_[a-z0-9-]+$/.test(encodedAction) ||
+  var isDevToolsAction = /^devtools_vlanmgr_(?:status|cronenable|crondisable|macshieldoff|macshieldon)_rid_[a-z0-9-]+$/.test(encodedAction) ||
     /^devtools_vlanmgr_selftest_(?!all_rid_)[a-z0-9-]+_rid_[a-z0-9-]+$/.test(encodedAction);
   if (encodedAction.length > 120 ||
       (typeof MVM_ALLOWED_ACTIONS !== "undefined" && !MVM_ALLOWED_ACTIONS.has(encodedAction) &&

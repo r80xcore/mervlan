@@ -76,6 +76,9 @@ readonly FLAGDIR="$MERV_BASE/flags"
 readonly PUBLIC_MERV_BASE="/www/user/mervlan"
 readonly PUBLIC_SETTINGS_DIR="${PUBLIC_MERV_BASE}/settings"
 readonly PUBLIC_SETTINGS_FILE="${PUBLIC_SETTINGS_DIR}/settings.json"
+# Development-only, MAIN-local MAC Shield override.  This is deliberately a
+# volatile public-web tmpfs path rather than a setting or durable runtime file.
+: "${MERV_MAC_SHIELD_DEBUG_FLAG:=/tmp/var/wwwext/mervlan/tmp/mac_shield_off}"
 readonly LOCKDIR="$TMPDIR/locks"
 readonly RESULTDIR="$TMPDIR/results"
 readonly CHANGES="$TMPDIR/results/vlan_changes"

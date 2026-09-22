@@ -715,13 +715,16 @@ test_mac_shield_lifecycle() {
   _tms_old_active="$MERV_MAC_DB_ACTIVE"
   _tms_old_jffs="$MERV_MAC_DB_JFFS"
   _tms_old_override="$MERV_MAC_OVERRIDE_DB"
+  _tms_old_debug="${MERV_MAC_SHIELD_DEBUG_FLAG:-}"
   _tms_old_dry="${DRY_RUN:-no}"
   _tms_db="$SELFTEST_ROOT/mac-shield.db"
+  _tms_debug_flag="$SELFTEST_ROOT/public-tmp/mac_shield_off"
   MERV_MAC_DB_ACTIVE="$_tms_db"
   MERV_MAC_DB_JFFS="$SELFTEST_ROOT/mac-shield.jffs.db"
   MERV_MAC_OVERRIDE_DB="$SELFTEST_ROOT/mac-shield.override.db"
+  MERV_MAC_SHIELD_DEBUG_FLAG="$_tms_debug_flag"
   DRY_RUN=no
-  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB MERV_MAC_SHIELD_DEBUG_FLAG DRY_RUN
   printf '1 02:00:00:00:00:01 wl0.2 187\n' > "$_tms_db" || return 1
 
   # Keep the fake ebtables command scoped to this test. The strict lifecycle
@@ -734,12 +737,63 @@ test_mac_shield_lifecycle() {
     fail "MAC shield initializes a missing owner chain before flushing and verifies exactly"
     _tms_rc=1
   fi
+
+  # The debug override is strictly MAC-chain-local. Seed unrelated L2 chains
+  # before switching OFF and prove those chains remain byte-for-byte intact.
+  "$SELFTEST_FAKE_BIN" -t filter -N MERV_QT || _tms_rc=1
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_QT -i wl0.2 --logical-in br0 -j DROP || _tms_rc=1
+  "$SELFTEST_FAKE_BIN" -t filter -N MERV_DHCP_HOLD || _tms_rc=1
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_DHCP_HOLD -p IPv4 --ip-proto udp --ip-dport 67 -j DROP || _tms_rc=1
+  _tms_qt_before=$(cat "$SELFTEST_FAKE_STATE/chains/MERV_QT" 2>/dev/null)
+  _tms_hold_before=$(cat "$SELFTEST_FAKE_STATE/chains/MERV_DHCP_HOLD" 2>/dev/null)
+
+  mkdir -p "${_tms_debug_flag%/*}" || _tms_rc=1
+  : > "$_tms_debug_flag" || _tms_rc=1
+  if ebt_mac_shield_init_and_apply "$_tms_db" && merv_mac_shield_verify_exact &&
+     [ "$(merv_ebtables_chain_rule_count "$(_merv_ebtables_get_dump)" "$MERV_MAC_CHAIN")" = 0 ] &&
+     merv_ebtables_verify_parent_jumps "$(_merv_ebtables_get_dump)" "$MERV_MAC_CHAIN" &&
+     [ "$(cat "$SELFTEST_FAKE_STATE/chains/MERV_QT" 2>/dev/null)" = "$_tms_qt_before" ] &&
+     [ "$(cat "$SELFTEST_FAKE_STATE/chains/MERV_DHCP_HOLD" 2>/dev/null)" = "$_tms_hold_before" ]; then
+    pass "MAC Shield debug OFF preserves parent jumps and all other L2 guards"
+  else
+    fail "MAC Shield debug OFF preserves parent jumps and all other L2 guards"
+    _tms_rc=1
+  fi
+
+  if restore_merv_mac_shield && merv_mac_shield_verify_exact &&
+     [ "$(merv_ebtables_chain_rule_count "$(_merv_ebtables_get_dump)" "$MERV_MAC_CHAIN")" = 0 ]; then
+    pass "MAC Shield debug OFF survives normal restore with zero child rules"
+  else
+    fail "MAC Shield debug OFF survives normal restore with zero child rules"
+    _tms_rc=1
+  fi
+
+  "$SELFTEST_FAKE_BIN" -t filter -A MERV_MAC -s 02:00:00:00:00:01 --logical-in br0 -j DROP || _tms_rc=1
+  if ! merv_mac_shield_verify_exact && restore_merv_mac_shield && merv_mac_shield_verify_exact &&
+     [ "$(merv_ebtables_chain_rule_count "$(_merv_ebtables_get_dump)" "$MERV_MAC_CHAIN")" = 0 ]; then
+    pass "MAC Shield debug OFF restore removes an unexpected child rule"
+  else
+    fail "MAC Shield debug OFF restore removes an unexpected child rule"
+    _tms_rc=1
+  fi
+
+  # Removing the volatile flag models both ON and the next boot: the normal
+  # canonical init/apply path must immediately restore the saved database.
+  rm -f "$_tms_debug_flag" || _tms_rc=1
+  if ebt_mac_shield_init_and_apply "$(merv_mac_best_db)" && merv_mac_shield_verify_exact &&
+     [ "$(merv_ebtables_chain_rule_count "$(_merv_ebtables_get_dump)" "$MERV_MAC_CHAIN")" = 1 ]; then
+    pass "MAC Shield ON and reboot semantics restore normal enforcement"
+  else
+    fail "MAC Shield ON and reboot semantics restore normal enforcement"
+    _tms_rc=1
+  fi
   unset -f ebtables 2>/dev/null || :
   MERV_MAC_DB_ACTIVE="$_tms_old_active"
   MERV_MAC_DB_JFFS="$_tms_old_jffs"
   MERV_MAC_OVERRIDE_DB="$_tms_old_override"
+  MERV_MAC_SHIELD_DEBUG_FLAG="$_tms_old_debug"
   DRY_RUN="$_tms_old_dry"
-  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
+  export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB MERV_MAC_SHIELD_DEBUG_FLAG DRY_RUN
   return "$_tms_rc"
 }
 
