@@ -1705,6 +1705,45 @@ install_path_chain_safe() {
     return 0
 }
 
+# Merlin normally exposes its writable WebUI tree through this one alias:
+# /www/user -> /tmp/var/wwwext.  Keep generic path validation strict, but
+# recognize that firmware-owned mapping before validating projection parents.
+# Test fixtures may substitute the two canonical paths only in explicit
+# TEST_RUN mode; MERV_INSTALL_WWW_USER_ROOT by itself never permits symlinks.
+install_external_webui_root_validate() {
+    _iewr_root="${1:-$INSTALL_EXTERNAL_WWW_ROOT}"
+    _iewr_canonical_root="/www/user"
+    _iewr_expected_target="/tmp/var/wwwext"
+    if [ "${TEST_RUN:-0}" = "1" ]; then
+        _iewr_canonical_root="${MERV_INSTALL_TEST_CANONICAL_WWW_ROOT:-$_iewr_canonical_root}"
+        _iewr_expected_target="${MERV_INSTALL_TEST_CANONICAL_WWW_TARGET:-$_iewr_expected_target}"
+    fi
+    INSTALL_EXTERNAL_WWW_PHYSICAL_ROOT=""
+
+    case "$_iewr_root" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$_iewr_root" in ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+
+    if [ "$_iewr_root" = "$_iewr_canonical_root" ] && [ -L "$_iewr_root" ]; then
+        type readlink >/dev/null 2>&1 || return 1
+        _iewr_target=$(readlink "$_iewr_root" 2>/dev/null) || return 1
+        [ "$_iewr_target" = "$_iewr_expected_target" ] || return 1
+        install_path_chain_safe "$_iewr_expected_target" || return 1
+        [ -d "$_iewr_expected_target" ] && [ ! -L "$_iewr_expected_target" ] && \
+            [ -r "$_iewr_expected_target" ] && [ -x "$_iewr_expected_target" ] || return 1
+        INSTALL_EXTERNAL_WWW_PHYSICAL_ROOT="$_iewr_expected_target"
+        return 0
+    fi
+
+    install_path_chain_safe "$_iewr_root" || return 1
+    [ -d "$_iewr_root" ] && [ ! -L "$_iewr_root" ] && \
+        [ -r "$_iewr_root" ] && [ -x "$_iewr_root" ] || return 1
+    INSTALL_EXTERNAL_WWW_PHYSICAL_ROOT="$_iewr_root"
+    return 0
+}
+
 # External installer projections are captured only after maintenance admission
 # and are restored before the owner is released.  The active addon tree is not
 # sufficient evidence for rollback: WebUI files, the bind-mounted menu, Merlin
@@ -1729,11 +1768,30 @@ install_external_parent_safe() {
     case "$_ieps_path" in
         ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
     esac
-    _ieps_parent=${_ieps_path%/*}
-    [ -n "$_ieps_parent" ] || _ieps_parent=/
+    case "$_ieps_path" in
+        "$INSTALL_EXTERNAL_WWW_ROOT"/*)
+            install_external_webui_root_validate "$INSTALL_EXTERNAL_WWW_ROOT" || return 1
+            _ieps_relative=${_ieps_path#"$INSTALL_EXTERNAL_WWW_ROOT"/}
+            [ "$_ieps_relative" != "$_ieps_path" ] || return 1
+            _ieps_parent=${_ieps_relative%/*}
+            if [ "$_ieps_parent" = "$_ieps_relative" ]; then
+                _ieps_parent="$INSTALL_EXTERNAL_WWW_PHYSICAL_ROOT"
+            else
+                _ieps_parent="$INSTALL_EXTERNAL_WWW_PHYSICAL_ROOT/$_ieps_parent"
+            fi
+            ;;
+        *)
+            _ieps_parent=${_ieps_path%/*}
+            [ -n "$_ieps_parent" ] || _ieps_parent=/
+            ;;
+    esac
     install_path_chain_safe "$_ieps_parent" || return 1
     [ -d "$_ieps_parent" ] && [ ! -L "$_ieps_parent" ] &&
         [ -r "$_ieps_parent" ] && [ -x "$_ieps_parent" ]
+}
+
+install_external_capture_error() {
+    printf '[install] ERROR: external projection capture failed: %s\n' "$1" >&2
 }
 
 install_external_copy_object() {
@@ -1816,38 +1874,71 @@ install_external_capture_metadata() {
 }
 
 install_external_capture_projection() {
-    local _iecp_epoch _iecp_tmp_inode _iecp_target_inode
+    local _iecp_epoch _iecp_tmp_inode _iecp_target_inode _iecp_capture_ok=0
     [ "$INSTALL_EXTERNAL_CAPTURED" = "0" ] || return 0
-    install_external_owner_current || return 1
-    install_external_parent_safe "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" || return 1
-    install_external_parent_safe "$INSTALL_EXTERNAL_MENU_TMP" || return 1
-    install_external_parent_safe "$INSTALL_EXTERNAL_MENU_TARGET" || return 1
-    install_external_parent_safe "$INSTALL_EXTERNAL_SERVICE_EVENT" || return 1
-    install_external_parent_safe "$INSTALL_EXTERNAL_SERVICES_START" || return 1
-    install_path_chain_safe "$TMP_DIR" || return 1
-    [ -d "$TMP_DIR" ] && [ ! -L "$TMP_DIR" ] || return 1
+    install_external_owner_current || { install_external_capture_error 'maintenance ownership'; return 1; }
+    install_external_webui_root_validate "$INSTALL_EXTERNAL_WWW_ROOT" || {
+        install_external_capture_error 'invalid WebUI root mapping'
+        return 1
+    }
+    install_external_parent_safe "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" || {
+        install_external_capture_error 'public projection parent'
+        return 1
+    }
+    install_external_parent_safe "$INSTALL_EXTERNAL_MENU_TMP" || {
+        install_external_capture_error 'temporary menu parent'
+        return 1
+    }
+    install_external_parent_safe "$INSTALL_EXTERNAL_MENU_TARGET" || {
+        install_external_capture_error 'live menu parent'
+        return 1
+    }
+    install_external_parent_safe "$INSTALL_EXTERNAL_SERVICE_EVENT" || {
+        install_external_capture_error 'service-event parent'
+        return 1
+    }
+    install_external_parent_safe "$INSTALL_EXTERNAL_SERVICES_START" || {
+        install_external_capture_error 'services-start parent'
+        return 1
+    }
+    install_path_chain_safe "$TMP_DIR" && [ -d "$TMP_DIR" ] && [ ! -L "$TMP_DIR" ] || {
+        install_external_capture_error 'temp root'
+        return 1
+    }
     _iecp_epoch=$(date +%s 2>/dev/null || printf '0')
-    case "$_iecp_epoch" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_iecp_epoch" in ''|*[!0-9]*) install_external_capture_error 'preserve-directory timestamp'; return 1 ;; esac
     INSTALL_EXTERNAL_PRESERVE_DIR="$TMP_DIR/install-external-preserve.$_iecp_epoch.$$"
     case "$INSTALL_EXTERNAL_PRESERVE_DIR" in
         "$TMP_DIR"/install-external-preserve.[0-9]*) ;;
-        *) INSTALL_EXTERNAL_PRESERVE_DIR=""; return 1 ;;
+        *) INSTALL_EXTERNAL_PRESERVE_DIR=""; install_external_capture_error 'preserve-directory path'; return 1 ;;
     esac
     [ ! -e "$INSTALL_EXTERNAL_PRESERVE_DIR" ] &&
         [ ! -L "$INSTALL_EXTERNAL_PRESERVE_DIR" ] || {
         INSTALL_EXTERNAL_PRESERVE_DIR=""
+        install_external_capture_error 'preserve-directory collision'
         return 1
     }
     ( umask 077; mkdir "$INSTALL_EXTERNAL_PRESERVE_DIR" ) 2>/dev/null || {
         INSTALL_EXTERNAL_PRESERVE_DIR=""
+        install_external_capture_error 'preserve-directory creation'
         return 1
     }
-    if ! install_external_capture_object public "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" dir ||
-       ! install_external_capture_object menu_tmp "$INSTALL_EXTERNAL_MENU_TMP" file ||
-       ! install_external_capture_object menu_target "$INSTALL_EXTERNAL_MENU_TARGET" file ||
-       ! install_external_capture_object service_event "$INSTALL_EXTERNAL_SERVICE_EVENT" file ||
-       ! install_external_capture_object services_start "$INSTALL_EXTERNAL_SERVICES_START" file ||
-       ! install_external_capture_metadata; then
+    if ! install_external_capture_object public "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" dir; then
+        install_external_capture_error 'public projection capture'
+    elif ! install_external_capture_object menu_tmp "$INSTALL_EXTERNAL_MENU_TMP" file; then
+        install_external_capture_error 'temporary menu capture'
+    elif ! install_external_capture_object menu_target "$INSTALL_EXTERNAL_MENU_TARGET" file; then
+        install_external_capture_error 'live menu capture'
+    elif ! install_external_capture_object service_event "$INSTALL_EXTERNAL_SERVICE_EVENT" file; then
+        install_external_capture_error 'service-event capture'
+    elif ! install_external_capture_object services_start "$INSTALL_EXTERNAL_SERVICES_START" file; then
+        install_external_capture_error 'services-start capture'
+    elif ! install_external_capture_metadata; then
+        install_external_capture_error 'metadata capture'
+    else
+        _iecp_capture_ok=1
+    fi
+    if [ "${_iecp_capture_ok:-0}" != "1" ]; then
         rm -rf "$INSTALL_EXTERNAL_PRESERVE_DIR" 2>/dev/null || :
         INSTALL_EXTERNAL_PRESERVE_DIR=""
         return 1
@@ -1856,12 +1947,24 @@ install_external_capture_projection() {
     if [ -f "$INSTALL_EXTERNAL_MENU_TMP" ] && [ -f "$INSTALL_EXTERNAL_MENU_TARGET" ]; then
         _iecp_tmp_inode=$(ls -di "$INSTALL_EXTERNAL_MENU_TMP" 2>/dev/null | awk '{print $1}')
         _iecp_target_inode=$(ls -di "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null | awk '{print $1}')
+        if [ -z "$_iecp_tmp_inode" ] || [ -z "$_iecp_target_inode" ]; then
+            install_external_capture_error 'bind-state evidence'
+            rm -rf "$INSTALL_EXTERNAL_PRESERVE_DIR" 2>/dev/null || :
+            INSTALL_EXTERNAL_PRESERVE_DIR=""
+            return 1
+        fi
         [ -n "$_iecp_tmp_inode" ] && [ "$_iecp_tmp_inode" = "$_iecp_target_inode" ] &&
             INSTALL_EXTERNAL_MENU_BOUND=1
     fi
-    printf '%s\n' "$INSTALL_EXTERNAL_MENU_BOUND" >"$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" || return 1
+    printf '%s\n' "$INSTALL_EXTERNAL_MENU_BOUND" >"$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" || {
+        install_external_capture_error 'bind-state evidence'
+        return 1
+    }
     chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" 2>/dev/null || :
-    printf 'format=1\n' >"$INSTALL_EXTERNAL_PRESERVE_DIR/format" || return 1
+    printf 'format=1\n' >"$INSTALL_EXTERNAL_PRESERVE_DIR/format" || {
+        install_external_capture_error 'format-marker write'
+        return 1
+    }
     chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/format" 2>/dev/null || :
     INSTALL_EXTERNAL_CAPTURED=1
     INSTALL_EXTERNAL_RESTORED=0

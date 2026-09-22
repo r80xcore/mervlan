@@ -153,6 +153,16 @@ merv_update_state_value() {
   printf '%s' "$_mus_value"
 }
 
+# Human-readable failure detail is diagnostic data, unlike structural journal
+# fields such as paths, refs, phases, and ownership identifiers. Encode it to
+# the journal's one-line grammar instead of weakening that grammar globally.
+merv_update_journal_detail_value() {
+  local _mujdv_value
+  _mujdv_value=$(printf '%s' "${1:-none}" | LC_ALL=C tr -c 'A-Za-z0-9._:/-' '_' | cut -c 1-160)
+  [ -n "$_mujdv_value" ] || _mujdv_value=none
+  printf '%s' "$_mujdv_value"
+}
+
 merv_update_journal_write() {
   local _muj_run="$1" _muj_phase="$2" _muj_ref="$3"
   local _muj_boot="$4" _muj_backup="$5" _muj_quiesced="$6"
@@ -174,7 +184,7 @@ merv_update_journal_write() {
   _muj_quiesced=$(merv_update_state_value "${_muj_quiesced:-0}") || return 1
   _muj_activation=$(merv_update_state_value "${_muj_activation:-0}") || return 1
   _muj_nodes=$(merv_update_state_value "${_muj_nodes:-0}") || return 1
-  _muj_detail=$(merv_update_state_value "${_muj_detail:-none}") || return 1
+  _muj_detail=$(merv_update_journal_detail_value "${_muj_detail:-none}") || return 1
   _muj_tmp_base=$(merv_update_state_value "${_muj_tmp_base:-none}") || return 1
   _muj_archive=$(merv_update_state_value "${_muj_archive:-none}") || return 1
   _muj_stage=$(merv_update_state_value "${_muj_stage:-none}") || return 1

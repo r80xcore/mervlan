@@ -34,6 +34,21 @@ merv_update_journal_active || fail journal-active
 merv_update_journal_requires_safe_boot || fail journal-safe-boot
 pass journal-write-and-read
 
+# Structural journal fields remain strict, while normal human failure prose is
+# deterministically encoded into the same one-line grammar.
+if merv_update_state_value 'refs/heads/test,unsafe' >/dev/null 2>&1; then
+  fail structural-comma-accepted
+fi
+detail_input="comma, (parentheses) apostrophe's colon: slash/path multiple   spaces"
+detail_expected='comma___parentheses__apostrophe_s_colon:_slash/path_multiple___spaces'
+[ "$(merv_update_journal_detail_value "$detail_input")" = "$detail_expected" ] || fail detail-serialization
+detail_long=$(printf '%200s' '' | tr ' ' x)
+[ "$(merv_update_journal_detail_value "$detail_long" | wc -c | tr -d '[:space:]')" = 160 ] || fail detail-length-bound
+merv_update_journal_write run-detail failed-refreshing_public refs/heads/custom 1 1 1 1 0 "$detail_input" || fail detail-journal-write
+merv_update_journal_active || fail detail-journal-active
+[ "$(merv_update_journal_get detail '')" = "$detail_expected" ] || fail detail-journal-value
+pass journal-detail-prose-serialization
+
 merv_update_quiesce_begin run-1 || fail quiesce-write
 merv_update_quiesce_active || fail quiesce-active
 unset MERV_UPDATE_OWNER

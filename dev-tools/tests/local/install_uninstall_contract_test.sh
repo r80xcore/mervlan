@@ -232,7 +232,8 @@ grep -Fq 'INSTALL_EXTERNAL_NODE_ATTEMPTED=1' "$INSTALL" || fail 'installer node 
 EXTERNAL_HELPERS="$TEST_ROOT/external-helpers.sh"
 : >"$EXTERNAL_HELPERS"
 for helper in install_path_present install_path_chain_safe \
-  install_external_owner_current install_external_parent_safe \
+  install_external_webui_root_validate install_external_owner_current install_external_parent_safe \
+  install_external_capture_error \
   install_external_copy_object install_external_remove_object \
   install_external_capture_object install_external_capture_metadata \
   install_external_capture_projection install_external_capture_webui_page \
