@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: save_settings.sh || version="0.57"                     #
+#               - File: save_settings.sh || version="0.58"                     #
 # ============================================================================ #
 # - Purpose:    Save current vlanmgr_* settings from custom_settings.txt into  #
 #               settings.json (persistent storage) and public settings.json.   #
@@ -773,7 +773,8 @@ seed_general_section_if_missing() {
             '    "_description": "Global addon flags and behavior toggles",' \
             '    "AUTO_SYNC_SETTINGS": "1",' \
             '    "HTML_CLIENT_REFRESH_MINUTES": "30",' \
-            '    "NODE_PARALLELISM": "2"' \
+            '    "NODE_PARALLELISM": "2",' \
+            '    "BOOT_RC_TIMEOUT": "45"' \
             '  }' \
             '}' > "${_sg_seed_tmp}" 2>/dev/null &&
            mv "${_sg_seed_tmp}" "${_save_candidate}" 2>/dev/null; then
@@ -791,7 +792,8 @@ seed_general_section_if_missing() {
                     print "    \"_description\": \"Global addon flags and behavior toggles\","
                     print "    \"AUTO_SYNC_SETTINGS\": \"1\","
                     print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\","
-                    print "    \"NODE_PARALLELISM\": \"2\""
+                    print "    \"NODE_PARALLELISM\": \"2\","
+                    print "    \"BOOT_RC_TIMEOUT\": \"45\""
                     print "  }"
                     print "}"
                     seeded=1
@@ -803,7 +805,8 @@ seed_general_section_if_missing() {
                     print "    \"_description\": \"Global addon flags and behavior toggles\","
                     print "    \"AUTO_SYNC_SETTINGS\": \"1\","
                     print "    \"HTML_CLIENT_REFRESH_MINUTES\": \"30\","
-                    print "    \"NODE_PARALLELISM\": \"2\""
+                    print "    \"NODE_PARALLELISM\": \"2\","
+                    print "    \"BOOT_RC_TIMEOUT\": \"45\""
                     print "  },"
                     seeded=1
                 }
@@ -826,19 +829,36 @@ seed_general_setting_from_normal_kv() {
     [ "$_sg_observed" = "$_sg_value" ] || return 1
 }
 
+# Migration is independent of whether this particular scoped Save included the
+# new control.  This prevents an existing sectioned installation from retaining
+# a missing Boot RC policy until the user happens to edit that one field.
+seed_general_boot_rc_timeout_default() {
+    _sgbrt_value=$(json_get_section_value "General" "BOOT_RC_TIMEOUT" "${_save_candidate}" 2>/dev/null || printf '')
+    [ -n "$_sgbrt_value" ] && return 0
+    seed_general_section_if_missing || return 1
+    json_set_section_value "General" "BOOT_RC_TIMEOUT" "45" "${_save_candidate}" || return 1
+    _sgbrt_value=$(json_get_section_value "General" "BOOT_RC_TIMEOUT" "${_save_candidate}" 2>/dev/null) || return 1
+    [ "$_sgbrt_value" = "45" ]
+}
+
 if [ "${SAVE_SCOPE:-full}" = "normal" ] || [ "${SAVE_SCOPE:-full}" = "wan_native" ] || [ "${SAVE_SCOPE:-full}" = "full" ]; then
     # Every Settings-modal control stored under General must use the structured
     # writer.  A scoped service Save contains only its changed controls; the
     # helper is a no-op for omitted keys, so this does not overwrite them.
     for _save_general_key in \
         BOOT_ENABLED PAUSE ENABLE_STP DRY_RUN EXPERIMENTAL ENABLE_NATIVE_SSID \
-        AUTO_SYNC_SETTINGS HTML_CLIENT_REFRESH_MINUTES NODE_PARALLELISM; do
+        AUTO_SYNC_SETTINGS HTML_CLIENT_REFRESH_MINUTES NODE_PARALLELISM BOOT_RC_TIMEOUT; do
         if ! seed_general_setting_from_normal_kv "$_save_general_key"; then
             error -c vlan "save_settings.sh: failed to seed General setting $_save_general_key"
             rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
             exit 1
         fi
     done
+    if ! seed_general_boot_rc_timeout_default; then
+        error -c vlan "save_settings.sh: failed to migrate General.BOOT_RC_TIMEOUT"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}"
+        exit 1
+    fi
 fi
 
 # NODE_PARALLELISM is a bounded MAIN-local scheduler control.  Unlike the
@@ -857,6 +877,26 @@ validate_node_parallelism_kv() {
 while IFS="$(printf '\t')" read -r _vnpp_key _vnpp_value; do
     if ! validate_node_parallelism_kv "$_vnpp_key" "$_vnpp_value"; then
         error -c vlan "save_settings.sh: invalid NODE_PARALLELISM='$_vnpp_value' (expected integer 1-5)"
+        rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
+        exit 1
+    fi
+done < "${TMP_SORTED}"
+
+# BOOT_RC_TIMEOUT is node-relevant boot policy.  Save rejects malformed values
+# rather than relying on the manager's defensive runtime normalization.
+validate_boot_rc_timeout_kv() {
+    _vbrt_key="$1"
+    _vbrt_value="$2"
+    [ "$_vbrt_key" = "BOOT_RC_TIMEOUT" ] || return 0
+    case "$_vbrt_value" in
+        0|5|6|7|8|9|[1-9][0-9]|1[01][0-9]|120) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+while IFS="$(printf '\t')" read -r _vbrt_key _vbrt_value; do
+    if ! validate_boot_rc_timeout_kv "$_vbrt_key" "$_vbrt_value"; then
+        error -c vlan "save_settings.sh: invalid BOOT_RC_TIMEOUT='$_vbrt_value' (expected 0 or integer 5-120)"
         rm -f "${TMP_KV}" "${TMP_SORTED}" "${TMP_JSON}" "${TMP_OVERRIDE}" "${TMP_CLIENTMETA}" "${TMP_NORMAL}" "${_save_candidate}"
         exit 1
     fi

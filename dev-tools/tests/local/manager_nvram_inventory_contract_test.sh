@@ -164,7 +164,7 @@ for _manager_fn in \
   normalize_basic normalize_iface normalize_ssid to_lower \
   merv_manager_inventory_file_is_current merv_manager_inventory_prepare \
   ssid_configured_for_iface is_internal_vap find_if_by_ssid find_if_by_ssid_any \
-  ssid_in_nvram boot_wait_for_configured_ssids nvram_base_for_ifname \
+  ssid_in_nvram boot_monotonic_now boot_wait_for_configured_ssids nvram_base_for_ifname \
   set_ap_isolation attach_to_bridge bind_configured_ssids; do
   extract_fn "$MANAGER" "$_manager_fn" "$EXTRACTED/$_manager_fn.sh" || \
     fail "manager SSID helper extraction: $_manager_fn"
@@ -194,7 +194,7 @@ for _manager_piece in \
   normalize_basic normalize_iface normalize_ssid to_lower \
   merv_manager_inventory_file_is_current merv_manager_inventory_prepare \
   ssid_configured_for_iface is_internal_vap find_if_by_ssid find_if_by_ssid_any \
-  ssid_in_nvram boot_wait_for_configured_ssids nvram_base_for_ifname \
+  ssid_in_nvram boot_monotonic_now boot_wait_for_configured_ssids nvram_base_for_ifname \
   set_ap_isolation bind_configured_ssids; do
   . "$EXTRACTED/$_manager_piece.sh" || fail "manager SSID helper load: $_manager_piece"
 done
@@ -592,6 +592,9 @@ merv_action_progress_update() { :; }
 merv_observation_wait_idle() { :; }
 merv_native_auth_snapshot() { :; }
 validate_configuration() { :; }
+# This inventory-focused main() harness does not exercise boot RC admission.
+# Keep the new boot-only gate outside its NVRAM preflight assertions.
+boot_wait_for_rc_quiet() { return 0; }
 
 # Mutation markers must remain absent when the preflight inventory fails.
 cleanup_existing_config() { : > "$TEST_ROOT/topology-mutation"; return 0; }
@@ -914,7 +917,7 @@ EOF_SSID
     normalize_basic normalize_iface normalize_ssid to_lower \
     merv_manager_inventory_file_is_current merv_manager_inventory_prepare \
     ssid_configured_for_iface is_internal_vap find_if_by_ssid find_if_by_ssid_any \
-    ssid_in_nvram boot_wait_for_configured_ssids nvram_base_for_ifname \
+    ssid_in_nvram boot_monotonic_now boot_wait_for_configured_ssids nvram_base_for_ifname \
     set_ap_isolation attach_to_bridge bind_configured_ssids; do
     . "$EXTRACTED/$_manager_piece.sh" || exit 1
   done

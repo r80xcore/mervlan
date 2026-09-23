@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#             - File: mervlan_manager.sh || version="0.72.8"                #
+#             - File: mervlan_manager.sh || version="0.72.9"                #
 # ============================================================================ #
 # - Purpose:    JSON-driven VLAN manager for Asuswrt-Merlin firmware.          #
 #               Applies VLAN settings to SSIDs and Ethernet ports based on     #
@@ -350,6 +350,22 @@ DRY_RUN=$(read_json_raw DRY_RUN "$SETTINGS_FILE")
 ENABLE_STP=$(read_json_raw ENABLE_STP "$SETTINGS_FILE")
 # Extract the override for tagging native SSIDs (wl0/wl1 directly to VLAN)
 ENABLE_NATIVE_SSID=$(read_json_raw ENABLE_NATIVE_SSID "$SETTINGS_FILE")
+# This is deliberately section-aware: BOOT_RC_TIMEOUT is General policy, not
+# a legacy root-level setting.  Keep the normalization local to boot admission
+# so manually edited or pre-migration files cannot weaken the gate.
+BOOT_RC_TIMEOUT=$(json_get_section_value "General" "BOOT_RC_TIMEOUT" "$SETTINGS_FILE" 2>/dev/null || printf '')
+BOOT_RC_QUIET_SECONDS=5
+
+boot_rc_timeout_normalize() {
+  _brtn_value="${1:-}"
+  case "$_brtn_value" in
+    0) printf '%s\n' 0 ;;
+    5|6|7|8|9|[1-9][0-9]|1[01][0-9]|120) printf '%s\n' "$_brtn_value" ;;
+    *) printf '%s\n' 45 ;;
+  esac
+}
+
+BOOT_RC_TIMEOUT=$(boot_rc_timeout_normalize "$BOOT_RC_TIMEOUT")
 
 # Extract NODE_ID early (before node-aware read_json wrapper is defined)
 NODE_ID=$(read_json_raw NODE_ID "$SETTINGS_FILE")
@@ -1361,6 +1377,17 @@ find_if_by_ssid_any() {
 # BOOT SSID READINESS GATE — Wait for configured SSIDs during boot mode      #
 # ========================================================================== #
 
+# Boot readiness timing must not depend on wall-clock correction during early
+# startup. /proc/uptime is boot-relative and gives the coarse seconds needed
+# by the fixed quiet/readiness intervals.
+boot_monotonic_now() {
+  local _bmn_up _bmn_rest
+  IFS=' ' read -r _bmn_up _bmn_rest < /proc/uptime || return 1
+  _bmn_up=${_bmn_up%%.*}
+  case "$_bmn_up" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$_bmn_up"
+}
+
 # ssid_in_nvram — Check if an SSID exists anywhere in the validated inventory
 # Args: $1=ssid_name
 # Returns: 0 if found, 1 if not found, 2 if inventory is unavailable
@@ -1395,8 +1422,8 @@ ssid_in_nvram() {
 
 # boot_wait_for_configured_ssids — Block until configured SSIDs are ready (boot mode only)
 # Args: $1=timeout_seconds (default 30)
-# Returns: 0 on readiness/timeout, 1 when the validated NVRAM inventory cannot
-# be read (logs warnings on timeout/missing SSIDs, continues for those cases)
+# Returns: 0 when all resolved interfaces are ready, 1 on an untrusted
+# inventory/resolver result or readiness timeout.
 # Purpose: Reduce boot race conditions by waiting for WLAN interfaces to appear
 boot_wait_for_configured_ssids() {
   [ "$MERV_MANAGER_MODE" = "boot" ] || return 0
@@ -1441,14 +1468,43 @@ $i|$ssid"
     return 1
   fi
 
-  # Partition SSIDs: in nvram (wait for interface) vs missing (likely typo)
+  # Partition SSIDs: in nvram (resolve once) vs missing (likely typo).  A
+  # missing configured SSID remains a warning for compatibility; the initial
+  # boot RC gate materially reduces an early inventory sample causing it.
   missing_nvram=""
-  waitlist=""
+  expected=""
   while IFS='|' read -r idx ssid; do
     [ -n "$idx" ] || continue
     if ssid_in_nvram "$ssid" "$_boot_inventory_file"; then
-      waitlist="${waitlist}
-$idx|$ssid"
+      # Preserve the established all-radio resolver.  It can intentionally
+      # return several VAPs for one shared SSID; every one must appear.
+      _resolved="$(find_if_by_ssid_any "$ssid" "$_boot_inventory_file")"
+      _find_rc=$?
+      if [ "$_find_rc" -eq 2 ]; then
+        error -c cli,vlan "Boot SSID wait: NVRAM inventory became unavailable while resolving '$ssid'; aborting before topology mutation"
+        return 1
+      fi
+      if [ -z "$_resolved" ]; then
+        error -c cli,vlan "Boot SSID wait: no usable interface mapping for SSID_$(printf '%02d' "$idx")='$ssid'; aborting before topology mutation"
+        return 1
+      fi
+      while IFS= read -r _boot_ifn; do
+        [ -n "$_boot_ifn" ] || continue
+        _duplicate=0
+        while IFS='|' read -r _old_idx _old_ssid _old_ifn; do
+          [ -n "$_old_idx" ] || continue
+          if [ "$_old_idx" = "$idx" ] && [ "$_old_ssid" = "$ssid" ] && [ "$_old_ifn" = "$_boot_ifn" ]; then
+            _duplicate=1
+            break
+          fi
+        done <<_BWAIT_DEDUP_
+$expected
+_BWAIT_DEDUP_
+        [ "$_duplicate" = "1" ] || expected="${expected}
+$idx|$ssid|$_boot_ifn"
+      done <<_BWAIT_RESOLVED_
+$_resolved
+_BWAIT_RESOLVED_
     else
       _sin_rc=$?
       if [ "$_sin_rc" -eq 2 ]; then
@@ -1469,67 +1525,54 @@ EOF
     done
   fi
 
-  waitlist="$(printf '%s\n' "$waitlist" | sed '/^$/d')"
-  [ -n "$waitlist" ] || return 0
+  expected="$(printf '%s\n' "$expected" | sed '/^$/d')"
+  [ -n "$expected" ] || return 0
 
-  start="$(date +%s 2>/dev/null || echo 0)"
-  case "$start" in ''|*[!0-9]*) start=1 ;; esac
+  start="$(boot_monotonic_now)" || {
+    error -c cli,vlan "Boot SSID wait: unable to acquire timestamp; aborting boot apply"
+    return 1
+  }
+  case "$start" in ''|*[!0-9]*)
+    error -c cli,vlan "Boot SSID wait: unable to acquire timestamp; aborting boot apply"
+    return 1
+    ;;
+  esac
 
-  # Wait until all SSIDs in waitlist resolve to present interfaces, or timeout
-  pending="$waitlist"
-  ready_count=0
-  total_count="$(printf '%s\n' "$waitlist" | wc -l | tr -d ' ')"
+  # Resolution is complete before polling begins.  The loop below intentionally
+  # performs only cheap sysfs interface checks plus wall-clock timing.
 
   while :; do
-    new_pending=""
-
-    while IFS='|' read -r idx ssid; do
+    _missing_expected=""
+    while IFS='|' read -r idx ssid _boot_ifn; do
       [ -n "$idx" ] || continue
+      iface_exists "$_boot_ifn" || _missing_expected="${_missing_expected}
+$idx|$ssid|$_boot_ifn"
+    done <<_BWAIT_EXPECTED_
+$expected
+_BWAIT_EXPECTED_
 
-      # find_if_by_ssid_any may return multiple lines (dual-band identical SSIDs)
-      # Mark ready if ANY of the resolved interfaces is present in the kernel
-      _resolved="$(find_if_by_ssid_any "$ssid" "$_boot_inventory_file")"
-      _find_rc=$?
-      if [ "$_find_rc" -eq 2 ]; then
-        error -c cli,vlan "Boot SSID wait: NVRAM inventory became unavailable while resolving '$ssid'; aborting before topology mutation"
-        return 1
-      fi
-      _ssid_ready=0
-      if [ -n "$_resolved" ]; then
-        while IFS= read -r _boot_ifn; do
-          [ -n "$_boot_ifn" ] || continue
-          iface_exists "$_boot_ifn" && { _ssid_ready=1; break; }
-        done <<_BWAIT_EOF_
-$_resolved
-_BWAIT_EOF_
-      fi
-      if [ "$_ssid_ready" = "1" ]; then
-        ready_count=$((ready_count + 1))
-      else
-        new_pending="${new_pending}
-$idx|$ssid"
-      fi
-    done <<EOF
-$pending
-EOF
-
-    pending="$(printf '%s\n' "$new_pending" | sed '/^$/d')"
-    [ -z "$pending" ] && {
-      info -c cli,vlan "Boot SSID wait: all $total_count configured SSID interfaces are present"
+    [ -z "$_missing_expected" ] && {
+      info -c cli,vlan "Boot SSID wait: all expected wireless interfaces are present"
       return 0
     }
 
-    now="$(date +%s 2>/dev/null || echo 0)"
-    case "$now" in ''|*[!0-9]*) now=$((start + timeout + 1)) ;; esac
+    now="$(boot_monotonic_now)" || {
+      error -c cli,vlan "Boot SSID wait: unable to acquire timestamp; aborting boot apply"
+      return 1
+    }
+    case "$now" in ''|*[!0-9]*)
+      error -c cli,vlan "Boot SSID wait: unable to acquire timestamp; aborting boot apply"
+      return 1
+      ;;
+    esac
 
     if [ $((now - start)) -ge "$timeout" ]; then
-      warn -c cli,vlan "Boot SSID wait: timed out after ${timeout}s ($ready_count/$total_count ready)"
-      warn -c cli,vlan "Boot SSID wait: still missing interface(s) for:"
-      printf '%s\n' "$pending" | while IFS='|' read -r idx ssid; do
-        [ -n "$idx" ] || continue
-        warn -c cli,vlan "  SSID_$(printf '%02d' "$idx")='$ssid'"
-      done
-      return 0
+      _first_missing="$(printf '%s\n' "$_missing_expected" | sed '/^$/d' | sed -n '1p')"
+      IFS='|' read -r idx ssid _boot_ifn <<_BWAIT_MISSING_
+$_first_missing
+_BWAIT_MISSING_
+      error -c cli,vlan "Boot SSID wait: expected interface $_boot_ifn for SSID_$(printf '%02d' "$idx")='$ssid' did not appear within ${timeout}s; aborting boot apply."
+      return 1
     fi
 
     sleep 1
@@ -2069,6 +2112,132 @@ cleanup_existing_config() {
 }
 
 # --- rc/queue helpers --------------------------------------------------------
+
+# Boot admission observes only firmware RC work that can change wireless or
+# bridge topology.  It deliberately does not share the post-restart watcher:
+# that one re-arms MerVLAN protection and is required later in Apply, whereas
+# this helper must remain a cheap, read-only boot sample.
+# Returns: 0 quiet, 1 busy, 2 observation failure.
+boot_rc_observe() {
+  local _brco_queue _brco_snapshot _brco_line
+
+  BOOT_RC_OBSERVE_REASON=""
+
+  if [ -e /tmp/rc_service ]; then
+    _brco_queue=$(cat /tmp/rc_service 2>/dev/null) || return 2
+    case "$_brco_queue" in
+      *restart_wireless*) BOOT_RC_OBSERVE_REASON="rc_service=restart_wireless"; return 1 ;;
+      *wireless*) BOOT_RC_OBSERVE_REASON="rc_service=wireless"; return 1 ;;
+      *start_lan*) BOOT_RC_OBSERVE_REASON="rc_service=start_lan"; return 1 ;;
+      *stop_lan*) BOOT_RC_OBSERVE_REASON="rc_service=stop_lan"; return 1 ;;
+      *switch*) BOOT_RC_OBSERVE_REASON="rc_service=switch"; return 1 ;;
+    esac
+  fi
+
+  # Keep ps outside a pipeline: a failing snapshot is unknown, never quiet.
+  _brco_snapshot=$(ps w 2>/dev/null) || return 2
+  while IFS= read -r _brco_line; do
+    # wlconf may be invoked directly, without a service argument.
+    case "$_brco_line" in *wlconf*) BOOT_RC_OBSERVE_REASON="process=wlconf"; return 1 ;; esac
+    # Do not broadly match wireless daemon names here.  Only concrete service
+    # operations which are known to mutate the relevant topology are admitted.
+    case "$_brco_line" in
+      *service*)
+        case "$_brco_line" in
+          *restart_wireless*) BOOT_RC_OBSERVE_REASON="process=service restart_wireless"; return 1 ;;
+          *start_lan*) BOOT_RC_OBSERVE_REASON="process=service start_lan"; return 1 ;;
+          *stop_lan*) BOOT_RC_OBSERVE_REASON="process=service stop_lan"; return 1 ;;
+          *switch*) BOOT_RC_OBSERVE_REASON="process=service switch"; return 1 ;;
+        esac
+        ;;
+    esac
+  done <<_BOOT_RC_PS_
+$_brco_snapshot
+_BOOT_RC_PS_
+
+  return 0
+}
+
+boot_rc_sleep() {
+  sleep "${1:-1}"
+}
+
+# Wait for the fixed continuous quiet interval before boot state acquisition
+# and again before entering fresh pre-mutation preparation.  Wall-clock
+# rollback and unavailable observations fail closed rather than extending boot
+# indefinitely or treating unknown firmware state as idle.
+boot_wait_for_rc_quiet() {
+  local _brw_phase _brw_timeout _brw_start _brw_now _brw_last _brw_quiet_since
+  local _brw_elapsed _brw_quiet_elapsed _brw_observe_rc _brw_busy_active
+
+  [ "$MERV_MANAGER_MODE" = "boot" ] || return 0
+  _brw_timeout=$(boot_rc_timeout_normalize "${BOOT_RC_TIMEOUT:-}")
+  [ "$_brw_timeout" = "0" ] && return 0
+  _brw_phase="${1:-boot}"
+
+  info -c cli,vlan "Boot RC wait [$_brw_phase]: waiting for ASUS network activity to remain quiet (timeout=${_brw_timeout}s)"
+  _brw_start=$(boot_monotonic_now) || {
+    error -c cli,vlan "Boot RC wait: unable to acquire timestamp; aborting boot apply."
+    return 1
+  }
+  _brw_last="$_brw_start"
+  _brw_quiet_since=""
+  _brw_busy_active=0
+
+  while :; do
+    _brw_now=$(boot_monotonic_now) || {
+      error -c cli,vlan "Boot RC wait: unable to acquire timestamp; aborting boot apply."
+      return 1
+    }
+    if [ "$_brw_now" -lt "$_brw_last" ]; then
+      error -c cli,vlan "Boot RC wait: monotonic clock moved backwards; aborting boot apply."
+      return 1
+    fi
+    _brw_last="$_brw_now"
+
+    boot_rc_observe
+    _brw_observe_rc=$?
+    case "$_brw_observe_rc" in
+      0)
+        if [ -z "$_brw_quiet_since" ]; then
+          _brw_quiet_since="$_brw_now"
+          if [ "$_brw_busy_active" -eq 1 ]; then
+            info -c cli,vlan "Boot RC wait [$_brw_phase]: ASUS network activity cleared; starting ${BOOT_RC_QUIET_SECONDS}s quiet interval"
+          else
+            info -c cli,vlan "Boot RC wait [$_brw_phase]: no relevant ASUS network activity observed; starting ${BOOT_RC_QUIET_SECONDS}s quiet interval"
+          fi
+          _brw_busy_active=0
+        else
+          _brw_quiet_elapsed=$((_brw_now - _brw_quiet_since))
+          if [ "$_brw_quiet_elapsed" -ge "$BOOT_RC_QUIET_SECONDS" ]; then
+            info -c cli,vlan "Boot RC wait [$_brw_phase]: ASUS network activity remained quiet for ${BOOT_RC_QUIET_SECONDS}s"
+            return 0
+          fi
+        fi
+        ;;
+      1)
+        if [ "$_brw_busy_active" -eq 0 ]; then
+          info -c cli,vlan "Boot RC wait [$_brw_phase]: ASUS network activity observed (${BOOT_RC_OBSERVE_REASON:-unknown}); resetting quiet interval"
+          _brw_busy_active=1
+        fi
+        _brw_quiet_since=""
+        ;;
+      *)
+        error -c cli,vlan "Boot RC wait: unable to observe ASUS process state; aborting boot apply."
+        return 1
+        ;;
+    esac
+
+    # Quiet completion above intentionally precedes this timeout check, so a
+    # continuously quiet BOOT_RC_TIMEOUT=5 succeeds at the exact boundary.
+    _brw_elapsed=$((_brw_now - _brw_start))
+    if [ "$_brw_elapsed" -ge "$_brw_timeout" ]; then
+      error -c cli,vlan "Boot RC wait [$_brw_phase]: ASUS network activity remained active for ${_brw_timeout}s; aborting boot apply."
+      return 1
+    fi
+    boot_rc_sleep 1
+  done
+}
 
 rc_queue_has() {
   # true if rc has a pending/active matching token in the queue file
@@ -2653,9 +2822,16 @@ main() {
   validate_configuration
   merv_action_progress_update validate 1 1 15 "Validating VLAN and SSID settings..."
 
-  # Validate the bounded NVRAM inventory before boot shield restoration or any
-  # later topology mutation. A valid empty inventory is allowed to proceed as
-  # ordinary SSID-not-found; read/validation failures are terminal.
+  # Boot state acquisition must not sample wireless NVRAM while ASUS is still
+  # rebuilding it.  Non-boot manager modes return immediately from this helper.
+  if ! boot_wait_for_rc_quiet inventory; then
+    error -c cli,vlan "Boot RC admission failed before initial NVRAM inventory; aborting before topology mutation"
+    return 1
+  fi
+
+  # Validate the bounded initial NVRAM inventory after the boot admission gate.
+  # A valid empty inventory is allowed to proceed as ordinary SSID-not-found;
+  # read/validation failures are terminal.
   if merv_nvram_inventory_read; then
     :
   else
@@ -2668,7 +2844,7 @@ main() {
   # Boot mode: wait for configured SSID interfaces to appear (reduces boot race conditions)
   # This only runs when invoked with "boot" argument from services-start
   if ! boot_wait_for_configured_ssids 30 "$_main_inventory_file"; then
-    error -c cli,vlan "Boot SSID readiness failed because NVRAM inventory could not be validated"
+    error -c cli,vlan "Boot SSID readiness failed; aborting before topology mutation"
     return 1
   fi
 
@@ -2728,6 +2904,14 @@ main() {
     return 1
   fi
 
+  # ASUS can resume topology work after the initial inventory/readiness phase.
+  # Admit the fresh cache and L2-arm sequence only after observing it quiet
+  # again; normal Apply/Sync manager runs bypass this boot-only helper.
+  if ! boot_wait_for_rc_quiet pre-mutation; then
+    error -c cli,vlan "Boot RC admission failed before pre-mutation preparation; aborting before topology mutation"
+    return 1
+  fi
+
   # Cleanup phase: remove old VLAN infrastructure from previous runs
   # Enable the iface→VID cache for the duration of the apply hot path. The
   # cache is shared by ebt_quarantine_ensure_expected_rules, merv_managed_wl_ifaces
@@ -2747,6 +2931,23 @@ main() {
   if [ "$DRY_RUN" != "yes" ] && ! merv_manager_arm_l2_before_mutation; then
     error -c cli,vlan "Cannot prove exact L2 protection; aborting before mutation"
     return 1
+  fi
+  # This intentionally is one cheap observation, not a third quiet wait.  It
+  # narrows the post-arming TOCTOU window immediately before bridge cleanup.
+  if [ "$MERV_MANAGER_MODE" = "boot" ] && [ "$BOOT_RC_TIMEOUT" != "0" ] && [ "$DRY_RUN" != "yes" ]; then
+    boot_rc_observe
+    _final_boot_rc=$?
+    case "$_final_boot_rc" in
+      0) : ;;
+      1)
+        error -c cli,vlan "Boot RC admission: ASUS network activity resumed after L2 arming; aborting before bridge cleanup."
+        return 1
+        ;;
+      *)
+        error -c cli,vlan "Boot RC admission: unable to observe ASUS process state; aborting before bridge cleanup."
+        return 1
+        ;;
+    esac
   fi
   if [ "$DRY_RUN" != "yes" ]; then
     if ! merv_dhcp_hold_mark_mutating "$MANAGER_DHCP_TOKEN" bridge-cleanup; then

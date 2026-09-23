@@ -2333,6 +2333,16 @@
           </select>
         </div>
 
+        <!-- Boot RC timeout -->
+        <div class="svc-settings-row">
+          <div class="svc-settings-label">
+            <span>Boot RC timeout</span>
+            <span class="svc-settings-hint">Maximum time for each ASUS network-settle check during boot. Set to 0 to disable.</span>
+          </div>
+          <input id="svcBootRcTimeout" class="input_option" type="number" min="0" max="120" step="1"
+            onchange="markSvcSettingsDirty()" title="0 disables boot RC admission; otherwise use 5 to 120 seconds">
+        </div>
+
         <!-- Pause Event Reactions -->
         <div class="svc-settings-row">
           <div class="svc-settings-label">
@@ -3767,6 +3777,7 @@
         flat.AUTO_SYNC_SETTINGS = stringOrDefault(general.AUTO_SYNC_SETTINGS, "1");
         flat.HTML_CLIENT_REFRESH_MINUTES = stringOrDefault(general.HTML_CLIENT_REFRESH_MINUTES, "30");
         flat.NODE_PARALLELISM = stringOrDefault(general.NODE_PARALLELISM, "2");
+        flat.BOOT_RC_TIMEOUT = stringOrDefault(general.BOOT_RC_TIMEOUT, "45");
 
         const ssh = ensurePlainObject(data.SSH);
         flat.SSH_KEYS_INSTALLED = stringOrDefault(ssh.SSH_KEYS_INSTALLED, "0");
@@ -3968,7 +3979,8 @@
             ENABLE_NATIVE_SSID: "0",
             AUTO_SYNC_SETTINGS: "1",
             HTML_CLIENT_REFRESH_MINUTES: "30",
-            NODE_PARALLELISM: "2"
+            NODE_PARALLELISM: "2",
+            BOOT_RC_TIMEOUT: "45"
           },
           SSH: {
             _description: "SSH settings for main router and nodes",
@@ -4028,6 +4040,10 @@
         general.NODE_PARALLELISM = stringOrDefault(
           flat.NODE_PARALLELISM,
           general.NODE_PARALLELISM ?? "2"
+        );
+        general.BOOT_RC_TIMEOUT = stringOrDefault(
+          flat.BOOT_RC_TIMEOUT,
+          general.BOOT_RC_TIMEOUT ?? "45"
         );
 
         const nodes = target.Nodes = ensurePlainObject(target.Nodes);
@@ -9867,6 +9883,15 @@
           })
         },
         {
+          key: 'BOOT_RC_TIMEOUT', controlId: 'svcBootRcTimeout', kind: 'setting', defaultValue: '45',
+          readControl: el => String(el.value).trim(),
+          writeControl: (el, value) => { el.value = String(value); },
+          validate: value => ({
+            ok: /^(0|[5-9]|[1-9][0-9]|1[01][0-9]|120)$/.test(String(value)),
+            message: 'Boot RC timeout must be 0 or an integer from 5 to 120 seconds.'
+          })
+        },
+        {
           key: 'PAUSE', controlId: 'svcTogglePause', kind: 'setting', defaultValue: 'off',
           readControl: el => el.checked ? 'on' : 'off', writeControl: (el, value) => { el.checked = value === 'on'; }
         },
@@ -11228,6 +11253,7 @@
         out["vlanmgr_AUTO_SYNC_SETTINGS"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["AUTO_SYNC_SETTINGS"]) || "1";
         out["vlanmgr_HTML_CLIENT_REFRESH_MINUTES"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["HTML_CLIENT_REFRESH_MINUTES"]) || "30";
         out["vlanmgr_NODE_PARALLELISM"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["NODE_PARALLELISM"]) || "2";
+        out["vlanmgr_BOOT_RC_TIMEOUT"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["BOOT_RC_TIMEOUT"]) || "45";
         out["vlanmgr_PERSISTENT_DEBUG_LOGGING"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["PERSISTENT_DEBUG_LOGGING"]) || "0";
 
         // Hardware_Override and ClientMeta keys are sent via their own scoped
@@ -11448,6 +11474,7 @@
         flat["AUTO_SYNC_SETTINGS"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["AUTO_SYNC_SETTINGS"]) || "1";
         flat["HTML_CLIENT_REFRESH_MINUTES"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["HTML_CLIENT_REFRESH_MINUTES"]) || "30";
         flat["NODE_PARALLELISM"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["NODE_PARALLELISM"]) || "2";
+        flat["BOOT_RC_TIMEOUT"] = (CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE["BOOT_RC_TIMEOUT"]) || "45";
 
         // Pull Hardware_Override flat keys from settings cache into flat object
         if (CURRENT_SETTINGS_CACHE) {
@@ -15244,7 +15271,7 @@
 
       function extractManagedKeys(flat) {
         const out = {};
-        const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|NODE_PARALLELISM|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
+        const staticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|NODE_PARALLELISM|BOOT_RC_TIMEOUT|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+|MAC_SHIELD_OVERRIDES|CLIENT_NAME_OVERRIDES)$/;
         Object.keys(flat || {}).forEach(k => {
           if (staticRe.test(k) || isManagedNodeKey(k)) out[k] = String(flat[k] ?? "");
         });
@@ -15258,7 +15285,7 @@
         if (scope === "service") {
           const serviceKeys = new Set([
             'BOOT_ENABLED', 'PAUSE', 'ENABLE_STP', 'DRY_RUN', 'EXPERIMENTAL',
-            'ENABLE_NATIVE_SSID', 'AUTO_SYNC_SETTINGS', 'HTML_CLIENT_REFRESH_MINUTES', 'NODE_PARALLELISM',
+            'ENABLE_NATIVE_SSID', 'AUTO_SYNC_SETTINGS', 'HTML_CLIENT_REFRESH_MINUTES', 'NODE_PARALLELISM', 'BOOT_RC_TIMEOUT',
             'PERSISTENT_DEBUG_LOGGING'
           ]);
           Object.keys(all).forEach(k => {
@@ -15283,7 +15310,7 @@
         }
 
         // "normal": all managed keys except OVERRIDE_* and ClientMeta
-        const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|NODE_PARALLELISM|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
+        const normalStaticRe = /^(BOOT_ENABLED|PAUSE|ENABLE_STP|DRY_RUN|EXPERIMENTAL|ENABLE_NATIVE_SSID|AUTO_SYNC_SETTINGS|HTML_CLIENT_REFRESH_MINUTES|NODE_PARALLELISM|BOOT_RC_TIMEOUT|PERSISTENT_DEBUG_LOGGING|SSID_\d\d|VLAN_\d\d|APISO_\d\d|SSIDassign_\d\d|ETH\d+_VLAN|WAN_NATIVE_(?:MAIN|NODE(?:10|[1-9]))|MAIN_WAN_NATIVE_IP|MAIN_ASUS_IP|TRUNK\d+|TAGGED_TRUNK\d+|UNTAGGED_TRUNK\d+)$/;
         Object.keys(all).forEach(k => {
           if (normalStaticRe.test(k)) { out[k] = String(all[k] ?? ""); return; }
           let m;

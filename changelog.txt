@@ -6,6 +6,19 @@ Fixed: VLAN duplicate advisory handling
 - Duplicate VLANs remain an input-level advisory; normal saved, pending, and
   invalid row statuses are preserved.
 
+Fixed: Boot-time wireless and topology readiness
+- Boot apply now waits for ASUS network activity to settle before capturing
+  wireless state and again before pre-mutation preparation, with a final
+  admission sample before bridge cleanup.
+- Added General.BOOT_RC_TIMEOUT (default 45 seconds) to bound each boot
+  network-settle check; set it to 0 to disable the boot RC checks.
+- Configured SSIDs are resolved once to their expected VAPs, then lightweight
+  sysfs checks require every resolved interface before topology changes begin.
+- Missing expected interfaces now abort boot apply safely, and readiness timers
+  use monotonic system uptime so wall-clock corrections cannot affect them.
+- These protections apply only at boot; normal Apply, Sync, Heal, and the
+  existing post-restart RC watcher are unchanged.
+
 Added: Development-only MAC Shield troubleshooting control
 - Developer Tools can temporarily disable or immediately restore MAIN MAC
   Shield enforcement without changing saved settings, node state, or the
