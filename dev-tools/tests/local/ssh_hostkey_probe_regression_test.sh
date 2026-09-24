@@ -30,6 +30,7 @@ done
 FAKE_KEYGEN="$TEST_ROOT/fake-dropbearkey"
 FAKE_CLIENT="$TEST_ROOT/fake-dbclient"
 FAKE_KEYGEN_LOG="$TEST_ROOT/keygen.calls"
+FAKE_KEYGEN_PUB_LOG="$TEST_ROOT/keygen.pub.calls"
 FAKE_IDENTITY_LOG="$TEST_ROOT/client.identity"
 FAKE_MODE_LOG="$TEST_ROOT/client.mode"
 FAKE_ARGS_LOG="$TEST_ROOT/client.args"
@@ -52,6 +53,8 @@ printf '%s\n' '#!/bin/sh' \
   'done' \
   '[ -n "$_out" ] || exit 2' \
   'printf "%s\n" ephemeral-test-identity > "$_out"' \
+  'printf "%s\n" ephemeral-test-identity.pub > "$_out.pub"' \
+  'printf "%s\n" "$_out.pub" >> "$FAKE_KEYGEN_PUB_LOG"' \
   > "$FAKE_KEYGEN" || fail keygen-fixture
 chmod 700 "$FAKE_KEYGEN" || fail keygen-mode
 
@@ -102,7 +105,7 @@ mkdir -p "$MERV_SSH_TRUST_STAGING_ROOT" || fail trust-staging-root
 HOST_FP=$(merv_ssh_trust_derive_fingerprint ssh-ed25519 "$HOST_KEY") || fail host-fingerprint
 mkdir -p "$TEST_ROOT/state/ssh_trust/staging" || fail probe-staging-root
 
-export FAKE_KEYGEN_LOG FAKE_IDENTITY_LOG FAKE_MODE_LOG FAKE_ARGS_LOG FAKE_KNOWN_HOSTS_LOG FAKE_FINGERPRINT_LOG
+export FAKE_KEYGEN_LOG FAKE_KEYGEN_PUB_LOG FAKE_IDENTITY_LOG FAKE_MODE_LOG FAKE_ARGS_LOG FAKE_KNOWN_HOSTS_LOG FAKE_FINGERPRINT_LOG
 export FAKE_PROBE_HOST=198.51.100.10
 export FAKE_PROBE_KEY="$HOST_KEY"
 export FAKE_PROBE_FP="$HOST_FP"
@@ -115,6 +118,7 @@ run_probe() {
   MERV_SSH_TRUST_TEST_MODE=1 \
   MERV_SSH_CLIENT="$FAKE_CLIENT" \
   FAKE_KEYGEN_LOG="$FAKE_KEYGEN_LOG" \
+  FAKE_KEYGEN_PUB_LOG="$FAKE_KEYGEN_PUB_LOG" \
   FAKE_IDENTITY_LOG="$FAKE_IDENTITY_LOG" \
   FAKE_MODE_LOG="$FAKE_MODE_LOG" \
   FAKE_ARGS_LOG="$FAKE_ARGS_LOG" \
@@ -134,6 +138,7 @@ probe_workspace_gone() {
 }
 
 : > "$FAKE_KEYGEN_LOG"
+: > "$FAKE_KEYGEN_PUB_LOG"
 rm -f "$FAKE_IDENTITY_LOG" "$FAKE_MODE_LOG" "$FAKE_ARGS_LOG"
 SETTINGS_DIGEST_BEFORE=$(sha256sum "$PROBE_BASE/settings/settings.json") || fail settings-digest-before
 FAKE_KEYGEN_MODE=ok
@@ -149,6 +154,10 @@ printf '%s' "$_probe_output" | awk -F '\t' -v k="$HOST_KEY" -v f="$HOST_FP" \
 [ -s "$FAKE_KEYGEN_LOG" ] || fail absent-key-not-generated
 _probe_identity=$(cat "$FAKE_IDENTITY_LOG") || fail absent-key-identity-log
 case "$_probe_identity" in /tmp/mervlan_tmp/ssh_hostkey_probe.*/probe_identity) ;; *) fail absent-key-not-ephemeral ;; esac
+[ -s "$FAKE_KEYGEN_PUB_LOG" ] || fail absent-key-pub-not-generated
+_probe_pub_identity=$(cat "$FAKE_KEYGEN_PUB_LOG") || fail absent-key-pub-log
+[ "$_probe_pub_identity" = "$_probe_identity.pub" ] || fail absent-key-pub-path
+[ ! -e "$_probe_pub_identity" ] || fail absent-key-pub-leaked
 [ "$_probe_identity" != "$PROBE_BASE/.ssh/vlan_manager" ] || fail absent-key-used-permanent
 [ "$(cat "$FAKE_MODE_LOG")" = "-rw-------" ] || fail absent-key-permissions
 grep -Fq -- '-y -N' "$FAKE_ARGS_LOG" || fail absent-key-bounded-flags
@@ -163,12 +172,14 @@ ok absent-permanent-key-uses-ephemeral-identity
 printf '%s\n' permanent-test-identity > "$PROBE_BASE/.ssh/vlan_manager" || fail permanent-key-create
 chmod 600 "$PROBE_BASE/.ssh/vlan_manager" || fail permanent-key-mode
 : > "$FAKE_KEYGEN_LOG"
+: > "$FAKE_KEYGEN_PUB_LOG"
 rm -f "$FAKE_IDENTITY_LOG" "$FAKE_MODE_LOG" "$FAKE_ARGS_LOG"
 _probe_output=$(run_probe 2>"$TEST_ROOT/permanent.stderr")
 _probe_rc=$?
 [ "$_probe_rc" -eq 0 ] || fail permanent-key-probe
 [ "$(cat "$FAKE_IDENTITY_LOG")" = "$PROBE_BASE/.ssh/vlan_manager" ] || fail permanent-key-not-used
 [ ! -s "$FAKE_KEYGEN_LOG" ] || fail permanent-key-regenerated
+[ ! -s "$FAKE_KEYGEN_PUB_LOG" ] || fail permanent-key-generated-sidecar
 ok permanent-key-path-unchanged
 
 # An existing symlink or directory is suspicious and must not trigger the
@@ -177,6 +188,7 @@ rm -f "$PROBE_BASE/.ssh/vlan_manager" || fail unsafe-key-remove
 printf '%s\n' unsafe-target > "$TEST_ROOT/unsafe-target" || fail unsafe-target
 ln -s "$TEST_ROOT/unsafe-target" "$PROBE_BASE/.ssh/vlan_manager" || fail unsafe-symlink
 : > "$FAKE_KEYGEN_LOG"
+: > "$FAKE_KEYGEN_PUB_LOG"
 rm -f "$FAKE_IDENTITY_LOG"
 run_probe >/dev/null 2>&1
 [ "$?" -eq 3 ] || fail unsafe-symlink-result
@@ -191,22 +203,25 @@ ok unsafe-existing-key-fails-closed
 
 # Key generation failure is terminal and leaves no probe workspace.
 : > "$FAKE_KEYGEN_LOG"
+: > "$FAKE_KEYGEN_PUB_LOG"
 rm -f "$FAKE_IDENTITY_LOG"
 FAKE_KEYGEN_MODE=fail run_probe >/dev/null 2>&1
 [ "$?" -eq 3 ] || fail keygen-failure-result
 [ ! -e "$FAKE_IDENTITY_LOG" ] || fail keygen-failure-client
 _keygen_identity=$(awk '{print $NF}' "$FAKE_KEYGEN_LOG" 2>/dev/null | tail -n 1)
 [ -z "$_keygen_identity" ] || probe_workspace_gone "$_keygen_identity" || fail keygen-failure-cleanup
+[ ! -s "$FAKE_KEYGEN_PUB_LOG" ] || fail keygen-failure-generated-sidecar
 ok temporary-key-generation-failure
 
 # A host-key/fingerprint mismatch remains terminal even though the temporary
 # identity allowed the transport to reach the first-contact capture point.
 FAKE_PROBE_FP=SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-rm -f "$FAKE_IDENTITY_LOG" "$FAKE_MODE_LOG" "$FAKE_ARGS_LOG"
+rm -f "$FAKE_IDENTITY_LOG" "$FAKE_MODE_LOG" "$FAKE_ARGS_LOG" "$FAKE_KEYGEN_PUB_LOG"
 run_probe >/dev/null 2>&1
 [ "$?" -eq 5 ] || fail host-key-mismatch-result
 _mismatch_identity=$(cat "$FAKE_IDENTITY_LOG" 2>/dev/null || printf '')
 [ -n "$_mismatch_identity" ] && probe_workspace_gone "$_mismatch_identity" || fail host-key-mismatch-client-cleanup
+[ ! -e "$_mismatch_identity.pub" ] || fail host-key-mismatch-pub-cleanup
 ok host-key-mismatch-fails-closed
 FAKE_PROBE_FP="$HOST_FP"
 
@@ -227,6 +242,7 @@ env MERV_BASE="$PROBE_BASE" MERV_STATE_ROOT="$TEST_ROOT/state" \
   MERV_SSH_TRUST_QUARANTINE_ROOT="$MERV_SSH_TRUST_QUARANTINE_ROOT" \
   MERV_SSH_TRUST_LOCK_PATH="$MERV_SSH_TRUST_LOCK_PATH" \
   FAKE_KEYGEN_LOG="$FAKE_KEYGEN_LOG" FAKE_IDENTITY_LOG="$FAKE_IDENTITY_LOG" \
+  FAKE_KEYGEN_PUB_LOG="$FAKE_KEYGEN_PUB_LOG" \
   FAKE_MODE_LOG="$FAKE_MODE_LOG" FAKE_ARGS_LOG="$FAKE_ARGS_LOG" \
   FAKE_PROBE_HOST="$FAKE_PROBE_HOST" FAKE_PROBE_KEY="$FAKE_PROBE_KEY" \
   FAKE_PROBE_FP="$HOST_FP" FAKE_KEYGEN_MODE=ok \

@@ -98,6 +98,7 @@ _shkp_cleanup() {
     printf '%s\n' "[ERROR] SSH host-key probe retained recovery workspace $_shkp_root" >&2
   else
     rm -f "$_shkp_root/.ssh/known_hosts" "$_shkp_root/probe_identity" \
+      "$_shkp_root/probe_identity.pub" \
       "$_shkp_root/client.stdout" "$_shkp_root/client.stderr" 2>/dev/null || :
     rmdir "$_shkp_root/.ssh" "$_shkp_root" 2>/dev/null || :
   fi
