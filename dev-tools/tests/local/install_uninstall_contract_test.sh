@@ -188,6 +188,116 @@ if TEST_ROOT="$TEST_ROOT" sh -c '
   if install_bootstrap_full_fresh_context; then exit 6; fi
 '; then :; else fail 'fresh offline tarball bootstrap admission fixture failed'; fi
 
+# Bare installed-source refresh remains available only for a complete active
+# tree. Its classifier gate runs before maintenance admission, while unknown
+# arguments must never become arbitrary modes.
+BARE_HELPERS="$TEST_ROOT/bare-helpers.sh"
+: > "$BARE_HELPERS"
+for helper in parse_install_args settings_file_looks_valid detect_existing_installation install_bare_existing_gate; do
+  extract_function "$INSTALL" "$helper" "$TEST_ROOT/$helper.sh" || fail "bare helper extraction: $helper"
+  cat "$TEST_ROOT/$helper.sh" >> "$BARE_HELPERS"
+done
+if TEST_ROOT="$TEST_ROOT" BARE_HELPERS="$BARE_HELPERS" sh -c '
+  . "$BARE_HELPERS" || exit 1
+  install_path_present() { ls -ld "$1" >/dev/null 2>&1; }
+  reset_args() { MODE=""; BRANCH=main; LEGACY_DEV_ARG=0; TEST_RUN=0; INTERACTIVE_INSTALL=0; }
+  make_valid() {
+    root=$1
+    mkdir -p "$root/settings" "$root/www" || return 1
+    printf "%s\n" "{\"General\":{},\"SSH\":{},\"Nodes\":{},\"SSH_USER\":\"admin\",\"SSH_PORT\":\"22\"}" > "$root/settings/settings.json" || return 1
+    for file in install.sh uninstall.sh mervlan.asp www/index.html settings/lib_json.sh settings/lib_update_state.sh settings/lib_node_reconcile.sh; do
+      : > "$root/$file" || return 1
+    done
+  }
+  reset_args; parse_install_args || exit 2
+  ACTIVE_MERV_BASE="$TEST_ROOT/bare-valid"; make_valid "$ACTIVE_MERV_BASE" || exit 3
+  install_bare_existing_gate || exit 4
+  [ "$INSTALL_STATE" = valid ] && [ "$MODE" = "" ] || exit 5
+
+  reset_args; ACTIVE_MERV_BASE="$TEST_ROOT/bare-absent"; mkdir -p "$ACTIVE_MERV_BASE" || exit 6
+  : > "$ACTIVE_MERV_BASE/install.sh" || exit 7
+  if install_bare_existing_gate > "$TEST_ROOT/bare-absent.out" 2>&1; then exit 8; fi
+  [ "$INSTALL_STATE" = absent ] || exit 9
+  grep -Fq "No existing MerVLAN installation was found" "$TEST_ROOT/bare-absent.out" || exit 10
+  grep -Fq "./install.sh full" "$TEST_ROOT/bare-absent.out" || exit 11
+  [ ! -e "$ACTIVE_MERV_BASE/mutation" ] || exit 12
+
+  reset_args; ACTIVE_MERV_BASE="$TEST_ROOT/bare-partial"; mkdir -p "$ACTIVE_MERV_BASE/settings" || exit 13
+  : > "$ACTIVE_MERV_BASE/settings/settings.json" || exit 13
+  if install_bare_existing_gate > "$TEST_ROOT/bare-partial.out" 2>&1; then exit 14; fi
+  [ "$INSTALL_STATE" = partial ] || exit 15
+  grep -Fq "incomplete or damaged" "$TEST_ROOT/bare-partial.out" || exit 16
+
+  for bad in ful foo; do
+    reset_args
+    if parse_install_args "$bad" > /dev/null 2>&1; then exit 17; fi
+    [ "$MODE" = "" ] || exit 18
+  done
+  for mode in full download tarball credentials reinstall; do
+    reset_args; parse_install_args "$mode" || exit 19
+    [ "$MODE" = "$mode" ] || exit 20
+  done
+  reset_args; parse_install_args full dev || exit 21
+  [ "$MODE" = full ] && [ "$BRANCH" = dev ] || exit 22
+  reset_args; parse_install_args full --test-run || exit 23
+  [ "$MODE" = full ] && [ "$TEST_RUN" = 1 ] || exit 24
+  reset_args
+  if parse_install_args download --test-run > /dev/null 2>&1; then exit 25; fi
+'; then :; else fail 'bare installer mode gate fixture failed'; fi
+
+# A validated staged child has its maintenance support available, but a strict
+# fresh active-tree proof must still take precedence over normal direct
+# admission. Established trees continue through direct admission instead.
+ADMISSION_HELPERS="$TEST_ROOT/admission-helpers.sh"
+: > "$ADMISSION_HELPERS"
+for helper in install_bootstrap_full_fresh_context install_maintenance_admit; do
+  extract_function "$INSTALL" "$helper" "$TEST_ROOT/$helper.sh" || fail "admission helper extraction: $helper"
+  cat "$TEST_ROOT/$helper.sh" >> "$ADMISSION_HELPERS"
+done
+if TEST_ROOT="$TEST_ROOT" ADMISSION_HELPERS="$ADMISSION_HELPERS" sh -c '
+  . "$ADMISSION_HELPERS" || exit 1
+  install_path_present() { ls -ld "$1" >/dev/null 2>&1; }
+  install_path_chain_safe() { case "$1" in /*) ;; *) return 1 ;; esac; [ ! -L "${1%/*}" ] && [ -d "${1%/*}" ]; }
+  fresh_case() {
+    case_root=$1
+    ADDON_DIR="$case_root/addons"; MERV_BASE="$ADDON_DIR/mervlan"; ACTIVE_MERV_BASE="$MERV_BASE"
+    TMP_DIR="$case_root/runtime"; MERV_STATE_ROOT="$case_root/state"; MERV_MAINTENANCE_RECOVERY_ROOT="$case_root/backups"
+    mkdir -p "$MERV_BASE" "$TMP_DIR" || return 1
+    : > "$MERV_BASE/install.sh" || return 1
+  }
+  MODE=full; TEST_RUN=0; MERV_MAINTENANCE_ENTRY_REQUIRED=1
+  MERV_INSTALL_SUPPORT_HANDOFF=1; MERV_INSTALL_HANDOFF_ADOPTED=1
+  MERV_INSTALL_BOOTSTRAP_FRESH=0; DIRECT_CALLED=0
+  fresh_case "$TEST_ROOT/staged" || exit 2
+  merv_maintenance_direct_admit() { DIRECT_CALLED=1; return 1; }
+  install_maintenance_admit >/dev/null || exit 3
+  [ "$MERV_INSTALL_BOOTSTRAP_FRESH" = 1 ] && [ "$DIRECT_CALLED" = 0 ] || exit 4
+
+  for evidence in extra maintenance-lock update-journal update-quiesce state-root recovery-root rollback incomplete; do
+    MODE=full; TEST_RUN=0; MERV_MAINTENANCE_ENTRY_REQUIRED=1; MERV_INSTALL_BOOTSTRAP_FRESH=0
+    fresh_case "$TEST_ROOT/blocked-$evidence" || exit 5
+    case "$evidence" in
+      extra) : > "$MERV_BASE/unexpected" ;;
+      maintenance-lock) mkdir -p "$TMP_DIR/locks"; : > "$TMP_DIR/locks/mervlan_maintenance.lock" ;;
+      update-journal) : > "$TMP_DIR/update.journal" ;;
+      update-quiesce) mkdir -p "$MERV_STATE_ROOT"; : > "$MERV_STATE_ROOT/update.quiesce" ;;
+      state-root) mkdir -p "$MERV_STATE_ROOT" ;;
+      recovery-root) mkdir -p "$MERV_MAINTENANCE_RECOVERY_ROOT" ;;
+      rollback) : > "$ADDON_DIR/.mervlan-install-rollback.test" ;;
+      incomplete) : > "$ADDON_DIR/.mervlan-install-incomplete.test" ;;
+    esac
+    if install_bootstrap_full_fresh_context; then exit 6; fi
+  done
+
+  MODE=full; TEST_RUN=0; MERV_MAINTENANCE_ENTRY_REQUIRED=1
+  MERV_INSTALL_SUPPORT_HANDOFF=0; MERV_INSTALL_BOOTSTRAP_FRESH=0; DIRECT_CALLED=0
+  fresh_case "$TEST_ROOT/established" || exit 7
+  mkdir -p "$MERV_BASE/settings" || exit 8
+  merv_maintenance_direct_admit() { DIRECT_CALLED=1; return 0; }
+  install_maintenance_admit || exit 9
+  [ "$MERV_INSTALL_BOOTSTRAP_FRESH" = 0 ] && [ "$DIRECT_CALLED" = 1 ] || exit 10
+'; then :; else fail 'staged fresh bootstrap admission fixture failed'; fi
+
 # Full uninstall confirmation must be explicit, offer backup deletion, and
 # remove only the MerVLAN/legacy metadata keys from Merlin's flat settings API.
 extract_function "$UNINSTALL" confirm_full_uninstall "$TEST_ROOT/uninstall-helper.sh" || fail 'uninstall confirmation extraction'

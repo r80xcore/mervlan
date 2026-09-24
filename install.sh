@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                    - File: install.sh || version="0.66"                      #
+#                    - File: install.sh || version="0.67"                      #
 # ============================================================================ #
 # - Purpose:    Enable the MerVLAN addon and set up necessary files            #
 #                                                                              #
@@ -99,14 +99,8 @@ parse_install_args() {
                 ;;
             "") : ;;
             *)
-                # Preserve the old no-mode behavior for a lone unknown first
-                # argument, but reject extra flags in the interactive installer.
-                if [ -z "$MODE" ] && [ "$TEST_RUN" = "0" ]; then
-                    MODE="$arg"
-                else
-                    echo "[install] ERROR: Unknown argument: $arg" >&2
-                    return 2
-                fi
+                echo "[install] ERROR: Unknown mode or argument: $arg" >&2
+                return 2
                 ;;
         esac
     done
@@ -411,12 +405,17 @@ install_maintenance_admit() {
         export MERV_MAINTENANCE_DELEGATION_KIND
     fi
 
+    # The detached fresh installer and its authenticated staged child both
+    # retain the exact empty active-tree shape. This proof must precede normal
+    # admission: the staged child has the modern recovery helper, whose normal
+    # direct gate correctly rejects a recovery root that has not yet existed.
+    if install_bootstrap_full_fresh_context; then
+        MERV_INSTALL_BOOTSTRAP_FRESH=1
+        echo "[install] Fresh bootstrap detected; normal maintenance ownership begins after the package is installed"
+        return 0
+    fi
+
     type merv_maintenance_direct_admit >/dev/null 2>&1 || {
-        if [ "$MERV_INSTALL_SUPPORT_HANDOFF" != "1" ] && install_bootstrap_full_fresh_context; then
-            MERV_INSTALL_BOOTSTRAP_FRESH=1
-            echo "[install] Fresh bootstrap detected; normal maintenance ownership begins after the package is installed"
-            return 0
-        fi
         echo "[install] ERROR: maintenance ownership support is unavailable; refusing tree mutation" >&2
         return 1
     }
@@ -1340,6 +1339,39 @@ detect_existing_installation() {
     for marker in uninstall.sh mervlan.asp changelog.txt settings/settings.json functions www tmp .ssh; do
         install_path_present "$ACTIVE_MERV_BASE/$marker" && { INSTALL_STATE="partial"; return 0; }
     done
+}
+
+install_bare_existing_gate() {
+    [ "$MODE" = "" ] || return 0
+    detect_existing_installation
+    case "$INSTALL_STATE" in
+        valid)
+            return 0
+            ;;
+        absent)
+            echo "[install] ERROR: No existing MerVLAN installation was found." >&2
+            echo "" >&2
+            echo "Running install.sh without a mode is only supported for an existing installation." >&2
+            echo "" >&2
+            echo "Available modes:" >&2
+            echo "  full         Full guided installation" >&2
+            echo "  download     Download a package for later installation" >&2
+            echo "  tarball      Install a downloaded package" >&2
+            echo "  credentials  Update SSH credentials on an existing installation" >&2
+            echo "" >&2
+            echo "For a new installation, use:" >&2
+            echo "  ./install.sh full" >&2
+            return 1
+            ;;
+        partial)
+            echo "[install] ERROR: The existing MerVLAN tree is incomplete or damaged; refusing bare local refresh." >&2
+            return 1
+            ;;
+        *)
+            echo "[install] ERROR: Existing MerVLAN installation state is unknown; refusing bare local refresh." >&2
+            return 1
+            ;;
+    esac
 }
 
 digest_active_user_files() {
@@ -3474,6 +3506,7 @@ if [ "$MODE" = "full" ] && [ "$MERV_INSTALL_SUPPORT_HANDOFF" != "1" ] &&
     MERV_INSTALL_WIZARD_DONE=1
 fi
 
+install_bare_existing_gate || exit 1
 install_stage_target_before_admission || {
     echo "[install] ERROR: target package could not be staged and validated before admission" >&2
     exit 1
