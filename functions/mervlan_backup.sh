@@ -107,7 +107,7 @@ mb_begin_durable_recovery() {
 mb_mark_durable_recovery_displaced() {
   [ "$MB_DURABLE_RECOVERY_OWNED" = "1" ] || return 1
   merv_maintenance_recovery_matches restore "$MB_JFFS_OLD" "$MB_JFFS_STAGE" || return 1
-  merv_maintenance_recovery_write restore displaced "$MB_JFFS_OLD" "$MB_JFFS_STAGE"
+  merv_maintenance_recovery_transition restore prepared displaced "$MB_JFFS_OLD" "$MB_JFFS_STAGE"
 }
 
 mb_clear_durable_recovery() {
@@ -275,17 +275,20 @@ mb_reconcile_stale_stages() {
   case "$_mb_recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
     0:active)
       _mb_prepared_old_absent=0
-      if ! ls -ld "$MERV_MAINTENANCE_RECOVERY_OLD" >/dev/null 2>&1 &&
-         [ -d "$MERV_MAINTENANCE_RECOVERY_ROOT" ] &&
-         [ -r "$MERV_MAINTENANCE_RECOVERY_ROOT" ] &&
-         [ -x "$MERV_MAINTENANCE_RECOVERY_ROOT" ]; then
+      if merv_maintenance_recovery_path_absent_authoritative "$MERV_MAINTENANCE_RECOVERY_OLD"; then
         _mb_prepared_old_absent=1
       fi
       if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
          [ "$_mb_prepared_old_absent" -eq 1 ] && \
-         [ ! -L "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
-         [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
+         merv_maintenance_recovery_path_absent_authoritative "$MERV_MAINTENANCE_RECOVERY_STAGE"; then
         _mb_prepared_recovery=1
+        _mb_prepared_stage_absent=1
+      elif [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+           [ "$_mb_prepared_old_absent" -eq 1 ] && \
+           [ ! -L "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
+           [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ]; then
+        _mb_prepared_recovery=1
+        _mb_prepared_stage_absent=0
       else
         error -c cli,vlan "An unresolved ${MERV_MAINTENANCE_RECOVERY_KIND} transaction protects recovery trees; use $MB_RECOVERY_SCRIPT after inspection"
         return 1
@@ -313,8 +316,12 @@ mb_reconcile_stale_stages() {
     return 0
   fi
   if [ "${_mb_prepared_recovery:-0}" = "1" ]; then
-    if ! mb_remove_jffs_stage "$MERV_MAINTENANCE_RECOVERY_STAGE" || \
-       ! merv_maintenance_recovery_clear; then
+    if [ "${_mb_prepared_stage_absent:-0}" != "1" ] &&
+       ! mb_remove_jffs_stage "$MERV_MAINTENANCE_RECOVERY_STAGE"; then
+      error -c cli,vlan "Could not retire an abandoned pre-activation restore stage; maintenance is blocked"
+      return 1
+    fi
+    if ! merv_maintenance_recovery_clear; then
       error -c cli,vlan "Could not retire an abandoned pre-activation restore stage; maintenance is blocked"
       return 1
     fi

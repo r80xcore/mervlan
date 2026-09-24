@@ -112,6 +112,68 @@ merv_maintenance_recovery_write() {
   }
 }
 
+# Advance one exact, already-owned durable transaction phase. Creation above
+# is intentionally create-only; callers must use this authenticated transition
+# instead of overwriting a marker or recreating it between activation steps.
+merv_maintenance_recovery_transition() {
+  _mmrt_kind="$1" _mmrt_expected="$2" _mmrt_next="$3" _mmrt_old="$4" _mmrt_stage="$5"
+  case "$_mmrt_kind:$_mmrt_expected:$_mmrt_next" in
+    restore:prepared:displaced|recovery:prepared:displaced) ;;
+    *) return 1 ;;
+  esac
+  merv_maintenance_recovery_read || return 1
+  [ "${MERV_MAINTENANCE_RECOVERY_STATUS:-}" = active ] || return 1
+  [ "${MERV_MAINTENANCE_RECOVERY_KIND:-}" = "$_mmrt_kind" ] || return 1
+  [ "${MERV_MAINTENANCE_RECOVERY_PHASE:-}" = "$_mmrt_expected" ] || return 1
+  [ "${MERV_MAINTENANCE_RECOVERY_OLD:-}" = "$_mmrt_old" ] || return 1
+  [ "${MERV_MAINTENANCE_RECOVERY_STAGE:-}" = "$_mmrt_stage" ] || return 1
+  _mmrt_old_component=$(merv_maintenance_recovery_path_component "$_mmrt_old") || return 1
+  _mmrt_stage_component=$(merv_maintenance_recovery_path_component "$_mmrt_stage") || return 1
+  [ ! -L "$MERV_MAINTENANCE_RECOVERY_MARKER" ] &&
+    [ -f "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || return 1
+  merv_maintenance_recovery_root_prepare || return 1
+  chmod 700 "$MERV_MAINTENANCE_RECOVERY_ROOT" 2>/dev/null || return 1
+  : "${MERV_MAINTENANCE_RECOVERY_SEQ:=0}"
+  MERV_MAINTENANCE_RECOVERY_SEQ=$((MERV_MAINTENANCE_RECOVERY_SEQ + 1))
+  _mmrt_tmp="$MERV_MAINTENANCE_RECOVERY_MARKER.tmp.$$.${MERV_MAINTENANCE_RECOVERY_SEQ}"
+  case "$_mmrt_tmp" in
+    "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.recovery.tmp.*) ;;
+    *) return 1 ;;
+  esac
+  [ ! -e "$_mmrt_tmp" ] && [ ! -L "$_mmrt_tmp" ] || return 1
+  ( umask 077
+    {
+      printf 'format=1\n'
+      printf 'kind=%s\n' "$_mmrt_kind"
+      printf 'phase=%s\n' "$_mmrt_next"
+      printf 'old=%s\n' "$_mmrt_old_component"
+      printf 'stage=%s\n' "$_mmrt_stage_component"
+    } > "$_mmrt_tmp"
+  ) 2>/dev/null || { rm -f "$_mmrt_tmp" 2>/dev/null || :; return 1; }
+  chmod 600 "$_mmrt_tmp" 2>/dev/null || {
+    rm -f "$_mmrt_tmp" 2>/dev/null || :
+    return 1
+  }
+  mv -f "$_mmrt_tmp" "$MERV_MAINTENANCE_RECOVERY_MARKER" 2>/dev/null || {
+    rm -f "$_mmrt_tmp" 2>/dev/null || :
+    return 1
+  }
+  return 0
+}
+
+merv_maintenance_recovery_path_absent_authoritative() {
+  _mmra_path="$1"
+  case "$_mmra_path" in
+    "$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.old.*|"$MERV_MAINTENANCE_RECOVERY_ROOT"/.mervlan.new.*) ;;
+    *) return 1 ;;
+  esac
+  merv_maintenance_recovery_path_component "$_mmra_path" >/dev/null || return 1
+  merv_maintenance_recovery_object_present "$_mmra_path" && return 1
+  _mmra_parent=${_mmra_path%/*}
+  [ ! -L "$_mmra_parent" ] && [ -d "$_mmra_parent" ] &&
+    [ -r "$_mmra_parent" ] && [ -x "$_mmra_parent" ]
+}
+
 merv_maintenance_recovery_read() {
   MERV_MAINTENANCE_RECOVERY_STATUS=absent
   MERV_MAINTENANCE_RECOVERY_KIND=""
@@ -174,11 +236,13 @@ merv_maintenance_recovery_read() {
 }
 
 merv_maintenance_recovery_matches() {
-  _mmr_kind="$1" _mmr_old="$2" _mmr_stage="$3"
+  _mmrm_expected_kind="$1"
+  _mmrm_expected_old="$2"
+  _mmrm_expected_stage="$3"
   merv_maintenance_recovery_read || return 1
-  [ "$MERV_MAINTENANCE_RECOVERY_KIND" = "$_mmr_kind" ] && \
-    [ "$MERV_MAINTENANCE_RECOVERY_OLD" = "$_mmr_old" ] && \
-    [ "$MERV_MAINTENANCE_RECOVERY_STAGE" = "$_mmr_stage" ]
+  [ "$MERV_MAINTENANCE_RECOVERY_KIND" = "$_mmrm_expected_kind" ] && \
+    [ "$MERV_MAINTENANCE_RECOVERY_OLD" = "$_mmrm_expected_old" ] && \
+    [ "$MERV_MAINTENANCE_RECOVERY_STAGE" = "$_mmrm_expected_stage" ]
 }
 
 merv_maintenance_recovery_clear() {

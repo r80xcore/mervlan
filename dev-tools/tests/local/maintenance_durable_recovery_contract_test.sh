@@ -29,8 +29,20 @@ done
 
 extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_reconcile_stale_stages \
   "$TEST_ROOT/extracted/mb_reconcile.sh" || fail 'backup reconciler extraction'
+extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_begin_durable_recovery \
+  "$TEST_ROOT/extracted/mb_begin_recovery.sh" || fail 'Backup recovery begin extraction'
+extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_mark_durable_recovery_displaced \
+  "$TEST_ROOT/extracted/mb_mark_displaced.sh" || fail 'Backup recovery transition extraction'
+extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_clear_durable_recovery \
+  "$TEST_ROOT/extracted/mb_clear_recovery.sh" || fail 'Backup recovery clear extraction'
 extract_function "$BASE_DIR/functions/mervlan_backup.sh" mb_install_recovery_helper \
   "$TEST_ROOT/extracted/mb_install_recovery_helper.sh" || fail 'Recovery helper publisher extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_begin_durable_recovery \
+  "$TEST_ROOT/extracted/recovery_begin.sh" || fail 'standalone Recovery begin extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_mark_durable_recovery_displaced \
+  "$TEST_ROOT/extracted/recovery_mark_displaced.sh" || fail 'standalone Recovery transition extraction'
+extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_clear_durable_recovery \
+  "$TEST_ROOT/extracted/recovery_clear.sh" || fail 'standalone Recovery clear extraction'
 extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_reconcile_stale_stages \
   "$TEST_ROOT/extracted/recovery_reconcile.sh" || fail 'Recovery reconciler extraction'
 extract_function "$BASE_DIR/functions/mervlan_recover.sh" recovery_path_present \
@@ -90,7 +102,13 @@ update_tree_valid() { recovery_tree_valid "$1"; }
 update_remove_jffs_stage() { rm -rf "$1"; }
 
 . "$TEST_ROOT/extracted/mb_reconcile.sh" || fail 'backup reconciler load'
+. "$TEST_ROOT/extracted/mb_begin_recovery.sh" || fail 'Backup recovery begin load'
+. "$TEST_ROOT/extracted/mb_mark_displaced.sh" || fail 'Backup recovery transition load'
+. "$TEST_ROOT/extracted/mb_clear_recovery.sh" || fail 'Backup recovery clear load'
 . "$TEST_ROOT/extracted/mb_install_recovery_helper.sh" || fail 'Recovery helper publisher load'
+. "$TEST_ROOT/extracted/recovery_begin.sh" || fail 'standalone Recovery begin load'
+. "$TEST_ROOT/extracted/recovery_mark_displaced.sh" || fail 'standalone Recovery transition load'
+. "$TEST_ROOT/extracted/recovery_clear.sh" || fail 'standalone Recovery clear load'
 . "$TEST_ROOT/extracted/recovery_update_state.sh" || fail 'Recovery Update-state load'
 . "$TEST_ROOT/extracted/recovery_drop_update_stages.sh" || fail 'Recovery Update-stage cleanup load'
 . "$TEST_ROOT/extracted/recovery_reconcile.sh" || fail 'Recovery reconciler load'
@@ -125,6 +143,80 @@ MB_RECOVERY_SCRIPT="$TEST_ROOT/backups/recover.sh"
 
 old="$TEST_ROOT/backups/.mervlan.old.4242"
 stage="$TEST_ROOT/backups/.mervlan.new.4242"
+
+reset_recovery_fixture() {
+  rm -rf "$old" "$stage" "$MERV_MAINTENANCE_RECOVERY_MARKER" || exit 1
+  mkdir -p "$old" "$stage" || exit 1
+  : > "$old/sentinel"
+  : > "$stage/sentinel"
+}
+
+assert_marker() {
+  _mdr_kind="$1" _mdr_phase="$2"
+  merv_maintenance_recovery_read || fail "marker read $_mdr_kind/$_mdr_phase"
+  [ "$MERV_MAINTENANCE_RECOVERY_KIND" = "$_mdr_kind" ] || fail "marker kind $_mdr_kind/$_mdr_phase"
+  [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "$_mdr_phase" ] || fail "marker phase $_mdr_kind/$_mdr_phase"
+  [ "$MERV_MAINTENANCE_RECOVERY_OLD" = "$old" ] || fail "marker old $_mdr_kind/$_mdr_phase"
+  [ "$MERV_MAINTENANCE_RECOVERY_STAGE" = "$stage" ] || fail "marker stage $_mdr_kind/$_mdr_phase"
+}
+
+# Exercise the real Restore and standalone Recovery begin/transition/clear
+# callers.  Directly writing a displaced marker would not catch the original
+# create-only writer bug.
+reset_recovery_fixture
+MB_JFFS_OLD="$old"; MB_JFFS_STAGE="$stage"; MB_DURABLE_RECOVERY_OWNED=0
+mb_begin_durable_recovery || fail 'Backup recovery begin'
+assert_marker restore prepared
+mb_mark_durable_recovery_displaced || fail 'Backup recovery prepared-to-displaced transition'
+assert_marker restore displaced
+mb_clear_durable_recovery || fail 'Backup recovery clear'
+[ ! -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Backup recovery marker remained after clear'
+pass 'Backup Restore durable recovery transitions prepared to displaced'
+
+reset_recovery_fixture
+RECOVERY_JFFS_OLD="$old"; RECOVERY_JFFS_STAGE="$stage"; RECOVERY_DURABLE_RECOVERY_OWNED=0
+recovery_begin_durable_recovery || fail 'standalone Recovery begin'
+assert_marker recovery prepared
+recovery_mark_durable_recovery_displaced || fail 'standalone Recovery prepared-to-displaced transition'
+assert_marker recovery displaced
+recovery_clear_durable_recovery || fail 'standalone Recovery clear'
+[ ! -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'standalone Recovery marker remained after clear'
+pass 'standalone Recovery durable recovery transitions prepared to displaced'
+
+# Creation remains create-only, and only the authenticated prepared-to-
+# displaced transition is allowed.
+reset_recovery_fixture
+merv_maintenance_recovery_write restore prepared "$old" "$stage" || fail 'prepared marker creation'
+if merv_maintenance_recovery_write recovery prepared "$old" "$stage"; then fail 'creation overwrote existing marker'; fi
+assert_marker restore prepared
+if merv_maintenance_recovery_transition recovery prepared displaced "$old" "$stage"; then fail 'wrong kind transition'; fi
+assert_marker restore prepared
+if merv_maintenance_recovery_transition restore prepared displaced "$old.bad" "$stage"; then fail 'wrong old-path transition'; fi
+assert_marker restore prepared
+if merv_maintenance_recovery_transition restore prepared displaced "$old" "$stage.bad"; then fail 'wrong stage-path transition'; fi
+assert_marker restore prepared
+if merv_maintenance_recovery_transition restore displaced displaced "$old" "$stage"; then fail 'wrong expected phase transition'; fi
+assert_marker restore prepared
+if merv_maintenance_recovery_transition restore prepared prepared "$old" "$stage"; then fail 'unsupported transition'; fi
+assert_marker restore prepared
+printf 'format=1\nkind=restore\nphase=prepared\nold=../../outside\nstage=.mervlan.new.4242\n' > "$TEST_ROOT/malformed-marker" || exit 1
+cp -p "$TEST_ROOT/malformed-marker" "$MERV_MAINTENANCE_RECOVERY_MARKER" || exit 1
+if merv_maintenance_recovery_transition restore prepared displaced "$old" "$stage"; then fail 'malformed marker transition'; fi
+cmp -s "$TEST_ROOT/malformed-marker" "$MERV_MAINTENANCE_RECOVERY_MARKER" || fail 'malformed marker changed'
+rm -f "$MERV_MAINTENANCE_RECOVERY_MARKER"
+merv_maintenance_recovery_write restore prepared "$old" "$stage" || fail 'symlink fixture marker creation'
+rm -f "$MERV_MAINTENANCE_RECOVERY_MARKER"
+ln -s "$old/sentinel" "$MERV_MAINTENANCE_RECOVERY_MARKER" || exit 1
+if merv_maintenance_recovery_transition restore prepared displaced "$old" "$stage"; then fail 'symlink marker transition'; fi
+[ -L "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'symlink marker was replaced'
+rm -f "$MERV_MAINTENANCE_RECOVERY_MARKER"
+merv_maintenance_recovery_write restore displaced "$old" "$stage" || fail 'displaced marker fixture creation'
+if merv_maintenance_recovery_transition restore displaced displaced "$old" "$stage"; then fail 'displaced-to-displaced transition'; fi
+assert_marker restore displaced
+merv_maintenance_recovery_clear || fail 'transition rejection fixture cleanup'
+pass 'durable recovery transition rejects foreign, malformed, symlink, and unsupported state'
+
+reset_recovery_fixture
 mkdir -p "$old" "$stage" || exit 1
 : > "$old/sentinel"
 : > "$stage/sentinel"
@@ -196,6 +288,33 @@ merv_update_quiesce_clear || fail 'Backup Update quiesce cleanup'
 merv_update_journal_clear || fail 'Backup Update journal cleanup'
 rm -rf "$old" "$stage"
 pass 'Backup and Recovery preserve stages protected by prior Update state'
+
+# A fully rolled-back prepared transaction has no exact old or stage tree left.
+# With a complete active tree this is safe to retire, but only this exact state
+# is reclaimable; malformed or displaced state remains protected below.
+reset_recovery_fixture
+rm -rf "$old" "$stage"
+merv_maintenance_recovery_write restore prepared "$old" "$stage" || fail 'fully rolled-back prepared marker write'
+mb_reconcile_stale_stages || fail 'Backup did not retire fully rolled-back prepared state'
+[ ! -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Backup retained fully rolled-back prepared marker'
+pass 'Backup retires prepared state when active tree and exact recorded trees are reconciled'
+
+reset_recovery_fixture
+rm -rf "$old" "$stage"
+merv_maintenance_recovery_write recovery prepared "$old" "$stage" || fail 'Recovery fully rolled-back prepared marker write'
+recovery_reconcile_stale_stages || fail 'Recovery did not retire fully rolled-back prepared state'
+[ ! -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Recovery retained fully rolled-back prepared marker'
+pass 'standalone Recovery retires fully rolled-back prepared state'
+
+reset_recovery_fixture
+rm -rf "$old" "$stage"
+merv_maintenance_recovery_write restore displaced "$old" "$stage" || fail 'displaced missing-tree marker write'
+if mb_reconcile_stale_stages; then fail 'Backup guessed away displaced missing-tree state'; fi
+[ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Backup cleared displaced missing-tree marker'
+recovery_reconcile_stale_stages || fail 'Recovery rejected preserved displaced missing-tree state'
+[ -e "$MERV_MAINTENANCE_RECOVERY_MARKER" ] || fail 'Recovery cleared displaced missing-tree marker'
+merv_maintenance_recovery_clear || fail 'displaced missing-tree fixture cleanup'
+pass 'displaced state with missing trees remains protected'
 
 mkdir -p "$old" "$stage" || exit 1
 : > "$old/sentinel"

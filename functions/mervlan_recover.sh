@@ -515,7 +515,7 @@ recovery_begin_durable_recovery() {
 recovery_mark_durable_recovery_displaced() {
   [ "$RECOVERY_DURABLE_RECOVERY_OWNED" = "1" ] || return 0
   merv_maintenance_recovery_matches recovery "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE" || return 1
-  merv_maintenance_recovery_write recovery displaced "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE"
+  merv_maintenance_recovery_transition recovery prepared displaced "$RECOVERY_JFFS_OLD" "$RECOVERY_JFFS_STAGE"
 }
 
 recovery_clear_durable_recovery() {
@@ -617,10 +617,15 @@ recovery_reconcile_stale_stages() {
   case "$recovery_state_rc:${MERV_MAINTENANCE_RECOVERY_STATUS:-unknown}" in
     0:active)
       if [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
-         ! recovery_path_present "$MERV_MAINTENANCE_RECOVERY_OLD" && \
-         [ ! -L "$MERV_MAINTENANCE_RECOVERY_STAGE" ] &&
-         [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
+         merv_maintenance_recovery_path_absent_authoritative "$MERV_MAINTENANCE_RECOVERY_OLD" && \
+         merv_maintenance_recovery_path_absent_authoritative "$MERV_MAINTENANCE_RECOVERY_STAGE" && \
          recovery_tree_valid "$MERVLAN_RECOVERY_ACTIVE_ROOT"; then
+        merv_maintenance_recovery_clear || return 1
+      elif [ "$MERV_MAINTENANCE_RECOVERY_PHASE" = "prepared" ] && \
+           merv_maintenance_recovery_path_absent_authoritative "$MERV_MAINTENANCE_RECOVERY_OLD" && \
+           [ ! -L "$MERV_MAINTENANCE_RECOVERY_STAGE" ] &&
+           [ -d "$MERV_MAINTENANCE_RECOVERY_STAGE" ] && \
+           recovery_tree_valid "$MERVLAN_RECOVERY_ACTIVE_ROOT"; then
         rm -rf "$MERV_MAINTENANCE_RECOVERY_STAGE" 2>/dev/null && \
           merv_maintenance_recovery_clear || return 1
       else
