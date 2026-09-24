@@ -493,13 +493,40 @@ merv_maintenance_delegation_valid() {
 # Acquire the shared maintenance owner for a standalone tree-mutating entry
 # point, or authenticate a delegated child already running under that owner.
 # Callers must invoke merv_maintenance_direct_release on every terminal path.
+#
+# The fresh-bootstrap mode is deliberately narrower than ordinary admission.
+# The installer has already proved the exact detached/bootstrap-only shape and
+# that the recovery root is absent.  It still acquires the same canonical
+# owner, prepares that missing root only after ownership is live, and then
+# runs the ordinary recovery/update gates.  Normal callers retain the
+# fail-closed behavior for an absent recovery root.
 merv_maintenance_direct_admit() {
-  local _mda_lock
+  local _mda_mode="${1:-normal}" _mda_lock _mda_fresh=0
+  case "$_mda_mode" in
+    normal) ;;
+    fresh-bootstrap) _mda_fresh=1 ;;
+    *) return 1 ;;
+  esac
+
+  if [ "$_mda_fresh" = "1" ]; then
+    type merv_maintenance_recovery_root_chain_safe >/dev/null 2>&1 || return 1
+    type merv_maintenance_recovery_object_present >/dev/null 2>&1 || return 1
+    type merv_maintenance_recovery_root_prepare >/dev/null 2>&1 || return 1
+    [ -n "${MERV_MAINTENANCE_RECOVERY_ROOT:-}" ] || return 1
+    # This is a read-only precondition.  The strict installer predicate is
+    # the authority that proves the complete fresh shape; this guard prevents
+    # the narrow mode from being used to bypass an existing recovery object.
+    merv_maintenance_recovery_root_chain_safe || return 1
+    merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_ROOT" && return 1
+  fi
+
   _mda_lock=$(merv_update_maintenance_lock_path) || return 1
   MERV_MAINTENANCE_ENTRY_OWNED=0
   MERV_MAINTENANCE_ENTRY_DELEGATED=0
   MERV_MAINTENANCE_ENTRY_LOCK="$_mda_lock"
-  if merv_maintenance_delegation_valid; then
+  # A genuine fresh bootstrap must claim the canonical owner itself.  Do not
+  # turn an externally supplied delegation environment into fresh authority.
+  if [ "$_mda_fresh" = "0" ] && merv_maintenance_delegation_valid; then
     MERV_MAINTENANCE_ENTRY_DELEGATED=1
     return 0
   fi
@@ -508,6 +535,18 @@ merv_maintenance_direct_admit() {
   MERV_MAINTENANCE_ENTRY_NONCE="${MERV_LOCK_NONCE:-}"
   MERV_MAINTENANCE_ENTRY_START="${MERV_LOCK_START:-}"
   MERV_MAINTENANCE_ENTRY_OWNED=1
+
+  if [ "$_mda_fresh" = "1" ]; then
+    # Recheck after claiming the owner so a concurrent appearance cannot be
+    # mistaken for the root proven absent by the installer.
+    if merv_maintenance_recovery_object_present "$MERV_MAINTENANCE_RECOVERY_ROOT" ||
+       ! merv_maintenance_recovery_root_prepare ||
+       ! chmod 700 "$MERV_MAINTENANCE_RECOVERY_ROOT" 2>/dev/null; then
+      merv_maintenance_direct_release >/dev/null 2>&1 || :
+      return 1
+    fi
+  fi
+
   # Ownership is necessary but not sufficient for ordinary install/uninstall
   # entry. An interrupted Update/Restore marker or unbound activation tree is
   # owned by the explicit recovery path, not by this new caller.

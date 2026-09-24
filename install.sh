@@ -409,9 +409,26 @@ install_maintenance_admit() {
     # retain the exact empty active-tree shape. This proof must precede normal
     # admission: the staged child has the modern recovery helper, whose normal
     # direct gate correctly rejects a recovery root that has not yet existed.
+    # The narrow fresh-bootstrap admission acquires the canonical owner and
+    # prepares that missing root before any external or persistent mutation.
     if install_bootstrap_full_fresh_context; then
+        type merv_maintenance_direct_admit >/dev/null 2>&1 || {
+            echo "[install] ERROR: fresh-bootstrap maintenance ownership support is unavailable; refusing tree mutation" >&2
+            return 1
+        }
+        if ! merv_maintenance_direct_admit fresh-bootstrap; then
+            echo "[install] ERROR: fresh-bootstrap maintenance ownership could not be acquired safely" >&2
+            return 1
+        fi
+        if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
+           ! merv_maintenance_direct_export_install_context; then
+            merv_maintenance_direct_release >/dev/null 2>&1 || :
+            echo "[install] ERROR: could not export authenticated fresh-bootstrap maintenance context" >&2
+            return 1
+        fi
+        MERV_MAINTENANCE_ENTRY_ADMITTED=1
         MERV_INSTALL_BOOTSTRAP_FRESH=1
-        echo "[install] Fresh bootstrap detected; normal maintenance ownership begins after the package is installed"
+        echo "[install] Fresh bootstrap admitted under canonical maintenance ownership"
         return 0
     fi
 
@@ -438,6 +455,7 @@ install_maintenance_admit() {
 # from that package, authenticate the new owner record, and only then continue
 # with settings, hardware, WebUI, and hook mutations.
 install_bootstrap_transition() {
+    local _ibt_lock _ibt_nonce _ibt_start _ibt_owned
     [ "${MERV_INSTALL_BOOTSTRAP_FRESH:-0}" = "1" ] || return 0
     [ "$MODE" = full ] || [ "$MODE" = tarball ] || return 1
     [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || return 1
@@ -445,20 +463,38 @@ install_bootstrap_transition() {
     [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ] &&
         [ -r "$MERV_BASE/settings/lib_update_state.sh" ] &&
         [ -r "$MERV_BASE/settings/lib_maintenance_recovery.sh" ] || return 1
-    unset LIB_OWNER_LOCK_LOADED LIB_UPDATE_STATE_LOADED LIB_MAINTENANCE_RECOVERY_LOADED
+
+    # Fresh admission already owns the canonical lock. Preserve that exact
+    # tuple while switching the support root from the private staged package
+    # to the now-active tree; never acquire a second owner after activation.
+    _ibt_lock="${MERV_MAINTENANCE_ENTRY_LOCK:-}"
+    _ibt_nonce="${MERV_MAINTENANCE_ENTRY_NONCE:-}"
+    _ibt_start="${MERV_MAINTENANCE_ENTRY_START:-}"
+    _ibt_owned="${MERV_MAINTENANCE_ENTRY_OWNED:-0}"
+    [ "$_ibt_owned" = "1" ] || return 1
+    type merv_owner_v2_matches >/dev/null 2>&1 || return 1
+    merv_owner_v2_matches "$_ibt_lock" "$$" "$_ibt_start" "$_ibt_nonce" || return 1
+
+    unset LIB_IDENTITY_LOADED LIB_OWNER_LOCK_LOADED LIB_UPDATE_STATE_LOADED LIB_MAINTENANCE_RECOVERY_LOADED
     . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || return 1
     . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || return 1
     . "$MERV_BASE/settings/lib_maintenance_recovery.sh" 2>/dev/null || return 1
     MERV_SUPPORT_ROOT="$MERV_BASE"
-    if ! merv_maintenance_direct_admit; then
-        echo "[install] ERROR: fresh package could not enter canonical maintenance ownership" >&2
-        return 1
-    fi
-    if [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = "1" ] &&
-       ! merv_maintenance_direct_export_install_context; then
-        merv_maintenance_direct_release >/dev/null 2>&1 || :
-        return 1
-    fi
+
+    # Rebind the entry state after sourcing the active cohort and verify that
+    # the same owner is still authoritative. The private stage is removed by
+    # install_activate_staged_package(), so no later operation may depend on
+    # its support files.
+    MERV_MAINTENANCE_ENTRY_LOCK="$_ibt_lock"
+    MERV_MAINTENANCE_ENTRY_NONCE="$_ibt_nonce"
+    MERV_MAINTENANCE_ENTRY_START="$_ibt_start"
+    MERV_MAINTENANCE_ENTRY_OWNED=1
+    MERV_MAINTENANCE_ENTRY_DELEGATED=0
+    merv_owner_v2_matches "$MERV_MAINTENANCE_ENTRY_LOCK" "$$" \
+        "$MERV_MAINTENANCE_ENTRY_START" "$MERV_MAINTENANCE_ENTRY_NONCE" || return 1
+    merv_maintenance_recovery_direct_gate || return 1
+    merv_update_direct_admission_gate || return 1
+    merv_maintenance_direct_export_install_context || return 1
     MERV_MAINTENANCE_ENTRY_ADMITTED=1
     MERV_INSTALL_BOOTSTRAP_FRESH=0
     return 0

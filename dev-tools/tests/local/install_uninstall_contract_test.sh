@@ -53,7 +53,10 @@ grep -Fq 'SOURCE_REF="refs/heads/$BRANCH"' "$INSTALL" || fail 'custom installer 
 grep -Fq 'am_settings_set mervlan_version "$MERVLAN_VERSION"' "$INSTALL" || fail 'installer MerVLAN version metadata write missing'
 grep -Fq 'metadata version verification' "$INSTALL" || fail 'installer MerVLAN version metadata verification missing'
 grep -Fq 'install_bootstrap_full_fresh_context' "$INSTALL" || fail 'fresh bootstrap admission helper missing'
-grep -Fq 'Fresh bootstrap detected; normal maintenance ownership begins after the package is installed' "$INSTALL" || fail 'fresh bootstrap admission missing'
+grep -Fq 'merv_maintenance_direct_admit fresh-bootstrap' "$INSTALL" || fail 'fresh bootstrap does not use narrow canonical admission'
+grep -Fq 'Fresh bootstrap admitted under canonical maintenance ownership' "$INSTALL" || fail 'fresh bootstrap ownership admission message missing'
+! grep -Fq 'normal maintenance ownership begins after the package is installed' "$INSTALL" || fail 'fresh bootstrap still has an ownerless admission message'
+grep -Fq 'MERV_MAINTENANCE_ENTRY_ADMITTED=1' "$INSTALL" || fail 'fresh bootstrap admission is not marked active'
 grep -Fq 'install_staged_handoff_adopt() {' "$INSTALL" || fail 'staged installer handoff admission helper missing'
 grep -Fq 'install_staged_handoff_write() {' "$INSTALL" || fail 'staged installer handoff writer missing'
 grep -Fq 'MERV_INSTALL_SCRIPT_PATH" = "$MERV_INSTALL_STAGED_ROOT/install.sh' "$INSTALL" || fail 'staged child does not bind its own installer path'
@@ -269,9 +272,11 @@ if TEST_ROOT="$TEST_ROOT" ADMISSION_HELPERS="$ADMISSION_HELPERS" sh -c '
   MERV_INSTALL_SUPPORT_HANDOFF=1; MERV_INSTALL_HANDOFF_ADOPTED=1
   MERV_INSTALL_BOOTSTRAP_FRESH=0; DIRECT_CALLED=0
   fresh_case "$TEST_ROOT/staged" || exit 2
-  merv_maintenance_direct_admit() { DIRECT_CALLED=1; return 1; }
+  merv_maintenance_direct_admit() { [ "$1" = fresh-bootstrap ] || return 1; DIRECT_CALLED=1; return 0; }
+  merv_maintenance_direct_export_install_context() { return 0; }
   install_maintenance_admit >/dev/null || exit 3
-  [ "$MERV_INSTALL_BOOTSTRAP_FRESH" = 1 ] && [ "$DIRECT_CALLED" = 0 ] || exit 4
+  [ "$MERV_INSTALL_BOOTSTRAP_FRESH" = 1 ] && [ "$DIRECT_CALLED" = 1 ] &&
+    [ "$MERV_MAINTENANCE_ENTRY_ADMITTED" = 1 ] || exit 4
 
   for evidence in extra maintenance-lock update-journal update-quiesce state-root recovery-root rollback incomplete; do
     MODE=full; TEST_RUN=0; MERV_MAINTENANCE_ENTRY_REQUIRED=1; MERV_INSTALL_BOOTSTRAP_FRESH=0

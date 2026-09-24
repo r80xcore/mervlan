@@ -760,16 +760,25 @@ enable_cron_now() {
 disable_cron_now() {
   if [ -z "$CRU_BIN" ]; then
     warn -c vlan,cli "Cron disable skipped: cru command not available"
-    return 0
+    return 1
   fi
 
   "$CRU_BIN" d "$CRON_NAME" 2>/dev/null
 
-  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
+  _dcn_cron_list=$("$CRU_BIN" l 2>/dev/null)
+  _dcn_cron_list_rc=$?
+  if [ "$_dcn_cron_list_rc" -ne 0 ]; then
+    warn -c vlan,cli "Cron disable verification failed; could not list cron entries"
+    return 1
+  fi
+
+  if printf '%s\n' "$_dcn_cron_list" | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
     warn -c vlan,cli "Cron disable verification failed; entry still present"
+    return 1
   else
     info -c vlan,cli "Cron disabled: $CRON_NAME"
   fi
+  return 0
 }
 
 # =============================================================================== #
@@ -1114,6 +1123,10 @@ case "$ACTION" in
       if ! is_node; then
         info -c vlan,cli "Not flagged as node; skipping nodedisable"
         exit 0
+      fi
+      if ! disable_cron_now; then
+        error -c vlan,cli "Could not disable MerVLAN health cron on node"
+        exit 1
       fi
       # Remove node service-event wrapper injection if present
       if [ -f "$SERVICE_EVENT_WRAPPER" ]; then

@@ -1155,7 +1155,6 @@ if [ "$ACTION" = "full" ]; then
         exit 1
     }
     rm -rf /jffs/addons/mervlan 2>/dev/null
-    rm -rf /tmp/mervlan_tmp 2>/dev/null
     rm -rf /www/user/mervlan 2>/dev/null
     if [ "$FULL_NODE_CLEANUP_OK" = "1" ]; then
         case "$MERV_STATE_ROOT" in
@@ -1179,4 +1178,7 @@ if ! uninstall_maintenance_release; then
     exit 1
 fi
 trap - EXIT
+if [ "$ACTION" = "full" ]; then
+    rm -rf /tmp/mervlan_tmp 2>/dev/null
+fi
 exit 0
