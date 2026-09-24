@@ -994,7 +994,11 @@ if [ "$ACTION" != "reinstall" ]; then
         # Only attempt teardown when the boot helper script is available
         if [ -x "$BOOT_SCRIPT" ]; then
             logger -t "$LOGTAG" "Pre-uninstall: disabling hooks locally and on nodes"
-            if ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+            if [ "$ACTION" = "full" ]; then
+                if ! MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
+                    logger -t "$LOGTAG" "WARNING: mervlan_boot.sh local disable failed pre-uninstall"
+                fi
+            elif ! sh "$BOOT_SCRIPT" disable >/dev/null 2>&1; then
                 logger -t "$LOGTAG" "WARNING: mervlan_boot.sh disable failed pre-uninstall"
             fi
             if [ "$ACTION" != "full" ] && ! sh "$BOOT_SCRIPT" nodedisable >/dev/null 2>&1; then

@@ -1138,11 +1138,22 @@ case "$ACTION" in
       # Remove both node-owned services-start blocks.  disable normally removes
       # the active manager block first, but nodedisable is deliberately complete
       # and idempotent when called on its own during recovery/uninstall.
+      _nodedisable_failed=0
       if [ -f "$SERVICES_START" ]; then
-        remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" \
-          || warn -c vlan,cli "Failed to remove services-start block"
-        remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" \
-          || warn -c vlan,cli "Failed to remove addon boot block"
+        if ! remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START"; then
+          error -c vlan,cli "Failed to remove services-start block"
+          _nodedisable_failed=1
+        elif marker_present "$TEMPLATE_SERVICES" "$SERVICES_START"; then
+          error -c vlan,cli "Manager services-start block remains after nodedisable"
+          _nodedisable_failed=1
+        fi
+        if ! remove_template_block "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START"; then
+          error -c vlan,cli "Failed to remove addon boot block"
+          _nodedisable_failed=1
+        elif marker_present "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START"; then
+          error -c vlan,cli "Addon boot block remains after nodedisable"
+          _nodedisable_failed=1
+        fi
       fi
       # Tear down MERV_QT quarantine chain on this node
       if type ebtables >/dev/null 2>&1; then
@@ -1162,6 +1173,7 @@ case "$ACTION" in
         error -c vlan,cli "MERV_MAC: could not remove persistent shield database files"
         exit 1
       fi
+      [ "$_nodedisable_failed" -eq 0 ] || exit 1
       exit 0
     fi
 

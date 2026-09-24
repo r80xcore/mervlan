@@ -130,6 +130,8 @@ remote_line=$(grep -n 'remove_nodes_full_install; then' "$UNINSTALL" | cut -d: -
 local_line=$(grep -n 'rm -rf /jffs/addons/mervlan' "$UNINSTALL" | tail -n 1 | cut -d: -f1)
 [ -n "$remote_line" ] && [ -n "$local_line" ] && [ "$remote_line" -lt "$local_line" ] || fail remote-before-local
 grep -Fq 'local control plane, settings, and trust were retained' "$UNINSTALL" || fail partial-failure-message
+grep -Fq 'MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" disable' "$UNINSTALL" || fail full-disable-local-only
+grep -Fq 'elif ! sh "$BOOT_SCRIPT" disable' "$UNINSTALL" || fail standard-disable-propagation-preserved
 pass full-uninstall-preflight-and-recovery-order
 
 # Existing installations can have a configured node that predates persisted
