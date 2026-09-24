@@ -239,7 +239,7 @@ repair_path_allowed() {
     settings/var_settings.sh|settings/log_settings.sh|settings/lib_identity.sh|settings/lib_owner_lock.sh|settings/lib_action_lock.sh) return 0 ;;
     settings/lib_action_ack.sh|settings/lib_action_progress.sh|settings/lib_action_runtime.sh|settings/lib_maintenance_recovery.sh) return 0 ;;
     settings/lib_br0_guard.sh|settings/lib_debug.sh|settings/lib_radio.sh|settings/lib_ssid_filter.sh|settings/lib_stp.sh) return 0 ;;
-    settings/lib_update_state.sh|settings/lib_json.sh|settings/lib_ssh.sh|settings/lib_ssh_trust.sh|settings/lib_mervqt.sh) return 0 ;;
+    settings/lib_update_state.sh|settings/lib_json.sh|settings/lib_ssh.sh|settings/lib_ssh_trust.sh|settings/lib_backup_state.sh|settings/lib_mervqt.sh) return 0 ;;
     settings/lib_node_jobs.sh|settings/lib_node_reconcile.sh|settings/lib_settings_reconcile.sh|settings/lib_progress.sh) return 0 ;;
     settings/log_settings.sh|settings/mac_shield_snapshot.sh|settings/var_settings.sh) return 0 ;;
     templates/mervlan_templates.sh) return 0 ;;
@@ -282,7 +282,7 @@ parse_manifest() {
   for _pm_required in install.sh uninstall.sh functions/update_mervlan.sh \
     functions/update_mervlan_repair.sh functions/update_mervlan_repair.manifest \
     functions/mervlan_boot.sh functions/mervlan_wan.sh settings/lib_owner_lock.sh \
-    settings/lib_update_state.sh settings/lib_maintenance_recovery.sh
+    settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh
   do
     grep -Fq " $_pm_required" "$PATHS_FILE" || return 1
   done

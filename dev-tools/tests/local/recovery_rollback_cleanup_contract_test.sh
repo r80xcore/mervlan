@@ -67,6 +67,7 @@ recovery_reconcile() {
 }
 recovery_boot_state() { printf '0\n'; }
 recovery_clear_durable_recovery() { return 0; }
+recovery_restore_original_trust() { return 0; }
 rm() {
   for _rrc_arg in "$@"; do
     if { [ "$CASE_MODE" = activated-rollback-failure ] || [ "$CASE_MODE" = rename-window-failure ] || [ "$CASE_MODE" = rename-window-durable-failure ]; } && \

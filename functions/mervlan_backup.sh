@@ -12,6 +12,10 @@
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_BACKUP_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_backup_state.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the backup-state library; refusing maintenance operation"
+  exit 1
+}
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the owner-lock library; refusing maintenance operation"
   exit 1
@@ -87,6 +91,12 @@ MB_RESTORE_ORIGINAL_BOOT=0
 MB_POOL_ABORT_FAILED=0
 MB_RECOVERY_REQUIRED=0
 MB_DURABLE_RECOVERY_OWNED=0
+MB_TRUST_TRANSACTION_ACTIVE=0
+MB_TRUST_ORIGINAL_PRESENT=0
+MB_TRUST_ORIGINAL_FILE=""
+MB_TRUST_TARGET_PRESENT=0
+MB_TRUST_TARGET_FILE=""
+MB_TRUST_TARGET_MODE=legacy
 
 mb_begin_durable_recovery() {
   merv_maintenance_recovery_write restore prepared "$MB_JFFS_OLD" "$MB_JFFS_STAGE" || return 1
@@ -115,6 +125,104 @@ mb_mark_recovery_required() {
      ! mb_mark_durable_recovery_displaced; then
     error -c cli,vlan "CRITICAL: durable restore recovery metadata could not record the interrupted activation"
   fi
+}
+
+mb_create_archive_from_tree() {
+  _mb_archive_source="$1"
+  _mb_archive_output="$2"
+  _mb_archive_settings="$3"
+  _mb_archive_trust="${4:-}"
+  _mb_archive_workspace="$5"
+  _mb_archive_parent="$_mb_archive_workspace/archive-source"
+  _mb_archive_stage="$_mb_archive_parent/${_mb_archive_source##*/}"
+  [ ! -e "$_mb_archive_parent" ] && [ ! -L "$_mb_archive_parent" ] || return 1
+  mkdir "$_mb_archive_parent" 2>/dev/null || return 1
+  [ ! -e "$_mb_archive_stage" ] && [ ! -L "$_mb_archive_stage" ] || return 1
+  merv_backup_state_prepare_tree "$_mb_archive_source" "$_mb_archive_stage" \
+    "$_mb_archive_settings" "$_mb_archive_trust" "$_mb_archive_workspace" || return 1
+  tar -czf "$_mb_archive_output" -C "$_mb_archive_parent" \
+    "${_mb_archive_stage##*/}" 2>/dev/null
+  _mb_archive_rc=$?
+  if ! rm -rf "$_mb_archive_parent" 2>/dev/null; then
+    MB_PRESERVE_WORK=1
+    [ "$_mb_archive_rc" -eq 0 ] && _mb_archive_rc=1
+  fi
+  return "$_mb_archive_rc"
+}
+
+mb_prepare_trust_transaction() {
+  [ "$MB_TRUST_TRANSACTION_ACTIVE" = "0" ] || return 0
+  MB_TRUST_ORIGINAL_PRESENT=0
+  MB_TRUST_ORIGINAL_FILE=""
+  if [ -L "$MERV_SSH_TRUST_FILE" ]; then
+    return 1
+  fi
+  if [ -f "$MERV_SSH_TRUST_FILE" ]; then
+    merv_ssh_trust_validate_db || return 1
+    MB_TRUST_ORIGINAL_FILE="$MB_WORK_ROOT/original-trust.v1"
+    cp -p "$MERV_SSH_TRUST_FILE" "$MB_TRUST_ORIGINAL_FILE" 2>/dev/null || return 1
+    chmod 600 "$MB_TRUST_ORIGINAL_FILE" 2>/dev/null || return 1
+    MB_TRUST_ORIGINAL_PRESENT=1
+  elif [ -e "$MERV_SSH_TRUST_FILE" ]; then
+    return 1
+  fi
+  MB_TRUST_TRANSACTION_ACTIVE=1
+  return 0
+}
+
+mb_publish_target_trust() {
+  [ "$MB_TRUST_TRANSACTION_ACTIVE" = "1" ] || return 1
+  case "$MB_TRUST_TARGET_MODE:$MB_TRUST_TARGET_PRESENT" in
+    legacy:0) return 0 ;;
+    modern:1)
+      [ ! -L "$MB_TRUST_TARGET_FILE" ] && [ -f "$MB_TRUST_TARGET_FILE" ] || return 1
+      [ ! -L "$MERV_SSH_TRUST_ROOT" ] && [ -d "$MERV_SSH_TRUST_ROOT" ] || return 1
+      _mb_trust_publish_tmp="$MERV_SSH_TRUST_ROOT/.restore-trust.$$.tmp"
+      [ ! -e "$_mb_trust_publish_tmp" ] && [ ! -L "$_mb_trust_publish_tmp" ] || return 1
+      cp -p "$MB_TRUST_TARGET_FILE" "$_mb_trust_publish_tmp" 2>/dev/null || return 1
+      chmod 600 "$_mb_trust_publish_tmp" 2>/dev/null || {
+        rm -f "$_mb_trust_publish_tmp" 2>/dev/null || :
+        return 1
+      }
+      mv -f "$_mb_trust_publish_tmp" "$MERV_SSH_TRUST_FILE" 2>/dev/null || {
+        rm -f "$_mb_trust_publish_tmp" 2>/dev/null || :
+        return 1
+      }
+      merv_ssh_trust_validate_db || return 1
+      return 0
+      ;;
+    modern:0)
+      if [ -L "$MERV_SSH_TRUST_FILE" ]; then return 1; fi
+      if [ -e "$MERV_SSH_TRUST_FILE" ] && ! rm -f "$MERV_SSH_TRUST_FILE" 2>/dev/null; then return 1; fi
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+mb_restore_original_trust() {
+  [ "$MB_TRUST_TRANSACTION_ACTIVE" = "1" ] || return 0
+  [ ! -L "$MERV_SSH_TRUST_ROOT" ] && [ -d "$MERV_SSH_TRUST_ROOT" ] || return 1
+  if [ "$MB_TRUST_ORIGINAL_PRESENT" = "1" ]; then
+    _mb_trust_restore_tmp="$MERV_SSH_TRUST_ROOT/.restore-trust.$$.rollback"
+    [ ! -e "$_mb_trust_restore_tmp" ] && [ ! -L "$_mb_trust_restore_tmp" ] || return 1
+    cp -p "$MB_TRUST_ORIGINAL_FILE" "$_mb_trust_restore_tmp" 2>/dev/null || return 1
+    chmod 600 "$_mb_trust_restore_tmp" 2>/dev/null || {
+      rm -f "$_mb_trust_restore_tmp" 2>/dev/null || :
+      return 1
+    }
+    mv -f "$_mb_trust_restore_tmp" "$MERV_SSH_TRUST_FILE" 2>/dev/null || {
+      rm -f "$_mb_trust_restore_tmp" 2>/dev/null || :
+      return 1
+    }
+  else
+    [ ! -L "$MERV_SSH_TRUST_FILE" ] || return 1
+    if [ -e "$MERV_SSH_TRUST_FILE" ] && ! rm -f "$MERV_SSH_TRUST_FILE" 2>/dev/null; then return 1; fi
+  fi
+  if [ "$MB_TRUST_ORIGINAL_PRESENT" = "1" ]; then
+    merv_ssh_trust_validate_db || return 1
+  fi
+  return 0
 }
 mb_pool_state_unresolved() {
   if type mnj_pool_state_unresolved >/dev/null 2>&1; then
@@ -1080,7 +1188,8 @@ mb_create_manual() {
   [ ! -e "$_mb_final" ] || { mb_fail collision "Backup $_mb_id already exists."; return 1; }
   mb_write_result running archiving "Creating manual backup $_mb_id."
   info -c cli,vlan "Creating manual backup $_mb_id"
-  if ! tar -czf "$_mb_partial" -C "${MERV_BASE%/*}" "${MERV_BASE##*/}" 2>/dev/null; then
+  if ! mb_create_archive_from_tree "$MERV_BASE" "$_mb_partial" \
+      "$MERV_BASE/settings/settings.json" "$MERV_SSH_TRUST_FILE" "$MB_WORK_ROOT"; then
     if ! rm -f "$_mb_partial" 2>/dev/null; then
       MB_PRESERVE_WORK=1
       warn -c cli,vlan "Manual backup archiving failed and its partial archive could not be removed"
@@ -1243,6 +1352,21 @@ mb_validate_archive_tree() {
     [ -f "$MB_RESTORE_TREE/$_mb_required" ] || return 1
   done
   mb_settings_file_valid "$MB_RESTORE_TREE/settings/settings.json" || return 1
+  merv_backup_state_validate_tree "$MB_RESTORE_TREE" \
+    "$MB_RESTORE_TREE/settings/settings.json" "$MB_WORK_ROOT" || return 1
+  MB_TRUST_TARGET_MODE="$MERV_BACKUP_STATE_FORMAT"
+  MB_TRUST_TARGET_PRESENT="$MERV_BACKUP_STATE_TRUST_PRESENT"
+  MB_TRUST_TARGET_FILE=""
+  if [ "$MERV_BACKUP_STATE_TRUST_PRESENT" = "1" ]; then
+    MB_TRUST_TARGET_FILE="$MB_WORK_ROOT/target-trust.v1"
+    cp -p "$MERV_BACKUP_STATE_TRUST_FILE" "$MB_TRUST_TARGET_FILE" 2>/dev/null || return 1
+    chmod 600 "$MB_TRUST_TARGET_FILE" 2>/dev/null || return 1
+  fi
+  if merv_backup_state_path_present "$MB_RESTORE_TREE/$MERV_BACKUP_STATE_DIR_NAME"; then
+    [ ! -L "$MB_RESTORE_TREE/$MERV_BACKUP_STATE_DIR_NAME" ] && \
+      [ -d "$MB_RESTORE_TREE/$MERV_BACKUP_STATE_DIR_NAME" ] || return 1
+    rm -rf "$MB_RESTORE_TREE/$MERV_BACKUP_STATE_DIR_NAME" 2>/dev/null || return 1
+  fi
   return 0
 }
 
@@ -1458,6 +1582,11 @@ mb_rollback_restore() {
     fi
     MB_ROLLBACK_DONE=1
     MB_ACTIVATION_STARTED=0
+    if ! mb_restore_original_trust; then
+      MB_PRESERVE_WORK=1
+      error -c cli,vlan "CRITICAL: rollback restored the original tree but could not restore the pre-restore SSH trust database"
+      return 1
+    fi
     if ! mb_refresh_public_tree "$MERV_BASE" >/dev/null 2>&1; then
       error -c cli,vlan "Rollback restored the original tree but could not refresh the public installation"
       _mb_rollback_failed=1
@@ -1504,7 +1633,9 @@ mb_publish_restore_undo() {
   _mb_undo_partial="$MB_UNDO_RESTORE_ARCHIVE.partial.$$"
   _mb_meta_partial="$MB_UNDO_RESTORE_META.partial.$$"
   rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null || return 1
-  if ! tar -czf "$_mb_undo_partial" -C "${_mb_old_tree%/*}" "${_mb_old_tree##*/}" 2>/dev/null || \
+  if ! mb_create_archive_from_tree "$_mb_old_tree" "$_mb_undo_partial" \
+      "$_mb_old_tree/settings/settings.json" \
+      "${MB_TRUST_ORIGINAL_FILE:-}" "$MB_WORK_ROOT" || \
      ! tar -tzf "$_mb_undo_partial" >/dev/null 2>&1; then
     if ! rm -f "$_mb_undo_partial" "$_mb_meta_partial" 2>/dev/null; then
       MB_PRESERVE_WORK=1
@@ -1653,8 +1784,7 @@ mb_restore() {
   # swaps the live installation. This keeps restore all-or-nothing at the
   # complete configured-node boundary.
   if [ "$MB_TEST_MODE" != "1" ]; then
-    if ! merv_ssh_preflight_settings_file "$MERV_BASE/settings/settings.json" || \
-       ! merv_ssh_preflight_settings_file "$MB_RESTORE_TREE/settings/settings.json"; then
+    if ! merv_ssh_preflight_settings_file "$MERV_BASE/settings/settings.json"; then
       if ! rm -rf "$_mb_stage" 2>/dev/null; then
         MB_PRESERVE_WORK=1
         warn -c cli,vlan "Restore trust preflight failed and its staging tree could not be removed"
@@ -1662,7 +1792,37 @@ mb_restore() {
       mb_fail ssh_trust "Restore blocked: complete SSH trust preflight failed."
       return 1
     fi
+    _mb_target_nodes=$(merv_backup_state_configured_nodes "$MB_RESTORE_TREE/settings/settings.json" 2>/dev/null) || {
+      if ! rm -rf "$_mb_stage" 2>/dev/null; then MB_PRESERVE_WORK=1; fi
+      mb_fail ssh_trust "Restore blocked: target configured-node settings could not be read."
+      return 1
+    }
+    if [ "$MB_TRUST_TARGET_MODE" = "modern" ] && [ "$MB_TRUST_TARGET_PRESENT" = "1" ]; then
+      merv_backup_state_preflight_with_trust \
+        "$MB_RESTORE_TREE/settings/settings.json" "$MB_TRUST_TARGET_FILE" "$MB_WORK_ROOT"
+      _mb_target_preflight_rc=$?
+    else
+      merv_ssh_preflight_settings_file "$MB_RESTORE_TREE/settings/settings.json"
+      _mb_target_preflight_rc=$?
+    fi
+    if [ "$_mb_target_preflight_rc" -ne 0 ]; then
+      if ! rm -rf "$_mb_stage" 2>/dev/null; then
+        MB_PRESERVE_WORK=1
+        warn -c cli,vlan "Restore trust preflight failed and its staging tree could not be removed"
+      fi
+      if [ "$MB_TRUST_TARGET_MODE" = "legacy" ] && [ -n "$_mb_target_nodes" ]; then
+        mb_fail ssh_trust "Restore blocked: this backup predates SSH trust-state backups. One or more configured nodes must be explicitly trusted before restore."
+      else
+        mb_fail ssh_trust "Restore blocked: complete SSH trust preflight failed."
+      fi
+      return 1
+    fi
   fi
+  mb_prepare_trust_transaction || {
+    if ! rm -rf "$_mb_stage" 2>/dev/null; then MB_PRESERVE_WORK=1; fi
+    mb_fail ssh_trust "Restore blocked: the current durable SSH trust database could not be preserved."
+    return 1
+  }
   _mb_target_boot=$(mb_read_boot_state "$MB_RESTORE_TREE")
   _mb_current_boot=$(mb_read_boot_state "$MERV_BASE")
   _mb_current_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
@@ -1743,6 +1903,13 @@ mb_restore() {
     mb_rollback_after_activation activating \
       "Could not activate the restored installation; the original installation was restored." \
       "Could not activate the restored installation; automatic rollback failed. Recovery data and the owner lock were preserved." \
+      "$_mb_old" "$_mb_current_boot"
+    return 1
+  fi
+  if ! mb_publish_target_trust; then
+    mb_rollback_after_activation trust \
+      "Restore could not publish the validated SSH trust database; the original installation was restored." \
+      "Restore could not publish the validated SSH trust database; automatic rollback failed. Recovery data and the owner lock were preserved." \
       "$_mb_old" "$_mb_current_boot"
     return 1
   fi

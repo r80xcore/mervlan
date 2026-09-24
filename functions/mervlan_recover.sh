@@ -32,6 +32,11 @@ RECOVERY_RECOVERY_REQUIRED=0
 RECOVERY_DURABLE_RECOVERY_OWNED=0
 RECOVERY_EXISTING_DURABLE_RECOVERY=0
 RECOVERY_EXISTING_UPDATE_RECOVERY=0
+RECOVERY_TRUST_MODE=legacy
+RECOVERY_TRUST_PRESENT=0
+RECOVERY_TRUST_FILE=""
+RECOVERY_TRUST_ORIGINAL_PRESENT=0
+RECOVERY_TRUST_ORIGINAL_FILE=""
 RECOVERY_STATE_HELPER="${MERVLAN_RECOVERY_STATE_HELPER:-$MERVLAN_RECOVERY_BACKUP_ROOT/recovery_state.sh}"
 RECOVERY_UPDATE_STATE_HELPER="${MERVLAN_RECOVERY_UPDATE_STATE_HELPER:-$MERVLAN_RECOVERY_BACKUP_ROOT/update_state.sh}"
 
@@ -671,6 +676,125 @@ recovery_tree_valid() {
   recovery_settings_valid "$recovery_root/settings/settings.json"
 }
 
+# Validate the optional backup-only state with the same trust and node parsers
+# used by the installed control plane.  Emergency Recovery can run without a
+# live MerVLAN tree, so load the parsers from the already-extracted candidate in
+# a subshell and bind them to a private trust root.  No canonical trust file is
+# changed by validation.
+recovery_validate_backup_state() {
+  RECOVERY_TRUST_MODE=legacy
+  RECOVERY_TRUST_PRESENT=0
+  RECOVERY_TRUST_FILE=""
+  [ -d "$RECOVERY_TREE" ] || return 1
+  [ -e "$RECOVERY_TREE/.backup_state" ] || [ -L "$RECOVERY_TREE/.backup_state" ] || return 0
+  [ ! -L "$RECOVERY_TREE/.backup_state" ] && [ -d "$RECOVERY_TREE/.backup_state" ] || return 1
+  (
+    MERV_BASE="$RECOVERY_TREE"
+    MERV_STATE_ROOT="$RECOVERY_WORK/trust-context"
+    MERV_SSH_TRUST_TEST_MODE=0
+    unset VAR_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_SSH_TRUST_LOADED LIB_BACKUP_STATE_LOADED
+    unset MERV_SSH_TRUST_ROOT MERV_SSH_TRUST_FILE MERV_SSH_TRUST_PENDING_ROOT \
+      MERV_SSH_TRUST_REQUESTS_ROOT MERV_SSH_TRUST_STAGING_ROOT \
+      MERV_SSH_TRUST_QUARANTINE_ROOT MERV_SSH_TRUST_LOCK_PATH
+    export MERV_BASE MERV_STATE_ROOT MERV_SSH_TRUST_TEST_MODE
+    . "$RECOVERY_TREE/settings/var_settings.sh" || exit 1
+    . "$RECOVERY_TREE/settings/lib_json.sh" || exit 1
+    . "$RECOVERY_TREE/settings/lib_ssh.sh" || exit 1
+    . "$RECOVERY_TREE/settings/lib_backup_state.sh" || exit 1
+    merv_backup_state_validate_tree "$RECOVERY_TREE" \
+      "$RECOVERY_TREE/settings/settings.json" "$RECOVERY_WORK" || exit 1
+    printf 'format=%s\ntrust=%s\n' "$MERV_BACKUP_STATE_FORMAT" \
+      "$MERV_BACKUP_STATE_TRUST_PRESENT"
+  ) >"$RECOVERY_WORK/backup-state.result" 2>/dev/null || {
+    recovery_error "Backup contains an invalid MerVLAN backup-state payload."
+    return 1
+  }
+  RECOVERY_TRUST_MODE=$(sed -n 's/^format=//p' "$RECOVERY_WORK/backup-state.result" 2>/dev/null)
+  RECOVERY_TRUST_PRESENT=$(sed -n 's/^trust=//p' "$RECOVERY_WORK/backup-state.result" 2>/dev/null)
+  case "$RECOVERY_TRUST_MODE:$RECOVERY_TRUST_PRESENT" in
+    modern:1)
+      RECOVERY_TRUST_FILE="$RECOVERY_WORK/target-trust.v1"
+      _recovery_payload_trust="$RECOVERY_TREE/.backup_state/ssh_trust/known_hosts.v1"
+      [ ! -L "$_recovery_payload_trust" ] && [ -f "$_recovery_payload_trust" ] || return 1
+      cp -p "$_recovery_payload_trust" "$RECOVERY_TRUST_FILE" 2>/dev/null || return 1
+      chmod 600 "$RECOVERY_TRUST_FILE" 2>/dev/null || return 1
+      ;;
+    modern:0) ;;
+    *) recovery_error "Backup-state validation returned an unexpected format."; return 1 ;;
+  esac
+  rm -rf "$RECOVERY_TREE/.backup_state" 2>/dev/null || {
+    recovery_error "Could not remove backup-only state from the private recovery tree."
+    return 1
+  }
+  return 0
+}
+
+recovery_prepare_trust_transaction() {
+  RECOVERY_TRUST_ORIGINAL_PRESENT=0
+  RECOVERY_TRUST_ORIGINAL_FILE=""
+  _recovery_trust_file="$MERVLAN_RECOVERY_STATE_ROOT/ssh_trust/known_hosts.v1"
+  if [ -L "$_recovery_trust_file" ]; then return 1; fi
+  if [ -f "$_recovery_trust_file" ]; then
+    RECOVERY_TRUST_ORIGINAL_FILE="$RECOVERY_WORK/original-trust.v1"
+    cp -p "$_recovery_trust_file" "$RECOVERY_TRUST_ORIGINAL_FILE" 2>/dev/null || return 1
+    chmod 600 "$RECOVERY_TRUST_ORIGINAL_FILE" 2>/dev/null || return 1
+    RECOVERY_TRUST_ORIGINAL_PRESENT=1
+  elif [ -e "$_recovery_trust_file" ]; then
+    return 1
+  fi
+  return 0
+}
+
+recovery_publish_target_trust() {
+  _recovery_trust_file="$MERVLAN_RECOVERY_STATE_ROOT/ssh_trust/known_hosts.v1"
+  case "$RECOVERY_TRUST_MODE:$RECOVERY_TRUST_PRESENT" in
+    legacy:0) return 0 ;;
+    modern:1)
+      [ ! -L "$RECOVERY_TRUST_FILE" ] && [ -f "$RECOVERY_TRUST_FILE" ] || return 1
+      recovery_path_parent_prepare "$_recovery_trust_file" || return 1
+      _recovery_trust_tmp="$MERVLAN_RECOVERY_STATE_ROOT/ssh_trust/.restore-trust.$$.tmp"
+      recovery_path_absent_authoritative "$_recovery_trust_tmp" || return 1
+      cp -p "$RECOVERY_TRUST_FILE" "$_recovery_trust_tmp" 2>/dev/null || return 1
+      chmod 600 "$_recovery_trust_tmp" 2>/dev/null || {
+        rm -f "$_recovery_trust_tmp" 2>/dev/null || :
+        return 1
+      }
+      mv -f "$_recovery_trust_tmp" "$_recovery_trust_file" 2>/dev/null || {
+        rm -f "$_recovery_trust_tmp" 2>/dev/null || :
+        return 1
+      }
+      ;;
+    modern:0)
+      [ ! -L "$_recovery_trust_file" ] || return 1
+      if [ -e "$_recovery_trust_file" ] && ! rm -f "$_recovery_trust_file" 2>/dev/null; then return 1; fi
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+recovery_restore_original_trust() {
+  _recovery_trust_file="$MERVLAN_RECOVERY_STATE_ROOT/ssh_trust/known_hosts.v1"
+  if [ "$RECOVERY_TRUST_ORIGINAL_PRESENT" = "1" ]; then
+    recovery_path_parent_prepare "$_recovery_trust_file" || return 1
+    _recovery_trust_tmp="$MERVLAN_RECOVERY_STATE_ROOT/ssh_trust/.restore-trust.$$.rollback"
+    recovery_path_absent_authoritative "$_recovery_trust_tmp" || return 1
+    cp -p "$RECOVERY_TRUST_ORIGINAL_FILE" "$_recovery_trust_tmp" 2>/dev/null || return 1
+    chmod 600 "$_recovery_trust_tmp" 2>/dev/null || {
+      rm -f "$_recovery_trust_tmp" 2>/dev/null || :
+      return 1
+    }
+    mv -f "$_recovery_trust_tmp" "$_recovery_trust_file" 2>/dev/null || {
+      rm -f "$_recovery_trust_tmp" 2>/dev/null || :
+      return 1
+    }
+  else
+    [ ! -L "$_recovery_trust_file" ] || return 1
+    if [ -e "$_recovery_trust_file" ] && ! rm -f "$_recovery_trust_file" 2>/dev/null; then return 1; fi
+  fi
+  return 0
+}
+
 recovery_meta_value() {
   recovery_meta_file="$1"
   recovery_meta_key="$2"
@@ -719,6 +843,7 @@ recovery_validate_archive() {
   tar -xzf "$recovery_archive" -C "$RECOVERY_STAGE" >/dev/null 2>&1 || return 1
   RECOVERY_TREE="$RECOVERY_STAGE/$recovery_archive_root"
   recovery_tree_valid "$RECOVERY_TREE" || { recovery_error "Backup is missing required MerVLAN files or valid settings."; return 1; }
+  recovery_validate_backup_state || return 1
 }
 
 recovery_list() {
@@ -805,6 +930,11 @@ recovery_rollback() {
     recovery_mark_rollback_required
     return 1
   fi
+  if ! recovery_restore_original_trust; then
+    recovery_mark_rollback_required
+    recovery_error "Recovery restored the original tree but could not restore the pre-recovery SSH trust database."
+    return 1
+  fi
   if ! recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT")"; then
     recovery_mark_rollback_required
     return 1
@@ -871,6 +1001,7 @@ recovery_restore() {
     *) recovery_error "Durable maintenance-recovery metadata became malformed during validation."; return 1 ;;
   esac
   recovery_target_boot=$(recovery_boot_state "$RECOVERY_TREE")
+  recovery_prepare_trust_transaction || { recovery_error "Could not preserve the current durable SSH trust database."; return 1; }
   if [ "$recovery_confirm" != "yes" ]; then
     printf 'Restore %s to %s? [y/N]: ' "$recovery_id" "$MERVLAN_RECOVERY_ACTIVE_ROOT"
     read recovery_answer
@@ -928,6 +1059,10 @@ recovery_restore() {
   fi
   RECOVERY_REPLACED=1
   mv "$RECOVERY_JFFS_STAGE" "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null || {
+    if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
+    return 1
+  }
+  recovery_publish_target_trust || {
     if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
     return 1
   }

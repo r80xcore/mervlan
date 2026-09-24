@@ -31,6 +31,10 @@ fi
 }
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
+[ -n "${LIB_BACKUP_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_backup_state.sh" 2>/dev/null || {
+	error -c cli,vlan "Unable to load the backup-state library; refusing update"
+	exit 1
+}
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the owner-lock library; refusing update"
   exit 1
@@ -907,13 +911,26 @@ create_durable_preupdate_backup() {
 	UPDATE_BACKUP_PARTIAL="$MERVLAN_BACKUP_DIR/.$UPDATE_BACKUP_ID.partial.$$"
 	UPDATE_BACKUP_META_FINAL="$UPDATE_BACKUP_FINAL.meta"
 	UPDATE_BACKUP_META_PARTIAL="$UPDATE_BACKUP_META_FINAL.partial.$$"
+	_update_backup_archive_parent="$TMP_BASE/preupdate-archive-source"
+	_update_backup_archive_source="$_update_backup_archive_parent/${_update_backup_source##*/}"
 	merv_maintenance_recovery_root_prepare || return 1
 	chmod 700 "$MERVLAN_BACKUP_DIR" 2>/dev/null || return 1
 	update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || return 1
+	update_cleanup_tree "$_update_backup_archive_parent" || return 1
 	update_path_absent_authoritative "$UPDATE_BACKUP_FINAL" || return 1
+	mkdir "$_update_backup_archive_parent" 2>/dev/null || return 1
 	info -c cli,vlan "Creating durable pre-update backup $UPDATE_BACKUP_ID"
-	if ! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "${_update_backup_source%/*}" "${_update_backup_source##*/}" 2>/dev/null; then
+	if ! merv_backup_state_prepare_tree "$_update_backup_source" \
+		"$_update_backup_archive_source" \
+		"$_update_backup_source/settings/settings.json" "$MERV_SSH_TRUST_FILE" "$TMP_BASE" || \
+		! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "$_update_backup_archive_parent" \
+		"${_update_backup_archive_source##*/}" 2>/dev/null; then
+		update_cleanup_tree "$_update_backup_archive_parent" || UPDATE_PRESERVE_TMP="1"
 		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	if ! update_cleanup_tree "$_update_backup_archive_parent"; then
+		UPDATE_PRESERVE_TMP="1"
 		return 1
 	fi
 	if ! tar -tzf "$UPDATE_BACKUP_PARTIAL" >/dev/null 2>&1; then
@@ -1014,6 +1031,7 @@ settings/log_settings.sh
 settings/lib_json.sh
 settings/lib_owner_lock.sh
 settings/lib_ssh.sh
+settings/lib_backup_state.sh
 settings/lib_update_state.sh
 settings/lib_maintenance_recovery.sh
 settings/lib_node_reconcile.sh
