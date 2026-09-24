@@ -26,7 +26,26 @@ _shkp_user=$(json_get_flag NODE_SSH_USER "__MISSING__" "$SETTINGS_FILE" 2>/dev/n
 [ -n "$_shkp_user" ] || _shkp_user=$(json_get_flag SSH_USER admin "$SETTINGS_FILE" 2>/dev/null)
 [ -n "$_shkp_user" ] || _shkp_user=admin
 case "$_shkp_user" in *[!A-Za-z0-9._-]*) exit 2 ;; esac
-[ -f "${SSH_KEY:-}" ] || exit 3
+
+# The first-contact probe only needs an SSH identity to complete the client
+# negotiation far enough for Dropbear to publish the server host key.  A
+# permanent MerVLAN client key is intentionally not required for that bounded,
+# non-mutating operation.  Preserve the old fail-closed behavior for any
+# existing unsafe object: the ephemeral fallback is only for a genuinely
+# absent permanent key.
+_shkp_identity=""
+_shkp_identity_temporary=0
+case "${SSH_KEY:-}" in
+  '') exit 3 ;;
+  *)
+    if [ -L "$SSH_KEY" ] || [ -e "$SSH_KEY" ]; then
+      [ -f "$SSH_KEY" ] && [ ! -L "$SSH_KEY" ] || exit 3
+      _shkp_identity="$SSH_KEY"
+    else
+      _shkp_identity_temporary=1
+    fi
+    ;;
+esac
 
 _shkp_client="${MERV_SSH_CLIENT:-dbclient}"
 case "$_shkp_client" in *[!A-Za-z0-9_./-]*) exit 2 ;; esac
@@ -35,6 +54,18 @@ if merv_has merv_cmd; then
 else
   _shkp_client_path="$_shkp_client"
   [ -x "$_shkp_client_path" ] || exit 3
+fi
+
+_shkp_keygen_path=""
+if [ "$_shkp_identity_temporary" -eq 1 ]; then
+  _shkp_keygen="${DROPBEARKEY:-}"
+  case "$_shkp_keygen" in ''|*[!A-Za-z0-9_./-]*) exit 3 ;; esac
+  if merv_has merv_cmd; then
+    _shkp_keygen_path=$(merv_cmd "$_shkp_keygen" 2>/dev/null) || exit 3
+  else
+    _shkp_keygen_path="$_shkp_keygen"
+    [ -x "$_shkp_keygen_path" ] || exit 3
+  fi
 fi
 
 _shkp_root="${TMPDIR:-/tmp/mervlan_tmp}/ssh_hostkey_probe.$$"
@@ -66,7 +97,8 @@ _shkp_cleanup() {
     printf '%s\n' "child-identity-unverifiable" > "$_shkp_root/recovery.pending" 2>/dev/null || :
     printf '%s\n' "[ERROR] SSH host-key probe retained recovery workspace $_shkp_root" >&2
   else
-    rm -f "$_shkp_root/.ssh/known_hosts" "$_shkp_root/client.stdout" "$_shkp_root/client.stderr" 2>/dev/null || :
+    rm -f "$_shkp_root/.ssh/known_hosts" "$_shkp_root/probe_identity" \
+      "$_shkp_root/client.stdout" "$_shkp_root/client.stderr" 2>/dev/null || :
     rmdir "$_shkp_root/.ssh" "$_shkp_root" 2>/dev/null || :
   fi
 }
@@ -83,9 +115,19 @@ trap '_shkp_cleanup' EXIT
 trap '_shkp_handle_signal 130' INT
 trap '_shkp_handle_signal 143' TERM
 
+if [ "$_shkp_identity_temporary" -eq 1 ]; then
+  _shkp_identity="$_shkp_root/probe_identity"
+  umask 077
+  "$_shkp_keygen_path" -t ed25519 -f "$_shkp_identity" >/dev/null 2>&1 || exit 3
+  [ -f "$_shkp_identity" ] && [ ! -L "$_shkp_identity" ] || exit 3
+  chmod 600 "$_shkp_identity" 2>/dev/null || exit 3
+  _shkp_mode=$(ls -ld "$_shkp_identity" 2>/dev/null | awk 'NR == 1 {print $1}')
+  [ "$_shkp_mode" = "-rw-------" ] || exit 3
+fi
+
 _shkp_home="$_shkp_root"
 export HOME="$_shkp_home"
-"$_shkp_client_path" -y -N -p "$_shkp_port" -i "$SSH_KEY" \
+"$_shkp_client_path" -y -N -p "$_shkp_port" -i "$_shkp_identity" \
   "$_shkp_user@$_shkp_host" >"$_shkp_root/client.stdout" 2>"$_shkp_root/client.stderr" &
 _shkp_pid=$!
 _shkp_start=$(merv_identity_proc_start "$_shkp_pid" 2>/dev/null || printf '')
