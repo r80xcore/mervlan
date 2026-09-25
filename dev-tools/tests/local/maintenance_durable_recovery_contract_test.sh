@@ -373,6 +373,7 @@ recovery_load_update_state() { return 0; }
 recovery_update_recovery_status() { return 1; }
 merv_maintenance_recovery_read() { MERV_MAINTENANCE_RECOVERY_STATUS=absent; return 1; }
 recovery_acquire_lock() { RECOVERY_LOCK_OWNED=1; return 0; }
+recovery_export_maintenance_context() { return 0; }
 recovery_log() { :; }
 recovery_validate_archive() { return 1; }
 recovery_reconcile_stale_stages() { : > "$TEST_ROOT/reconcile-was-called"; return 0; }
