@@ -71,12 +71,24 @@ export MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
   MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
 merv_maintenance_delegation_valid || fail exact-backup-delegation
 sh -c '. "$MERV_BASE/settings/lib_update_state.sh"; merv_maintenance_delegation_valid' || fail delegated-child-context
+MERV_MAINTENANCE_SYNC=1
+export MERV_MAINTENANCE_SYNC
+merv_maintenance_sync_context_valid || fail backup-sync-delegation
+sh -c '. "$MERV_BASE/settings/lib_update_state.sh"; merv_maintenance_sync_context_valid' || fail delegated-child-sync-context
 MERV_MAINTENANCE_OWNER_NONCE=forged
 if merv_maintenance_delegation_valid; then fail forged-delegation; fi
+if merv_maintenance_sync_context_valid; then fail forged-sync-delegation; fi
 MERV_MAINTENANCE_OWNER_NONCE="$MERV_LOCK_NONCE"
+merv_maintenance_sync_context_valid || fail restored-sync-delegation
 merv_owner_lock_release "$MERV_UPDATE_MAINTENANCE_LOCK" "$MERV_LOCK_NONCE" || fail owner-release
 if merv_maintenance_delegation_valid; then fail stale-delegation; fi
+if merv_maintenance_sync_context_valid; then fail stale-sync-delegation; fi
+unset MERV_MAINTENANCE_SYNC
 pass exact-live-delegation-and-forgery-rejection
+
+_sync_gate_count=$(grep -c 'merv_maintenance_sync_context_valid' "$BASE_DIR/functions/sync_nodes.sh")
+[ "$_sync_gate_count" -ge 2 ] || fail sync-node-gates-use-authenticated-delegation
+pass sync-node-gates-use-authenticated-delegation
 
 # Update delegation requires both the authenticated owner and durable
 # journal/quiesce state; the owner tuple alone is insufficient.
@@ -90,6 +102,9 @@ if merv_maintenance_delegation_valid; then fail update-without-quiesce; fi
 merv_update_journal_write run-r5 extracting refs/heads/test 0 0 1 0 0 r5 || fail journal-write
 merv_update_quiesce_begin run-r5 || fail quiesce-write
 merv_maintenance_delegation_valid || fail update-delegation
+MERV_MAINTENANCE_SYNC=1
+export MERV_MAINTENANCE_SYNC
+merv_maintenance_sync_context_valid || fail update-sync-delegation
 
 # A v0.53.26 Update parent has no delegation-kind marker, but after the target
 # tree is activated it still owns the live canonical record and the matching

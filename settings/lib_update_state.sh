@@ -442,6 +442,26 @@ merv_update_maintenance_sync_context_valid() {
   merv_update_owner_context_valid
 }
 
+# Sync Nodes normally runs as an authenticated child of Update.  Restore also
+# owns the same canonical maintenance lock while it is rebuilding configured
+# nodes, so permit that one explicit backup delegation without turning the
+# MERV_MAINTENANCE_SYNC flag into a generic bypass.  Both paths still require
+# their respective exact live owner contracts.
+merv_maintenance_sync_context_valid() {
+  [ "${MERV_MAINTENANCE_SYNC:-0}" = "1" ] || return 1
+  case "${MERV_MAINTENANCE_DELEGATION_KIND:-}" in
+    update)
+      merv_update_maintenance_sync_context_valid
+      ;;
+    backup)
+      merv_maintenance_delegation_valid
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # Direct install/uninstall entry points use this single delegated-owner
 # contract.  The environment is only an authenticated transport for the
 # exact canonical owner tuple; it is never authority by itself.  Update

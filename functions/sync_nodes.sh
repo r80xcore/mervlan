@@ -40,8 +40,8 @@ fi
     exit 75
 }
 if [ "${MERV_MAINTENANCE_SYNC:-0}" = "1" ]; then
-    if ! merv_update_maintenance_sync_context_valid; then
-        error -c cli,vlan "Sync refused: maintenance synchronization lacks an authenticated Update owner"
+    if ! merv_maintenance_sync_context_valid; then
+        error -c cli,vlan "Sync refused: maintenance synchronization lacks an authenticated owner"
         exit 75
     fi
 elif merv_update_mutation_blocked; then
@@ -424,7 +424,7 @@ if [ "$DRY_RUN" != "yes" ] && type merv_owner_lock_acquire >/dev/null 2>&1; then
         error -c cli,vlan "Sync: lock directory could not be created; refusing synchronization"
         exit 1
     }
-    if ! merv_update_maintenance_sync_context_valid && type merv_owner_lock_state >/dev/null 2>&1; then
+    if ! merv_maintenance_sync_context_valid && type merv_owner_lock_state >/dev/null 2>&1; then
         case "$(merv_owner_lock_state "$LOCKDIR/mervlan_maintenance.lock")" in
             live|unknown)
                 warn -c cli,vlan "Sync: update, backup, or restore maintenance is active — skipping this run"
