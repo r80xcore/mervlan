@@ -348,7 +348,7 @@ EXTERNAL_HELPERS="$TEST_ROOT/external-helpers.sh"
 : >"$EXTERNAL_HELPERS"
 for helper in install_path_present install_path_chain_safe \
   install_external_webui_root_validate install_external_owner_current install_external_parent_safe \
-  install_external_capture_error \
+  install_external_capture_error install_external_mark_dirty \
   install_external_copy_object install_external_remove_object \
   install_external_capture_object install_external_capture_metadata \
   install_external_capture_projection install_external_capture_webui_page \
@@ -375,9 +375,11 @@ if TEST_ROOT="$TEST_ROOT" EXTERNAL_HELPERS="$EXTERNAL_HELPERS" sh -c '
   TMP_DIR="$CASE/tmp"
   INSTALL_EXTERNAL_PRESERVE_DIR=""
   INSTALL_EXTERNAL_CAPTURED=0
+  INSTALL_EXTERNAL_DIRTY=0
   INSTALL_EXTERNAL_RESTORED=0
   INSTALL_EXTERNAL_INCOMPLETE=0
   INSTALL_EXTERNAL_MENU_BOUND=0
+  INSTALL_EXTERNAL_MENU_MOUNTED=0
   INSTALL_EXTERNAL_PAGE=""
   INSTALL_EXTERNAL_PAGE_CAPTURED=0
   INSTALL_EXTERNAL_NODE_ATTEMPTED=0
@@ -388,6 +390,7 @@ if TEST_ROOT="$TEST_ROOT" EXTERNAL_HELPERS="$EXTERNAL_HELPERS" sh -c '
   INSTALL_EXTERNAL_SERVICES_START="$CASE/hooks/services-start"
   install_external_capture_projection || exit 2
   install_external_capture_webui_page user1.asp || exit 3
+  install_external_mark_dirty || exit 4
   printf new-public >"$WWW/mervlan/index.html"
   printf new-page >"$WWW/user1.asp"
   printf new-menu >"$CASE/tmp/menuTree.js"
@@ -397,17 +400,61 @@ if TEST_ROOT="$TEST_ROOT" EXTERNAL_HELPERS="$EXTERNAL_HELPERS" sh -c '
   am_settings_set mervlan_page user2.asp
   am_settings_set mervlan_state enabled
   am_settings_set mervlan_version v-new
-  install_external_restore_projection || exit 4
-  [ "$(cat "$WWW/mervlan/index.html")" = old-public ] || exit 5
-  [ "$(cat "$WWW/user1.asp")" = old-page ] || exit 6
-  [ "$(cat "$CASE/tmp/menuTree.js")" = old-menu ] || exit 7
-  [ "$(cat "$CASE/www/require/modules/menuTree.js")" = old-target ] || exit 8
-  [ "$(cat "$CASE/hooks/service-event")" = old-event ] || exit 9
-  [ "$(cat "$CASE/hooks/services-start")" = old-start ] || exit 10
-  [ "$(am_settings_get mervlan_page)" = user9.asp ] || exit 11
-  [ "$(am_settings_get mervlan_state)" = disabled ] || exit 12
-  [ "$(am_settings_get mervlan_version)" = v-old ] || exit 13
+  install_external_restore_projection || exit 5
+  [ "$(cat "$WWW/mervlan/index.html")" = old-public ] || exit 6
+  [ "$(cat "$WWW/user1.asp")" = old-page ] || exit 7
+  [ "$(cat "$CASE/tmp/menuTree.js")" = old-menu ] || exit 8
+  # The firmware-owned menu target is evidence only. A changed/unbound target
+  # must not be removed or rewritten by rollback.
+  [ "$(cat "$CASE/www/require/modules/menuTree.js")" = new-target ] || exit 9
+  [ "$(cat "$CASE/hooks/service-event")" = old-event ] || exit 10
+  [ "$(cat "$CASE/hooks/services-start")" = old-start ] || exit 11
+  [ "$(am_settings_get mervlan_page)" = user9.asp ] || exit 12
+  [ "$(am_settings_get mervlan_state)" = disabled ] || exit 13
+  [ "$(am_settings_get mervlan_version)" = v-old ] || exit 14
+
+  # Capture without any external mutation must only retire private evidence;
+  # it must not invoke unmount or projection restoration.
+  : >"$CASE/umount.trace"
+  umount() { printf 'called\n' >>"$CASE/umount.trace"; return 1; }
+  INSTALL_EXTERNAL_CAPTURED=0
+  INSTALL_EXTERNAL_DIRTY=0
+  INSTALL_EXTERNAL_RESTORED=0
+  INSTALL_EXTERNAL_MENU_MOUNTED=0
+  INSTALL_EXTERNAL_PAGE=""
+  INSTALL_EXTERNAL_PAGE_CAPTURED=0
+  install_external_capture_projection || exit 15
+  install_external_cleanup_projection || exit 16
+  [ ! -s "$CASE/umount.trace" ] || exit 17
+  [ "$INSTALL_EXTERNAL_CAPTURED" = 0 ] || exit 18
+  [ "$INSTALL_EXTERNAL_DIRTY" = 0 ] || exit 19
+  [ "$(cat "$CASE/www/require/modules/menuTree.js")" = new-target ] || exit 20
+
+  # Model the normal bound-menu state. The target is a hard-linked stand
+  # in for the served bind source; the mount stub recreates the served copy
+  # after rollback. No firmware-target restore helper is allowed to run.
+  rm -f "$CASE/www/require/modules/menuTree.js"
+  ln "$CASE/tmp/menuTree.js" "$CASE/www/require/modules/menuTree.js" || exit 21
+  INSTALL_EXTERNAL_CAPTURED=0
+  INSTALL_EXTERNAL_DIRTY=0
+  INSTALL_EXTERNAL_RESTORED=0
+  INSTALL_EXTERNAL_MENU_MOUNTED=1
+  INSTALL_EXTERNAL_PAGE=""
+  INSTALL_EXTERNAL_PAGE_CAPTURED=0
+  install_external_capture_projection || exit 22
+  grep -Fqx 1 "$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" || exit 23
+  install_external_mark_dirty || exit 24
+  printf new-bound-menu >"$CASE/tmp/menuTree.js"
+  umount() { rm -f "$1"; return 0; }
+  mount() { cp "$3" "$4"; return $?; }
+  install_external_restore_projection || exit 25
+  [ "$(cat "$CASE/tmp/menuTree.js")" = old-menu ] || exit 26
+  [ "$(cat "$CASE/www/require/modules/menuTree.js")" = old-menu ] || exit 27
 '; then :; else fail 'external projection capture/restore fixture failed'; fi
 printf 'PASS: external WebUI/menu/metadata/hook rollback restores the pre-install projection\n'
+
+grep -Fq 'INSTALL_EXTERNAL_DIRTY' "$INSTALL" || fail 'captured-vs-dirty projection state missing'
+! grep -Fq 'install_external_restore_object menu_target "$INSTALL_EXTERNAL_MENU_TARGET"' "$INSTALL" ||
+  fail 'rollback still rewrites firmware-owned menu target'
 
 printf 'INSTALL_UNINSTALL_CONTRACT_OK\n'

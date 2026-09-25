@@ -515,7 +515,11 @@ install_maintenance_exit_handler() {
     local _ime_status=$?
     trap - EXIT
     if [ "$_ime_status" != "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
-        install_external_restore_projection || _ime_status=1
+        if [ "${INSTALL_EXTERNAL_DIRTY:-0}" = "1" ]; then
+            install_external_restore_projection || _ime_status=1
+        else
+            install_external_cleanup_projection || _ime_status=1
+        fi
     fi
     if ! install_maintenance_release; then
         _ime_status=1
@@ -548,9 +552,11 @@ ACTIVE_MENU_SNAPSHOT=""
 ACTIVE_METADATA_SNAPSHOT=""
 INSTALL_EXTERNAL_PRESERVE_DIR=""
 INSTALL_EXTERNAL_CAPTURED=0
+INSTALL_EXTERNAL_DIRTY=0
 INSTALL_EXTERNAL_RESTORED=0
 INSTALL_EXTERNAL_INCOMPLETE=0
 INSTALL_EXTERNAL_MENU_BOUND=0
+INSTALL_EXTERNAL_MENU_MOUNTED=0
 INSTALL_EXTERNAL_PAGE=""
 INSTALL_EXTERNAL_PAGE_CAPTURED=0
 INSTALL_EXTERNAL_NODE_ATTEMPTED=0
@@ -1863,6 +1869,12 @@ install_external_capture_error() {
     printf '[install] ERROR: external projection capture failed: %s\n' "$1" >&2
 }
 
+install_external_mark_dirty() {
+    [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ] || return 1
+    INSTALL_EXTERNAL_DIRTY=1
+    return 0
+}
+
 install_external_copy_object() {
     _ieco_src="$1" _ieco_dest="$2" _ieco_kind="$3"
     case "$_ieco_kind" in dir|file) ;; *) return 1 ;; esac
@@ -2036,6 +2048,7 @@ install_external_capture_projection() {
     }
     chmod 600 "$INSTALL_EXTERNAL_PRESERVE_DIR/format" 2>/dev/null || :
     INSTALL_EXTERNAL_CAPTURED=1
+    INSTALL_EXTERNAL_DIRTY=0
     INSTALL_EXTERNAL_RESTORED=0
     INSTALL_EXTERNAL_INCOMPLETE=0
     return 0
@@ -2096,7 +2109,7 @@ install_external_restore_metadata() {
 }
 
 install_external_restore_projection() {
-    local _ier_failed=0 _ier_bound=0
+    local _ier_failed=0 _ier_bound=0 _ier_menu_ready=1
     [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ] || return 0
     [ "$INSTALL_EXTERNAL_RESTORED" = "0" ] || return 0
     install_external_owner_current || return 1
@@ -2104,13 +2117,23 @@ install_external_restore_projection() {
     _ier_bound=$(sed -n '1p' "$INSTALL_EXTERNAL_PRESERVE_DIR/menu.bound" 2>/dev/null)
     case "$_ier_bound" in 0|1) ;; *) return 1 ;; esac
     if [ "$_ier_bound" = "1" ] || [ "${INSTALL_EXTERNAL_MENU_MOUNTED:-0}" = "1" ]; then
-        umount "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || _ier_failed=1
+        if umount "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null; then
+            INSTALL_EXTERNAL_MENU_MOUNTED=0
+        else
+            _ier_failed=1
+            _ier_menu_ready=0
+        fi
     fi
     install_external_restore_object public "$INSTALL_EXTERNAL_WWW_ROOT/mervlan" dir || _ier_failed=1
-    install_external_restore_object menu_target "$INSTALL_EXTERNAL_MENU_TARGET" file || _ier_failed=1
-    install_external_restore_object menu_tmp "$INSTALL_EXTERNAL_MENU_TMP" file || _ier_failed=1
-    if [ "$_ier_bound" = "1" ] && [ "$_ier_failed" = "0" ]; then
-        mount -o bind "$INSTALL_EXTERNAL_MENU_TMP" "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || _ier_failed=1
+    # The firmware-owned menu target is captured for evidence only. Merlin
+    # normally serves the writable /tmp copy through a bind mount; rollback
+    # must never remove or rewrite the underlying firmware file.
+    if [ "$_ier_menu_ready" = "1" ]; then
+        install_external_restore_object menu_tmp "$INSTALL_EXTERNAL_MENU_TMP" file || _ier_failed=1
+        if [ "$_ier_bound" = "1" ] && [ "$_ier_failed" = "0" ]; then
+            mount -o bind "$INSTALL_EXTERNAL_MENU_TMP" "$INSTALL_EXTERNAL_MENU_TARGET" 2>/dev/null || _ier_failed=1
+            [ "$_ier_failed" = "0" ] && INSTALL_EXTERNAL_MENU_MOUNTED=1
+        fi
     fi
     if [ "$INSTALL_EXTERNAL_PAGE_CAPTURED" = "1" ]; then
         install_external_restore_object page "$INSTALL_EXTERNAL_WWW_ROOT/$INSTALL_EXTERNAL_PAGE" file || _ier_failed=1
@@ -2142,6 +2165,7 @@ install_external_restore_projection() {
     }
     INSTALL_EXTERNAL_RESTORED=1
     INSTALL_EXTERNAL_CAPTURED=0
+    INSTALL_EXTERNAL_DIRTY=0
     INSTALL_EXTERNAL_PRESERVE_DIR=""
     return 0
 }
@@ -2155,6 +2179,7 @@ install_external_cleanup_projection() {
     esac
     rm -rf "$INSTALL_EXTERNAL_PRESERVE_DIR" 2>/dev/null || return 1
     INSTALL_EXTERNAL_CAPTURED=0
+    INSTALL_EXTERNAL_DIRTY=0
     INSTALL_EXTERNAL_PRESERVE_DIR=""
     return 0
 }
@@ -2623,11 +2648,16 @@ installer_exit_handler() {
             cleanup_preserved_files >/dev/null 2>&1 || :
         fi
         if [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
-            if install_external_restore_projection >/dev/null 2>&1; then
-                :
-            else
+            if [ "${INSTALL_EXTERNAL_DIRTY:-0}" = "1" ]; then
+                if install_external_restore_projection >/dev/null 2>&1; then
+                    :
+                else
+                    status=1
+                    RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
+                fi
+            elif ! install_external_cleanup_projection >/dev/null 2>&1; then
                 status=1
-                RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
+                RESULT_DETAIL="external projection capture cleanup failed; retained recovery evidence is required"
             fi
         fi
         if [ "$TEST_RUN" = "1" ]; then
@@ -2664,7 +2694,11 @@ installer_tarball_exit_handler() {
         rollback_active_installation >/dev/null 2>&1 || status=1
     fi
     if [ "$status" != "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
-        install_external_restore_projection >/dev/null 2>&1 || status=1
+        if [ "${INSTALL_EXTERNAL_DIRTY:-0}" = "1" ]; then
+            install_external_restore_projection >/dev/null 2>&1 || status=1
+        else
+            install_external_cleanup_projection >/dev/null 2>&1 || status=1
+        fi
     fi
     [ "$status" = "0" ] && cleanup_preserved_files >/dev/null 2>&1 || :
     install_maintenance_release || status=1
@@ -2917,6 +2951,9 @@ INSTALL_STAGED_ROOT="$MERV_INSTALL_STAGED_ROOT"
 INSTALL_STAGED_WORK="$MERV_INSTALL_STAGED_WORK"
 INSTALL_STAGED_ARCHIVE="$MERV_INSTALL_STAGED_ARCHIVE"
 INSTALL_STAGED_READY="$MERV_INSTALL_STAGED_READY"
+[ "$MERV_INSTALL_SUPPORT_HANDOFF" = "1" ] &&
+  [ "$INSTALL_STAGED_READY" = "1" ] &&
+  INSTALL_DOWNLOAD_WORK="$INSTALL_STAGED_WORK"
 
 normalize_install_script_permissions() {
     local f depth
@@ -2945,30 +2982,86 @@ cleanup_install_download_work() {
   [ -n "$INSTALL_DOWNLOAD_WORK" ] || return 0
   case "$INSTALL_DOWNLOAD_WORK" in
     "$TMP_DIR"/install.[0-9]*)
-      [ -d "$INSTALL_DOWNLOAD_WORK" ] && rm -rf "$INSTALL_DOWNLOAD_WORK" 2>/dev/null || :
+      if [ -d "$INSTALL_DOWNLOAD_WORK" ]; then
+        rm -rf "$INSTALL_DOWNLOAD_WORK" 2>/dev/null || return 1
+      fi
+      ;;
+    *)
+      return 1
       ;;
   esac
   INSTALL_DOWNLOAD_WORK=""
+  return 0
+}
+
+install_pre_admission_stage_failure() {
+  INSTALL_STAGE_ONLY="0"
+  if ! cleanup_install_download_work; then
+    RESULT_DETAIL="pre-admission staging workspace cleanup failed; retained evidence requires recovery"
+    installer_record ERROR "$RESULT_DETAIL"
+  fi
+  return 1
+}
+
+install_pre_admission_exit_handler() {
+  local _ipeh_status=$?
+  trap - EXIT INT TERM
+  if ! cleanup_install_download_work >/dev/null 2>&1; then
+    echo '[install] ERROR: pre-admission staging workspace cleanup failed; retained evidence requires recovery' >&2
+  fi
+  exit "$_ipeh_status"
+}
+
+install_activation_failure() {
+  RESULT_DETAIL="$1"
+  echo "[install] ERROR: $RESULT_DETAIL" >&2
+  installer_record ERROR "$RESULT_DETAIL"
+  return 1
 }
 
 install_activate_staged_package() {
-  [ "$INSTALL_STAGED_READY" = "1" ] || return 1
-  [ -n "$INSTALL_STAGED_ROOT" ] && [ -n "$INSTALL_STAGED_WORK" ] || return 1
+  [ "$INSTALL_STAGED_READY" = "1" ] || {
+    install_activation_failure 'staged activation: staged package is not ready'
+    return 1
+  }
+  [ -n "$INSTALL_STAGED_ROOT" ] && [ -n "$INSTALL_STAGED_WORK" ] || {
+    install_activation_failure 'staged activation: staged root/workspace is missing'
+    return 1
+  }
   [ -n "$INSTALL_DOWNLOAD_WORK" ] || INSTALL_DOWNLOAD_WORK="$INSTALL_STAGED_WORK"
-  install_support_cohort_valid "$INSTALL_STAGED_ROOT" || return 1
-  [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || return 1
-  install_path_chain_safe "$MERV_BASE" || return 1
+  if ! install_support_cohort_valid "$INSTALL_STAGED_ROOT"; then
+    install_activation_failure 'staged activation: staged support cohort revalidation failed'
+    return 1
+  fi
+  [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || {
+    install_activation_failure 'staged activation: active target skeleton is missing or unsafe'
+    return 1
+  }
+  if ! install_path_chain_safe "$MERV_BASE"; then
+    install_activation_failure 'staged activation: active target path chain is unsafe'
+    return 1
+  fi
   if ! cp -a "$INSTALL_STAGED_ROOT"/. "$MERV_BASE"/ 2>/dev/null; then
-    ( cd "$INSTALL_STAGED_ROOT" && tar -cf - . ) |
-      ( cd "$MERV_BASE" && tar -xpf - ) || return 1
+    installer_record WARNING 'staged activation: cp -a failed; attempting tar fallback'
+    if ! ( cd "$INSTALL_STAGED_ROOT" && tar -cf - . ) |
+      ( cd "$MERV_BASE" && tar -xpf - ); then
+      install_activation_failure 'staged activation: cp -a and tar fallback activation failed'
+      return 1
+    fi
   fi
   normalize_install_script_permissions
-  install_tree_valid "$MERV_BASE" || return 1
+  if ! install_tree_valid "$MERV_BASE"; then
+    install_activation_failure 'staged activation: activated tree validation failed'
+    return 1
+  fi
   RESULT_ARCHIVE="PASS - staged package"
   RESULT_FILES="PASS"
   INSTALL_STAGED_READY="0"
   INSTALL_STAGE_ONLY="0"
-  cleanup_install_download_work || return 1
+  if ! cleanup_install_download_work; then
+    install_activation_failure 'staged activation: staging workspace cleanup failed'
+    return 1
+  fi
   return 0
 }
 
@@ -3497,27 +3590,42 @@ install_stage_target_before_admission() {
     case "$MODE" in full|tarball) ;; *) return 0 ;; esac
     if [ "$MERV_INSTALL_SUPPORT_HANDOFF" = "1" ]; then
         [ "$MERV_INSTALL_HANDOFF_ADOPTED" = "1" ] || return 1
-        install_support_cohort_valid "$MERV_INSTALL_STAGED_ROOT" || return 1
+        install_support_cohort_valid "$MERV_INSTALL_STAGED_ROOT" || {
+            install_pre_admission_stage_failure
+            return 1
+        }
         return 0
     fi
     install_path_chain_safe "$TMP_DIR" || return 1
     [ -d "$TMP_DIR" ] || mkdir -p "$TMP_DIR" 2>/dev/null || return 1
     INSTALL_STAGE_ONLY="1"
     download_mervlan || {
-        INSTALL_STAGE_ONLY="0"
+        install_pre_admission_stage_failure
         return 1
     }
     INSTALL_STAGE_ONLY="0"
-    [ "$INSTALL_STAGED_READY" = "1" ] || return 1
-    install_support_cohort_valid "$INSTALL_STAGED_ROOT" || return 1
+    [ "$INSTALL_STAGED_READY" = "1" ] || {
+        install_pre_admission_stage_failure
+        return 1
+    }
+    install_support_cohort_valid "$INSTALL_STAGED_ROOT" || {
+        install_pre_admission_stage_failure
+        return 1
+    }
     MERV_INSTALL_SUPPORT_HANDOFF=1
     MERV_INSTALL_STAGED_ROOT="$INSTALL_STAGED_ROOT"
     MERV_INSTALL_STAGED_WORK="$INSTALL_STAGED_WORK"
     MERV_INSTALL_STAGED_ARCHIVE="$INSTALL_STAGED_ARCHIVE"
     MERV_INSTALL_STAGED_READY=1
     MERV_INSTALL_WIZARD_DONE=1
-    install_staged_handoff_write || return 1
-    [ -f "$INSTALL_STAGED_ROOT/install.sh" ] && [ ! -L "$INSTALL_STAGED_ROOT/install.sh" ] || return 1
+    install_staged_handoff_write || {
+        install_pre_admission_stage_failure
+        return 1
+    }
+    [ -f "$INSTALL_STAGED_ROOT/install.sh" ] && [ ! -L "$INSTALL_STAGED_ROOT/install.sh" ] || {
+        install_pre_admission_stage_failure
+        return 1
+    }
     export MERV_INSTALL_SUPPORT_HANDOFF MERV_INSTALL_STAGED_ROOT \
         MERV_INSTALL_STAGED_WORK MERV_INSTALL_STAGED_ARCHIVE \
         MERV_INSTALL_STAGED_READY MERV_INSTALL_HANDOFF_BRANCH \
@@ -3534,6 +3642,10 @@ install_stage_target_before_admission() {
 
 INSTALL_LOG_POLICY="reset"
 [ "$MODE" = "reinstall" ] && INSTALL_LOG_POLICY="preserve"
+
+if [ "$MERV_INSTALL_SUPPORT_HANDOFF" = "1" ]; then
+    trap 'install_pre_admission_exit_handler' EXIT
+fi
 
 if [ "$MODE" = "full" ] && [ "$MERV_INSTALL_SUPPORT_HANDOFF" != "1" ] &&
    [ "$MERV_INSTALL_WIZARD_DONE" != "1" ]; then
@@ -3744,6 +3856,7 @@ if [ "$WEBUI_ENABLED" = "1" ]; then
         RESULT_WEBUI="FAIL - ASP rollback capture"
         exit 1
     }
+    install_external_mark_dirty || { RESULT_WEBUI="FAIL - projection ownership"; exit 1; }
     cp "$WEBUI_SOURCE_PAGE" "$INSTALL_EXTERNAL_WWW_ROOT/$am_webui_page" || { RESULT_WEBUI="FAIL - ASP publication"; exit 1; }
     [ "$TEST_RUN" = "1" ] && TEST_WEBUI_PAGE="$am_webui_page"
     RESULT_WEBUI="PASS - $am_webui_page"
@@ -3863,6 +3976,7 @@ fi
 if [ "$WEBUI_ENABLED" = "1" ]; then
 # 4. Copy menuTree.js (if not already bind-mounted) so we can modify it
 if [ ! -f "$INSTALL_EXTERNAL_MENU_TMP" ]; then
+    install_external_mark_dirty || { RESULT_MENU="FAIL - projection ownership"; exit 1; }
     cp "$INSTALL_EXTERNAL_MENU_TARGET" "$INSTALL_EXTERNAL_MENU_TMP"
     mount -o bind "$INSTALL_EXTERNAL_MENU_TMP" "$INSTALL_EXTERNAL_MENU_TARGET" || { RESULT_MENU="FAIL - bind mount"; exit 1; }
     INSTALL_EXTERNAL_MENU_MOUNTED=1
@@ -3871,6 +3985,7 @@ fi
 
 # 5. Insert our tab inside the LAN menu
 # Clean only the entry owned by this profile.
+install_external_mark_dirty || { RESULT_MENU="FAIL - projection ownership"; exit 1; }
 if [ "$TEST_RUN" = "1" ]; then
     MENU_LABEL="MerVLAN Test"
     sed -i '/tabName: "MerVLAN Test"/d' "$INSTALL_EXTERNAL_MENU_TMP"
@@ -3968,7 +4083,8 @@ else
     echo "[install] Installing service-event hooks"
     if [ -x "$MERV_BASE/functions/mervlan_boot.sh" ]; then
         _install_hook_log="${TMP_DIR:-/tmp}/install-hooks.$$"
-        if MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >"$_install_hook_log" 2>&1; then
+        if install_external_mark_dirty &&
+           MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" setupenable >"$_install_hook_log" 2>&1; then
             logger -t "$ADDON" "addon setupenable completed (post-install)"
             echo "[install] Service-event hooks installed"
             RESULT_HOOKS="PASS"
@@ -3991,7 +4107,7 @@ else
             INSTALL_EXTERNAL_NODE_ATTEMPTED=1
             echo "[install] Propagating setup to $(count_configured_nodes) configured node(s)"
             logger -t "$ADDON" "Propagating nodeenable to configured nodes"
-            if sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then
+            if install_external_mark_dirty && sh "$BOOT_SCRIPT" nodeenable >/dev/null 2>&1; then
                 logger -t "$ADDON" "nodeenable completed successfully"
                 echo "[install] Node setup completed successfully"
                 RESULT_NODES="PASS - $(count_configured_nodes) node(s)"
@@ -4119,9 +4235,15 @@ fi
 # restore their captured external projection explicitly before releasing the
 # maintenance owner.
 if [ "$FINAL_STATUS" != "0" ] && [ "$INSTALL_EXTERNAL_CAPTURED" = "1" ]; then
-    install_external_restore_projection >/dev/null 2>&1 || {
-        RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
-    }
+    if [ "${INSTALL_EXTERNAL_DIRTY:-0}" = "1" ]; then
+        install_external_restore_projection >/dev/null 2>&1 || {
+            RESULT_DETAIL="external projection rollback incomplete; retained recovery evidence is required"
+        }
+    else
+        install_external_cleanup_projection >/dev/null 2>&1 || {
+            RESULT_DETAIL="external projection capture cleanup failed; retained recovery evidence is required"
+        }
+    fi
 fi
 
 if [ "$INSTALL_ROLLBACK_NEEDED" = "1" ]; then
