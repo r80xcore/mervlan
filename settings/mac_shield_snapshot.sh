@@ -11,7 +11,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#               - File: mac_shield_snapshot.sh || version="0.37"                #
+#               - File: mac_shield_snapshot.sh || version="0.38"                #
 # ============================================================================ #
 # Purpose: MERV_MAC persistent db management.
 #   Builds a post-apply snapshot of known client MAC→iface→VID state,
@@ -45,6 +45,7 @@ fi
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || true
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # The shared bounded node pool is the only parallelism boundary for remote
 # observation and Shield propagation.  Keep this optional at source time so
@@ -1682,6 +1683,83 @@ merv_mac_node_pool_progress() {
   _merv_mac_refresh_progress "$_mmnpp_ui_phase" "$_mmnpp_percent" "$_mmnpp_label — ${_mmnpp_done} of ${_mmnpp_total} complete."
 }
 
+# The node-operation phase of a snapshot must share Sync's canonical action
+# owner.  The mac_snapshot lock still coalesces snapshots, but it is not the
+# global mutation mutex and cannot prevent Sync from starting after a check.
+# Parent-owned action contexts are accepted by lib_action_lock; only a lock
+# acquired here is released here.
+merv_mac_node_operation_lock_enter() {
+  [ "${MERV_MAC_NODE_OPERATION_LOCK_ACTIVE:-0}" = 1 ] && return 0
+  type merv_action_lock_enter >/dev/null 2>&1 || {
+    MERV_MAC_LAST_REASON="node_operation_lock_unavailable"
+    return 4
+  }
+  _mmnol_path="${MERV_ACTION_LOCK_PATH:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_action.lock}"
+  merv_action_lock_enter "$_mmnol_path"
+  _mmnol_rc=$?
+  [ "$_mmnol_rc" -eq 0 ] || {
+    MERV_MAC_LAST_REASON="node_operation_busy"
+    return "$_mmnol_rc"
+  }
+  MERV_MAC_NODE_OPERATION_LOCK_ACTIVE=1
+  MERV_MAC_NODE_OPERATION_LOCK_PATH="$_mmnol_path"
+  MERV_MAC_NODE_OPERATION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+  MERV_MAC_NODE_OPERATION_LOCK_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+  MERV_MAC_NODE_OPERATION_LOCK_START="${MERV_ACTION_LOCK_START:-}"
+  return 0
+}
+
+merv_mac_node_operation_lock_leave() {
+  [ "${MERV_MAC_NODE_OPERATION_LOCK_ACTIVE:-0}" = 1 ] || return 0
+  _mmnol_release_rc=0
+  if [ "${MERV_MAC_NODE_OPERATION_LOCK_MODE:-none}" = self ]; then
+    merv_action_lock_leave \
+      "${MERV_MAC_NODE_OPERATION_LOCK_PATH:-}" \
+      "${MERV_MAC_NODE_OPERATION_LOCK_NONCE:-}" \
+      "${MERV_MAC_NODE_OPERATION_LOCK_START:-}" self || _mmnol_release_rc=1
+  fi
+  if [ "$_mmnol_release_rc" -eq 0 ]; then
+    MERV_MAC_NODE_OPERATION_LOCK_ACTIVE=0
+    MERV_MAC_NODE_OPERATION_LOCK_PATH=""
+    MERV_MAC_NODE_OPERATION_LOCK_MODE=none
+    MERV_MAC_NODE_OPERATION_LOCK_NONCE=""
+    MERV_MAC_NODE_OPERATION_LOCK_START=""
+  fi
+  return "$_mmnol_release_rc"
+}
+
+# Readiness is deliberately checked through the authenticated SSH command
+# path, but the command itself is read-only.  The exact files below are the
+# settings/libs sourced by the remote Shield reload.  An empty/partial addon
+# directory is therefore not treated as an installed node.
+merv_mac_node_control_plane_check() {
+  _mmcp_nid="$1" _mmcp_nip="$2"
+  _mmcp_status=$(merv_ssh_exec "$_mmcp_nid" "$_mmcp_nip" \
+    "base='$MERV_BASE'; if [ ! -d \"\$base\" ]; then printf 'node-not-provisioned\\n'; elif [ ! -s \"\$base/settings/var_settings.sh\" ] || [ ! -s \"\$base/settings/log_settings.sh\" ] || [ ! -s \"\$base/settings/lib_mervqt.sh\" ]; then printf 'node-control-plane-incomplete\\n'; else printf 'node-ready\\n'; fi" \
+    2>/dev/null) || {
+    _merv_mac_log warn "MERV_MAC: node ${_mmcp_nip} readiness check failed; db not pushed"
+    return 1
+  }
+  _mmcp_status=$(printf '%s\n' "$_mmcp_status" | tail -n 1 | tr -d '\r')
+  case "$_mmcp_status" in
+    node-ready)
+      return 0
+      ;;
+    node-not-provisioned)
+      _merv_mac_log info "MERV_MAC: node ${_mmcp_nip} is not provisioned; skipping db/override push"
+      return 75
+      ;;
+    node-control-plane-incomplete)
+      _merv_mac_log warn "MERV_MAC: node ${_mmcp_nip} control plane is incomplete; refusing db/override push"
+      return 1
+      ;;
+    *)
+      _merv_mac_log warn "MERV_MAC: node ${_mmcp_nip} readiness result was ambiguous; db not pushed"
+      return 1
+      ;;
+  esac
+}
+
 # Pool worker for one node's atomic DB/override stream and remote Shield reload.
 # All SSH scratch state is redirected by mnj_worker to this node's isolated job
 # directory; the worker never mutates parent counters or public progress.
@@ -1697,6 +1775,7 @@ merv_mac_push_node() {
     _merv_mac_log warn "MERV_MAC: node ${_mmpp_nip} precheck failed — db not pushed"
     return 1
   fi
+  merv_mac_node_control_plane_check "$_mmpp_nid" "$_mmpp_nip" || return $?
   if ! merv_ssh_exec "$_mmpp_nid" "$_mmpp_nip" "mkdir -p '${MERV_MAC_DB_ACTIVE%/*}' '${MERV_MAC_OVERRIDE_DB%/*}'" >/dev/null 2>&1; then
     return 1
   fi
@@ -2044,7 +2123,7 @@ _merv_mac_set_counts() {
 #   7. Reload local shield on change OR force-reload; push to nodes
 #   8. Set MERV_MAC_LAST_* status globals + summary log
 # ============================================================================
-merv_mac_snapshot() {
+merv_mac_snapshot_body() {
   [ "${DRY_RUN:-no}" = "yes" ] && return 0
 
   # An unresolved pool is a hard stop.  In particular, do this before the
@@ -2328,6 +2407,7 @@ _NODES_
         # bounded push/reload pool as non-empty snapshots.  Push failures remain
         # reflected in the push counters and per-node warnings, matching the
         # existing normal-path best-effort propagation contract.
+        _mmdp_empty_push_ok=1
         if [ -n "$_nodes" ]; then
           _merv_mac_refresh_progress push 82 \
             "Pushing empty MAC Shield database and rules to nodes..."
@@ -2340,7 +2420,20 @@ _NODES_
               # generic pool can be reconciled by its owning parent.
               return 1
             fi
+            MERV_MAC_LAST_STATUS="push_failed"
+            MERV_MAC_LAST_REASON="node_push_failed"
+            _merv_mac_log warn "MERV_MAC: empty Shield push did not reach every configured node"
+            _mmdp_empty_push_ok=0
           fi
+        fi
+        if [ "$_mmdp_empty_push_ok" -ne 1 ]; then
+          _merv_mac_set_counts
+          rm -f "$snap_tmp" 2>/dev/null || :
+          if [ "$_snap_owned" = 1 ]; then
+            merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+            _snap_owned=0
+          fi
+          return 1
         fi
         MERV_MAC_LAST_STATUS="empty"; MERV_MAC_LAST_REASON="reset_no_clients"
         _merv_mac_set_counts
@@ -2438,6 +2531,15 @@ _NODES_
           # pool can be reconciled by its owning parent.
           return 1
         fi
+        MERV_MAC_LAST_STATUS="push_failed"
+        MERV_MAC_LAST_REASON="node_push_failed"
+        _merv_mac_log warn "MERV_MAC: Shield push did not reach every configured node"
+        _merv_mac_set_counts
+        if [ "$_snap_owned" = 1 ]; then
+          merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
+          _snap_owned=0
+        fi
+        return 1
       fi
     fi
   else
@@ -2460,6 +2562,39 @@ _NODES_
     merv_owner_lock_release "$_snap_lock" "$_snap_nonce" || return 1
     _snap_owned=0
   fi
+}
+
+# Acquire the action owner before any snapshot node collection or push.  This
+# is the authoritative mutual exclusion with Sync; obs_config_observable's
+# lock checks remain advisory/deferred but are intentionally not the race
+# boundary.  A busy action owner leaves the generation pending for the next
+# bounded worker attempt.
+merv_mac_snapshot() {
+  _mms_lock_owned=0
+  if [ "${MERV_MAC_NODE_SYNC:-1}" = 1 ] &&
+     type merv_mac_is_main >/dev/null 2>&1 && merv_mac_is_main; then
+    if [ "${MERV_MAC_NODE_OPERATION_LOCK_ACTIVE:-0}" != 1 ]; then
+      merv_mac_node_operation_lock_enter
+      _mms_lock_rc=$?
+      if [ "$_mms_lock_rc" -ne 0 ]; then
+        MERV_MAC_LAST_STATUS="busy"
+        [ -n "${MERV_MAC_LAST_REASON:-}" ] || MERV_MAC_LAST_REASON="node_operation_busy"
+        _merv_mac_log info "MERV_MAC: snapshot deferred — node operation owner is active or unavailable"
+        return 75
+      fi
+      _mms_lock_owned=1
+    fi
+  fi
+
+  merv_mac_snapshot_body "$@"
+  _mms_snapshot_rc=$?
+  if [ "$_mms_lock_owned" -eq 1 ]; then
+    if ! merv_mac_node_operation_lock_leave; then
+      _merv_mac_log warn "MERV_MAC: node operation owner cleanup failed"
+      [ "$_mms_snapshot_rc" -eq 0 ] && _mms_snapshot_rc=1
+    fi
+  fi
+  return "$_mms_snapshot_rc"
 }
 
 LIB_MAC_SHIELD_SNAPSHOT_LOADED=1

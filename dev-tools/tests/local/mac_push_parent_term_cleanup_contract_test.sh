@@ -151,6 +151,13 @@ case "$CASE_NAME" in
     OBS_LOCK_NONCE=observation-owner
     OBS_LOCK_ACQUIRED=1
     _ow_nonce="$OBS_LOCK_NONCE"
+    MERV_MAC_NODE_OPERATION_LOCK_ACTIVE=1
+    MERV_MAC_NODE_OPERATION_LOCK_MODE=self
+    merv_mac_node_operation_lock_leave() {
+      fake_action_release
+      MERV_MAC_NODE_OPERATION_LOCK_ACTIVE=0
+      return 0
+    }
     OBS_SIGNAL_HANDLING=0
     trap 'obs_handle_signal 143' TERM
     _caller_cleanup=obs_worker_cleanup
@@ -272,7 +279,7 @@ DRIVER
   ! grep -q 'before-worker-stop' "$_md_case_root/trace" || return 1
   awk '/lock-release$|action-release$/{released=1} released && /worker-mutating/{bad=1} END{exit bad+0}' "$_md_case_root/trace" || return 1
   if [ "$_md_case" = observation ]; then
-    :
+    grep -q '^action-release$' "$_md_case_root/trace" || return 1
   elif [ "$_md_case" = meta ]; then
     grep -q '^action-release$' "$_md_case_root/trace" || return 1
   elif [ "$_md_case" = backup ]; then

@@ -83,6 +83,7 @@ merv_ssh_precheck() {
 merv_ssh_exec() {
   _mnp_nid="$1"
   case "$3" in
+    *node-not-provisioned*|*node-control-plane-incomplete*|*node-ready*) _mnp_stage=readiness; printf 'node-ready\n' ;;
     mkdir*) _mnp_stage=mkdir ;;
     *ebt_mac_shield_init_and_apply*) _mnp_stage=reload ;;
     *) _mnp_stage=other ;;
@@ -191,7 +192,7 @@ run_width() {
     _mnp_push_path=$(awk -F: -v n="$_mnp_node" '$1 == "push" && $2 == n && $3 == "precheck" { print $5; exit }' "$TEST_TRACE")
     case "$_mnp_push_path" in */node_$_mnp_node) ;; *) fail "width $_mnp_width push worker $_mnp_node path=$_mnp_push_path" ;; esac
     _mnp_stages=$(awk -F: -v n="$_mnp_node" '$1 == "push" && $2 == n { print $3 }' "$TEST_TRACE" | tr '\n' ' ')
-    [ "$_mnp_stages" = 'precheck mkdir db override reload ' ] || fail "width $_mnp_width node $_mnp_node push order=$_mnp_stages"
+    [ "$_mnp_stages" = 'precheck readiness mkdir db override reload ' ] || fail "width $_mnp_width node $_mnp_node push order=$_mnp_stages"
   done
   [ -z "$(find "$TMPDIR/node_jobs" -mindepth 1 -print -quit 2>/dev/null)" ] || fail "width $_mnp_width node-pool workspace leaked after complete run"
   [ -z "$(find "$COLLECT_ACTIVE_ROOT" -mindepth 1 -print -quit 2>/dev/null)" ] || fail "width $_mnp_width collection active markers leaked"

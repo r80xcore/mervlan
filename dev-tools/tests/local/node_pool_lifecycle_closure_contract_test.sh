@@ -91,8 +91,8 @@ fi
 
 # Source the production Shield library with its optional dependencies marked
 # loaded, then verify collection and direct push both stop before build/mkdir.
-LIB_OWNER_LOCK_LOADED=1 LIB_SSH_LOADED=1 LIB_MAC_SHIELD_SNAPSHOT_LOADED=''
-export LIB_OWNER_LOCK_LOADED LIB_SSH_LOADED
+LIB_OWNER_LOCK_LOADED=1 LIB_SSH_LOADED=1 LIB_ACTION_LOCK_LOADED=1 LIB_MAC_SHIELD_SNAPSHOT_LOADED=''
+export LIB_OWNER_LOCK_LOADED LIB_SSH_LOADED LIB_ACTION_LOCK_LOADED
 MERV_MAC_DB_ACTIVE="$TEST_ROOT/db/active.db"
 MERV_MAC_DB_JFFS="$TEST_ROOT/db/jffs.db"
 MERV_MAC_OVERRIDE_DB="$TEST_ROOT/db/override.db"
@@ -101,6 +101,18 @@ export MERV_MAC_DB_ACTIVE MERV_MAC_DB_JFFS MERV_MAC_OVERRIDE_DB DRY_RUN
 : > "$MERV_MAC_DB_ACTIVE"
 . "$ROOT/settings/mac_shield_snapshot.sh" || fail 'Shield library did not load'
 MERV_MAC_BUILD_CALLED=0
+MERV_MAC_NODE_SYNC=1
+export MERV_MAC_NODE_SYNC
+merv_mac_is_main() { return 0; }
+info() { :; }
+warn() { :; }
+merv_action_lock_enter() {
+    MERV_ACTION_LOCK_MODE=self
+    MERV_ACTION_LOCK_NONCE=closure-action
+    MERV_ACTION_LOCK_START=1
+    return 0
+}
+merv_action_lock_leave() { return 0; }
 merv_mac_build_snapshot() { MERV_MAC_BUILD_CALLED=1; : > "$1"; printf '0\n'; }
 warn() { :; }
 if merv_mac_snapshot; then fail 'Shield collection accepted unresolved pool state'; fi

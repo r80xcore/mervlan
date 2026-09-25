@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# - File: post_apply_worker.sh || version="0.5"
+# - File: post_apply_worker.sh || version="0.6"
 # - Purpose: Serialize and coalesce post-apply MAC snapshots/client collection.
 # ============================================================================
 : "${MERV_BASE:=/jffs/addons/mervlan}"
@@ -427,6 +427,11 @@ obs_worker_cleanup() {
     fi
   fi
   if [ "$_ow_pool_abort_failed" -eq 0 ]; then
+    if type merv_mac_node_operation_lock_leave >/dev/null 2>&1 &&
+       ! merv_mac_node_operation_lock_leave; then
+      _ow_cleanup_rc=1
+      obs_log error "observation worker could not release the MAC node-operation owner"
+    fi
     if ! obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" 2>/dev/null; then
       _ow_cleanup_rc=1
       obs_log error "observation worker lock cleanup failed"
