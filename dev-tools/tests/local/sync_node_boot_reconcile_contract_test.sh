@@ -72,8 +72,8 @@ case "$1" in
         : > "$services"
         printf '%s\n' '### >>> MERVLAN START: service-event [tpl=service-event.v2.tpl md5=test]' >> "$event"
         printf '%s\n' '### <<< MERVLAN END: service-event [tpl=service-event.v2.tpl md5=test]' >> "$event"
-        printf '%s\n' '### >>> MERVLAN START: services-start-addon [tpl=services-start-addon.v2.tpl md5=test]' >> "$services"
-        printf '%s\n' '### <<< MERVLAN END: services-start-addon [tpl=services-start-addon.v2.tpl md5=test]' >> "$services"
+        printf '%s\n' '### >>> MERVLAN START: services-start [tpl=services-start-addon.v2.tpl md5=test]' >> "$services"
+        printf '%s\n' '### <<< MERVLAN END: services-start [tpl=services-start-addon.v2.tpl md5=test]' >> "$services"
         ;;
     enable)
         if [ -f "$base/fail-enable" ]; then exit 17; fi
@@ -91,7 +91,7 @@ case "$1" in
         . "$base/settings/lib_json.sh"
         desired=$(json_get_flag BOOT_ENABLED 0 "$base/settings/settings.json")
         if [ -f "$base/cron" ]; then cron=present; else cron=absent; fi
-        if [ "$(marker_count '### >>> MERVLAN START: services-start-addon [tpl=services-start-addon.v' "$services")" = 1 ]; then addon=node-on; else addon=node-off; fi
+        if [ "$(marker_count '### >>> MERVLAN START: services-start [tpl=services-start-addon.v' "$services")" = 1 ]; then addon=node-on; else addon=node-off; fi
         if [ -f "$event" ] && grep -qF '### >>> MERVLAN START: service-event [tpl=service-event.v' "$event"; then event_state=active; else event_state=missing; fi
         printf 'REPORT hw=test boot=%s addon=%s event=%s cron=%s is_node=yes mac_shield=off\n' "$desired" "$addon" "$event_state" "$cron"
         ;;
@@ -139,7 +139,7 @@ run_helper() {
 enabled_root=$(make_fixture enabled 1 baseline)
 run_helper "$enabled_root" || fail 'BOOT_ENABLED=1 baseline reconciliation failed'
 assert_file_count 1 '### >>> MERVLAN START: services-start [tpl=services-start.v' "$SCRIPTS_DIR/services-start" 'enabled manager block'
-assert_file_count 1 '### >>> MERVLAN START: services-start-addon [tpl=services-start-addon.v' "$SCRIPTS_DIR/services-start" 'enabled addon block'
+assert_file_count 1 '### >>> MERVLAN START: services-start [tpl=services-start-addon.v' "$SCRIPTS_DIR/services-start" 'enabled addon block'
 assert_file_count 1 '### >>> MERVLAN START: service-event [tpl=service-event.v' "$SCRIPTS_DIR/service-event" 'enabled service-event block'
 [ -f "$enabled_root/cron" ] || fail 'BOOT_ENABLED=1 reconciliation did not create cron'
 grep -q 'enable MERV_NODE_CONTEXT=1' "$enabled_root/boot.calls" || fail 'enabled reconciliation was not node-local'
@@ -151,7 +151,7 @@ assert_file_count 1 '### >>> MERVLAN START: services-start [tpl=services-start.v
 disabled_root=$(make_fixture disabled 0 enabled)
 run_helper "$disabled_root" || fail 'BOOT_ENABLED=0 enabled-state cleanup failed'
 assert_file_count 0 '### >>> MERVLAN START: services-start [tpl=services-start.v' "$SCRIPTS_DIR/services-start" 'disabled manager block'
-assert_file_count 1 '### >>> MERVLAN START: services-start-addon [tpl=services-start-addon.v' "$SCRIPTS_DIR/services-start" 'disabled addon block'
+assert_file_count 1 '### >>> MERVLAN START: services-start [tpl=services-start-addon.v' "$SCRIPTS_DIR/services-start" 'disabled addon block'
 assert_file_count 1 '### >>> MERVLAN START: service-event [tpl=service-event.v' "$SCRIPTS_DIR/service-event" 'disabled service-event block'
 [ ! -f "$disabled_root/cron" ] || fail 'BOOT_ENABLED=0 reconciliation left cron'
 

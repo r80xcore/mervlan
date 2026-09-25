@@ -1899,7 +1899,7 @@ sync_node_boot_reconcile_body() {
                 printf '%s\n' "${_snbr_marker_result:-0}"
             }
             _snbr_manager_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start [tpl=services-start.v')
-            _snbr_addon_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start-addon [tpl=services-start-addon.v')
+            _snbr_addon_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start [tpl=services-start-addon.v')
             _snbr_event_count=$(_snbr_marker_count "$_snbr_event" '### >>> MERVLAN START: service-event [tpl=service-event.v')
 
             case " $_snbr_report " in
