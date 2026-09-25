@@ -2042,8 +2042,20 @@ activate_staged_node() {
         if ! mv \"\$stage\" \"\$active\" 2>/dev/null; then exit 26; fi;
         printf 'STAGED_NODE_ROLLBACK_OK\\n'; exit 0
     "
+    # Staged activation is one bounded remote transaction containing nodeenable,
+    # the synchronized boot-state reconciliation, a report, and hardware
+    # probing.  That composed operation can legitimately exceed the generic
+    # per-command SSH timeout even though each individual step is healthy.
+    # Give only this transaction a larger bounded window, then restore the
+    # caller's normal timeout before returning.
+    _asn_saved_ssh_timeout="${MERV_SSH_TIMEOUT:-10}"
+    _asn_activation_ssh_timeout=30
+    MERV_SSH_TIMEOUT="$_asn_activation_ssh_timeout"
+    export MERV_SSH_TIMEOUT
     _asn_result=$(merv_ssh_exec "$_asn_id" "$_asn_ip" "$_asn_cmd" 2>/dev/null)
     _asn_rc=$?
+    MERV_SSH_TIMEOUT="$_asn_saved_ssh_timeout"
+    export MERV_SSH_TIMEOUT
     if echo "$_asn_result" | grep -q STAGED_NODE_OK; then
         SYNC_NODE_ACTIVATION_OUTPUT="$_asn_result"
         export SYNC_NODE_ACTIVATION_OUTPUT
@@ -2053,6 +2065,12 @@ activate_staged_node() {
         _asn_diag=$(echo "$_asn_result" | grep -E 'STAGED_NODE_(FAIL|ROLLBACK_FAIL)' | tail -1 | tr -cd 'A-Za-z0-9_=.,:-' | cut -c 1-220)
         MERV_SSH_LAST_REASON="node-activation-failed"
         MERV_SSH_LAST_DETAIL="NODE$_asn_id staged activation failed (ssh_rc=$_asn_rc) $_asn_diag"
+    elif [ "$_asn_rc" -ne 0 ]; then
+        MERV_SSH_LAST_REASON="node-activation-ssh-failed"
+        MERV_SSH_LAST_DETAIL="NODE$_asn_id staged activation SSH transaction failed (ssh_rc=$_asn_rc timeout=${_asn_activation_ssh_timeout}s)"
+    else
+        MERV_SSH_LAST_REASON="node-activation-response-invalid"
+        MERV_SSH_LAST_DETAIL="NODE$_asn_id staged activation returned no success marker"
     fi
     return 1
 }
