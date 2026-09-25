@@ -1847,6 +1847,110 @@ cleanup_remote_stage() {
     merv_ssh_exec "$_crs_id" "$_crs_ip" "rm -rf '$_crs_stage'" >/dev/null 2>&1
 }
 
+# Emit the node-local boot reconciliation helper used by staged activation.
+# nodeenable deliberately installs only the node baseline; this helper then
+# converges the effective boot lifecycle to the synchronized BOOT_ENABLED value
+# before the new tree is reported as active.
+sync_node_boot_reconcile_body() {
+    cat <<'EOF'
+        sync_node_boot_reconcile() {
+            _snbr_active="$1"
+            SYNC_NODE_BOOT_DETAIL=""
+            SYNC_NODE_BOOT_REPORT=""
+            _snbr_services="${SCRIPTS_DIR:-/jffs/scripts}/services-start"
+            _snbr_event="${SCRIPTS_DIR:-/jffs/scripts}/service-event"
+            _snbr_settings="$_snbr_active/settings/settings.json"
+            _snbr_boot="$_snbr_active/functions/mervlan_boot.sh"
+            _snbr_json="$_snbr_active/settings/lib_json.sh"
+
+            if [ ! -f "$_snbr_settings" ] || [ ! -f "$_snbr_json" ]; then
+                SYNC_NODE_BOOT_DETAIL=settings-cohort-missing
+                return 1
+            fi
+            if ! . "$_snbr_json" 2>/dev/null; then
+                SYNC_NODE_BOOT_DETAIL=settings-helper-load-failed
+                return 1
+            fi
+
+            _snbr_desired=$(json_get_flag BOOT_ENABLED "" "$_snbr_settings" 2>/dev/null | tr -d '[:space:]')
+            case "$_snbr_desired" in
+                1) _snbr_action=enable ;;
+                0) _snbr_action=disable ;;
+                *)
+                    SYNC_NODE_BOOT_DETAIL=invalid-boot-enabled
+                    return 1
+                    ;;
+            esac
+
+            MERV_NODE_CONTEXT=1 sh "$_snbr_boot" "$_snbr_action" >/dev/null 2>&1
+            _snbr_action_rc=$?
+            if [ "$_snbr_action_rc" -ne 0 ]; then
+                SYNC_NODE_BOOT_DETAIL="boot-${_snbr_action}-failed"
+                return 1
+            fi
+
+            _snbr_report=$(MERV_NODE_CONTEXT=1 sh "$_snbr_boot" report 2>/dev/null | tail -1)
+            SYNC_NODE_BOOT_REPORT="$_snbr_report"
+            _snbr_marker_count() {
+                _snbr_marker_file="$1"
+                _snbr_marker_text="$2"
+                [ -f "$_snbr_marker_file" ] || { printf '0\n'; return 0; }
+                _snbr_marker_result=$(grep -cF "$_snbr_marker_text" "$_snbr_marker_file" 2>/dev/null) || :
+                printf '%s\n' "${_snbr_marker_result:-0}"
+            }
+            _snbr_manager_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start [tpl=services-start.v')
+            _snbr_addon_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start-addon [tpl=services-start-addon.v')
+            _snbr_event_count=$(_snbr_marker_count "$_snbr_event" '### >>> MERVLAN START: service-event [tpl=service-event.v')
+
+            case " $_snbr_report " in
+                *" addon=node-on "*|*" addon=node-on"*) : ;;
+                *) SYNC_NODE_BOOT_DETAIL=node-baseline-not-active; return 1 ;;
+            esac
+            case " $_snbr_report " in
+                *" event=active "*|*" event=active"*) : ;;
+                *) SYNC_NODE_BOOT_DETAIL=node-service-event-not-active; return 1 ;;
+            esac
+            [ "$_snbr_addon_count" = 1 ] || {
+                SYNC_NODE_BOOT_DETAIL=node-addon-block-invalid
+                return 1
+            }
+            [ "$_snbr_event_count" = 1 ] || {
+                SYNC_NODE_BOOT_DETAIL=node-service-event-block-invalid
+                return 1
+            }
+
+            if [ "$_snbr_desired" = 1 ]; then
+                case " $_snbr_report " in
+                    *" boot=1 "*|*" boot=1"*) : ;;
+                    *) SYNC_NODE_BOOT_DETAIL=node-boot-state-mismatch; return 1 ;;
+                esac
+                case " $_snbr_report " in
+                    *" cron=present "*|*" cron=present"*) : ;;
+                    *) SYNC_NODE_BOOT_DETAIL=node-cron-missing; return 1 ;;
+                esac
+                [ "$_snbr_manager_count" = 1 ] || {
+                    SYNC_NODE_BOOT_DETAIL=node-manager-block-missing
+                    return 1
+                }
+            else
+                case " $_snbr_report " in
+                    *" boot=0 "*|*" boot=0"*) : ;;
+                    *) SYNC_NODE_BOOT_DETAIL=node-boot-state-mismatch; return 1 ;;
+                esac
+                case " $_snbr_report " in
+                    *" cron=absent "*|*" cron=absent"*) : ;;
+                    *) SYNC_NODE_BOOT_DETAIL=node-cron-present; return 1 ;;
+                esac
+                [ "$_snbr_manager_count" = 0 ] || {
+                    SYNC_NODE_BOOT_DETAIL=node-manager-block-present
+                    return 1
+                }
+            fi
+            return 0
+        }
+EOF
+}
+
 activate_staged_node() {
     _asn_ip="$1"
     _asn_id="$2"
@@ -1859,6 +1963,7 @@ activate_staged_node() {
 
     _asn_cmd="
         active='$MERV_BASE'; stage='$_asn_stage'; old='$_asn_old';
+        $(sync_node_boot_reconcile_body)
         test -f \"\$stage/settings/settings.json\" || exit 21;
         test -x \"\$stage/functions/mervlan_boot.sh\" || exit 22;
         rm -rf \"\$old\" 2>/dev/null || exit 23;
@@ -1882,12 +1987,14 @@ activate_staged_node() {
         else
             nodeenable_rc=24;
         fi;
-        report=\"\"; report_rc=1;
+        boot_rc=1; boot_detail=\"\"; report=\"\";
         if [ \"\$nodeenable_rc\" -eq 0 ]; then
-            report=\$(MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh report 2>/dev/null | tail -1);
-            report_rc=\$?;
+            sync_node_boot_reconcile \"\$active\";
+            boot_rc=\$?;
+            boot_detail=\"\${SYNC_NODE_BOOT_DETAIL:-}\";
+            report=\"\${SYNC_NODE_BOOT_REPORT:-}\";
         fi;
-        if [ \"\$nodeenable_rc\" -eq 0 ] && [ \"\$report_rc\" -eq 0 ] && echo \"\$report\" | grep -q 'addon=node-on' && echo \"\$report\" | grep -q 'event=active'; then
+        if [ \"\$nodeenable_rc\" -eq 0 ] && [ \"\$boot_rc\" -eq 0 ]; then
             if ! rm -rf \"\$old\" 2>/dev/null; then echo STAGED_NODE_CLEANUP_FAILED; exit 28; fi;
             printf 'NODE_REPORT=%s\\n' \"\$report\";
             echo STAGED_NODE_OK;
@@ -1905,13 +2012,28 @@ activate_staged_node() {
             fi;
             exit 0;
         fi;
-        node_msg=\$(printf '%s\\n' \"\$nodeenable_out\" | tail -n 1 | tr -cd 'A-Za-z0-9_.,:=-' | cut -c 1-120);
-        printf 'STAGED_NODE_FAIL nodeenable_rc=%s report_rc=%s report=%s detail=%s\\n' \"\$nodeenable_rc\" \"\$report_rc\" \"\$report\" \"\$node_msg\";
+        node_msg=\$(printf '%s\\n' \"\${boot_detail:-\$nodeenable_out}\" | tail -n 1 | tr -cd 'A-Za-z0-9_.,:=-' | cut -c 1-120);
+        printf 'STAGED_NODE_FAIL nodeenable_rc=%s boot_rc=%s report=%s detail=%s\\n' \"\$nodeenable_rc\" \"\$boot_rc\" \"\$report\" \"\$node_msg\";
         if ! rm -rf \"\$stage\" 2>/dev/null; then exit 26; fi;
         mv \"\$active\" \"\$stage\" 2>/dev/null || exit 26;
         if [ \"\$had_old\" = 1 ]; then
             if mv \"\$old\" \"\$active\" 2>/dev/null; then
-                if ! cd \"\$active/functions\" 2>/dev/null || ! MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local >/dev/null 2>&1; then exit 28; fi;
+                if ! cd \"\$active/functions\" 2>/dev/null; then
+                    echo STAGED_NODE_ROLLBACK_FAIL stage=nodeenable;
+                    exit 28;
+                fi;
+                nodeenable_out=\$(MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local 2>&1);
+                nodeenable_rc=\$?;
+                if [ \"\$nodeenable_rc\" -ne 0 ]; then
+                    echo STAGED_NODE_ROLLBACK_FAIL stage=nodeenable;
+                    exit 28;
+                fi;
+                sync_node_boot_reconcile \"\$active\";
+                if [ \"\$?\" -ne 0 ]; then
+                    rollback_detail=\$(printf '%s\\n' \"\${SYNC_NODE_BOOT_DETAIL:-boot-reconcile-failed}\" | tr -cd 'A-Za-z0-9_.,:=-' | cut -c 1-120);
+                    printf 'STAGED_NODE_ROLLBACK_FAIL stage=boot-reconcile detail=%s\\n' \"\$rollback_detail\";
+                    exit 28;
+                fi;
                 if ! rm -rf \"\$stage\" 2>/dev/null; then exit 29; fi;
                 printf 'STAGED_NODE_ROLLBACK_OK\\n'; exit 0;
             fi;
@@ -1927,8 +2049,8 @@ activate_staged_node() {
         export SYNC_NODE_ACTIVATION_OUTPUT
         return 0
     fi
-    if echo "$_asn_result" | grep -q STAGED_NODE_FAIL; then
-        _asn_diag=$(echo "$_asn_result" | grep STAGED_NODE_FAIL | tail -1 | tr -cd 'A-Za-z0-9_=.,:-' | cut -c 1-220)
+    if echo "$_asn_result" | grep -qE 'STAGED_NODE_(FAIL|ROLLBACK_FAIL)'; then
+        _asn_diag=$(echo "$_asn_result" | grep -E 'STAGED_NODE_(FAIL|ROLLBACK_FAIL)' | tail -1 | tr -cd 'A-Za-z0-9_=.,:-' | cut -c 1-220)
         MERV_SSH_LAST_REASON="node-activation-failed"
         MERV_SSH_LAST_DETAIL="NODE$_asn_id staged activation failed (ssh_rc=$_asn_rc) $_asn_diag"
     fi

@@ -14,8 +14,13 @@ edits on a node.
 4. Copy explicit files using the supported legacy SCP protocol when required.
 5. Check file presence, mode/owner, and BusyBox `sh -n` in staging.
 6. Activate with an exact same-filesystem move and retain rollback information.
-7. Publish a validated per-node terminal result and aggregate the run.
-8. Verify node hashes, versions, observation state, and idle workers afterward.
+7. After the node baseline is installed, staged activation reads the
+   synchronized `BOOT_ENABLED` value and runs the node-local `enable` or
+   `disable` action under node context. It verifies the resulting manager
+   boot marker, addon/event markers, and health cron before publishing success;
+   this does not recursively propagate back to other nodes.
+8. Publish a validated per-node terminal result and aggregate the run.
+9. Verify node hashes, versions, observation state, and idle workers afterward.
 
 The staging verifier checks every file's exact size and digest through one
 verified SSH stream carrying a compact manifest, including the node-specific
