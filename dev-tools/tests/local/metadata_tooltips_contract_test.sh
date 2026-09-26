@@ -15,6 +15,8 @@ fail() {
   exit 1
 }
 
+. "$TEST_DIR/js_source_helpers.sh"
+
 grep -Fq 'title="Set an optional friendly name for this client in MerVLAN. This does not change the device hostname or DNS name."' "$UI_FILE" || fail 'client-name title mismatch'
 grep -Fq 'title="Unlock: Exclude this MAC from MAC shield locking across the cluster so the device can roam between bridges without being blocked by MAC shield. Example: a trusted admin device that needs to move between the native LAN and VLAN networks. Normal VLAN and firewall policy still applies."' "$UI_FILE" || fail 'Unlock title mismatch'
 grep -Fq 'title="Enter a MAC address to add an Unlock override, even if the device is not currently detected. Example: aa:bb:cc:dd:ee:ff."' "$UI_FILE" || fail 'Add MAC input title mismatch'
@@ -33,10 +35,24 @@ printf '%s\n' "$no_loading_block" | grep -Fq '"macclientmeta_vlanmgr"' || fail '
 grep -Fq 'function MVM_macClientMeta(opts) {' "$PARENT_FILE" || fail 'metadata action wrapper is not explicit'
 grep -Fq 'actionOpts.loading = false;' "$PARENT_FILE" || fail 'metadata wrapper can re-enable parent loading'
 grep -Fq 'actionOpts.minLoadingMs = 0;' "$PARENT_FILE" || fail 'metadata wrapper can retain a parent loader hold'
-quiet_save_block=$(sed -n '/function MVM_save_quiet(settingsObj)/,/^}/p' "$PARENT_FILE")
-printf '%s\n' "$quiet_save_block" | grep -Fq 'minLoadingMs: 0' || fail 'quiet metadata save can retain the save loader hold'
+metadata_wrapper=$(extract_js_function MVM_macClientMeta "$PARENT_FILE") || fail 'metadata wrapper extraction failed'
+quiet_save_block=$(extract_js_function MVM_save_quiet "$PARENT_FILE") || fail 'quiet save wrapper extraction failed'
+metadata_wrapper_compact=$(printf '%s\n' "$metadata_wrapper" | tr -d '[:space:]')
+quiet_save_compact=$(printf '%s\n' "$quiet_save_block" | tr -d '[:space:]')
+printf '%s\n' "$metadata_wrapper_compact" | grep -Fq 'actionOpts.loading=false;' || fail 'metadata wrapper does not disable parent loading'
+printf '%s\n' "$metadata_wrapper_compact" | grep -Fq 'actionOpts.waitSec=0;' || fail 'metadata wrapper retains a parent wait'
+printf '%s\n' "$metadata_wrapper_compact" | grep -Fq 'actionOpts.skipRefresh=true;' || fail 'metadata wrapper does not suppress parent refresh'
+printf '%s\n' "$metadata_wrapper_compact" | grep -Fq 'actionOpts.minLoadingMs=0;' || fail 'metadata wrapper retains a parent loader hold'
+printf '%s\n' "$quiet_save_compact" | grep -Fq 'loading:false' || fail 'quiet metadata save can re-enable parent loading'
+printf '%s\n' "$quiet_save_compact" | grep -Fq 'waitSec:0' || fail 'quiet metadata save retains a parent wait'
+printf '%s\n' "$quiet_save_compact" | grep -Fq 'skipRefresh:true' || fail 'quiet metadata save does not suppress parent refresh'
+printf '%s\n' "$quiet_save_compact" | grep -Fq 'minLoadingMs:0' || fail 'quiet metadata save can retain the save loader hold'
 metadata_save_block=$(sed -n '/const saveResult = (typeof window.parent.MVM_save_quiet/,/if (saveResult === false)/p' "$UI_FILE")
-printf '%s\n' "$metadata_save_block" | grep -Fq 'minLoadingMs:0' || fail 'metadata save fallback can retain the save loader hold'
+metadata_save_compact=$(printf '%s\n' "$metadata_save_block" | tr -d '[:space:]')
+printf '%s\n' "$metadata_save_compact" | grep -Fq 'loading:false' || fail 'metadata save fallback can retain parent loading'
+printf '%s\n' "$metadata_save_compact" | grep -Fq 'waitSec:0' || fail 'metadata save fallback retains a parent wait'
+printf '%s\n' "$metadata_save_compact" | grep -Fq 'skipRefresh:true' || fail 'metadata save fallback does not suppress parent refresh'
+printf '%s\n' "$metadata_save_compact" | grep -Fq 'minLoadingMs:0' || fail 'metadata save fallback can retain the save loader hold'
 grep -Fq 'minLoadingMs: 0' "$UI_FILE" || fail 'metadata caller does not explicitly suppress parent loader hold'
 ! sed -n '/"macclientmeta_vlanmgr": {/,/^[[:space:]]*},/p' "$MERV_BASE/www/settings/loading_actions.json" | grep -Fq '"frontend_owned": true' || fail 'metadata action suppresses backend progress updates'
 grep -Fq "MerVLANLoading.start('macclientmeta_vlanmgr', 'Saving Client Metadata'" "$UI_FILE" || fail 'metadata loading header does not identify the save phase'

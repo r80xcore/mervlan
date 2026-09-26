@@ -114,9 +114,18 @@ validate_node_parallelism_kv OTHER_SETTING malformed || fail 'Save validator rej
 pass 'Save accepts only NODE_PARALLELISM 1..5'
 
 # The valid path is structured under General and the invalid gate runs before
-# the candidate commit.  Verify the production writer and ordering remain
-# coupled to the tested validator.
-require 'NODE_PARALLELISM; do' "$SAVE_FILE" 'Save does not include NODE_PARALLELISM in General seeding'
+# the candidate commit. Verify membership, not list position: another valid
+# General setting may follow NODE_PARALLELISM in this loop.
+general_seed_loop=$(awk '
+    !found && /^[[:space:]]*for _save_general_key in[[:space:]]*\\$/ { found=1 }
+    found {
+        print
+        if ($0 ~ /;[[:space:]]*do[[:space:]]*$/) exit
+    }
+' "$SAVE_FILE")
+[ -n "$general_seed_loop" ] || fail 'General Save setting loop is missing'
+printf '%s\n' "$general_seed_loop" | grep -Fq 'NODE_PARALLELISM' || fail 'Save does not include NODE_PARALLELISM in General seeding'
+printf '%s\n' "$general_seed_loop" | grep -Fq 'BOOT_RC_TIMEOUT' || fail 'General Save loop does not retain BOOT_RC_TIMEOUT membership'
 require 'json_set_section_value "General" "$_sg_key" "$_sg_value"' "$SAVE_FILE" 'Save does not persist General setting through structured writer'
 require 'validate_node_parallelism_kv' "$SAVE_FILE" 'Save validator is not present'
 _validator_line=$(grep -n '^validate_node_parallelism_kv()' "$SAVE_FILE" | cut -d: -f1)

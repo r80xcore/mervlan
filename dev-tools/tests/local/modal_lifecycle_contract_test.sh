@@ -12,8 +12,10 @@ fail() {
   exit 1
 }
 
+. "$TEST_DIR/js_source_helpers.sh"
+
 function_block() {
-  sed -n "/^function $1(/,/^}/p" "$UI_FILE"
+  extract_js_function "$1" "$UI_FILE"
 }
 
 ssh_open=$(function_block showSSHKeyModal)
@@ -46,8 +48,8 @@ grep -Fq 'return `Decision expires in ${minutes}:${remainder}`;' "$UI_FILE" || f
 printf '%s\n' "$trust_revoke" | grep -Fq "node_id: node && typeof node === 'object' ? node.nodeId : ''" || fail 'trusted-row revoke loses the normalized node identifier'
 printf '%s\n' "$trust_revoke" | grep -Fq "MVM_triggerVerified('sshtrustrevoke_vlanmgr'" || fail 'trusted-row revoke no longer dispatches through the verified parent action'
 
-settings_open=$(sed -n '/^    async function showServiceSettingsModal()/,/^    function closeServiceSettingsModal()/p' "$UI_FILE")
-settings_loader=$(sed -n '/^    async function loadSettings(opts = {}){/,/^    function toNone/p' "$UI_FILE")
+settings_open=$(extract_js_function showServiceSettingsModal "$UI_FILE") || fail 'Settings modal function extraction failed'
+settings_loader=$(extract_js_function loadSettings "$UI_FILE") || fail 'settings loader function extraction failed'
 printf '%s\n' "$settings_open" | grep -Fq "modal.style.display = 'block';" || fail 'Settings modal is not opened synchronously'
 printf '%s\n' "$settings_open" | grep -Fq "setServiceSettingsLoadState('loading', 'Loading settings...')" || fail 'Settings loading state missing'
 printf '%s\n' "$settings_open" | grep -Fq "if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;" || fail 'Settings modal load is not single-flight'

@@ -9,8 +9,10 @@ UI="$ROOT/www/index.html"
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
-REPAIR_BLOCK=$(sed -n '/async function repairUpdateComponentsBeforeUpdate/,/^}/p' "$UI")
-UPDATE_BLOCK=$(sed -n '/const repairRequested = /,/const descBase = /p' "$UI")
+. "$ROOT/dev-tools/tests/local/js_source_helpers.sh"
+
+REPAIR_BLOCK=$(extract_js_function repairUpdateComponentsBeforeUpdate "$UI") || fail 'repair function extraction failed'
+UPDATE_BLOCK=$(extract_js_function runUpdateFromModal "$UI") || fail 'update function extraction failed'
 
 printf '%s\n' "$REPAIR_BLOCK" | grep -Fq 'const terminal = await loadingTask.completion;' || \
   fail 'repair flow does not await loading completion'

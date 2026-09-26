@@ -46,7 +46,17 @@ require_ui "window.addEventListener('pageshow', resumePersistedProgressAction);"
 require_ui "clearPersistedProgressAction(active.token);" 'terminal action does not clear reload-resume state'
 require_ui 'may have restarted and lost its temporary action state' 'missing-result guidance does not explain a possible router restart'
 require_ui "loadingMini.dataset.state === \"running\"" 'loading latch does not distinguish minimized work from idle status'
-require_ui '.maintenance-confirm-actions { display: flex; justify-content: center;' 'confirmation buttons are not centered'
+
+maintenance_confirm_block=$(awk '
+    !found && /^[[:space:]]*\.maintenance-confirm-actions[[:space:]]*\{/ { found=1 }
+    found {
+        print
+        if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) exit
+    }
+' "$UI_FILE")
+[ -n "$maintenance_confirm_block" ] || fail 'confirmation action selector is missing'
+printf '%s\n' "$maintenance_confirm_block" | grep -Eq 'display:[[:space:]]*flex[[:space:]]*;' || fail 'confirmation buttons are not a flex row'
+printf '%s\n' "$maintenance_confirm_block" | grep -Eq 'justify-content:[[:space:]]*center[[:space:]]*;' || fail 'confirmation buttons are not centered'
 
 require_style 'grid-template-columns:auto minmax(0, 1fr) auto auto;' 'experimental footer columns are not stable'
 require_style '.form-box.form-box--experimental > #mervlanLoadingSlot' 'loading status slot is not reserved in footer geometry'

@@ -7,11 +7,11 @@ MERV_BASE=$(CDPATH= cd -- "$TEST_DIR/../../.." && pwd)
 UI_FILE="$MERV_BASE/www/index.html"
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
-block() { sed -n "/^$1/,/^}/p" "$UI_FILE"; }
+. "$TEST_DIR/js_source_helpers.sh"
 
-fetch_block=$(block '        async function fetchCustomBranchVersion(branch)')
-input_block=$(block 'function onCustomBranchInput()')
-submit_block=$(block 'async function runUpdateFromModal(buttonEl)')
+fetch_block=$(extract_js_function fetchCustomBranchVersion "$UI_FILE") || fail 'custom version function extraction failed'
+input_block=$(extract_js_function onCustomBranchInput "$UI_FILE") || fail 'custom input function extraction failed'
+submit_block=$(extract_js_function runUpdateFromModal "$UI_FILE") || fail 'custom submit function extraction failed'
 
 grep -Fq 'function isValidCustomBranchName(value)' "$UI_FILE" || fail 'shared custom branch syntax helper missing'
 printf '%s\n' "$fetch_block" | grep -Fq 'method: "GET"' || fail 'custom validation does not use GET'

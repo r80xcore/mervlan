@@ -10,10 +10,55 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const html = await readFile(path.join(root, 'www/index.html'), 'utf8');
-const start = html.indexOf('        let WAN_NATIVE_POPUP_STATE = null;');
-const end = html.indexOf('\n\n  function pollOnce(){', start);
-assert.ok(start >= 0 && end > start, 'could not locate production WAN Native popup functions');
-const productionPopup = html.slice(start, end);
+
+function functionSource(name) {
+  const declaration = new RegExp('(?:^|\\n)[\\t ]*function[\\t ]+' + name + '[\\t ]*\\(').exec(html);
+  assert.ok(declaration, name + ' declaration is missing');
+  const start = declaration.index + declaration[0].indexOf('function');
+  const open = html.indexOf('{', start);
+  assert.ok(open >= 0, name + ' body is missing');
+  let depth = 0;
+  let quote = null;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = open; index < html.length; index += 1) {
+    const ch = html[index];
+    const next = html[index + 1];
+    if (lineComment) {
+      if (ch === '\n') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (ch === '*' && next === '/') { blockComment = false; index += 1; }
+      continue;
+    }
+    if (quote) {
+      if (ch === '\\') { index += 1; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '/' && next === '/') { lineComment = true; index += 1; continue; }
+    if (ch === '/' && next === '*') { blockComment = true; index += 1; continue; }
+    if (ch === '"' || ch === "'" || ch === String.fromCharCode(96)) { quote = ch; continue; }
+    if (ch === '{') depth += 1;
+    if (ch === '}' && --depth === 0) return html.slice(start, index + 1);
+  }
+  assert.fail(name + ' has an unterminated body');
+}
+
+const stateDeclaration = /let[\t ]+WAN_NATIVE_POPUP_STATE[\t ]*=[\t ]*null[\t ]*;/.exec(html);
+assert.ok(stateDeclaration, 'WAN Native popup state declaration is missing');
+const popupFunctions = [
+  'wanNativePopupInput', 'wanNativeTargetLabel', 'wanNativeNodeAsusIp',
+  'wanNativeNodeRole', 'renderWanNativePopupNodeDraft',
+  'handleWanNativePopupRoleChange', 'handleWanNativePopupVlanInput',
+  'updateWanNativePopupRequirement', 'openWanNativeConfigPopup',
+  'saveWanNativeConfig', 'cancelWanNativeConfig'
+];
+const productionPopup = [
+  stateDeclaration[0],
+  ...popupFunctions.map(functionSource)
+].join('\n');
 
 function validIp(value) {
   const parts = String(value || '').split('.');
@@ -69,6 +114,10 @@ function createHarness(cache, target = 'NODE1') {
       return role === 'aimesh' || role === 'standalone' ? role : fallback;
     },
     statusNodeIpIsValid: validIp,
+    wanNativeOptionalIpIsValid: value => {
+      const raw = String(value || '').trim();
+      return !raw || raw.toLowerCase() === 'none' || validIp(raw);
+    },
     managedVlanNumber: value => {
       const raw = String(value || '').trim();
       return /^\d+$/.test(raw) && +raw >= 2 && +raw <= 4094 ? +raw : null;
@@ -110,8 +159,19 @@ function nodeCache(slot = 1, { main = '190', own = '200', role = 'aimesh', nodeI
   };
 }
 
+function mainCache({ vlan = '190', nativeIp = '192.168.190.2', asusIp = '192.168.1.2' } = {}) {
+  return {
+    WAN_NATIVE_MAIN: vlan,
+    MAIN_WAN_NATIVE_IP: nativeIp,
+    MAIN_ASUS_IP: asusIp
+  };
+}
+
+let behavioralCases = 0;
+
 // 1–5: inherited display and retained Standalone draft across repeated role toggles.
 {
+  behavioralCases += 1;
   const h = createHarness(nodeCache());
   h.open();
   assert.equal(h.element('wanNativePopupVlan').value, '190');
@@ -132,6 +192,7 @@ function nodeCache(slot = 1, { main = '190', own = '200', role = 'aimesh', nodeI
 
 // 6: Cancel is draft-only and leaves authoritative cache unchanged.
 {
+  behavioralCases += 1;
   const cache = nodeCache();
   const before = JSON.stringify(cache);
   const h = createHarness(cache);
@@ -142,6 +203,7 @@ function nodeCache(slot = 1, { main = '190', own = '200', role = 'aimesh', nodeI
 // 7–8 and 13–14: AiMesh Save retains dormant VID; Standalone Save writes only
 // the draft, synchronizes the shared role control, and survives a reopen.
 {
+  behavioralCases += 2;
   const aimesh = nodeCache();
   const h = createHarness(aimesh);
   h.open(); h.save();
@@ -162,6 +224,7 @@ function nodeCache(slot = 1, { main = '190', own = '200', role = 'aimesh', nodeI
 
 // 9–11: ASUS/default inheritance, conflict rejection, and node-reservation validation.
 {
+  behavioralCases += 3;
   const asus = createHarness(nodeCache(1, { main: 'none' }));
   asus.open();
   assert.equal(asus.element('wanNativePopupVlan').value, '');
@@ -180,8 +243,43 @@ function nodeCache(slot = 1, { main = '190', own = '200', role = 'aimesh', nodeI
   assert.equal(invalidReservation.WAN_NATIVE_NODE1, '200');
 }
 
-// 12: the same draft model works for every supported node slot.
+// 15: managed VLAN bounds remain strict while valid 4094 remains usable.
+{
+  behavioralCases += 1;
+  const cache = nodeCache();
+  const h = createHarness(cache);
+  h.open(); h.role('standalone');
+  for (const value of ['1', '4095']) {
+    h.vlan(value); h.save();
+    assert.match(h.element('wanNativePopupError').textContent, /Use a VLAN ID/);
+    assert.equal(cache.WAN_NATIVE_NODE1, '200');
+  }
+  h.vlan('4094'); h.save();
+  assert.equal(cache.WAN_NATIVE_NODE1, '4094');
+}
+
+// 16–17: MAIN tagged -> ASUS/default and ASUS/default -> tagged transitions
+// keep reservation validation and publish only on Save.
+{
+  behavioralCases += 2;
+  const returning = mainCache();
+  const r = createHarness(returning, 'main');
+  r.open(); r.vlan(''); r.save();
+  assert.equal(returning.WAN_NATIVE_MAIN, 'none');
+  assert.ok(r.edited.includes('WAN_NATIVE_MAIN'));
+
+  const tagging = mainCache({ vlan: 'none', nativeIp: 'none' });
+  const t = createHarness(tagging, 'main');
+  t.open(); t.vlan('4094');
+  t.element('wanNativePopupNativeIp').value = '192.168.190.2';
+  t.save();
+  assert.equal(tagging.WAN_NATIVE_MAIN, '4094');
+  assert.equal(tagging.MAIN_WAN_NATIVE_IP, '192.168.190.2');
+}
+
+// 18: the same draft model works for every supported node slot.
 for (let slot = 1; slot <= 10; slot++) {
+  behavioralCases += 1;
   const own = String(200 + slot);
   const h = createHarness(nodeCache(slot, { own }), `NODE${slot}`);
   h.open();
@@ -190,4 +288,4 @@ for (let slot = 1; slot <= 10; slot++) {
   assert.equal(h.element('wanNativePopupVlan').value, own);
 }
 
-console.log('WAN_NATIVE_DRAFT_BEHAVIOR_OK');
+console.log('WAN_NATIVE_DRAFT_BEHAVIOR_OK cases=' + behavioralCases);
