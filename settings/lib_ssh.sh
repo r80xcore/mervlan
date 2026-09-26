@@ -10,7 +10,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#              - File: lib_ssh.sh || version="0.72.5"                       #
+#              - File: lib_ssh.sh || version="0.72.6"                       #
 # ============================================================================ #
 # - Purpose:    Define shared SSH related functions                            #
 # ============================================================================ #
@@ -1495,8 +1495,56 @@ merv_ssh_stream_stdin() {
 merv_ssh_test() {
   # merv_ssh_test <node_num> <node_ip>
   # returns 0 if remote echo works
-  _merv_test_out="$(merv_ssh_exec "$1" "$2" "echo connected" 2>/dev/null)"
-  [ $? -eq 0 ] || return 1
+  # Do not put merv_ssh_exec in command substitution: its failure reason and
+  # detail are caller-visible shell state. Capture only its stdout in a private
+  # file so those diagnostics remain in the current shell.
+  _merv_test_out_dir=""
+  _merv_test_out_file=""
+  _merv_test_exec_rc=1
+  _merv_test_read_rc=0
+  _merv_test_cleanup_rc=0
+  _merv_test_reason=""
+  _merv_test_detail=""
+
+  if ! _merv_ssh_tmp_root || ! _merv_ssh_tmp_acquire "$MERV_SSH_TMP_ROOT"; then
+    MERV_SSH_LAST_REASON="ssh-test-output-allocation-failed"
+    MERV_SSH_LAST_DETAIL="Could not allocate a private SSH test output path"
+    return 1
+  fi
+  _merv_test_out_dir="$MERV_SSH_ERR_DIR"
+  _merv_test_out_file="$_merv_test_out_dir/stdout"
+  if ! ( umask 077; : > "$_merv_test_out_file" ) 2>/dev/null ||
+     ! chmod 600 "$_merv_test_out_file" 2>/dev/null; then
+    rm -f "$_merv_test_out_file" "$_merv_test_out_dir/stderr" 2>/dev/null || :
+    rmdir "$_merv_test_out_dir" 2>/dev/null || :
+    MERV_SSH_LAST_REASON="ssh-test-output-allocation-failed"
+    MERV_SSH_LAST_DETAIL="Could not prepare a private SSH test output path"
+    return 1
+  fi
+
+  merv_ssh_exec "$1" "$2" "echo connected" >"$_merv_test_out_file" 2>/dev/null
+  _merv_test_exec_rc=$?
+  _merv_test_reason="$MERV_SSH_LAST_REASON"
+  _merv_test_detail="$MERV_SSH_LAST_DETAIL"
+  _merv_test_out=$(cat "$_merv_test_out_file" 2>/dev/null) || _merv_test_read_rc=$?
+
+  if ! rm -f "$_merv_test_out_file" "$_merv_test_out_dir/stderr" 2>/dev/null ||
+     ! rmdir "$_merv_test_out_dir" 2>/dev/null; then
+    _merv_test_cleanup_rc=1
+    _merv_log_err "Could not remove private SSH test output path $_merv_test_out_dir"
+  fi
+
+  # Restore the exact diagnostics produced by merv_ssh_exec after the output
+  # capture and cleanup operations have completed.
+  MERV_SSH_LAST_REASON="$_merv_test_reason"
+  MERV_SSH_LAST_DETAIL="$_merv_test_detail"
+  if [ "$_merv_test_read_rc" -ne 0 ]; then
+    MERV_SSH_LAST_REASON="ssh-test-output-read-failed"
+    MERV_SSH_LAST_DETAIL="Could not read the private SSH test output"
+    return 1
+  fi
+  [ "$_merv_test_exec_rc" -eq 0 ] || return "$_merv_test_exec_rc"
+  [ "$_merv_test_cleanup_rc" -eq 0 ] || return 1
   printf '%s\n' "$_merv_test_out" | grep -q "connected"
 }
 
