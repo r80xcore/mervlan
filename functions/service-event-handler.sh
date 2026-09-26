@@ -75,11 +75,15 @@ if [ -z "${RAW}" ]; then
   exit 0
 fi
 
-# Keep the original spelling for the isolated Developer Tools transport.  The
-# normal event path intentionally normalizes dashes to underscores, but
-# Developer Tools request IDs and self-test cases use a lower-case dash-safe
-# alphabet and must be correlated exactly in the public result.
+# Keep the original spelling for the isolated Developer Tools transport and
+# the closed maintenance archive transport.  The normal event path
+# intentionally normalizes dashes to underscores, but Developer Tools request
+# IDs and archive identities must be correlated exactly in their respective
+# public results.  The archive raw spelling is consumed only by the narrow
+# archive-action decoder below, after the ordinary parser has accepted the
+# action alphabet.
 DEVTOOLS_RAW_ACTION="$RAW"
+MAINTENANCE_RAW_ACTION="$RAW"
 
 # Normalize action format: convert dashes to underscores for case matching
 # Example: "save-vlanmgr" becomes "save_vlanmgr" (case statement uses underscores)
@@ -310,6 +314,24 @@ decode_maintenance_archive_action() {
   esac
   maintenance_archive_valid "$_dmaa_archive_id" || return 1
   printf '%s|%s\n' "$_dmaa_token" "$_dmaa_archive_id"
+}
+
+maintenance_archive_action_for_decode() {
+  _maad_base="$1"
+  _maad_normalized="$2"
+  case "${MAINTENANCE_RAW_ACTION:-}" in
+    "${_maad_base}"_*)
+      _maad_encoded=${MAINTENANCE_RAW_ACTION#${_maad_base}_}
+      _maad_token_hex=${_maad_encoded%%_*}
+      case "$_maad_token_hex" in
+        ''|*[!0-9a-f]*) printf '%s\n' "$_maad_normalized" ;;
+        *) printf '%s\n' "$MAINTENANCE_RAW_ACTION" ;;
+      esac
+      ;;
+    *)
+      printf '%s\n' "$_maad_normalized"
+      ;;
+  esac
 }
 
 maintenance_tag_valid() {
@@ -1413,7 +1435,8 @@ case "${TYPE}_${EVENT}" in
     fi
     ;;
   deletebackup_vlanmgr_*)
-    _maint_decoded=$(decode_maintenance_archive_action "${TYPE}_${EVENT}" deletebackup_vlanmgr)
+    _maint_action=$(maintenance_archive_action_for_decode deletebackup_vlanmgr "${TYPE}_${EVENT}")
+    _maint_decoded=$(decode_maintenance_archive_action "$_maint_action" deletebackup_vlanmgr)
     _maint_token=${_maint_decoded%%|*}
     _maint_payload=${_maint_decoded#*|}
     if [ -n "$_maint_decoded" ] && maintenance_archive_valid "$_maint_payload"; then
@@ -1432,7 +1455,8 @@ case "${TYPE}_${EVENT}" in
     fi
     ;;
   restorebackup_vlanmgr_*)
-    _maint_decoded=$(decode_maintenance_archive_action "${TYPE}_${EVENT}" restorebackup_vlanmgr)
+    _maint_action=$(maintenance_archive_action_for_decode restorebackup_vlanmgr "${TYPE}_${EVENT}")
+    _maint_decoded=$(decode_maintenance_archive_action "$_maint_action" restorebackup_vlanmgr)
     _maint_token=${_maint_decoded%%|*}
     _maint_payload=${_maint_decoded#*|}
     if [ -n "$_maint_decoded" ] && maintenance_archive_valid "$_maint_payload"; then
