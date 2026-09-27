@@ -97,6 +97,8 @@ MB_TRUST_ORIGINAL_FILE=""
 MB_TRUST_TARGET_PRESENT=0
 MB_TRUST_TARGET_FILE=""
 MB_TRUST_TARGET_MODE=legacy
+MB_TARGET_KEY_FINGERPRINT=""
+MB_SSH_READINESS_DETAIL=""
 
 mb_begin_durable_recovery() {
   merv_maintenance_recovery_write restore prepared "$MB_JFFS_OLD" "$MB_JFFS_STAGE" || return 1
@@ -1339,6 +1341,166 @@ mb_delete_all() {
   return 0
 }
 
+# Restore must prove that the activated SSH identity is usable before it
+# delegates any node work to the canonical Sync pipeline.  These helpers are
+# deliberately read-only: a failed readiness check must not repair settings,
+# regenerate keys, or change trust state while the restored installation is
+# still being classified.
+mb_regular_file_mode() {
+  _mb_rfm_file="$1"
+  _mb_rfm_mode="$2"
+  [ ! -L "$_mb_rfm_file" ] && [ -f "$_mb_rfm_file" ] || return 1
+  _mb_rfm_actual=$(ls -ld "$_mb_rfm_file" 2>/dev/null | awk 'NR == 1 { print $1 }')
+  [ "$_mb_rfm_actual" = "$_mb_rfm_mode" ]
+}
+
+mb_key_material_from_private() {
+  _mb_kmp_file="$1"
+  mb_regular_file_mode "$_mb_kmp_file" "-rw-------" || return 1
+  [ -s "$_mb_kmp_file" ] || return 1
+  [ -x "${DROPBEARKEY:-}" ] || return 1
+  _mb_kmp_material=$(
+    "$DROPBEARKEY" -y -f "$_mb_kmp_file" 2>/dev/null |
+      awk '$1 ~ /^ssh-/ && NF >= 2 { count++; if (count == 1) print $1 " " $2 } END { exit (count == 1 ? 0 : 1) }'
+  ) || return 1
+  [ -n "$_mb_kmp_material" ] || return 1
+  printf '%s\n' "$_mb_kmp_material"
+}
+
+mb_key_material_from_public() {
+  _mb_kmp_file="$1"
+  mb_regular_file_mode "$_mb_kmp_file" "-rw-r--r--" || return 1
+  [ -s "$_mb_kmp_file" ] || return 1
+  _mb_kmp_material=$(
+    awk '$1 ~ /^ssh-/ && NF >= 2 { count++; if (count == 1) print $1 " " $2 } END { exit (count == 1 ? 0 : 1) }' \
+      "$_mb_kmp_file"
+  ) || return 1
+  [ -n "$_mb_kmp_material" ] || return 1
+  printf '%s\n' "$_mb_kmp_material"
+}
+
+mb_key_material_valid() {
+  _mb_kmv_material="$1"
+  _mb_kmv_algorithm=$(printf '%s\n' "$_mb_kmv_material" | awk '{ print $1 }')
+  _mb_kmv_key=$(printf '%s\n' "$_mb_kmv_material" | awk '{ print $2 }')
+  type merv_ssh_trust_algorithm_valid >/dev/null 2>&1 || return 1
+  type merv_ssh_trust_key_valid >/dev/null 2>&1 || return 1
+  merv_ssh_trust_algorithm_valid "$_mb_kmv_algorithm" || return 1
+  merv_ssh_trust_key_valid "$_mb_kmv_key" || return 1
+}
+
+mb_key_fingerprint_from_material() {
+  _mb_kmf_material="$1"
+  _mb_kmf_algorithm=$(printf '%s\n' "$_mb_kmf_material" | awk '{ print $1 }')
+  _mb_kmf_key=$(printf '%s\n' "$_mb_kmf_material" | awk '{ print $2 }')
+  type merv_ssh_trust_derive_fingerprint >/dev/null 2>&1 || return 1
+  merv_ssh_trust_derive_fingerprint "$_mb_kmf_algorithm" "$_mb_kmf_key"
+}
+
+mb_validate_restored_ssh_readiness() {
+  _mb_vsr_nodes="$1"
+  _mb_vsr_settings="${SETTINGS_FILE:-$MERV_BASE/settings/settings.json}"
+  MB_SSH_READINESS_DETAIL=""
+  [ ! -L "$_mb_vsr_settings" ] && [ -f "$_mb_vsr_settings" ] || {
+    MB_SSH_READINESS_DETAIL="restored settings file is missing or not a regular file"
+    return 1
+  }
+  _mb_vsr_flag=$(json_get_flag "SSH_KEYS_INSTALLED" "__MISSING__" "$_mb_vsr_settings" 2>/dev/null)
+  case "$_mb_vsr_flag" in
+    __MISSING__|1) ;;
+    *) MB_SSH_READINESS_DETAIL="restored SSH_KEYS_INSTALLED is not enabled"; return 1 ;;
+  esac
+  _mb_vsr_private=$(mb_key_material_from_private "$SSH_KEY" 2>/dev/null) || {
+    MB_SSH_READINESS_DETAIL="restored private key is missing, malformed, symlinked, or has unsafe permissions"
+    return 1
+  }
+  _mb_vsr_public=$(mb_key_material_from_public "$SSH_PUBKEY" 2>/dev/null) || {
+    MB_SSH_READINESS_DETAIL="restored public key is missing, malformed, symlinked, or has unsafe permissions"
+    return 1
+  }
+  mb_key_material_valid "$_mb_vsr_private" || {
+    MB_SSH_READINESS_DETAIL="restored private key material is not a supported public-key identity"
+    return 1
+  }
+  mb_key_material_valid "$_mb_vsr_public" || {
+    MB_SSH_READINESS_DETAIL="restored public key material is not a supported public-key identity"
+    return 1
+  }
+  [ "$_mb_vsr_private" = "$_mb_vsr_public" ] || {
+    MB_SSH_READINESS_DETAIL="restored private and public key material do not match"
+    return 1
+  }
+  _mb_vsr_fingerprint=$(mb_key_fingerprint_from_material "$_mb_vsr_private" 2>/dev/null) || {
+    MB_SSH_READINESS_DETAIL="restored SSH key fingerprint could not be derived"
+    return 1
+  }
+  if [ -n "${MB_TARGET_KEY_FINGERPRINT:-}" ] &&
+     [ "$_mb_vsr_fingerprint" != "$MB_TARGET_KEY_FINGERPRINT" ]; then
+    MB_SSH_READINESS_DETAIL="activated SSH key fingerprint differs from the selected backup"
+    return 1
+  fi
+  _mb_vsr_user=$(get_node_ssh_user 2>/dev/null || printf '')
+  case "$_mb_vsr_user" in
+    ''|*[!A-Za-z0-9._-]*) MB_SSH_READINESS_DETAIL="restored SSH username is invalid"; return 1 ;;
+  esac
+  _mb_vsr_port="${SSH_PORT:-}"
+  case "$_mb_vsr_port" in
+    ''|*[!0-9]*)
+      _mb_vsr_port=$(json_get_flag "NODE_SSH_PORT" "__MISSING__" "$_mb_vsr_settings" 2>/dev/null)
+      if [ "$_mb_vsr_port" = "__MISSING__" ] || [ -z "$_mb_vsr_port" ]; then
+        _mb_vsr_port=$(json_get_flag "SSH_PORT" "22" "$_mb_vsr_settings" 2>/dev/null)
+      fi
+      [ "$_mb_vsr_port" = "__MISSING__" ] && _mb_vsr_port=22
+      ;;
+  esac
+  case "$_mb_vsr_port" in
+    ''|*[!0-9]*|0) MB_SSH_READINESS_DETAIL="restored SSH port is invalid"; return 1 ;;
+  esac
+  [ "$_mb_vsr_port" -le 65535 ] 2>/dev/null || {
+    MB_SSH_READINESS_DETAIL="restored SSH port is out of range"
+    return 1
+  }
+  if [ -n "$_mb_vsr_nodes" ]; then
+    mb_regular_file_mode "$MERV_SSH_TRUST_FILE" "-rw-------" || {
+      MB_SSH_READINESS_DETAIL="restored canonical SSH trust database is missing, symlinked, or has unsafe permissions"
+      return 1
+    }
+    merv_ssh_trust_validate_db || {
+      MB_SSH_READINESS_DETAIL="restored canonical SSH trust database is invalid"
+      return 1
+    }
+    while IFS=' ' read -r _mb_vsr_slot _mb_vsr_host _mb_vsr_extra || [ -n "$_mb_vsr_slot" ]; do
+      [ -n "$_mb_vsr_slot" ] || continue
+      [ -z "$_mb_vsr_extra" ] || {
+        MB_SSH_READINESS_DETAIL="restored configured-node record is malformed"
+        return 1
+      }
+      _mb_vsr_mac=$(json_get_flag "AUTO_NODE${_mb_vsr_slot}_MAC" "" "$_mb_vsr_settings" 2>/dev/null)
+      _mb_vsr_mac=$(merv_ssh_trust_mac_or_none "$_mb_vsr_mac" 2>/dev/null) || {
+        MB_SSH_READINESS_DETAIL="restored NODE${_mb_vsr_slot} MAC identity is invalid"
+        return 1
+      }
+      _mb_vsr_node=$(merv_ssh_trust_node_id "$_mb_vsr_slot" "$_mb_vsr_mac" "$_mb_vsr_host" "$_mb_vsr_port" 2>/dev/null) || {
+        MB_SSH_READINESS_DETAIL="restored NODE${_mb_vsr_slot} trust identity could not be formed"
+        return 1
+      }
+      merv_ssh_trust_find "$_mb_vsr_node" >/dev/null 2>&1 || {
+        MB_SSH_READINESS_DETAIL="restored canonical SSH trust has no valid record for NODE${_mb_vsr_slot}"
+        return 1
+      }
+      [ "${SSH_TRUST_SLOT:-}" = "$_mb_vsr_slot" ] &&
+        [ "${SSH_TRUST_HOST:-}" = "$_mb_vsr_host" ] &&
+        [ "${SSH_TRUST_PORT:-}" = "$_mb_vsr_port" ] || {
+          MB_SSH_READINESS_DETAIL="restored NODE${_mb_vsr_slot} trust record does not match its configured endpoint"
+          return 1
+        }
+    done <<EOF
+$_mb_vsr_nodes
+EOF
+  fi
+  return 0
+}
+
 mb_validate_archive_tree() {
   _mb_archive="$1"
   _mb_stage="$2"
@@ -1361,6 +1523,11 @@ mb_validate_archive_tree() {
   mb_settings_file_valid "$MB_RESTORE_TREE/settings/settings.json" || return 1
   merv_backup_state_validate_tree "$MB_RESTORE_TREE" \
     "$MB_RESTORE_TREE/settings/settings.json" "$MB_WORK_ROOT" || return 1
+  MB_TARGET_KEY_FINGERPRINT=""
+  _mb_target_key_material=$(mb_key_material_from_private "$MB_RESTORE_TREE/.ssh/vlan_manager" 2>/dev/null || printf '')
+  if [ -n "$_mb_target_key_material" ] && mb_key_material_valid "$_mb_target_key_material"; then
+    MB_TARGET_KEY_FINGERPRINT=$(mb_key_fingerprint_from_material "$_mb_target_key_material" 2>/dev/null || printf '')
+  fi
   MB_TRUST_TARGET_MODE="$MERV_BACKUP_STATE_FORMAT"
   MB_TRUST_TARGET_PRESENT="$MERV_BACKUP_STATE_TRUST_PRESENT"
   MB_TRUST_TARGET_FILE=""
@@ -1447,31 +1614,6 @@ mb_push_restored_mac_db() {
     [ "${MERV_MAC_LAST_PUSH_TOTAL:-0}" -gt 0 ]
 }
 
-mb_apply_restored_node_boot_state() {
-  _mb_nodes="$1"
-  _mb_state="$2"
-  if [ "$_mb_state" = "1" ]; then
-    _mb_node_action=enable
-  else
-    _mb_node_action=disable
-  fi
-  _mb_node_failed=0
-  while read -r _mb_node_id _mb_node_ip; do
-    [ -n "$_mb_node_ip" ] || continue
-    if merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" \
-         "cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh $_mb_node_action" >/dev/null 2>&1; then
-      info -c cli,vlan "Restored boot state '${_mb_node_action}' on NODE${_mb_node_id} ($_mb_node_ip)"
-    else
-      type merv_ssh_skip_log >/dev/null 2>&1 && \
-        merv_ssh_skip_log "$_mb_node_id" "$_mb_node_ip" "restore boot state $_mb_node_action"
-      _mb_node_failed=1
-    fi
-  done <<EOF
-$_mb_nodes
-EOF
-  [ "$_mb_node_failed" = "0" ]
-}
-
 mb_runtime_report_matches() {
   _mb_report="$1"
   _mb_role="$2"
@@ -1498,33 +1640,23 @@ mb_runtime_report_matches() {
 mb_verify_restored_runtime() {
   _mb_nodes="$1"
   _mb_expected_boot="$2"
+  _mb_node_sync_ok="${3:-0}"
   MB_VERIFY_PARTIAL=0
   [ "$MB_TEST_MODE" = "1" ] && return 0
   _mb_boot_script="$MERV_BASE/functions/mervlan_boot.sh"
-  _mb_action=disable
-  [ "$_mb_expected_boot" = "1" ] && _mb_action=enable
 
   _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null)
   _mb_main_report_rc=$?
   [ "$_mb_main_report_rc" -eq 0 ] || warn -c cli,vlan "Restored main runtime report command failed (rc=$_mb_main_report_rc)"
   if ! mb_runtime_report_matches "$_mb_main_report" main "$_mb_expected_boot"; then
-    warn -c cli,vlan "Restored main runtime mismatch; retrying hook reconciliation"
-    MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot_script" setupenable >/dev/null 2>&1 ||
-      warn -c cli,vlan "Restored main hook reconciliation setup failed"
-    MERV_SKIP_NODE_SYNC=1 sh "$_mb_boot_script" "$_mb_action" >/dev/null 2>&1 ||
-      warn -c cli,vlan "Restored main boot-state reconciliation failed"
-    _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null)
-    _mb_main_report_rc=$?
-    [ "$_mb_main_report_rc" -eq 0 ] || warn -c cli,vlan "Restored main retry report command failed (rc=$_mb_main_report_rc)"
-  fi
-  if ! mb_runtime_report_matches "$_mb_main_report" main "$_mb_expected_boot"; then
-    error -c cli,vlan "Restored main runtime verification failed after retry: ${_mb_main_report:-no report}"
+    error -c cli,vlan "Restored main runtime verification failed: ${_mb_main_report:-no report}"
     return 1
   fi
   info -c cli,vlan "Verified restored main runtime: configured-node baseline active, BOOT_ENABLED=$_mb_expected_boot"
 
   [ -n "$_mb_nodes" ] || return 0
-  if ! type ssh_keys_effectively_installed >/dev/null 2>&1 || ! ssh_keys_effectively_installed; then
+  if [ "$_mb_node_sync_ok" != "1" ]; then
+    warn -c cli,vlan "Skipped NODE runtime verification because canonical Sync did not complete"
     MB_VERIFY_PARTIAL=1
     return 0
   fi
@@ -1534,17 +1666,10 @@ mb_verify_restored_runtime() {
     _mb_node_report=$(merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "$_mb_remote" 2>/dev/null)
     _mb_node_report_rc=$?
     [ "$_mb_node_report_rc" -eq 0 ] || warn -c cli,vlan "NODE${_mb_node_id} restored runtime report failed (rc=$_mb_node_report_rc)"
-    if ! mb_runtime_report_matches "$_mb_node_report" node "$_mb_expected_boot"; then
-      warn -c cli,vlan "NODE${_mb_node_id} ($_mb_node_ip) restored runtime mismatch; retrying reconciliation"
-      _mb_remote="cd '$MERV_BASE/functions' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh '$_mb_action' && MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh report"
-      _mb_node_report=$(merv_ssh_exec "$_mb_node_id" "$_mb_node_ip" "$_mb_remote" 2>/dev/null)
-      _mb_node_report_rc=$?
-      [ "$_mb_node_report_rc" -eq 0 ] || warn -c cli,vlan "NODE${_mb_node_id} restored retry report failed (rc=$_mb_node_report_rc)"
-    fi
     if mb_runtime_report_matches "$_mb_node_report" node "$_mb_expected_boot"; then
       info -c cli,vlan "Verified restored NODE${_mb_node_id} ($_mb_node_ip): baseline active, BOOT_ENABLED=$_mb_expected_boot"
     else
-      warn -c cli,vlan "NODE${_mb_node_id} ($_mb_node_ip) restored runtime verification failed after retry: ${_mb_node_report:-no report}"
+      warn -c cli,vlan "NODE${_mb_node_id} ($_mb_node_ip) restored runtime verification failed: ${_mb_node_report:-no report}"
       MB_VERIFY_PARTIAL=1
     fi
   done <<EOF
@@ -1613,10 +1738,6 @@ mb_rollback_restore() {
           error -c cli,vlan "Rollback restored the original tree but node synchronization failed"
           _mb_rollback_failed=1
         fi
-      fi
-      if ! mb_apply_restored_node_boot_state "$_mb_rollback_nodes" "$_mb_old_boot" >/dev/null 2>&1; then
-        error -c cli,vlan "Rollback restored the original tree but node boot-state reconciliation failed"
-        _mb_rollback_failed=1
       fi
     fi
     if [ "$_mb_rollback_failed" -eq 0 ]; then
@@ -1981,24 +2102,33 @@ mb_restore() {
       "$_mb_old" "$_mb_current_boot"
     return 1
   fi
+  _mb_node_sync_ok=1
   if [ "$MB_TEST_MODE" != "1" ] && [ -n "$_mb_restored_nodes" ]; then
-    if ! type ssh_keys_effectively_installed >/dev/null 2>&1 || ! ssh_keys_effectively_installed; then
-      warn -c cli,vlan "Restored settings contain nodes, but SSH keys are unavailable; node restore was skipped"
+    _mb_node_sync_ok=0
+    if ! mb_validate_restored_ssh_readiness "$_mb_restored_nodes"; then
+      warn -c cli,vlan "Restored SSH identity/trust readiness failed; node synchronization was skipped: $MB_SSH_READINESS_DETAIL"
       _mb_partial=1
     elif [ ! -x "$MERV_BASE/functions/sync_nodes.sh" ]; then
-      warn -c cli,vlan "Restored sync_nodes.sh is unavailable; node restore was skipped"
+      warn -c cli,vlan "Restored sync_nodes.sh is unavailable; node synchronization was skipped"
       _mb_partial=1
     else
       mb_write_result running syncing_nodes "Synchronizing the restored installation to configured nodes."
-      MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh" || { warn -c cli,vlan "Restored node synchronization reported errors"; _mb_partial=1; }
-      mb_write_result running restoring_node_data "Restoring the shared MAC Shield database to configured nodes."
-      mb_push_restored_mac_db "$_mb_restored_nodes" || { warn -c cli,vlan "Restored MAC Shield data could not be applied to every configured node"; _mb_partial=1; }
-      mb_write_result running restoring_node_boot "Re-applying the restored boot state to configured nodes."
-      mb_apply_restored_node_boot_state "$_mb_restored_nodes" "$_mb_target_boot" || { warn -c cli,vlan "Restored boot state could not be applied to every configured node"; _mb_partial=1; }
+      if MERV_MAINTENANCE_SYNC=1 sh "$MERV_BASE/functions/sync_nodes.sh"; then
+        _mb_node_sync_ok=1
+      else
+        warn -c cli,vlan "Restored node synchronization reported errors"
+        _mb_partial=1
+      fi
+      if [ "$_mb_node_sync_ok" = "1" ]; then
+        mb_write_result running restoring_node_data "Restoring the shared MAC Shield database to configured nodes."
+        mb_push_restored_mac_db "$_mb_restored_nodes" || { warn -c cli,vlan "Restored MAC Shield data could not be applied to every configured node"; _mb_partial=1; }
+      else
+        warn -c cli,vlan "Skipping Restore-specific NODE follow-up actions because canonical Sync did not complete"
+      fi
     fi
   fi
   mb_write_result running verifying_runtime "Verifying restored hooks and boot state."
-  if ! mb_verify_restored_runtime "$_mb_restored_nodes" "$_mb_target_boot"; then
+  if ! mb_verify_restored_runtime "$_mb_restored_nodes" "$_mb_target_boot" "$_mb_node_sync_ok"; then
     mb_rollback_after_activation reconciliation \
       "Restore could not verify the required runtime state; the original installation was restored." \
       "Restore could not verify the required runtime state; automatic rollback failed. Recovery data and the owner lock were preserved." \
@@ -2050,23 +2180,35 @@ mb_restore() {
     mb_fail recovery "Restore completed but durable recovery metadata could not be cleared; recovery data and the owner lock were preserved."
     return 1
   fi
-  case "$_mb_mode" in
-    restore)
-      if [ "$_mb_undo_created" = "1" ]; then
-        _mb_success_message="Restore completed successfully. Undo Restore is available until the router reboots."
-      else
-        _mb_success_message="Restore completed, but no temporary Undo Restore file is available."
-      fi
-      ;;
-    undo_restore) _mb_success_message="Undo Restore completed successfully. The temporary undo point was consumed." ;;
-    undo_update) _mb_success_message="Undo Update completed successfully. The temporary undo shortcut was consumed." ;;
-  esac
+  if [ "$_mb_partial" = "1" ]; then
+    case "$_mb_mode" in
+      restore)
+        _mb_success_message="Restore completed with warnings."
+        [ "$_mb_undo_created" = "1" ] && _mb_success_message="$_mb_success_message Undo Restore is available until the router reboots."
+        _mb_success_message="$_mb_success_message Review the CLI log for details."
+        ;;
+      undo_restore) _mb_success_message="Undo Restore completed with warnings. Review the CLI log for details." ;;
+      undo_update) _mb_success_message="Undo Update completed with warnings. Review the CLI log for details." ;;
+    esac
+  else
+    case "$_mb_mode" in
+      restore)
+        if [ "$_mb_undo_created" = "1" ]; then
+          _mb_success_message="Restore completed successfully. Undo Restore is available until the router reboots."
+        else
+          _mb_success_message="Restore completed, but no temporary Undo Restore file is available."
+        fi
+        ;;
+      undo_restore) _mb_success_message="Undo Restore completed successfully. The temporary undo point was consumed." ;;
+      undo_update) _mb_success_message="Undo Update completed successfully. The temporary undo shortcut was consumed." ;;
+    esac
+  fi
   info -c cli,vlan "$_mb_success_message"
   [ -n "$_mb_current_version" ] && info -c cli,vlan "  From: $_mb_current_version"
   [ -n "$_mb_target_version" ] && info -c cli,vlan "  To:   $_mb_target_version"
   if [ "$_mb_partial" = "1" ]; then
     warn -c cli,vlan "$MB_OPERATION completed with warnings"
-    mb_write_result partial complete "$_mb_success_message Review the CLI log for warnings."
+    mb_write_result partial complete "$_mb_success_message"
   else
     mb_write_result success complete "$_mb_success_message"
   fi

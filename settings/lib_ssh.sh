@@ -1311,7 +1311,19 @@ merv_ssh_exec_endpoint() {
       return 5
     else
       # Best-effort classify common dbclient failures
-      if echo "$_err" | grep -qi "Permission denied"; then
+      # Dropbear may fall back to an interactive password prompt when the
+      # configured public key was not accepted.  stdin is deliberately closed,
+      # so a prompt followed by a closed session is a deterministic diagnostic,
+      # not permission for a password retry or an alternate endpoint.
+      if echo "$_err" | grep -Eqi 'password[[:space:]]*:'; then
+        MERV_SSH_LAST_REASON="publickey-not-accepted"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' dbclient requested a password after configured key authentication was not accepted; session closed before command"
+        return 5
+      elif echo "$_err" | grep -Eqi 'public[[:space:]]*key.*(denied|reject|fail)|authentication.*(failed|refused)' ; then
+        MERV_SSH_LAST_REASON="publickey-not-accepted"
+        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' configured public-key authentication was rejected before command"
+        return 5
+      elif echo "$_err" | grep -qi "Permission denied"; then
         MERV_SSH_LAST_REASON="auth-failed"
         MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' Permission denied (keys/user mismatch)"
         # auth failures won't improve by retrying → stop

@@ -72,6 +72,11 @@ case "${MERV_TEST_MODE:-}:$host" in
   connect-timeout:admin@192.168.190.201) printf '%s\n' 'Connection timed out' >&2; exit 1 ;;
   no-route:admin@192.168.190.201) printf '%s\n' 'No route to host' >&2; exit 1 ;;
   host-key:admin@192.168.190.201) printf '%s\n' 'Host key mismatch' >&2; exit 1 ;;
+  publickey-password:admin@192.168.190.201)
+    printf '%s\n' 'admin@192.168.190.201 password:' >&2
+    printf '%s\n' 'dbclient: Connection to admin@192.168.190.201:22 exited: Remote closed the connection' >&2
+    exit 1
+    ;;
 esac
 printf '%s' ok
 EOF
@@ -125,6 +130,15 @@ if merv_ssh_exec 1 192.168.186.201 'trust fixture' >/dev/null 2>&1; then
 fi
 assert_eq "$MERV_SSH_LAST_REASON" host-key-mismatch 'host-key mismatch is fail-closed'
 assert_eq "$(call_hosts)" 'admin@192.168.190.201,' 'host-key mismatch has no fallback'
+
+reset_case
+MERV_TEST_MODE=publickey-password
+export MERV_TEST_MODE
+if merv_ssh_exec 1 192.168.186.201 'key diagnostic fixture' >/dev/null 2>&1; then
+  fail 'public-key rejection unexpectedly succeeded'
+fi
+assert_eq "$MERV_SSH_LAST_REASON" publickey-not-accepted 'password fallback is classified as public-key rejection'
+assert_eq "$(call_hosts)" 'admin@192.168.190.201,' 'public-key rejection has no fallback or replay'
 
 reset_case
 MERV_TEST_MODE=refused

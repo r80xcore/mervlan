@@ -22,6 +22,16 @@ edits on a node.
 8. Publish a validated per-node terminal result and aggregate the run.
 9. Verify node hashes, versions, observation state, and idle workers afterward.
 
+Restore uses this same Sync flow as the only NODE builder.  After activating a
+backup, Restore performs a read-only local SSH identity/trust readiness gate,
+then delegates NODE connectivity, staging, transfer, activation, boot
+reconciliation, hooks, cron, and runtime convergence to `sync_nodes.sh`.  A
+failed readiness gate or Sync is reported as a partial Restore; Restore does
+not regenerate keys, edit trust, run NODE boot commands, retry NODE runtime
+repair, or perform a second NODE installation path.  Restore-specific MAC
+Shield database publication is allowed only after canonical Sync succeeds,
+followed by read-only runtime reporting.
+
 The staging verifier checks every file's exact size and digest through one
 verified SSH stream carrying a compact manifest, including the node-specific
 rewritten settings file. This reports a deterministic file mismatch directly,
