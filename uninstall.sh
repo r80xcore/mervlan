@@ -98,6 +98,40 @@ mervlan_metadata_remove_all() {
     return 0
 }
 
+# Full Uninstall owns this exact pre-addon legacy page location.  The current
+# package has always published the ASP from inside /jffs/addons/mervlan and
+# never reads this top-level path; keep symlinks/directories obstructing it
+# untouched so an unrelated object cannot be removed by a legacy cleanup.
+uninstall_remove_legacy_persistent_page() {
+    _urlp_path="${1:-/jffs/addons/mervlan.asp}"
+    [ "$ACTION" = "full" ] || return 0
+    [ -L "$_urlp_path" ] && return 0
+    [ -f "$_urlp_path" ] || return 0
+    rm -f "$_urlp_path" 2>/dev/null || return 1
+    echo "[uninstall] Legacy MerVLAN page removed: $_urlp_path"
+    return 0
+}
+
+# Recovery deliberately retains non-empty evidence.  Full Uninstall may only
+# remove the exact production scratch parent when it is an empty directory;
+# rmdir is the ownership boundary and never traverses retained workspaces.
+uninstall_remove_empty_recovery_tmp() {
+    _uret_path="${1:-/tmp/mervlan_recovery}"
+    [ "$ACTION" = "full" ] || return 0
+    [ -L "$_uret_path" ] && return 0
+    [ -d "$_uret_path" ] || return 0
+    if rmdir "$_uret_path" 2>/dev/null; then
+        echo "[uninstall] Empty recovery scratch root removed: $_uret_path"
+        return 0
+    fi
+    if [ -n "$(ls -A "$_uret_path" 2>/dev/null)" ]; then
+        echo "[uninstall] Retaining non-empty recovery scratch root for forensic inspection: $_uret_path"
+        return 0
+    fi
+    echo "[uninstall] ERROR: could not remove empty recovery scratch root: $_uret_path" >&2
+    return 1
+}
+
 # ---- merv: portable `command -v` replacement ----
 if ! type merv_has >/dev/null 2>&1; then
   merv_has() { type "$1" >/dev/null 2>&1; }
@@ -891,7 +925,7 @@ remove_nodes_full_install() {
     # This command is sent only after the complete, strict SSH preflight.  It
     # removes the node's own MerVLAN control plane and no other addon's
     # metadata; hooks are disabled while the node runtime still exists.
-    _rnf_cleanup_cmd='if [ -x /jffs/addons/mervlan/functions/mervlan_boot.sh ]; then /bin/sh /jffs/addons/mervlan/functions/mervlan_boot.sh nodedisable >/dev/null 2>&1 || exit 1; fi; for _rnf_settings in /jffs/addons/custom_settings.txt; do [ -f "$_rnf_settings" ] || continue; for _rnf_key in mervlan_page mervlan_state mervlan_version merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version; do sed -i "\\~^$_rnf_key ~d" "$_rnf_settings" || exit 1; done; done; rm -rf '
+    _rnf_cleanup_cmd='if [ -x /jffs/addons/mervlan/functions/mervlan_boot.sh ]; then /bin/sh /jffs/addons/mervlan/functions/mervlan_boot.sh nodedisable >/dev/null 2>&1 || exit 1; fi; for _rnf_settings in /jffs/addons/custom_settings.txt; do [ -f "$_rnf_settings" ] || continue; for _rnf_key in mervlan_page mervlan_state mervlan_version merlin_vlan_manager_page merlin_vlan_manager_state merlin_vlan_manager_version; do sed -i "\\~^$_rnf_key ~d" "$_rnf_settings" || exit 1; done; done; if [ -f /jffs/addons/mervlan.asp ] && [ ! -L /jffs/addons/mervlan.asp ]; then rm -f /jffs/addons/mervlan.asp || exit 1; fi; rm -rf '
     # The command runs on the verified node, not MAIN. Mark it local so the
     # node does not try to repeat MAIN-owned SSH trust preflight/propagation.
     _rnf_cleanup_cmd="MERV_NODE_CONTEXT=1; export MERV_NODE_CONTEXT; $_rnf_cleanup_cmd"
@@ -1175,6 +1209,10 @@ if [ "$ACTION" = "full" ]; then
     else
         echo "[uninstall] Retained MerVLAN backups were kept"
     fi
+    if ! uninstall_remove_legacy_persistent_page; then
+        echo "[uninstall] ERROR: could not remove the exact legacy MerVLAN page" >&2
+        exit 1
+    fi
     echo "[uninstall] All addon files and data removed"
 fi
 if ! uninstall_maintenance_release; then
@@ -1183,6 +1221,10 @@ if ! uninstall_maintenance_release; then
 fi
 trap - EXIT
 if [ "$ACTION" = "full" ]; then
+    if ! uninstall_remove_empty_recovery_tmp; then
+        echo "[uninstall] ERROR: recovery scratch cleanup could not be verified" >&2
+        exit 1
+    fi
     rm -rf /tmp/mervlan_tmp 2>/dev/null
 fi
 exit 0

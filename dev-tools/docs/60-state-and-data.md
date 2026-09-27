@@ -124,3 +124,25 @@ redirectable and avoids path drift. Maintenance has additional persistent
 backup/restore markers. Inspect the action token and result marker before
 assuming a backup or restore completed. Never delete a lock or recovery marker
 merely to make the UI green.
+
+## Full Uninstall residual boundary
+
+Full Uninstall removes active MerVLAN-owned control-plane state: the addon
+tree, durable state root, selected backup root, public projections, hooks,
+cron entries, guard chains, active locks, and the owned runtime root. It also
+removes the exact legacy `/jffs/addons/mervlan.asp` regular file observed on
+legacy installations. The current ASP remains inside the addon tree; the
+legacy path is not a supported input to Install, Update, Repair, Restore, or
+Recovery.
+
+The production Recovery scratch parent `/tmp/mervlan_recovery` is removed only
+when it is an empty directory. A non-empty or obstructed parent is retained
+for inspection because it may contain a `restore.*` workspace needed for
+rollback or forensic recovery. Valid `/tmp/mervlan_repair.*` workspaces with
+their ownership/handoff markers, protected snapshot, or retained failure
+evidence are likewise outside Full Uninstall's deletion authority.
+
+This boundary is ownership-specific, not a search for every pathname
+containing `mervlan`: external ASUS SSH authorization, unrelated administrator
+state, retained recovery/repair evidence, and test/diagnostic files are not
+MerVLAN production cleanup targets.
