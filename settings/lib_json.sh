@@ -1437,6 +1437,194 @@ json_set_section2_value_ext() {
     _json_contract_commit "$_js2_file" "$_jcp_tmp"
 }
 
+# merv_settings_merge_preserved — Merge scalar user settings into current
+# defaults without importing the backup's executable/schema cohort.
+#
+# The updater and normal backup Restore use the same migration primitive.  The
+# source file is treated as data: only quoted scalar values in non-Hardware
+# sections are copied, while current defaults, key names, arrays, and nested
+# structure remain authoritative.  The caller supplies a private temporary
+# root so this helper never writes outside its transaction workspace.
+merv_settings_merge_preserved() {
+    _msmp_old_file="$1"
+    _msmp_new_file="$2"
+    _msmp_tmp_root="$3"
+    MERV_SETTINGS_MERGE_EXTRACTED=0
+    MERV_SETTINGS_MERGE_APPLIED=0
+
+    if [ -L "$_msmp_old_file" ] || {
+        [ -e "$_msmp_old_file" ] && [ ! -f "$_msmp_old_file" ]
+    }; then
+        return 1
+    fi
+    [ -f "$_msmp_old_file" ] || return 0
+    [ -f "$_msmp_new_file" ] && [ ! -L "$_msmp_new_file" ] || return 1
+    case "$_msmp_tmp_root" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    [ ! -L "$_msmp_tmp_root" ] && [ -d "$_msmp_tmp_root" ] || return 1
+
+    _msmp_epoch=$(date +%s 2>/dev/null)
+    case "$_msmp_epoch" in ''|*[!0-9]*) _msmp_epoch=0 ;; esac
+    _msmp_work="$_msmp_tmp_root/.settings-merge.$$.$_msmp_epoch"
+    [ ! -e "$_msmp_work" ] && [ ! -L "$_msmp_work" ] || return 1
+    mkdir "$_msmp_work" 2>/dev/null || return 1
+    _msmp_kv="$_msmp_work/values"
+
+    if ! awk -v out="$_msmp_kv" '
+        function net_braces(s,   t, o, c) {
+            t = s
+            o = gsub("[{]", "", t)
+            c = gsub("[}]", "", t)
+            return o - c
+        }
+        function get_name(line,   t) {
+            t = line
+            sub(/^[[:space:]]*"/, "", t)
+            sub(/".*$/, "", t)
+            return t
+        }
+        BEGIN {
+            depth=-1
+            sec=""; subsec=""
+            sec_depth=0; sub_depth=0
+            in_hw=0; hw_depth=0
+        }
+        {
+            line=$0
+
+            if (depth==0 && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*[{]/) {
+                sec = get_name(line)
+                sec_depth = depth + net_braces(line)
+                if (sec == "Hardware") {
+                    in_hw = 1
+                    hw_depth = sec_depth
+                } else {
+                    in_hw = 0
+                }
+                subsec = ""
+                sub_depth = 0
+            }
+
+            if (!in_hw && sec != "" && depth==1 &&
+                line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*[{]/) {
+                subsec = get_name(line)
+                sub_depth = depth + net_braces(line)
+            }
+
+            if (!in_hw && sec != "" &&
+                line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*$/) {
+                k = get_name(line)
+                v = line
+                sub(/^[^:]*:[[:space:]]*"/, "", v)
+                sub(/".*$/, "", v)
+                if (k !~ /^_/ && k !~ /^BACKUP_[123]$/) {
+                    if (depth==1) {
+                        printf "%s|%s|%s|%s\n", sec, "", k, v >> out
+                    } else if (subsec != "") {
+                        printf "%s|%s|%s|%s\n", sec, subsec, k, v >> out
+                    }
+                }
+            }
+
+            depth += net_braces(line)
+
+            if (in_hw && depth < hw_depth) {
+                in_hw = 0
+                sec = ""
+                subsec = ""
+            }
+            if (subsec != "" && depth < sub_depth) {
+                subsec = ""
+            }
+            if (sec != "" && depth < sec_depth) {
+                sec = ""
+                subsec = ""
+            }
+        }
+    ' "$_msmp_old_file"; then
+        rm -rf "$_msmp_work" 2>/dev/null || :
+        return 1
+    fi
+
+    _msmp_extracted=$(wc -l < "$_msmp_kv" 2>/dev/null | tr -d '[:space:]')
+    case "$_msmp_extracted" in ''|*[!0-9]*) _msmp_extracted=0 ;; esac
+    MERV_SETTINGS_MERGE_EXTRACTED="$_msmp_extracted"
+    if [ "$_msmp_extracted" -eq 0 ]; then
+        rm -rf "$_msmp_work" 2>/dev/null || :
+        return 0
+    fi
+
+    _msmp_merged="$_msmp_work/settings.merged"
+    _msmp_count="$_msmp_work/merged.count"
+    if ! awk -F '|' -v count_out="$_msmp_count" '
+        function braces(s,   t, o, c) {
+            t=s; o=gsub("[{]", "", t); c=gsub("[}]", "", t); return o-c
+        }
+        function pname(s,   t) {
+            t=s; sub(/^[[:space:]]*"/, "", t); sub(/".*$/, "", t); return t
+        }
+        NR==FNR {
+            if (NF >= 4) {
+                path=$1 SUBSEP $2 SUBSEP $3
+                value=substr($0, length($1)+length($2)+length($3)+4)
+                saved[path]=value
+            }
+            next
+        }
+        FNR==1 { depth=-1; sec=""; subsec=""; secdepth=0; subdepth=0; inhw=0; hwdepth=0; merged=0 }
+        {
+            line=$0
+            if (depth==0 && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*[{]/) {
+                sec=pname(line); secdepth=depth+braces(line); inhw=(sec=="Hardware"); hwdepth=secdepth; subsec=""
+            }
+            if (!inhw && sec!="" && depth==1 && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*[{]/) {
+                subsec=pname(line); subdepth=depth+braces(line)
+            }
+            if (!inhw && sec!="" && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*$/) {
+                k=pname(line); path=""
+                if (k !~ /^_/ && k !~ /^BACKUP_[123]$/) {
+                    if (depth==1) path=sec SUBSEP "" SUBSEP k
+                    else if (subsec!="") path=sec SUBSEP subsec SUBSEP k
+                }
+                if (path!="" && path in saved) {
+                    match(line,/^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"/)
+                    comma=(line ~ /,[[:space:]]*$/ ? "," : "")
+                    line=substr(line,1,RLENGTH) saved[path] "\"" comma
+                    merged++
+                }
+            }
+            print line
+            depth+=braces($0)
+            if (inhw && depth<hwdepth) { inhw=0; sec=""; subsec="" }
+            if (subsec!="" && depth<subdepth) subsec=""
+            if (sec!="" && depth<secdepth) { sec=""; subsec="" }
+        }
+        END { print merged+0 > count_out }
+    ' "$_msmp_kv" "$_msmp_new_file" > "$_msmp_merged"; then
+        rm -rf "$_msmp_work" 2>/dev/null || :
+        return 1
+    fi
+    _msmp_applied=$(tr -d '[:space:]' < "$_msmp_count" 2>/dev/null)
+    case "$_msmp_applied" in ''|*[!0-9]*) _msmp_applied=0 ;; esac
+    [ "$_msmp_applied" -gt 0 ] || {
+        rm -rf "$_msmp_work" 2>/dev/null || :
+        return 1
+    }
+    chmod 644 "$_msmp_merged" 2>/dev/null || {
+        rm -rf "$_msmp_work" 2>/dev/null || :
+        return 1
+    }
+    mv -f "$_msmp_merged" "$_msmp_new_file" 2>/dev/null || {
+        rm -rf "$_msmp_work" 2>/dev/null || :
+        return 1
+    }
+    MERV_SETTINGS_MERGE_APPLIED="$_msmp_applied"
+    rm -rf "$_msmp_work" 2>/dev/null || return 1
+    return 0
+}
+
 # Strict aliases used by new code and by local contract tests.
 json_get_scalar_strict() { json_get_scalar_ext "$@"; }
 json_get_section_value_strict() { json_get_section_value_ext "$@"; }

@@ -37,6 +37,7 @@ safety check.
 | `50-ui-action-pipelines.md` | Button-to-backend-to-completion behavior. |
 | `60-state-and-data.md` | Settings, locks, progress, observation, and result files. |
 | `70-node-sync-and-ssh.md` | Router/node roles, sync, SSH, and staged transfer. |
+| `75-backup-state-manifest.md` | Backup members, normal Restore state overlay, and rollback boundary. |
 | `80-code-limitations.md` | Product and platform constraints. |
 | `90-testing-and-evidence.md` | Local, router, node, and human validation. |
 | `92-test-workflows.md` | Exact commands and when/why to use each test layer. |

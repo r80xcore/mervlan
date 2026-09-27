@@ -8,7 +8,7 @@ avoid sourcing the same library repeatedly.
 |---|---|
 | `var_settings.sh` | Establishes runtime paths, settings locations, hardware context, and node identity. |
 | `log_settings.sh` | Configures log channels, files, retention, and `info`/`warn`/`error`. |
-| `lib_json.sh` | Reads validated values from JSON/settings files without sourcing data as shell. |
+| `lib_json.sh` | Reads validated values from JSON/settings files without sourcing data as shell; provides the shared scalar settings migration used by Update and normal Restore. |
 | `lib_identity.sh` | Canonical PID/start identity matching and current-shell nonce generation. |
 | `lib_owner_lock.sh` | Strict v2 generic owner grammar, atomic publication, bounded acquire/reclaim, quarantine, and authenticated release. |
 | `lib_action_lock.sh` | Thin action policy wrapper for self-owned and authenticated parent-owned action locks. |

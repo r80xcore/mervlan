@@ -22,8 +22,11 @@ edits on a node.
 8. Publish a validated per-node terminal result and aggregate the run.
 9. Verify node hashes, versions, observation state, and idle workers afterward.
 
-Restore uses this same Sync flow as the only NODE builder.  After activating a
-backup, Restore performs a read-only local SSH identity/trust readiness gate,
+Restore uses this same Sync flow as the only NODE builder.  A normal Restore
+keeps the currently installed executable cohort and overlays validated
+persistent state from the selected archive; it does not activate the archive's
+older scripts or libraries.  After activating that current-code candidate,
+Restore performs a read-only local SSH identity/trust readiness gate,
 then delegates NODE connectivity, staging, transfer, activation, boot
 reconciliation, hooks, cron, and runtime convergence to `sync_nodes.sh`.  A
 failed readiness gate or Sync is reported as a partial Restore; Restore does

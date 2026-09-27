@@ -1397,6 +1397,117 @@ mb_key_fingerprint_from_material() {
   merv_ssh_trust_derive_fingerprint "$_mb_kmf_algorithm" "$_mb_kmf_key"
 }
 
+# Copy one audited persistent member into a private Restore candidate.  The
+# destination is never allowed to be a symlink or an unexpected object; the
+# caller supplies only paths from the authoritative backup-state manifest.
+mb_restore_copy_state_file() {
+  _mb_rcsf_source="$1"
+  _mb_rcsf_dest="$2"
+  _mb_rcsf_mode="${3:-}"
+  [ ! -L "$_mb_rcsf_source" ] && [ -f "$_mb_rcsf_source" ] || return 1
+  _mb_rcsf_parent=${_mb_rcsf_dest%/*}
+  [ -n "$_mb_rcsf_parent" ] || _mb_rcsf_parent=.
+  [ ! -L "$_mb_rcsf_parent" ] || return 1
+  [ -d "$_mb_rcsf_parent" ] || mkdir -p "$_mb_rcsf_parent" 2>/dev/null || return 1
+  if [ -L "$_mb_rcsf_dest" ] || {
+    [ -e "$_mb_rcsf_dest" ] && [ ! -f "$_mb_rcsf_dest" ]
+  }; then
+    return 1
+  fi
+  cp -p "$_mb_rcsf_source" "$_mb_rcsf_dest" 2>/dev/null || return 1
+  if [ -n "$_mb_rcsf_mode" ]; then
+    chmod "$_mb_rcsf_mode" "$_mb_rcsf_dest" 2>/dev/null || return 1
+  fi
+  [ ! -L "$_mb_rcsf_dest" ] && [ -f "$_mb_rcsf_dest" ] || return 1
+  return 0
+}
+
+mb_restore_remove_state_file() {
+  _mb_rrsf_dest="$1"
+  [ ! -L "$_mb_rrsf_dest" ] || return 1
+  if [ -e "$_mb_rrsf_dest" ]; then
+    [ -f "$_mb_rrsf_dest" ] || return 1
+    rm -f "$_mb_rrsf_dest" 2>/dev/null || return 1
+  fi
+  return 0
+}
+
+# Build the normal Restore candidate from CURRENT code and an audited state
+# overlay.  The full archive remains available to validation, Undo, and
+# recovery, but it is never the source of the normal activation candidate.
+mb_prepare_restore_candidate() {
+  _mb_prc_current="$1"
+  _mb_prc_backup="$2"
+  _mb_prc_candidate="$3"
+  _mb_prc_workspace="$4"
+  [ ! -L "$_mb_prc_current" ] && [ -d "$_mb_prc_current" ] || return 1
+  [ ! -L "$_mb_prc_backup" ] && [ -d "$_mb_prc_backup" ] || return 1
+  [ ! -e "$_mb_prc_candidate" ] && [ ! -L "$_mb_prc_candidate" ] || return 1
+  [ ! -L "$_mb_prc_workspace" ] && [ -d "$_mb_prc_workspace" ] || return 1
+
+  for _mb_prc_dir in .ssh tmp; do
+    if [ -L "$_mb_prc_backup/$_mb_prc_dir" ] || {
+      [ -e "$_mb_prc_backup/$_mb_prc_dir" ] && [ ! -d "$_mb_prc_backup/$_mb_prc_dir" ]
+    }; then
+      return 1
+    fi
+  done
+
+  cp -pR "$_mb_prc_current" "$_mb_prc_candidate" 2>/dev/null || return 1
+  [ ! -L "$_mb_prc_candidate" ] && [ -d "$_mb_prc_candidate" ] || return 1
+  if [ -L "$_mb_prc_candidate/$MERV_BACKUP_STATE_DIR_NAME" ]; then
+    return 1
+  elif [ -e "$_mb_prc_candidate/$MERV_BACKUP_STATE_DIR_NAME" ]; then
+    [ -d "$_mb_prc_candidate/$MERV_BACKUP_STATE_DIR_NAME" ] || return 1
+    rm -rf "$_mb_prc_candidate/$MERV_BACKUP_STATE_DIR_NAME" 2>/dev/null || return 1
+  fi
+
+  merv_settings_merge_preserved \
+    "$_mb_prc_backup/settings/settings.json" \
+    "$_mb_prc_candidate/settings/settings.json" \
+    "$_mb_prc_workspace" || return 1
+  mb_settings_file_valid "$_mb_prc_candidate/settings/settings.json" || return 1
+
+  _mb_prc_private="$_mb_prc_backup/.ssh/vlan_manager"
+  _mb_prc_public="$_mb_prc_backup/.ssh/vlan_manager.pub"
+  _mb_prc_private_present=0
+  _mb_prc_public_present=0
+  if [ -L "$_mb_prc_private" ] || [ -e "$_mb_prc_private" ]; then _mb_prc_private_present=1; fi
+  if [ -L "$_mb_prc_public" ] || [ -e "$_mb_prc_public" ]; then _mb_prc_public_present=1; fi
+  if [ "$_mb_prc_private_present" -ne "$_mb_prc_public_present" ]; then
+    return 1
+  elif [ "$_mb_prc_private_present" = "1" ]; then
+    _mb_prc_private_material=$(mb_key_material_from_private "$_mb_prc_private" 2>/dev/null) || return 1
+    _mb_prc_public_material=$(mb_key_material_from_public "$_mb_prc_public" 2>/dev/null) || return 1
+    mb_key_material_valid "$_mb_prc_private_material" || return 1
+    mb_key_material_valid "$_mb_prc_public_material" || return 1
+    [ "$_mb_prc_private_material" = "$_mb_prc_public_material" ] || return 1
+    mkdir -p "$_mb_prc_candidate/.ssh" 2>/dev/null || return 1
+    [ ! -L "$_mb_prc_candidate/.ssh" ] && [ -d "$_mb_prc_candidate/.ssh" ] || return 1
+    mb_restore_copy_state_file "$_mb_prc_private" \
+      "$_mb_prc_candidate/.ssh/vlan_manager" 600 || return 1
+    mb_restore_copy_state_file "$_mb_prc_public" \
+      "$_mb_prc_candidate/.ssh/vlan_manager.pub" 644 || return 1
+  else
+    _mb_prc_keys_flag=$(json_get_flag "SSH_KEYS_INSTALLED" "__MISSING__" \
+      "$_mb_prc_candidate/settings/settings.json" 2>/dev/null)
+    [ "$_mb_prc_keys_flag" != "1" ] || return 1
+    mb_restore_remove_state_file "$_mb_prc_candidate/.ssh/vlan_manager" || return 1
+    mb_restore_remove_state_file "$_mb_prc_candidate/.ssh/vlan_manager.pub" || return 1
+  fi
+
+  for _mb_prc_db in mac_shield.db mac_shield_override.db client_name_override.db; do
+    _mb_prc_source="$_mb_prc_backup/tmp/$_mb_prc_db"
+    if [ -L "$_mb_prc_source" ] || [ -e "$_mb_prc_source" ]; then
+      mb_restore_copy_state_file "$_mb_prc_source" \
+        "$_mb_prc_candidate/tmp/$_mb_prc_db" || return 1
+    fi
+  done
+  [ ! -e "$_mb_prc_candidate/$MERV_BACKUP_STATE_DIR_NAME" ] && \
+    [ ! -L "$_mb_prc_candidate/$MERV_BACKUP_STATE_DIR_NAME" ] || return 1
+  return 0
+}
+
 mb_validate_restored_ssh_readiness() {
   _mb_vsr_nodes="$1"
   _mb_vsr_settings="${SETTINGS_FILE:-$MERV_BASE/settings/settings.json}"
@@ -1907,6 +2018,25 @@ mb_restore() {
     mb_fail validation "Backup archive is corrupt, unsafe, or missing required MerVLAN files."
     return 1
   fi
+  _mb_current_boot=$(mb_read_boot_state "$MERV_BASE")
+  _mb_current_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
+  _mb_target_settings="$MB_RESTORE_TREE/settings/settings.json"
+  _mb_activation_source="$MB_RESTORE_TREE"
+  if [ "$_mb_mode" = "restore" ]; then
+    _mb_state_candidate="$MB_WORK_ROOT/current-state-candidate"
+    if ! mb_prepare_restore_candidate "$MERV_BASE" "$MB_RESTORE_TREE" \
+      "$_mb_state_candidate" "$MB_WORK_ROOT"; then
+      if ! rm -rf "$_mb_stage" 2>/dev/null; then
+        MB_PRESERVE_WORK=1
+        warn -c cli,vlan "Restore state-overlay preparation failed and its staging tree could not be removed"
+      fi
+      mb_fail validation "Backup persistent state could not be migrated onto the current MerVLAN code."
+      return 1
+    fi
+    _mb_target_settings="$_mb_state_candidate/settings/settings.json"
+    _mb_activation_source="$_mb_state_candidate"
+    info -c cli,vlan "Normal Restore will retain the current executable cohort and overlay validated backup state"
+  fi
   # Both the currently active node set and the target archive's node set must
   # be host-key verified before restore creates a stage, disables hooks, or
   # swaps the live installation. This keeps restore all-or-nothing at the
@@ -1920,17 +2050,17 @@ mb_restore() {
       mb_fail ssh_trust "Restore blocked: complete SSH trust preflight failed."
       return 1
     fi
-    _mb_target_nodes=$(merv_backup_state_configured_nodes "$MB_RESTORE_TREE/settings/settings.json" 2>/dev/null) || {
+    _mb_target_nodes=$(merv_backup_state_configured_nodes "$_mb_target_settings" 2>/dev/null) || {
       if ! rm -rf "$_mb_stage" 2>/dev/null; then MB_PRESERVE_WORK=1; fi
       mb_fail ssh_trust "Restore blocked: target configured-node settings could not be read."
       return 1
     }
     if [ "$MB_TRUST_TARGET_MODE" = "modern" ] && [ "$MB_TRUST_TARGET_PRESENT" = "1" ]; then
       merv_backup_state_preflight_with_trust \
-        "$MB_RESTORE_TREE/settings/settings.json" "$MB_TRUST_TARGET_FILE" "$MB_WORK_ROOT"
+        "$_mb_target_settings" "$MB_TRUST_TARGET_FILE" "$MB_WORK_ROOT"
       _mb_target_preflight_rc=$?
     else
-      merv_ssh_preflight_settings_file "$MB_RESTORE_TREE/settings/settings.json"
+      merv_ssh_preflight_settings_file "$_mb_target_settings"
       _mb_target_preflight_rc=$?
     fi
     if [ "$_mb_target_preflight_rc" -ne 0 ]; then
@@ -1951,10 +2081,12 @@ mb_restore() {
     mb_fail ssh_trust "Restore blocked: the current durable SSH trust database could not be preserved."
     return 1
   }
-  _mb_target_boot=$(mb_read_boot_state "$MB_RESTORE_TREE")
-  _mb_current_boot=$(mb_read_boot_state "$MERV_BASE")
-  _mb_current_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
-  _mb_target_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MB_RESTORE_TREE/changelog.txt" 2>/dev/null)
+  _mb_target_boot=$(mb_read_boot_state "$_mb_activation_source")
+  if [ "$_mb_mode" = "restore" ]; then
+    _mb_target_version="$_mb_current_version"
+  else
+    _mb_target_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MB_RESTORE_TREE/changelog.txt" 2>/dev/null)
+  fi
   if ! ls -ld "$MB_WORK_ROOT/preserve" >/dev/null 2>&1 &&
      mkdir "$MB_WORK_ROOT/preserve" 2>/dev/null; then
     :
@@ -1972,7 +2104,9 @@ mb_restore() {
   done
   mb_write_result running preparing_activation "Creating the validated temporary JFFS activation stage."
   merv_maintenance_recovery_root_prepare || { mb_fail preparing_activation "Could not prepare the persistent backup directory."; return 1; }
-  if ! mb_require_space_kb "$MB_BACKUP_ROOT" "$_mb_expanded_kb" "temporary JFFS activation stage"; then
+  _mb_activation_kb=$(mb_path_size_kb "$_mb_activation_source")
+  [ "$_mb_activation_kb" -gt 0 ] 2>/dev/null || _mb_activation_kb="$_mb_expanded_kb"
+  if ! mb_require_space_kb "$MB_BACKUP_ROOT" "$_mb_activation_kb" "temporary JFFS activation stage"; then
     mb_fail space "$MB_SPACE_MESSAGE"
     return 1
   fi
@@ -1982,7 +2116,7 @@ mb_restore() {
     mb_fail recovery "A preserved activation tree blocks this restore. No recovery data was removed; run $MB_BACKUP_ROOT/recover.sh after inspection."
     return 1
   fi
-  if ! cp -pR "$MB_RESTORE_TREE" "$MB_JFFS_STAGE" 2>/dev/null || \
+  if ! cp -pR "$_mb_activation_source" "$MB_JFFS_STAGE" 2>/dev/null || \
      ! mb_settings_file_valid "$MB_JFFS_STAGE/settings/settings.json"; then
     if ! mb_remove_jffs_stage "$MB_JFFS_STAGE"; then
       MB_PRESERVE_JFFS=1

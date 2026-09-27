@@ -1091,124 +1091,23 @@ OPTIONAL_STAGE_DIRS="www/vendor docs docs/diagrams docs/images"
 merge_settings_json() {
 	old_file="$1"
 	new_file="$2"
-	tmp_kv="$TMP_BASE/merge_kv.$$"
-
 	[ -f "$old_file" ] || return 0
-	[ -f "$new_file" ] || return 1
-
-	: > "$tmp_kv"
-
-	if ! awk -v out="$tmp_kv" '
-		function net_braces(s,   t, o, c) {
-			t = s
-			o = gsub(/\{/, "", t)
-			c = gsub(/\}/, "", t)
-			return o - c
-		}
-		function get_name(line,   t) {
-			t = line
-			sub(/^[[:space:]]*"/, "", t)
-			sub(/".*$/, "", t)
-			return t
-		}
-		BEGIN {
-			depth=-1
-			sec=""; subsec=""
-			sec_depth=0; sub_depth=0
-			in_hw=0; hw_depth=0
-		}
-		{
-			line=$0
-
-			# Enter top-level section only when at depth 0
-			if (depth==0 && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*\{/) {
-				sec = get_name(line)
-				sec_depth = depth + net_braces(line)
-				if (sec == "Hardware") {
-					in_hw = 1
-					hw_depth = sec_depth
-				} else {
-					in_hw = 0
-				}
-				subsec = ""
-				sub_depth = 0
-			}
-
-			# Enter subsection only when inside a section at depth 1 (not Hardware)
-			if (!in_hw && sec != "" && depth==1 &&
-			    line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*\{/) {
-				subsec = get_name(line)
-				sub_depth = depth + net_braces(line)
-			}
-
-			# Capture quoted scalar values only (no arrays/objects)
-			if (!in_hw && sec != "" &&
-			    line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*$/) {
-				k = get_name(line)
-				v = line
-				sub(/^[^:]*:[[:space:]]*"/, "", v)
-				sub(/".*$/, "", v)
-				if (k !~ /^_/ && k !~ /^BACKUP_[123]$/) {
-					if (depth==1) {
-						printf "%s|%s|%s|%s\n", sec, "", k, v >> out
-					} else if (subsec != "") {
-						printf "%s|%s|%s|%s\n", sec, subsec, k, v >> out
-					}
-				}
-			}
-
-			# Update depth AFTER processing line
-			depth += net_braces(line)
-
-			# Exit Hardware
-			if (in_hw && depth < hw_depth) {
-				in_hw = 0
-				sec = ""
-				subsec = ""
-			}
-
-			# Exit subsection
-			if (subsec != "" && depth < sub_depth) {
-				subsec = ""
-			}
-
-			# Exit section
-			if (sec != "" && depth < sec_depth) {
-				sec = ""
-				subsec = ""
-			}
-		}
-	' "$old_file"; then
+	if ! type merv_settings_merge_preserved >/dev/null 2>&1; then
+		_update_merge_library="${MERVLAN_UPDATED_TREE_DIR:-}/settings/lib_json.sh"
+		[ -f "$_update_merge_library" ] || return 1
+		unset LIB_JSON_LOADED
+		. "$_update_merge_library" || return 1
+	fi
+	if ! merv_settings_merge_preserved "$old_file" "$new_file" "${TMP_BASE:-/tmp}"; then
 		return 1
 	fi
-
-	if [ -s "$tmp_kv" ]; then
-		cnt="$(wc -l < "$tmp_kv" 2>/dev/null | tr -d '[:space:]')"
-		[ -n "$cnt" ] || cnt="?"
+	cnt="${MERV_SETTINGS_MERGE_EXTRACTED:-0}"
+	[ -n "$cnt" ] || cnt=0
+	if [ "$cnt" -gt 0 ] 2>/dev/null; then
 		info -c cli,vlan "settings.json merge: extracted $cnt scalar values"
 	else
 		warn -c cli,vlan "settings.json merge: extracted 0 values (old file format mismatch?)"
-		update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
-		return 0
 	fi
-
-	while IFS='|' read -r section subsection key value || [ -n "$section" ]; do
-		[ -n "$section" ] || continue
-		[ -n "$key" ] || continue
-		if [ -n "$subsection" ]; then
-			if ! json_set_section2_value "$section" "$subsection" "$key" "$value" "$new_file"; then
-				update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
-				return 1
-			fi
-		else
-			if ! json_set_section_value "$section" "$key" "$value" "$new_file"; then
-				update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
-				return 1
-			fi
-		fi
-	done < "$tmp_kv"
-
-	update_cleanup_files "$tmp_kv" || UPDATE_PRESERVE_TMP="1"
 }
 
 # ========================================================================== #
