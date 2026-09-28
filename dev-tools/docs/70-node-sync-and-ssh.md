@@ -25,15 +25,19 @@ edits on a node.
 Restore uses this same Sync flow as the only NODE builder.  A normal Restore
 keeps the currently installed executable cohort and overlays validated
 persistent state from the selected archive; it does not activate the archive's
-older scripts or libraries.  After activating that current-code candidate,
-Restore performs a read-only local SSH identity/trust readiness gate,
-then delegates NODE connectivity, staging, transfer, activation, boot
-reconciliation, hooks, cron, and runtime convergence to `sync_nodes.sh`.  A
-failed readiness gate or Sync is reported as a partial Restore; Restore does
-not regenerate keys, edit trust, run NODE boot commands, retry NODE runtime
-repair, or perform a second NODE installation path.  Restore-specific MAC
-Shield database publication is allowed only after canonical Sync succeeds,
-followed by read-only runtime reporting.
+older scripts or libraries.  Before activation, Restore validates the
+candidate's local identity/trust state and performs one bounded, read-only
+authenticated `echo connected` probe per configured NODE using that candidate
+identity and the canonical expected-first endpoint resolver.  Only after this
+remote-auth gate passes does Restore activate the current-code candidate,
+refresh the public tree, reconcile MAIN boot/hooks, and delegate NODE
+connectivity, staging, transfer, activation, boot reconciliation, hooks, cron,
+and runtime convergence to `sync_nodes.sh`.  A failed readiness gate or Sync
+is reported as a partial/blocked Restore; Restore does not regenerate keys,
+edit trust, run NODE boot commands, retry NODE runtime repair, or perform a
+second NODE installation path.  Restore-specific MAC Shield database
+publication is allowed only after canonical Sync succeeds, followed by
+read-only runtime reporting.
 
 The staging verifier checks every file's exact size and digest through one
 verified SSH stream carrying a compact manifest, including the node-specific
@@ -80,6 +84,42 @@ developer manifest is empty when these files are absent, so a production-style
 tree without `dev-tools/` follows the normal runtime-only sync flow. Developer
 documentation, planning, evidence, local tests, specifications, and agent
 rules are never copied to devices.
+
+## SSH authentication and diagnostics
+
+MerVLAN NODE SSH is explicitly key-only on the supported Dropbear baseline:
+the client receives `-o BatchMode=yes -o PasswordAuthentication=no`, and the
+child environment removes `DROPBEAR_PASSWORD`, `SSH_ASKPASS`,
+`SSH_ASKPASS_ALWAYS`, `DISPLAY`, `SSH_AUTH_SOCK`, and `SSH_AGENT_PID`.  These
+values are authentication inputs rather than MerVLAN configuration; removing
+them prevents CGI/cron/service launchers from turning an intended key-only
+operation into a password prompt or agent attempt.  The supported ASUS target
+for the current qualification uses Dropbear 2025.87; targets older than the
+Dropbear 2024.84 option support must fail closed rather than silently falling
+back to password authentication.
+
+SSH failures are classified from the most specific evidence first.  A local
+`Failed loading keyfile`/invalid-key diagnostic is
+`private-key-load-failed`; an explicit public-key rejection is
+`publickey-rejected`; a password/no-authentication-method result without
+proof of explicit-key rejection is `auth-method-failed`.  Transport, pinned
+host-key, session-timeout, remote-command, and ambiguous command/session
+failures retain separate reasons.  The explicit key path, key metadata and
+fingerprint, pinned trust fingerprint, selected endpoint, client options,
+execution context, and bounded sanitized stderr are retained in mode-600
+forensic records.  Worker records stay in the existing private worker log
+retention flow; the WebUI projection exposes only the sanitized SSH channel.
+Private keys, passwords, and secret environment values are never recorded.
+Successful Restore candidate probes additionally leave a bounded maintenance
+log summary of the candidate settings/key/trust paths and execution context,
+so a later post-activation Sync failure can be compared without retaining the
+candidate tree or private key material.
+
+`merv_ssh_test` captures probe stdout through a private file in the current
+shell; it does not put `merv_ssh_exec` in command substitution, so its
+caller-visible reason/detail state survives.  A potentially mutating remote
+command remains single-shot unless an explicitly idempotent caller enables
+the existing safe retry contract; authentication ambiguity never replays it.
 
 ## SSH limits
 

@@ -666,7 +666,7 @@ if [ ! -f /root/.ssh/authorized_keys ] || ! grep -qF "$PUBKEY_CONTENT" /root/.ss
     exit 1
 fi
 
-info -c cli,vlan "✓ SSH key verification passed"
+info -c cli,vlan "✓ Local MerVLAN SSH identity verification passed (does not prove NODE authorization)"
 
 # ========================================================================== #
 # NODE DISCOVERY — Extract and validate node IP addresses from settings      #
@@ -778,7 +778,18 @@ echo ""
 test_ssh_connection() {
     node_ip="$1"
     node_id="${2:-?}"
+    _sync_ssh_context_was_set=0
+    [ "${MERV_SSH_DIAGNOSTIC_CONTEXT+x}" = x ] && _sync_ssh_context_was_set=1
+    _sync_ssh_saved_context="${MERV_SSH_DIAGNOSTIC_CONTEXT:-}"
+    MERV_SSH_DIAGNOSTIC_CONTEXT=sync-node-auth
     merv_ssh_test "$node_id" "$node_ip"
+    _sync_ssh_test_rc=$?
+    if [ "$_sync_ssh_context_was_set" -eq 1 ]; then
+        MERV_SSH_DIAGNOSTIC_CONTEXT="$_sync_ssh_saved_context"
+    else
+        unset MERV_SSH_DIAGNOSTIC_CONTEXT
+    fi
+    return "$_sync_ssh_test_rc"
 }
 
 # check_remote_jffs_status — Inspect nvram flags controlling persistent storage
@@ -2325,6 +2336,30 @@ sync_copy_worker_log_for_view() {
     mv "$_scwv_tmp" "$_scwv_dest" 2>/dev/null || { rm -f "$_scwv_tmp"; return 1; }
 }
 
+# Project only the bounded, sanitized SSH forensic records.  The private
+# worker directory remains the retention authority; this copy contains no
+# private key material, passwords, or arbitrary environment values.
+sync_copy_worker_ssh_forensics() {
+    _scws_source="$1"
+    _scws_dest="$2"
+    [ -d "$_scws_source" ] || return 0
+    _scws_tmp="$_scws_dest.new.$$"
+    _scws_found=0
+    : > "$_scws_tmp" 2>/dev/null || return 1
+    for _scws_file in "$_scws_source"/attempt.*.log; do
+        [ -f "$_scws_file" ] || continue
+        cat "$_scws_file" >> "$_scws_tmp" 2>/dev/null || { rm -f "$_scws_tmp"; return 1; }
+        printf '\n' >> "$_scws_tmp" || { rm -f "$_scws_tmp"; return 1; }
+        _scws_found=1
+    done
+    if [ "$_scws_found" -eq 0 ]; then
+        rm -f "$_scws_tmp" 2>/dev/null || :
+        return 0
+    fi
+    chmod 644 "$_scws_tmp" 2>/dev/null || { rm -f "$_scws_tmp"; return 1; }
+    mv "$_scws_tmp" "$_scws_dest" 2>/dev/null || { rm -f "$_scws_tmp"; return 1; }
+}
+
 sync_publish_worker_log_view() {
     _spwv_root="$1"
     _spwv_phase="$2"
@@ -2349,12 +2384,15 @@ sync_publish_worker_log_view() {
         sync_copy_worker_log_for_view "$_spwv_node_dir/cli.log" "$_spwv_view_node/cli.json" || { rm -f "$_spwv_json"; return 1; }
         sync_copy_worker_log_for_view "$_spwv_node_dir/vlan.log" "$_spwv_view_node/vlan.json" || { rm -f "$_spwv_json"; return 1; }
         sync_copy_worker_log_for_view "$_spwv_node_dir/stdout.log" "$_spwv_view_node/stdout.json" || { rm -f "$_spwv_json"; return 1; }
+        sync_copy_worker_ssh_forensics "$_spwv_node_dir/ssh_forensics" "$_spwv_view_node/ssh.log" || { rm -f "$_spwv_json"; return 1; }
         _spwv_state=running
         if mnj_result_validate "$_spwv_node_dir/result" "$_spwv_node" sync; then
             _spwv_state="$MNJ_RESULT_STATE"
         fi
         [ "$_spwv_first" -eq 1 ] || printf '%s' ',' >> "$_spwv_json"
-        printf '%s' "{\"job\":\"$_spwv_job\",\"phase\":\"sync\",\"node_id\":\"$_spwv_node\",\"state\":\"$_spwv_state\",\"cli\":\"$_spwv_job/node_$_spwv_node/cli.json\",\"vlan\":\"$_spwv_job/node_$_spwv_node/vlan.json\",\"stdout\":\"$_spwv_job/node_$_spwv_node/stdout.json\"}" >> "$_spwv_json" || { rm -f "$_spwv_json"; return 1; }
+        _spwv_ssh=""
+        [ -f "$_spwv_view_node/ssh.log" ] && _spwv_ssh=",\"ssh\":\"$_spwv_job/node_$_spwv_node/ssh.log\""
+        printf '%s' "{\"job\":\"$_spwv_job\",\"phase\":\"sync\",\"node_id\":\"$_spwv_node\",\"state\":\"$_spwv_state\",\"cli\":\"$_spwv_job/node_$_spwv_node/cli.json\",\"vlan\":\"$_spwv_job/node_$_spwv_node/vlan.json\",\"stdout\":\"$_spwv_job/node_$_spwv_node/stdout.json\"$_spwv_ssh}" >> "$_spwv_json" || { rm -f "$_spwv_json"; return 1; }
         _spwv_first=0
     done < "$_sync_nodes_file"
     printf '%s\n' ']}' >> "$_spwv_json" || { rm -f "$_spwv_json"; return 1; }
@@ -2476,11 +2514,14 @@ sync_worker_log_archive() {
             _swla_cli="$_swla_job/node_$_swla_node/cli.json"
             _swla_vlan="$_swla_job/node_$_swla_node/vlan.json"
             _swla_stdout="$_swla_job/node_$_swla_node/stdout.json"
+            _swla_ssh="$_swla_job/node_$_swla_node/ssh.log"
             [ -f "$_swla_node_dir/cli.json" ] || continue
             [ -f "$_swla_node_dir/vlan.json" ] || continue
             [ -f "$_swla_node_dir/stdout.json" ] || continue
             [ "$_swla_first" -eq 1 ] || printf '%s' ',' >> "$_swla_json"
-            printf '%s' "{\"job\":\"$_swla_job\",\"phase\":\"sync\",\"node_id\":\"$_swla_node\",\"state\":\"$_swla_run_state\",\"cli\":\"$_swla_cli\",\"vlan\":\"$_swla_vlan\",\"stdout\":\"$_swla_stdout\"}" >> "$_swla_json" || return 1
+            _swla_ssh_json=""
+            [ -f "$_swla_node_dir/ssh.log" ] && _swla_ssh_json=",\"ssh\":\"$_swla_ssh\""
+            printf '%s' "{\"job\":\"$_swla_job\",\"phase\":\"sync\",\"node_id\":\"$_swla_node\",\"state\":\"$_swla_run_state\",\"cli\":\"$_swla_cli\",\"vlan\":\"$_swla_vlan\",\"stdout\":\"$_swla_stdout\"$_swla_ssh_json}" >> "$_swla_json" || return 1
             _swla_first=0
         done
         _swla_kept=$((_swla_kept + 1))

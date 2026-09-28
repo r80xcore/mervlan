@@ -327,13 +327,14 @@ Loading log content...
             item && item.phase === 'sync' && typeof item.node_id === 'string' &&
             typeof item.state === 'string' && typeof item.cli === 'string' && typeof item.vlan === 'string' && typeof item.stdout === 'string' &&
             ['running', 'ok', 'failed', 'timeout'].includes(item.state) &&
-            [item.cli, item.vlan, item.stdout].every(path => /^[A-Za-z0-9._/-]+\.json$/.test(path) && !path.includes('..'))
+            [item.cli, item.vlan, item.stdout].every(path => /^[A-Za-z0-9._/-]+\.json$/.test(path) && !path.includes('..')) &&
+            (typeof item.ssh === 'undefined' || (typeof item.ssh === 'string' && /^[A-Za-z0-9._/-]+\.log$/.test(item.ssh) && !item.ssh.includes('..')))
         );
         const select = document.getElementById('workerLog');
         const previous = select.value;
         select.textContent = '';
         workerLogs.forEach((item, index) => {
-            ['cli', 'vlan', 'stdout'].forEach(channel => {
+            ['cli', 'vlan', 'stdout', ...(item.ssh ? ['ssh'] : [])].forEach(channel => {
                 const option = document.createElement('option');
                 option.value = item[channel];
                 option.textContent = `${item.job} · NODE${item.node_id} · ${channel.toUpperCase()} · ${item.state}`;

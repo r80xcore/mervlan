@@ -857,7 +857,7 @@ merv_ssh_preflight_node_set() {
     [ -z "$_msp_extra" ] || return 2
     case "$_msp_slot" in ''|*[!0-9]*) return 2 ;; esac
     if [ -z "$_msp_mac" ] && type json_get_flag >/dev/null 2>&1; then
-      _msp_mac=$(json_get_flag "AUTO_NODE${_msp_slot}_MAC" "" "${SETTINGS_FILE:-}" 2>/dev/null)
+      _msp_mac=$(json_get_flag "AUTO_NODE${_msp_slot}_MAC" "" "$_msp_settings" 2>/dev/null)
     fi
     _msp_mac=$(merv_ssh_trust_mac_or_none "$_msp_mac") || return 2
     _msp_host=$(merv_ssh_trust_normalize_host "$_msp_host") || return 2
@@ -954,7 +954,7 @@ merv_ssh_preflight_node_lines() {
 $_mspnl_lines
 EOF
   if type get_node_ssh_port >/dev/null 2>&1; then
-    MERV_NODE_SSH_PORT=$(get_node_ssh_port 2>/dev/null) || MERV_NODE_SSH_PORT="${MERV_NODE_SSH_PORT:-22}"
+    MERV_NODE_SSH_PORT=$(get_node_ssh_port "$_mspnl_settings" 2>/dev/null) || MERV_NODE_SSH_PORT="${MERV_NODE_SSH_PORT:-22}"
   fi
   MERV_NODE_SSH_PORT=$(merv_ssh_trust_normalize_port "${MERV_NODE_SSH_PORT:-22}") || {
     merv_ssh_trust_cleanup_files "$_mspnl_tmp"

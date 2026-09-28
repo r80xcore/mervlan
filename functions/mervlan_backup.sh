@@ -1509,6 +1509,11 @@ mb_prepare_restore_candidate() {
 }
 
 mb_validate_restored_ssh_readiness() {
+  # This is deliberately a local candidate/readiness check only.  It proves
+  # that MAIN has a coherent identity and pinned trust/configuration; it does
+  # not prove that any configured NODE currently accepts that identity.  The
+  # normal Restore path performs the separate candidate remote-auth gate
+  # before activation.
   _mb_vsr_nodes="$1"
   _mb_vsr_settings="${SETTINGS_FILE:-$MERV_BASE/settings/settings.json}"
   MB_SSH_READINESS_DETAIL=""
@@ -2074,6 +2079,27 @@ mb_restore() {
         mb_fail ssh_trust "Restore blocked: complete SSH trust preflight failed."
       fi
       return 1
+    fi
+    # Normal Restore must prove the candidate identity can authenticate to the
+    # configured nodes before MAIN is activated.  This is one bounded,
+    # read-only echo per node through the canonical SSH endpoint resolver.  It
+    # never installs NODE files or changes ASUS/NODE authorized_keys.
+    if [ "$_mb_mode" = "restore" ] && [ -n "$_mb_target_nodes" ]; then
+      _mb_candidate_key="$_mb_activation_source/.ssh/vlan_manager"
+      _mb_candidate_pubkey="$_mb_activation_source/.ssh/vlan_manager.pub"
+      if [ "$MB_TRUST_TARGET_MODE" = "modern" ] && [ "$MB_TRUST_TARGET_PRESENT" = "1" ]; then
+        _mb_candidate_trust="$MB_TRUST_TARGET_FILE"
+      else
+        _mb_candidate_trust="$MERV_SSH_TRUST_FILE"
+      fi
+      if ! merv_backup_state_remote_auth_preflight \
+          "$_mb_target_settings" "$_mb_candidate_trust" "$MB_WORK_ROOT" \
+          "$_mb_candidate_key" "$_mb_candidate_pubkey"; then
+        MB_PRESERVE_WORK=1
+        mb_fail ssh_auth "Restore blocked before activation: candidate remote authentication failed (${MERV_SSH_LAST_REASON:-unknown}) — ${MERV_SSH_LAST_DETAIL:-no diagnostic detail}. Bounded SSH evidence is retained under $MB_WORK_ROOT/ssh_forensics."
+        return 1
+      fi
+      info -c cli,vlan "Candidate remote SSH authentication readiness passed for the configured nodes; activating Restore."
     fi
   fi
   mb_prepare_trust_transaction || {

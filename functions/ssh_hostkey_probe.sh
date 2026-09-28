@@ -128,7 +128,12 @@ fi
 
 _shkp_home="$_shkp_root"
 export HOME="$_shkp_home"
-"$_shkp_client_path" -y -N -p "$_shkp_port" -i "$_shkp_identity" \
+# First-contact discovery is not an authenticated MerVLAN action, but it must
+# still be noninteractive: do not allow a password/agent environment to turn
+# a bounded host-key probe into an authentication prompt.
+unset DROPBEAR_PASSWORD SSH_ASKPASS SSH_ASKPASS_ALWAYS DISPLAY SSH_AUTH_SOCK SSH_AGENT_PID
+"$_shkp_client_path" -y -N -p "$_shkp_port" \
+  -o BatchMode=yes -o PasswordAuthentication=no -i "$_shkp_identity" \
   "$_shkp_user@$_shkp_host" >"$_shkp_root/client.stdout" 2>"$_shkp_root/client.stderr" &
 _shkp_pid=$!
 _shkp_start=$(merv_identity_proc_start "$_shkp_pid" 2>/dev/null || printf '')

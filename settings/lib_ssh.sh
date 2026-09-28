@@ -385,14 +385,33 @@ prompt_ssh_user_override() {
 }
 
 
+## SSH identity context
+#
+# Normal callers use the active installation.  Restore's pre-activation
+# remote-auth gate supplies a private, read-only candidate context instead of
+# rebinding the readonly SETTINGS_FILE/SSH_KEY variables used by the live
+# runtime.  These accessors keep that context explicit and bounded.
+merv_ssh_context_settings_file() {
+    printf '%s\n' "${MERV_SSH_CONTEXT_SETTINGS_FILE:-${SETTINGS_FILE:-}}"
+}
+
+merv_ssh_context_key_file() {
+    printf '%s\n' "${MERV_SSH_CONTEXT_KEY:-${SSH_KEY:-}}"
+}
+
+merv_ssh_context_pubkey_file() {
+    printf '%s\n' "${MERV_SSH_CONTEXT_PUBKEY:-${SSH_PUBKEY:-}}"
+}
+
 get_node_ssh_user() {
     local user="__MISSING__"
+    local settings_file="${1:-$(merv_ssh_context_settings_file)}"
 
     # Prefer NODE_SSH_USER if set
-    user=$(json_get_flag "NODE_SSH_USER" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+    user=$(json_get_flag "NODE_SSH_USER" "__MISSING__" "$settings_file" 2>/dev/null)
     if [ "$user" = "__MISSING__" ] || [ -z "$user" ]; then
         # Fall back to SSH_USER
-        user=$(json_get_flag "SSH_USER" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+        user=$(json_get_flag "SSH_USER" "__MISSING__" "$settings_file" 2>/dev/null)
     fi
 
     # Final fallback: admin
@@ -405,18 +424,25 @@ get_node_ssh_user() {
 
 get_node_ssh_port() {
     local port
+    local settings_file="${1:-$(merv_ssh_context_settings_file)}"
 
     # Prefer environment override if it’s a clean integer
-    case "${SSH_PORT:-}" in
-        ""|*[!0-9]*) port="" ;;
-        *) port="$SSH_PORT" ;;
-    esac
+    # An explicit settings file is a candidate context.  Do not let a live
+    # process-wide SSH_PORT override change the candidate's restored port.
+    if [ "$#" -gt 0 ]; then
+        port=""
+    else
+        case "${SSH_PORT:-}" in
+            ""|*[!0-9]*) port="" ;;
+            *) port="$SSH_PORT" ;;
+        esac
+    fi
 
     # If no valid env override, read from settings.json (new key preferred)
     if [ -z "$port" ]; then
-        port=$(json_get_flag "NODE_SSH_PORT" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)
+        port=$(json_get_flag "NODE_SSH_PORT" "__MISSING__" "$settings_file" 2>/dev/null)
         if [ "$port" = "__MISSING__" ] || [ -z "$port" ]; then
-            port=$(json_get_flag "SSH_PORT" "22" "$SETTINGS_FILE" 2>/dev/null)
+            port=$(json_get_flag "SSH_PORT" "22" "$settings_file" 2>/dev/null)
         fi
     fi
 
@@ -446,42 +472,46 @@ _sync_ssh_flag() {
 
 ssh_keys_effectively_installed() {
     local flag="0" have_keys="0" flag_present="0"
+    local settings_file="$(merv_ssh_context_settings_file)"
+    local key_file="$(merv_ssh_context_key_file)"
+    local pubkey_file="$(merv_ssh_context_pubkey_file)"
 
     # Check actual key files
-    if [ -n "${SSH_KEY:-}" ] && [ -f "$SSH_KEY" ] && \
-       [ -n "${SSH_PUBKEY:-}" ] && [ -f "$SSH_PUBKEY" ]; then
+    if [ -n "$key_file" ] && [ -f "$key_file" ] && \
+       [ -n "$pubkey_file" ] && [ -f "$pubkey_file" ]; then
         have_keys="1"
     fi
 
     if merv_has json_get_flag; then
         # Read flag via JSON helper
-        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
+        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$settings_file" 2>/dev/null)
 
         # Detect presence by using a special sentinel
-        if [ "$(json_get_flag "SSH_KEYS_INSTALLED" "__MISSING__" "$SETTINGS_FILE" 2>/dev/null)" != "__MISSING__" ]; then
+        if [ "$(json_get_flag "SSH_KEYS_INSTALLED" "__MISSING__" "$settings_file" 2>/dev/null)" != "__MISSING__" ]; then
             flag_present="1"
         fi
-    elif [ -f "${SETTINGS_FILE:-}" ]; then
+    elif [ -f "$settings_file" ]; then
         # Legacy grep-only fallback
-        if grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$SETTINGS_FILE" 2>/dev/null; then
+        if grep -q '"SSH_KEYS_INSTALLED"[[:space:]]*:[[:space:]]*"1"' "$settings_file" 2>/dev/null; then
             flag="1"
         fi
-        if grep -q '"SSH_KEYS_INSTALLED"' "$SETTINGS_FILE" 2>/dev/null; then
+        if grep -q '"SSH_KEYS_INSTALLED"' "$settings_file" 2>/dev/null; then
             flag_present="1"
         fi
     fi
 
     # If flag key is missing entirely, sync it to whatever we think it currently is
-    if [ "$flag_present" = "0" ] && [ -n "${SETTINGS_FILE:-}" ] && merv_has json_set_flag; then
+    if [ "${MERV_SSH_CONTEXT_READONLY:-0}" != "1" ] &&
+       [ "$flag_present" = "0" ] && [ -n "$settings_file" ] && merv_has json_set_flag; then
         _sync_ssh_flag "$flag"
-        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$SETTINGS_FILE" 2>/dev/null)
+        flag=$(json_get_flag "SSH_KEYS_INSTALLED" "0" "$settings_file" 2>/dev/null)
     fi
 
     # If physical keys and flag disagree, make them consistent
-    if [ "$have_keys" = "1" ] && [ "$flag" != "1" ]; then
+    if [ "${MERV_SSH_CONTEXT_READONLY:-0}" != "1" ] && [ "$have_keys" = "1" ] && [ "$flag" != "1" ]; then
         _sync_ssh_flag "1"
         flag="1"
-    elif [ "$have_keys" = "0" ] && [ "$flag" = "1" ]; then
+    elif [ "${MERV_SSH_CONTEXT_READONLY:-0}" != "1" ] && [ "$have_keys" = "0" ] && [ "$flag" = "1" ]; then
         _sync_ssh_flag "0"
         flag="0"
     fi
@@ -963,8 +993,9 @@ MERV_SSH_KNOWN_HOME_SEQ=0
 
 merv_ssh_node_mac() {
   _msnm_node="$1"
+  _msnm_settings="${2:-$(merv_ssh_context_settings_file)}"
   if type json_get_flag >/dev/null 2>&1; then
-    _msnm_mac=$(json_get_flag "AUTO_NODE${_msnm_node}_MAC" "" "${SETTINGS_FILE:-}" 2>/dev/null)
+    _msnm_mac=$(json_get_flag "AUTO_NODE${_msnm_node}_MAC" "" "$_msnm_settings" 2>/dev/null)
   fi
   merv_ssh_trust_mac_or_none "${_msnm_mac:-}" 2>/dev/null
 }
@@ -988,15 +1019,15 @@ merv_ssh_precheck_cache_matches() {
 }
 
 merv_ssh_canonical_endpoint() {
-  _msce_slot="$1"; _msce_host="$2"
-  _msce_canonical=$(merv_node_asus_endpoint "$_msce_slot" 2>/dev/null || printf '')
+  _msce_slot="$1"; _msce_host="$2"; _msce_settings="${3:-$(merv_ssh_context_settings_file)}"
+  _msce_canonical=$(merv_node_asus_endpoint "$_msce_slot" "$_msce_settings" 2>/dev/null || printf '')
   [ -n "$_msce_canonical" ] || _msce_canonical="$_msce_host"
   printf '%s\n' "$_msce_canonical"
 }
 
 merv_ssh_precheck_cache_store() {
   _mspcs_slot="$1"; _mspcs_host="$2"; _mspcs_port="$3"; _mspcs_mac="$4"; _mspcs_user="$5"
-  _mspcs_canonical=$(merv_ssh_canonical_endpoint "$_mspcs_slot" "$_mspcs_host") || return 1
+  _mspcs_canonical=$(merv_ssh_canonical_endpoint "$_mspcs_slot" "$_mspcs_host" "$(merv_ssh_context_settings_file)") || return 1
   _mspcs_node=$(merv_ssh_trust_node_id "$_mspcs_slot" "$_mspcs_mac" "$_mspcs_canonical" "$_mspcs_port") || return 1
   [ "${SSH_TRUST_NODE:-}" = "$_mspcs_node" ] || return 1
   [ "${SSH_TRUST_HOST:-}" = "$_mspcs_canonical" ] && [ "${SSH_TRUST_PORT:-}" = "$_mspcs_port" ] || return 1
@@ -1011,7 +1042,7 @@ merv_ssh_precheck_cache_store() {
 
 merv_ssh_precheck_trust_current() {
   _msptc_node="$1"; _msptc_host="$2"; _msptc_port="$3"; _msptc_mac="$4"
-  _msptc_canonical=$(merv_ssh_canonical_endpoint "${MERV_SSH_PRECHECK_SLOT:-}" "$_msptc_host") || return 1
+  _msptc_canonical=$(merv_ssh_canonical_endpoint "${MERV_SSH_PRECHECK_SLOT:-}" "$_msptc_host" "$(merv_ssh_context_settings_file)") || return 1
   [ "${MERV_SSH_PRECHECK_HOST:-}" = "$_msptc_host" ] || return 1
   [ "${MERV_SSH_PRECHECK_PORT:-}" = "$_msptc_port" ] && [ "${MERV_SSH_PRECHECK_MAC:-}" = "$_msptc_mac" ] || return 1
   [ "${MERV_SSH_PRECHECK_NODE:-}" = "$_msptc_node" ] && [ "${MERV_SSH_PRECHECK_TRUST_NODE:-}" = "$_msptc_node" ] || return 1
@@ -1104,6 +1135,244 @@ merv_ssh_prepare_known_host() {
   return 0
 }
 
+# Run dbclient through a small POSIX shell wrapper so the machine-to-machine
+# contract is explicit even when the caller was launched by CGI/cron with
+# password or agent variables in its environment.  The wrapper deliberately
+# preserves the normal PATH/HOME and only removes authentication inputs that
+# could turn a key-only operation into an interactive password/agent attempt.
+# The supported Dropbear baseline for MerVLAN is 2024.84 or newer.  Upstream
+# added dbclient -o BatchMode and -o PasswordAuthentication in 2024.84;
+# ASUSWRT targets in the current qualification use Dropbear 2025.87.  Keep
+# the options in one helper so tests can assert the exact argv and so a future
+# target downgrade cannot silently re-enable password fallback.
+merv_ssh_client_run() {
+  _mscr_client="${MERV_SSH_CLIENT:-dbclient}"
+  _merv_timeout_run "$MERV_SSH_TIMEOUT" sh -c \
+    'unset DROPBEAR_PASSWORD SSH_ASKPASS SSH_ASKPASS_ALWAYS DISPLAY SSH_AUTH_SOCK SSH_AGENT_PID; exec "$@"' \
+    mervlan-dbclient "$_mscr_client" \
+    -o BatchMode=yes -o PasswordAuthentication=no "$@"
+}
+
+merv_ssh_sanitize_diagnostic() {
+  # Collapse all line/control separators before the bounded printable filter;
+  # retained evidence is data, never a shell fragment or sourced marker.
+  printf '%s' "${1:-}" | tr '\r\n\t' '   ' | tr -cd '[:print:]' | cut -c 1-512
+}
+
+merv_ssh_diagnostic_root() {
+  _msdr_root="${MERV_SSH_DIAGNOSTIC_DIR:-}"
+  if [ -z "$_msdr_root" ]; then
+    if [ -n "${MERV_NODE_JOB_DIR:-}" ]; then
+      _msdr_root="$MERV_NODE_JOB_DIR/ssh_forensics"
+    else
+      _msdr_root="${TMPDIR:-/tmp/mervlan_tmp}/logs/ssh_diagnostics"
+    fi
+  fi
+  case "$_msdr_root" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$_msdr_root" in
+    *..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  if [ -n "${MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT:-}" ]; then
+    case "$MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    case "$MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT" in
+      *..*|*[!A-Za-z0-9_./-]*) return 1 ;;
+    esac
+    case "$_msdr_root" in
+      "$MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT"|"$MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT"/*) ;;
+      *) return 1 ;;
+    esac
+  elif [ -n "${MERV_NODE_JOB_DIR:-}" ]; then
+    case "$_msdr_root" in
+      "$MERV_NODE_JOB_DIR"/ssh_forensics|"$MERV_NODE_JOB_DIR"/ssh_forensics/*) ;;
+      *) return 1 ;;
+    esac
+  else
+    case "$_msdr_root" in
+      "${TMPDIR:-/tmp/mervlan_tmp}"/logs/ssh_diagnostics|\
+      "${TMPDIR:-/tmp/mervlan_tmp}"/backup_manager.[0-9]*/ssh_forensics) ;;
+      *) return 1 ;;
+    esac
+  fi
+  mkdir -p "$_msdr_root" 2>/dev/null || return 1
+  chmod 700 "$_msdr_root" 2>/dev/null || return 1
+  printf '%s\n' "$_msdr_root"
+}
+
+merv_ssh_key_metadata() {
+  _mskm_key="${1:-$(merv_ssh_context_key_file)}"
+  MERV_SSH_KEY_TYPE="unknown"
+  MERV_SSH_KEY_MODE="unknown"
+  MERV_SSH_KEY_UID="unknown"
+  MERV_SSH_KEY_SIZE="unknown"
+  MERV_SSH_KEY_FINGERPRINT="unknown"
+  [ -n "$_mskm_key" ] && [ -f "$_mskm_key" ] && [ ! -L "$_mskm_key" ] || return 0
+  _mskm_ls=$(ls -lnd "$_mskm_key" 2>/dev/null || printf '')
+  MERV_SSH_KEY_MODE=$(printf '%s\n' "$_mskm_ls" | awk 'NR==1 { print $1 }')
+  MERV_SSH_KEY_UID=$(printf '%s\n' "$_mskm_ls" | awk 'NR==1 { print $3 }')
+  MERV_SSH_KEY_SIZE=$(printf '%s\n' "$_mskm_ls" | awk 'NR==1 { print $5 }')
+  [ -n "$MERV_SSH_KEY_MODE" ] || MERV_SSH_KEY_MODE=unknown
+  [ -n "$MERV_SSH_KEY_UID" ] || MERV_SSH_KEY_UID=unknown
+  [ -n "$MERV_SSH_KEY_SIZE" ] || MERV_SSH_KEY_SIZE=unknown
+  if [ -x "${DROPBEARKEY:-}" ]; then
+    _mskm_material=$("$DROPBEARKEY" -y -f "$_mskm_key" 2>/dev/null | \
+      awk '$1 ~ /^ssh-/ && NF >= 2 { count++; if (count == 1) print $1 " " $2 } END { exit (count == 1 ? 0 : 1) }') || _mskm_material=""
+    if [ -n "$_mskm_material" ]; then
+      MERV_SSH_KEY_TYPE=$(printf '%s\n' "$_mskm_material" | awk '{ print $1 }')
+      if type merv_ssh_trust_derive_fingerprint >/dev/null 2>&1; then
+        MERV_SSH_KEY_FINGERPRINT=$(merv_ssh_trust_derive_fingerprint \
+          "$MERV_SSH_KEY_TYPE" "$(printf '%s\n' "$_mskm_material" | awk '{ print $2 }')" 2>/dev/null || printf 'unknown')
+      fi
+    fi
+    unset _mskm_material
+  fi
+  return 0
+}
+
+merv_ssh_write_forensic() {
+  _mswf_node="$1"; _mswf_canonical="$2"; _mswf_selected="$3"
+  _mswf_user="$4"; _mswf_port="$5"; _mswf_rc="$6"; _mswf_status="$7"
+  _mswf_stderr="${8:-}"
+  _mswf_root=$(merv_ssh_diagnostic_root 2>/dev/null) || return 1
+  case "${MERV_SSH_FORENSIC_SEQ:-}" in ''|*[!0-9]*) MERV_SSH_FORENSIC_SEQ=0 ;; esac
+  MERV_SSH_FORENSIC_SEQ=$((MERV_SSH_FORENSIC_SEQ + 1))
+  _mswf_tmp="$_mswf_root/.attempt.$$.${MERV_SSH_FORENSIC_SEQ}.tmp"
+  _mswf_file="$_mswf_root/attempt.$$.${MERV_SSH_FORENSIC_SEQ}.log"
+  _mswf_client="${MERV_SSH_CLIENT:-dbclient}"
+  if type merv_cmd >/dev/null 2>&1; then
+    _mswf_client=$(merv_cmd "$_mswf_client" 2>/dev/null || printf '%s' "$_mswf_client")
+  fi
+  merv_ssh_key_metadata "$(merv_ssh_context_key_file)"
+  _mswf_pwd=$(pwd 2>/dev/null || printf unknown)
+  _mswf_umask=$(umask 2>/dev/null || printf unknown)
+  _mswf_phase=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_DIAGNOSTIC_CONTEXT:-ssh-attempt}")
+  _mswf_stderr=$(merv_ssh_sanitize_diagnostic "$_mswf_stderr")
+  _mswf_key_path=$(merv_ssh_sanitize_diagnostic "$(merv_ssh_context_key_file)")
+  _mswf_trust_fp=$(merv_ssh_sanitize_diagnostic "${SSH_TRUST_FINGERPRINT:-unknown}")
+  ( umask 077
+    {
+      printf 'format=1\n'
+      printf 'phase=%s\n' "$_mswf_phase"
+      printf 'status=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_status")"
+      printf 'return_code=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_rc")"
+      printf 'node=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_node")"
+      printf 'canonical_endpoint=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_canonical")"
+      printf 'selected_endpoint=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_selected")"
+      printf 'ssh_user=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_user")"
+      printf 'ssh_port=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_port")"
+      printf 'ssh_settings_path=%s\n' "$(merv_ssh_sanitize_diagnostic "$(merv_ssh_context_settings_file)")"
+      printf 'ssh_key_path=%s\n' "$_mswf_key_path"
+      printf 'ssh_key_type=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_KEY_TYPE:-unknown}")"
+      printf 'ssh_key_mode=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_KEY_MODE:-unknown}")"
+      printf 'ssh_key_uid=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_KEY_UID:-unknown}")"
+      printf 'ssh_key_size=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_KEY_SIZE:-unknown}")"
+      printf 'ssh_key_fingerprint=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_KEY_FINGERPRINT:-unknown}")"
+      printf 'trust_path=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_TRUST_FILE:-}")"
+      printf 'trust_record_fingerprint=%s\n' "$_mswf_trust_fp"
+      printf 'dbclient_binary=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_client")"
+      printf 'dbclient_options=BatchMode=yes,PasswordAuthentication=no\n'
+      printf 'maintenance_sync=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_MAINTENANCE_SYNC:-0}")"
+      printf 'maintenance_delegation=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_MAINTENANCE_DELEGATION_KIND:-none}")"
+      printf 'action_lock_mode=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_ACTION_LOCK_MODE:-none}")"
+      printf 'tmpdir=%s\n' "$(merv_ssh_sanitize_diagnostic "${TMPDIR:-}")"
+      printf 'ssh_tmpdir=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_TMPDIR:-}")"
+      printf 'worker_dir=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_NODE_JOB_DIR:-}")"
+      printf 'working_directory=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_pwd")"
+      printf 'umask=%s\n' "$(merv_ssh_sanitize_diagnostic "$_mswf_umask")"
+      printf 'classification=%s\n' "$(merv_ssh_sanitize_diagnostic "${MERV_SSH_LAST_REASON:-}")"
+      printf 'sanitized_stderr=%s\n' "$_mswf_stderr"
+    } > "$_mswf_tmp"
+  ) 2>/dev/null || {
+    rm -f "$_mswf_tmp" 2>/dev/null || :
+    return 1
+  }
+  chmod 600 "$_mswf_tmp" 2>/dev/null || { rm -f "$_mswf_tmp" 2>/dev/null || :; return 1; }
+  mv -f "$_mswf_tmp" "$_mswf_file" 2>/dev/null || { rm -f "$_mswf_tmp" 2>/dev/null || :; return 1; }
+  MERV_SSH_FORENSIC_LAST_FILE="$_mswf_file"
+  # Retain a bounded set in the managed diagnostic namespace.  Worker jobs
+  # are independently retained/rotated by sync_nodes.sh; this cap prevents a
+  # non-worker caller from turning a transport fault into unbounded /tmp data.
+  _mswf_list="$_mswf_root/.list.$$"
+  for _mswf_existing in "$_mswf_root"/attempt.*.log; do
+    [ -f "$_mswf_existing" ] || continue
+    _mswf_seq=$(printf '%s\n' "$_mswf_existing" | sed 's|.*/attempt\.[0-9][0-9]*\.||; s/\.log$//')
+    case "$_mswf_seq" in ''|*[!0-9]*) continue ;; esac
+    printf '%s %s\n' "$_mswf_seq" "$_mswf_existing" >> "$_mswf_list"
+  done
+  if [ -f "$_mswf_list" ]; then
+    sort -nr "$_mswf_list" 2>/dev/null | awk 'NR > 8 { sub(/^[0-9]+ /, ""); print }' | while IFS= read -r _mswf_old; do
+      rm -f "$_mswf_old" 2>/dev/null || :
+    done
+    rm -f "$_mswf_list" 2>/dev/null || :
+  fi
+  return 0
+}
+
+merv_ssh_attach_forensic_detail() {
+  if [ -n "${MERV_SSH_FORENSIC_LAST_FILE:-}" ]; then
+    MERV_SSH_LAST_DETAIL="${MERV_SSH_LAST_DETAIL:-SSH operation failed}; forensic=${MERV_SSH_FORENSIC_LAST_FILE}"
+  fi
+}
+
+merv_ssh_classify_dbclient_failure() {
+  _mscdf_node="$1"; _mscdf_ip="$2"; _mscdf_rc="$3"; _mscdf_err="${4:-}"
+  # A local identity-load diagnostic is more specific than every later
+  # authentication symptom.  Dropbear can print this and then continue to a
+  # password method, so the password prompt is not evidence of a server-side
+  # public-key rejection in this case.
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi \
+      'failed[[:space:]]+(loading|to[[:space:]]+load)[[:space:]]+(keyfile|key)|cannot[[:space:]]+load[[:space:]]+(keyfile|key)|invalid[[:space:]]+key(file)?|bad[[:space:]]+key(file)?|keyfile.*(not[[:space:]]+found|no[[:space:]]+such[[:space:]]+file|failed)'; then
+    MERV_SSH_LAST_REASON="private-key-load-failed"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' dbclient could not load the configured private key; no public-key offer is proven"
+    return 0
+  fi
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi 'host[[:space:]-]*key|fingerprint'; then
+    MERV_SSH_LAST_REASON="host-key-mismatch"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' rejected the pinned SSH host key"
+    return 0
+  fi
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi \
+      'public[[:space:]]*key.*(denied|reject|fail)|publickey.*(denied|reject|fail)|key[[:space:]-]*based.*(denied|reject|fail)'; then
+    MERV_SSH_LAST_REASON="publickey-rejected"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' dbclient reported that public-key authentication was rejected before command"
+    return 0
+  fi
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi 'connection[[:space:]]+refused'; then
+    MERV_SSH_LAST_REASON="refused"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' connection refused (SSH service/port wrong)"
+    return 0
+  fi
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi 'no[[:space:]]+route[[:space:]]+to[[:space:]]+host|network[[:space:]]+is[[:space:]]+unreachable'; then
+    MERV_SSH_LAST_REASON="no-route"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' no route to host"
+    return 0
+  fi
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi 'connection[[:space:]]+timed[[:space:]]+out|connect[[:space:]]+timeout|operation[[:space:]]+timed[[:space:]]+out'; then
+    MERV_SSH_LAST_REASON="connect-timeout"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' connection timed out before SSH session establishment"
+    return 0
+  fi
+  if printf '%s\n' "$_mscdf_err" | grep -Eqi \
+      'password[[:space:]]*:|permission[[:space:]]+denied|no[[:space:]]+(more|supported)[[:space:]]+authentication[[:space:]]+methods|no[[:space:]]+authentication[[:space:]]+methods[[:space:]]+succeeded|authentication[[:space:]]+failed'; then
+    MERV_SSH_LAST_REASON="auth-method-failed"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' authentication method failed; password fallback was observed without proof that the server rejected the explicit key"
+    return 0
+  fi
+  if [ "$_mscdf_rc" -eq 126 ] 2>/dev/null || [ "$_mscdf_rc" -eq 127 ] 2>/dev/null; then
+    MERV_SSH_LAST_REASON="remote-command-failed"
+    MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' remote command exited rc=$_mscdf_rc"
+    return 0
+  fi
+  MERV_SSH_LAST_REASON="command-or-session-failed"
+  MERV_SSH_LAST_DETAIL="NODE${_mscdf_node:-?} ip='$_mscdf_ip' command/session failed rc=$_mscdf_rc; not replayed"
+  return 0
+}
+
 merv_ssh_precheck() {
   # merv_ssh_precheck <node_num> <node_ip>
   # returns:
@@ -1124,16 +1393,17 @@ merv_ssh_precheck() {
     return 3
   fi
 
-  node_mac=$(merv_ssh_node_mac "$node_num" 2>/dev/null)
+  _merv_precheck_settings="$(merv_ssh_context_settings_file)"
+  node_mac=$(merv_ssh_node_mac "$node_num" "$_merv_precheck_settings" 2>/dev/null)
   if [ -z "$node_mac" ]; then
     MERV_SSH_LAST_REASON="node-mac-missing"
     MERV_SSH_LAST_DETAIL="NODE${node_num:-?} has no canonical AUTO_NODE${node_num}_MAC identity"
     return 6
   fi
-  _node_port_for_trust="$(get_node_ssh_port 2>/dev/null || printf '22')"
-  _node_asus_endpoint=$(merv_node_asus_endpoint "$node_num" 2>/dev/null || printf '')
+  _node_port_for_trust="$(get_node_ssh_port "$_merv_precheck_settings" 2>/dev/null || printf '22')"
+  _node_asus_endpoint=$(merv_node_asus_endpoint "$node_num" "$_merv_precheck_settings" 2>/dev/null || printf '')
   if [ -n "$_node_asus_endpoint" ] && [ "$node_ip" != "$_node_asus_endpoint" ] && \
-     ! merv_node_endpoint_is_configured "$node_num" "$node_ip"; then
+     ! merv_node_endpoint_is_configured "$node_num" "$node_ip" "$_merv_precheck_settings"; then
     MERV_SSH_LAST_REASON="unconfigured-endpoint"
     MERV_SSH_LAST_DETAIL="NODE${node_num:-?} endpoint '$node_ip' is not configured"
     return 3
@@ -1153,13 +1423,14 @@ merv_ssh_precheck() {
     return 2
   fi
 
-  if [ -z "${SSH_KEY:-}" ] || [ ! -f "$SSH_KEY" ]; then
-    MERV_SSH_LAST_REASON="ssh-keyfile-missing"
-    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip' missing SSH_KEY='$SSH_KEY'"
+  _merv_precheck_key="$(merv_ssh_context_key_file)"
+  if [ -z "$_merv_precheck_key" ] || [ ! -f "$_merv_precheck_key" ]; then
+    MERV_SSH_LAST_REASON="private-key-missing"
+    MERV_SSH_LAST_DETAIL="NODE${node_num:-?} ip='$node_ip' missing configured MerVLAN private key"
     return 2
   fi
 
-  _node_user_for_ssh="$(get_node_ssh_user 2>/dev/null || printf 'admin')"
+  _node_user_for_ssh="$(get_node_ssh_user "$_merv_precheck_settings" 2>/dev/null || printf 'admin')"
   [ -n "$_node_user_for_ssh" ] || _node_user_for_ssh="admin"
 
   # A caller that has just completed a verified SSH connection may suppress
@@ -1205,6 +1476,8 @@ merv_ssh_exec_endpoint() {
   _node_num="$1"
   _node_ip="$2"
   _remote_cmd="$3"
+  _merv_ssh_settings="$(merv_ssh_context_settings_file)"
+  _merv_ssh_key="$(merv_ssh_context_key_file)"
 
   # Refuse to run if node context is set (safety; aligns with mervlan_boot behavior)
   if [ "${MERV_NODE_CONTEXT:-0}" = "1" ]; then
@@ -1242,9 +1515,9 @@ merv_ssh_exec_endpoint() {
       _node_mac="$MERV_SSH_PRECHECK_MAC"
       _user="$MERV_SSH_PRECHECK_USER"
     else
-      _port="$(get_node_ssh_port)"
-      _node_mac=$(merv_ssh_node_mac "$_node_num" 2>/dev/null) || _node_mac=""
-      _user="$(get_node_ssh_user)"
+      _port="$(get_node_ssh_port "$_merv_ssh_settings")"
+      _node_mac=$(merv_ssh_node_mac "$_node_num" "$_merv_ssh_settings" 2>/dev/null) || _node_mac=""
+      _user="$(get_node_ssh_user "$_merv_ssh_settings")"
     fi
     [ -n "$_port" ] || _port="22"
     [ -n "$_user" ] || _user="admin"
@@ -1270,9 +1543,10 @@ merv_ssh_exec_endpoint() {
       MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} verified key could not be installed into the private client home"
       return 5
     }
+    MERV_SSH_FORENSIC_LAST_FILE=""
+    _merv_ssh_canonical=$(merv_ssh_canonical_endpoint "$_node_num" "$_node_ip" "$_merv_ssh_settings" 2>/dev/null || printf '%s' "$_node_ip")
     _out=$(
-      _merv_timeout_run "$MERV_SSH_TIMEOUT" \
-        "${MERV_SSH_CLIENT:-dbclient}" -p "$_port" -i "$SSH_KEY" \
+      merv_ssh_client_run -p "$_port" -i "$_merv_ssh_key" \
         "$_user@$_node_ip" "$_remote_cmd" \
         </dev/null \
         2>"$_tmp"
@@ -1285,17 +1559,24 @@ merv_ssh_exec_endpoint() {
     _merv_ssh_tmp_release || {
       MERV_SSH_LAST_REASON="ssh-tmp-cleanup-failed"
       MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} isolated SSH stderr cleanup failed"
+      merv_ssh_write_forensic "$_node_num" "$_merv_ssh_canonical" "$_node_ip" "$_user" "$_port" "$_rc" failure "$_err" || :
+      merv_ssh_attach_forensic_detail
       return 5
     }
     if [ "$_merv_ssh_known_release_rc" -ne 0 ]; then
       MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"
       MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} private SSH client home cleanup failed"
+      merv_ssh_write_forensic "$_node_num" "$_merv_ssh_canonical" "$_node_ip" "$_user" "$_port" "$_rc" failure "$_err" || :
+      merv_ssh_attach_forensic_detail
       return 5
     fi
 
     if [ "$_rc" -eq 0 ]; then
       MERV_SSH_LAST_REASON=""
       MERV_SSH_LAST_DETAIL=""
+      if [ "${MERV_SSH_DIAGNOSTIC_CAPTURE:-0}" = "1" ]; then
+        merv_ssh_write_forensic "$_node_num" "$_merv_ssh_canonical" "$_node_ip" "$_user" "$_port" 0 success "$_err" || :
+      fi
       # Print stdout so callers can capture it if needed
       printf '%s' "$_out"
       return 0
@@ -1308,49 +1589,18 @@ merv_ssh_exec_endpoint() {
     if [ "$_rc" -eq 124 ]; then
       MERV_SSH_LAST_REASON="session-timeout"
       MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' command/session timed out after ${MERV_SSH_TIMEOUT}s"
+      merv_ssh_write_forensic "$_node_num" "$_merv_ssh_canonical" "$_node_ip" "$_user" "$_port" "$_rc" failure "$_err" || :
+      merv_ssh_attach_forensic_detail
       return 5
     else
-      # Best-effort classify common dbclient failures
-      # Dropbear may fall back to an interactive password prompt when the
-      # configured public key was not accepted.  stdin is deliberately closed,
-      # so a prompt followed by a closed session is a deterministic diagnostic,
-      # not permission for a password retry or an alternate endpoint.
-      if echo "$_err" | grep -Eqi 'password[[:space:]]*:'; then
-        MERV_SSH_LAST_REASON="publickey-not-accepted"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' dbclient requested a password after configured key authentication was not accepted; session closed before command"
-        return 5
-      elif echo "$_err" | grep -Eqi 'public[[:space:]]*key.*(denied|reject|fail)|authentication.*(failed|refused)' ; then
-        MERV_SSH_LAST_REASON="publickey-not-accepted"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' configured public-key authentication was rejected before command"
-        return 5
-      elif echo "$_err" | grep -qi "Permission denied"; then
-        MERV_SSH_LAST_REASON="auth-failed"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' Permission denied (keys/user mismatch)"
-        # auth failures won't improve by retrying → stop
-        return 5
-      elif echo "$_err" | grep -qi "Connection refused"; then
-        MERV_SSH_LAST_REASON="refused"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' connection refused (SSH service/port wrong)"
-      elif echo "$_err" | grep -qi "No route to host"; then
-        MERV_SSH_LAST_REASON="no-route"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' no route to host"
-      elif echo "$_err" | grep -Eqi 'Connection timed out|Connect timeout|Operation timed out|Network is unreachable'; then
-        MERV_SSH_LAST_REASON="connect-timeout"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' connection timed out before SSH session establishment"
-      elif echo "$_err" | grep -Eqi 'host[[:space:]-]*key|fingerprint'; then
-        MERV_SSH_LAST_REASON="host-key-mismatch"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' rejected the pinned SSH host key"
-        return 6
-      elif [ "$_rc" -eq 126 ] || [ "$_rc" -eq 127 ]; then
-        MERV_SSH_LAST_REASON="remote-cmd-failed"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' remote command exited rc=$_rc"
-        # Missing remote files/binaries will not improve by retrying.
-        return 5
-      else
-        MERV_SSH_LAST_REASON="command-or-session-failed"
-        MERV_SSH_LAST_DETAIL="NODE${_node_num:-?} ip='$_node_ip' command/session failed rc=$_rc; not replayed"
-        return 5
-      fi
+      merv_ssh_classify_dbclient_failure "$_node_num" "$_node_ip" "$_rc" "$_err"
+      merv_ssh_write_forensic "$_node_num" "$_merv_ssh_canonical" "$_node_ip" "$_user" "$_port" "$_rc" failure "$_err" || :
+      merv_ssh_attach_forensic_detail
+      [ "${MERV_SSH_LAST_REASON:-}" = host-key-mismatch ] && return 6
+      case "${MERV_SSH_LAST_REASON:-}" in
+        refused|no-route|connect-timeout) ;;
+        *) return 5 ;;
+      esac
     fi
 
     # A same-endpoint execution retry is an explicit caller contract, and is
@@ -1384,7 +1634,7 @@ merv_ssh_exec() {
   # All existing connection callers retain their configured ASUS value, while
   # this wrapper chooses the expected WAN Native endpoint first when enabled.
   _msee_slot="$1"; _msee_configured="$2"; _msee_cmd="$3"
-  _msee_candidates=$(merv_node_endpoint_candidates "$_msee_slot" 2>/dev/null)
+  _msee_candidates=$(merv_node_endpoint_candidates "$_msee_slot" "$(merv_ssh_context_settings_file)" 2>/dev/null)
   _msee_candidate_rc=$?
   if [ "$_msee_candidate_rc" -ne 0 ]; then
     # Preserve the historical direct-wrapper contract for legacy callers that
@@ -1422,7 +1672,8 @@ EOF
 
 merv_node_resolve_endpoint() {
   # merv_node_resolve_endpoint <slot> <configured-asus-ip>
-  _mnre_slot="$1"; _mnre_configured="$2"; _mnre_candidates=$(merv_node_endpoint_candidates "$_mnre_slot" 2>/dev/null)
+  _mnre_slot="$1"; _mnre_configured="$2"; _mnre_settings="${3:-$(merv_ssh_context_settings_file)}"
+  _mnre_candidates=$(merv_node_endpoint_candidates "$_mnre_slot" "$_mnre_settings" 2>/dev/null)
   _mnre_candidates_rc=$?
   if [ "$_mnre_candidates_rc" -ne 0 ]; then
     [ "$_mnre_candidates_rc" -eq 1 ] && merv_node_valid_ipv4 "$_mnre_configured" || return 3
@@ -1453,25 +1704,27 @@ EOF
 # fixed by the caller, never derived from browser input.
 merv_ssh_stream_file() {
   _mssf_node="$1"; _mssf_ip="$2"; _mssf_local="$3"; _mssf_remote="$4"
+  _mssf_settings="$(merv_ssh_context_settings_file)"
+  _mssf_key="$(merv_ssh_context_key_file)"
   [ -f "$_mssf_local" ] || [ "$_mssf_local" = "/dev/null" ] || return 1
   case "$_mssf_remote" in
     /*) ;;
     *) MERV_SSH_LAST_REASON="invalid-remote-path"; return 2 ;;
   esac
   case "$_mssf_remote" in *..*|*[!A-Za-z0-9_./-]*) MERV_SSH_LAST_REASON="invalid-remote-path"; return 2 ;; esac
-  _mssf_ip=$(merv_node_resolve_endpoint "$_mssf_node" "$_mssf_ip") || return $?
+  _mssf_ip=$(merv_node_resolve_endpoint "$_mssf_node" "$_mssf_ip" "$_mssf_settings") || return $?
   merv_ssh_precheck "$_mssf_node" "$_mssf_ip" || return $?
   if merv_ssh_precheck_cache_matches "$_mssf_node" "$_mssf_ip"; then
     _mssf_mac="$MERV_SSH_PRECHECK_MAC"; _mssf_port="$MERV_SSH_PRECHECK_PORT"; _mssf_user="$MERV_SSH_PRECHECK_USER"
   else
-    _mssf_mac=$(merv_ssh_node_mac "$_mssf_node" 2>/dev/null) || return 6
-    _mssf_port=$(get_node_ssh_port)
-    _mssf_user=$(get_node_ssh_user)
+    _mssf_mac=$(merv_ssh_node_mac "$_mssf_node" "$_mssf_settings" 2>/dev/null) || return 6
+    _mssf_port=$(get_node_ssh_port "$_mssf_settings")
+    _mssf_user=$(get_node_ssh_user "$_mssf_settings")
   fi
   merv_ssh_prepare_known_host "$_mssf_node" "$_mssf_ip" "$_mssf_port" "$_mssf_mac" || { merv_ssh_release_known_host 2>/dev/null || :; return 5; }
   _mssf_rc=0
-  if cat "$_mssf_local" | _merv_timeout_run "$MERV_SSH_TIMEOUT" \
-      "${MERV_SSH_CLIENT:-dbclient}" -p "$_mssf_port" -i "$SSH_KEY" \
+  if cat "$_mssf_local" | merv_ssh_client_run \
+      -p "$_mssf_port" -i "$_mssf_key" \
       "$_mssf_user@$_mssf_ip" "cat > '${_mssf_remote}.tmp' && mv '${_mssf_remote}.tmp' '${_mssf_remote}'" 2>/dev/null; then
     :
   else
@@ -1486,19 +1739,20 @@ merv_ssh_stream_file() {
 
 merv_ssh_stream_stdin() {
   _msss_node="$1"; _msss_ip="$2"; _msss_cmd="$3"
-  _msss_ip=$(merv_node_resolve_endpoint "$_msss_node" "$_msss_ip") || return $?
+  _msss_settings="$(merv_ssh_context_settings_file)"
+  _msss_key="$(merv_ssh_context_key_file)"
+  _msss_ip=$(merv_node_resolve_endpoint "$_msss_node" "$_msss_ip" "$_msss_settings") || return $?
   merv_ssh_precheck "$_msss_node" "$_msss_ip" || return $?
   if merv_ssh_precheck_cache_matches "$_msss_node" "$_msss_ip"; then
     _msss_mac="$MERV_SSH_PRECHECK_MAC"; _msss_port="$MERV_SSH_PRECHECK_PORT"; _msss_user="$MERV_SSH_PRECHECK_USER"
   else
-    _msss_mac=$(merv_ssh_node_mac "$_msss_node" 2>/dev/null) || return 6
-    _msss_port=$(get_node_ssh_port)
-    _msss_user=$(get_node_ssh_user)
+    _msss_mac=$(merv_ssh_node_mac "$_msss_node" "$_msss_settings" 2>/dev/null) || return 6
+    _msss_port=$(get_node_ssh_port "$_msss_settings")
+    _msss_user=$(get_node_ssh_user "$_msss_settings")
   fi
   merv_ssh_prepare_known_host "$_msss_node" "$_msss_ip" "$_msss_port" "$_msss_mac" || { merv_ssh_release_known_host 2>/dev/null || :; return 5; }
   _msss_rc=0
-  _merv_timeout_run "$MERV_SSH_TIMEOUT" "${MERV_SSH_CLIENT:-dbclient}" \
-    -p "$_msss_port" -i "$SSH_KEY" "$_msss_user@$_msss_ip" "$_msss_cmd"
+  merv_ssh_client_run -p "$_msss_port" -i "$_msss_key" "$_msss_user@$_msss_ip" "$_msss_cmd"
   _msss_rc=$?
   merv_ssh_release_known_host || { MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"; MERV_SSH_LAST_DETAIL="NODE${_msss_node:-?} private SSH client home cleanup failed"; return 5; }
   return "$_msss_rc"
@@ -1517,10 +1771,21 @@ merv_ssh_test() {
   _merv_test_cleanup_rc=0
   _merv_test_reason=""
   _merv_test_detail=""
+  _merv_test_capture_was_set=0
+  _merv_test_context_was_set=0
+  [ "${MERV_SSH_DIAGNOSTIC_CAPTURE+x}" = x ] && _merv_test_capture_was_set=1
+  [ "${MERV_SSH_DIAGNOSTIC_CONTEXT+x}" = x ] && _merv_test_context_was_set=1
+  _merv_test_saved_capture="${MERV_SSH_DIAGNOSTIC_CAPTURE:-}"
+  _merv_test_saved_context="${MERV_SSH_DIAGNOSTIC_CONTEXT:-}"
+  MERV_SSH_DIAGNOSTIC_CAPTURE=1
+  MERV_SSH_DIAGNOSTIC_CONTEXT="${MERV_SSH_DIAGNOSTIC_CONTEXT:-node-auth-test}"
+  MERV_SSH_FORENSIC_LAST_FILE=""
 
   if ! _merv_ssh_tmp_root || ! _merv_ssh_tmp_acquire "$MERV_SSH_TMP_ROOT"; then
     MERV_SSH_LAST_REASON="ssh-test-output-allocation-failed"
     MERV_SSH_LAST_DETAIL="Could not allocate a private SSH test output path"
+    if [ "$_merv_test_capture_was_set" -eq 0 ]; then unset MERV_SSH_DIAGNOSTIC_CAPTURE; else MERV_SSH_DIAGNOSTIC_CAPTURE="$_merv_test_saved_capture"; fi
+    if [ "$_merv_test_context_was_set" -eq 0 ]; then unset MERV_SSH_DIAGNOSTIC_CONTEXT; else MERV_SSH_DIAGNOSTIC_CONTEXT="$_merv_test_saved_context"; fi
     return 1
   fi
   _merv_test_out_dir="$MERV_SSH_ERR_DIR"
@@ -1531,6 +1796,8 @@ merv_ssh_test() {
     rmdir "$_merv_test_out_dir" 2>/dev/null || :
     MERV_SSH_LAST_REASON="ssh-test-output-allocation-failed"
     MERV_SSH_LAST_DETAIL="Could not prepare a private SSH test output path"
+    if [ "$_merv_test_capture_was_set" -eq 0 ]; then unset MERV_SSH_DIAGNOSTIC_CAPTURE; else MERV_SSH_DIAGNOSTIC_CAPTURE="$_merv_test_saved_capture"; fi
+    if [ "$_merv_test_context_was_set" -eq 0 ]; then unset MERV_SSH_DIAGNOSTIC_CONTEXT; else MERV_SSH_DIAGNOSTIC_CONTEXT="$_merv_test_saved_context"; fi
     return 1
   fi
 
@@ -1550,6 +1817,8 @@ merv_ssh_test() {
   # capture and cleanup operations have completed.
   MERV_SSH_LAST_REASON="$_merv_test_reason"
   MERV_SSH_LAST_DETAIL="$_merv_test_detail"
+  if [ "$_merv_test_capture_was_set" -eq 0 ]; then unset MERV_SSH_DIAGNOSTIC_CAPTURE; else MERV_SSH_DIAGNOSTIC_CAPTURE="$_merv_test_saved_capture"; fi
+  if [ "$_merv_test_context_was_set" -eq 0 ]; then unset MERV_SSH_DIAGNOSTIC_CONTEXT; else MERV_SSH_DIAGNOSTIC_CONTEXT="$_merv_test_saved_context"; fi
   if [ "$_merv_test_read_rc" -ne 0 ]; then
     MERV_SSH_LAST_REASON="ssh-test-output-read-failed"
     MERV_SSH_LAST_DETAIL="Could not read the private SSH test output"
@@ -1558,6 +1827,168 @@ merv_ssh_test() {
   [ "$_merv_test_exec_rc" -eq 0 ] || return "$_merv_test_exec_rc"
   [ "$_merv_test_cleanup_rc" -eq 0 ] || return 1
   printf '%s\n' "$_merv_test_out" | grep -q "connected"
+}
+
+# Execute one read-only authenticated probe against a candidate Restore
+# identity.  The candidate is supplied through explicit context variables so
+# the readonly live SETTINGS_FILE/SSH_KEY bindings are never rebound.  This
+# helper intentionally calls merv_ssh_test directly: callers need the reason,
+# detail, selected endpoint, and forensic path in this shell.
+merv_ssh_test_context() {
+  _mstv_settings="$1"; _mstv_key="$2"; _mstv_pubkey="$3"; _mstv_node="$4"; _mstv_endpoint="$5"; _mstv_diag_root="${6:-}"
+  [ -f "$_mstv_settings" ] && [ ! -L "$_mstv_settings" ] || {
+    MERV_SSH_LAST_REASON=private-key-context-invalid
+    MERV_SSH_LAST_DETAIL="Candidate SSH settings file is missing or unsafe"
+    return 2
+  }
+  [ -f "$_mstv_key" ] && [ ! -L "$_mstv_key" ] || {
+    MERV_SSH_LAST_REASON=private-key-missing
+    MERV_SSH_LAST_DETAIL="Candidate MerVLAN private key is missing"
+    return 2
+  }
+  [ -f "$_mstv_pubkey" ] && [ ! -L "$_mstv_pubkey" ] || {
+    MERV_SSH_LAST_REASON=public-key-missing
+    MERV_SSH_LAST_DETAIL="Candidate MerVLAN public key is missing"
+    return 2
+  }
+
+  _mstv_context_settings_was_set=0; _mstv_context_key_was_set=0; _mstv_context_pubkey_was_set=0
+  _mstv_context_readonly_was_set=0; _mstv_capability_was_set=0; _mstv_diag_dir_was_set=0; _mstv_diag_allow_was_set=0
+  _mstv_diag_context_was_set=0; _mstv_diag_capture_was_set=0; _mstv_sync_map_was_set=0
+  _mstv_preflight_map_was_set=0; _mstv_skip_ping_was_set=0; _mstv_retries_was_set=0
+  _mstv_retry_safe_was_set=0; _mstv_node_port_was_set=0; _mstv_endpoint_selected_was_set=0
+  _mstv_endpoint_expected_was_set=0; _mstv_endpoint_fallback_was_set=0
+  [ "${MERV_SSH_CONTEXT_SETTINGS_FILE+x}" = x ] && _mstv_context_settings_was_set=1
+  [ "${MERV_SSH_CONTEXT_KEY+x}" = x ] && _mstv_context_key_was_set=1
+  [ "${MERV_SSH_CONTEXT_PUBKEY+x}" = x ] && _mstv_context_pubkey_was_set=1
+  [ "${MERV_SSH_CONTEXT_READONLY+x}" = x ] && _mstv_context_readonly_was_set=1
+  [ "${MERV_SSH_CAPABILITY_PROVEN+x}" = x ] && _mstv_capability_was_set=1
+  [ "${MERV_SSH_DIAGNOSTIC_DIR+x}" = x ] && _mstv_diag_dir_was_set=1
+  [ "${MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT+x}" = x ] && _mstv_diag_allow_was_set=1
+  [ "${MERV_SSH_DIAGNOSTIC_CONTEXT+x}" = x ] && _mstv_diag_context_was_set=1
+  [ "${MERV_SSH_DIAGNOSTIC_CAPTURE+x}" = x ] && _mstv_diag_capture_was_set=1
+  [ "${MERV_SSH_SYNC_ENDPOINT_MAP+x}" = x ] && _mstv_sync_map_was_set=1
+  [ "${MERV_SSH_PREFLIGHT_ENDPOINT_MAP+x}" = x ] && _mstv_preflight_map_was_set=1
+  [ "${MERV_SSH_SKIP_PING+x}" = x ] && _mstv_skip_ping_was_set=1
+  [ "${MERV_SSH_RETRIES+x}" = x ] && _mstv_retries_was_set=1
+  [ "${MERV_SSH_EXEC_RETRY_SAFE+x}" = x ] && _mstv_retry_safe_was_set=1
+  [ "${MERV_NODE_SSH_PORT+x}" = x ] && _mstv_node_port_was_set=1
+  [ "${MERV_NODE_ENDPOINT_SELECTED+x}" = x ] && _mstv_endpoint_selected_was_set=1
+  [ "${MERV_NODE_ENDPOINT_EXPECTED+x}" = x ] && _mstv_endpoint_expected_was_set=1
+  [ "${MERV_NODE_ENDPOINT_FALLBACK+x}" = x ] && _mstv_endpoint_fallback_was_set=1
+  _mstv_saved_context_settings="${MERV_SSH_CONTEXT_SETTINGS_FILE:-}"
+  _mstv_saved_context_key="${MERV_SSH_CONTEXT_KEY:-}"
+  _mstv_saved_context_pubkey="${MERV_SSH_CONTEXT_PUBKEY:-}"
+  _mstv_saved_context_readonly="${MERV_SSH_CONTEXT_READONLY:-}"
+  _mstv_saved_capability="${MERV_SSH_CAPABILITY_PROVEN:-}"
+  _mstv_saved_diag_dir="${MERV_SSH_DIAGNOSTIC_DIR:-}"
+  _mstv_saved_diag_allow="${MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT:-}"
+  _mstv_saved_diag_context="${MERV_SSH_DIAGNOSTIC_CONTEXT:-}"
+  _mstv_saved_diag_capture="${MERV_SSH_DIAGNOSTIC_CAPTURE:-}"
+  _mstv_saved_sync_map="${MERV_SSH_SYNC_ENDPOINT_MAP:-}"
+  _mstv_saved_preflight_map="${MERV_SSH_PREFLIGHT_ENDPOINT_MAP:-}"
+  _mstv_saved_skip_ping="${MERV_SSH_SKIP_PING:-}"
+  _mstv_saved_retries="${MERV_SSH_RETRIES:-}"
+  _mstv_saved_retry_safe="${MERV_SSH_EXEC_RETRY_SAFE:-}"
+  _mstv_saved_node_port="${MERV_NODE_SSH_PORT:-}"
+  _mstv_saved_endpoint_selected="${MERV_NODE_ENDPOINT_SELECTED:-}"
+  _mstv_saved_endpoint_expected="${MERV_NODE_ENDPOINT_EXPECTED:-}"
+  _mstv_saved_endpoint_fallback="${MERV_NODE_ENDPOINT_FALLBACK:-}"
+
+  MERV_SSH_CONTEXT_SETTINGS_FILE="$_mstv_settings"
+  MERV_SSH_CONTEXT_KEY="$_mstv_key"
+  MERV_SSH_CONTEXT_PUBKEY="$_mstv_pubkey"
+  MERV_SSH_CONTEXT_READONLY=1
+  # Candidate trust validation has completed in the caller's private trust
+  # context.  That is the capability proof required by the normal precheck;
+  # restore the caller's value after this one bounded probe.
+  MERV_SSH_CAPABILITY_PROVEN=1
+  MERV_SSH_DIAGNOSTIC_CONTEXT="${MERV_SSH_DIAGNOSTIC_CONTEXT:-restore-candidate-auth}"
+  MERV_SSH_DIAGNOSTIC_CAPTURE=1
+  if [ -n "$_mstv_diag_root" ]; then
+    MERV_SSH_DIAGNOSTIC_DIR="$_mstv_diag_root"
+    MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT="$_mstv_diag_root"
+  fi
+  MERV_SSH_SYNC_ENDPOINT_MAP=""
+  MERV_SSH_PREFLIGHT_ENDPOINT_MAP=""
+  MERV_SSH_SKIP_PING=""
+  MERV_SSH_RETRIES=1
+  MERV_SSH_EXEC_RETRY_SAFE=0
+  MERV_SSH_FORENSIC_LAST_FILE=""
+  MERV_SSH_PRECHECK_TRUST_NODE=""
+  # Do not let the endpoint selected for a previous candidate/node leak into
+  # this probe's result.  The selected endpoint is an output of this one
+  # invocation, not an input to the next candidate.
+  unset MERV_NODE_ENDPOINT_SELECTED MERV_NODE_ENDPOINT_EXPECTED MERV_NODE_ENDPOINT_FALLBACK
+  merv_ssh_precheck_cache_clear
+  # Restore may provide an explicitly bounded diagnostic root; standalone
+  # callers continue to use the worker or managed /tmp namespaces.
+  _mstv_result=1
+  if merv_ssh_test "$_mstv_node" "$_mstv_endpoint"; then
+    _mstv_result=0
+  else
+    _mstv_result=$?
+  fi
+  _mstv_reason="$MERV_SSH_LAST_REASON"
+  _mstv_detail="$MERV_SSH_LAST_DETAIL"
+  _mstv_selected="${MERV_NODE_ENDPOINT_SELECTED:-$_mstv_endpoint}"
+  _mstv_forensic="${MERV_SSH_FORENSIC_LAST_FILE:-}"
+  _mstv_key_fp="${MERV_SSH_KEY_FINGERPRINT:-unknown}"
+  _mstv_trust_fp="${SSH_TRUST_FINGERPRINT:-unknown}"
+  _mstv_key_type="${MERV_SSH_KEY_TYPE:-unknown}"
+  _mstv_key_mode="${MERV_SSH_KEY_MODE:-unknown}"
+  _mstv_key_uid="${MERV_SSH_KEY_UID:-unknown}"
+  _mstv_key_size="${MERV_SSH_KEY_SIZE:-unknown}"
+  _mstv_user="$(get_node_ssh_user "$_mstv_settings" 2>/dev/null || printf 'admin')"
+  _mstv_port="$(get_node_ssh_port "$_mstv_settings" 2>/dev/null || printf '22')"
+  _mstv_pwd="$(pwd 2>/dev/null || printf '')"
+  _mstv_umask="$(umask 2>/dev/null || printf '')"
+  MERV_SSH_CANDIDATE_AUTH_SETTINGS="$_mstv_settings"
+  MERV_SSH_CANDIDATE_AUTH_KEY="$_mstv_key"
+  MERV_SSH_CANDIDATE_AUTH_TRUST="${MERV_SSH_TRUST_FILE:-}"
+  MERV_SSH_CANDIDATE_AUTH_USER="$_mstv_user"
+  MERV_SSH_CANDIDATE_AUTH_PORT="$_mstv_port"
+  MERV_SSH_CANDIDATE_AUTH_KEY_TYPE="$_mstv_key_type"
+  MERV_SSH_CANDIDATE_AUTH_KEY_MODE="$_mstv_key_mode"
+  MERV_SSH_CANDIDATE_AUTH_KEY_UID="$_mstv_key_uid"
+  MERV_SSH_CANDIDATE_AUTH_KEY_SIZE="$_mstv_key_size"
+  MERV_SSH_CANDIDATE_AUTH_KEY_FINGERPRINT="$_mstv_key_fp"
+  MERV_SSH_CANDIDATE_AUTH_TRUST_FINGERPRINT="$_mstv_trust_fp"
+  MERV_SSH_CANDIDATE_AUTH_DBCLIENT="${MERV_SSH_CLIENT:-dbclient}"
+  MERV_SSH_CANDIDATE_AUTH_TMPDIR="${TMPDIR:-}"
+  MERV_SSH_CANDIDATE_AUTH_SSH_TMPDIR="${MERV_SSH_TMPDIR:-}"
+  MERV_SSH_CANDIDATE_AUTH_WORKER_DIR="${MERV_NODE_JOB_DIR:-}"
+  MERV_SSH_CANDIDATE_AUTH_WORKING_DIRECTORY="$_mstv_pwd"
+  MERV_SSH_CANDIDATE_AUTH_UMASK="$_mstv_umask"
+  MERV_SSH_CANDIDATE_AUTH_DIAGNOSTIC_ROOT="$_mstv_diag_root"
+  MERV_SSH_CANDIDATE_AUTH_MAINTENANCE_SYNC="${MERV_MAINTENANCE_SYNC:-0}"
+  MERV_SSH_CANDIDATE_AUTH_DELEGATION="${MERV_MAINTENANCE_DELEGATION_KIND:-none}"
+  MERV_SSH_CANDIDATE_AUTH_ACTION_LOCK="${MERV_ACTION_LOCK_MODE:-none}"
+
+  if [ "$_mstv_context_settings_was_set" -eq 1 ]; then MERV_SSH_CONTEXT_SETTINGS_FILE="$_mstv_saved_context_settings"; else unset MERV_SSH_CONTEXT_SETTINGS_FILE; fi
+  if [ "$_mstv_context_key_was_set" -eq 1 ]; then MERV_SSH_CONTEXT_KEY="$_mstv_saved_context_key"; else unset MERV_SSH_CONTEXT_KEY; fi
+  if [ "$_mstv_context_pubkey_was_set" -eq 1 ]; then MERV_SSH_CONTEXT_PUBKEY="$_mstv_saved_context_pubkey"; else unset MERV_SSH_CONTEXT_PUBKEY; fi
+  if [ "$_mstv_context_readonly_was_set" -eq 1 ]; then MERV_SSH_CONTEXT_READONLY="$_mstv_saved_context_readonly"; else unset MERV_SSH_CONTEXT_READONLY; fi
+  if [ "$_mstv_capability_was_set" -eq 1 ]; then MERV_SSH_CAPABILITY_PROVEN="$_mstv_saved_capability"; else unset MERV_SSH_CAPABILITY_PROVEN; fi
+  if [ "$_mstv_diag_dir_was_set" -eq 1 ]; then MERV_SSH_DIAGNOSTIC_DIR="$_mstv_saved_diag_dir"; else unset MERV_SSH_DIAGNOSTIC_DIR; fi
+  if [ "$_mstv_diag_allow_was_set" -eq 1 ]; then MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT="$_mstv_saved_diag_allow"; else unset MERV_SSH_DIAGNOSTIC_ALLOWED_ROOT; fi
+  if [ "$_mstv_diag_context_was_set" -eq 1 ]; then MERV_SSH_DIAGNOSTIC_CONTEXT="$_mstv_saved_diag_context"; else unset MERV_SSH_DIAGNOSTIC_CONTEXT; fi
+  if [ "$_mstv_diag_capture_was_set" -eq 1 ]; then MERV_SSH_DIAGNOSTIC_CAPTURE="$_mstv_saved_diag_capture"; else unset MERV_SSH_DIAGNOSTIC_CAPTURE; fi
+  if [ "$_mstv_sync_map_was_set" -eq 1 ]; then MERV_SSH_SYNC_ENDPOINT_MAP="$_mstv_saved_sync_map"; else unset MERV_SSH_SYNC_ENDPOINT_MAP; fi
+  if [ "$_mstv_preflight_map_was_set" -eq 1 ]; then MERV_SSH_PREFLIGHT_ENDPOINT_MAP="$_mstv_saved_preflight_map"; else unset MERV_SSH_PREFLIGHT_ENDPOINT_MAP; fi
+  if [ "$_mstv_skip_ping_was_set" -eq 1 ]; then MERV_SSH_SKIP_PING="$_mstv_saved_skip_ping"; else unset MERV_SSH_SKIP_PING; fi
+  if [ "$_mstv_retries_was_set" -eq 1 ]; then MERV_SSH_RETRIES="$_mstv_saved_retries"; else unset MERV_SSH_RETRIES; fi
+  if [ "$_mstv_retry_safe_was_set" -eq 1 ]; then MERV_SSH_EXEC_RETRY_SAFE="$_mstv_saved_retry_safe"; else unset MERV_SSH_EXEC_RETRY_SAFE; fi
+  if [ "$_mstv_node_port_was_set" -eq 1 ]; then MERV_NODE_SSH_PORT="$_mstv_saved_node_port"; else unset MERV_NODE_SSH_PORT; fi
+  if [ "$_mstv_endpoint_selected_was_set" -eq 1 ]; then MERV_NODE_ENDPOINT_SELECTED="$_mstv_saved_endpoint_selected"; else unset MERV_NODE_ENDPOINT_SELECTED; fi
+  if [ "$_mstv_endpoint_expected_was_set" -eq 1 ]; then MERV_NODE_ENDPOINT_EXPECTED="$_mstv_saved_endpoint_expected"; else unset MERV_NODE_ENDPOINT_EXPECTED; fi
+  if [ "$_mstv_endpoint_fallback_was_set" -eq 1 ]; then MERV_NODE_ENDPOINT_FALLBACK="$_mstv_saved_endpoint_fallback"; else unset MERV_NODE_ENDPOINT_FALLBACK; fi
+  merv_ssh_precheck_cache_clear
+  MERV_SSH_CANDIDATE_AUTH_ENDPOINT="$_mstv_selected"
+  MERV_SSH_CANDIDATE_AUTH_FORENSIC="$_mstv_forensic"
+  MERV_SSH_LAST_REASON="$_mstv_reason"
+  MERV_SSH_LAST_DETAIL="$_mstv_detail"
+  return "$_mstv_result"
 }
 
 merv_ssh_skip_log() {

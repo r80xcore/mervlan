@@ -137,6 +137,94 @@ merv_backup_state_preflight_with_trust() {
   return "$_mbs_preflight_rc"
 }
 
+# Prove that the restored candidate identity can authenticate to every
+# configured node before Restore activates MAIN.  This is deliberately a
+# read-only echo through the ordinary endpoint resolver; it does not install
+# files, alter NODE authorization, or publish the candidate trust database.
+# The loop stays in this shell so merv_ssh_test diagnostics survive.
+merv_backup_state_remote_auth_preflight() {
+  _mbs_auth_settings="$1"
+  _mbs_auth_trust="$2"
+  _mbs_auth_workspace="$3"
+  _mbs_auth_key="$4"
+  _mbs_auth_pubkey="$5"
+  [ -f "$_mbs_auth_settings" ] && [ ! -L "$_mbs_auth_settings" ] || return 2
+  [ -f "$_mbs_auth_trust" ] && [ ! -L "$_mbs_auth_trust" ] || return 2
+  [ -d "$_mbs_auth_workspace" ] && [ ! -L "$_mbs_auth_workspace" ] || return 2
+  type merv_node_list >/dev/null 2>&1 || return 2
+  type merv_ssh_test_context >/dev/null 2>&1 || return 2
+
+  merv_backup_state_context_begin "$_mbs_auth_workspace" "$_mbs_auth_trust" || return 1
+  if ! merv_ssh_trust_validate_db; then
+    _mbs_auth_rc=1
+    MERV_SSH_LAST_REASON="candidate-trust-invalid"
+    MERV_SSH_LAST_DETAIL="Candidate SSH trust database failed validation before remote authentication"
+  else
+    _mbs_auth_nodes=$(merv_node_list "$_mbs_auth_settings" 2>/dev/null)
+    _mbs_auth_list_rc=$?
+    if [ "$_mbs_auth_list_rc" -ne 0 ]; then
+      _mbs_auth_rc=2
+      MERV_SSH_LAST_REASON="candidate-node-settings-invalid"
+      MERV_SSH_LAST_DETAIL="Candidate configured-node set could not be read"
+    else
+      _mbs_auth_rc=0
+      while IFS=' ' read -r _mbs_auth_slot _mbs_auth_endpoint _mbs_auth_extra || [ -n "$_mbs_auth_slot" ]; do
+        [ -n "$_mbs_auth_slot" ] || continue
+        [ -z "$_mbs_auth_extra" ] || {
+          _mbs_auth_rc=2
+          MERV_SSH_LAST_REASON="candidate-node-settings-invalid"
+          MERV_SSH_LAST_DETAIL="Candidate configured-node set contains a malformed entry"
+          break
+        }
+        if merv_ssh_test_context "$_mbs_auth_settings" "$_mbs_auth_key" "$_mbs_auth_pubkey" \
+            "$_mbs_auth_slot" "$_mbs_auth_endpoint" "$_mbs_auth_workspace/ssh_forensics"; then
+          _mbs_auth_selected="${MERV_SSH_CANDIDATE_AUTH_ENDPOINT:-$_mbs_auth_endpoint}"
+          MERV_SSH_CANDIDATE_AUTH_NODE="$_mbs_auth_slot"
+          MERV_SSH_CANDIDATE_AUTH_ENDPOINT="$_mbs_auth_selected"
+          # Keep the successful candidate side of a later Restore-vs-Sync
+          # differential visible in the retained maintenance log.  The raw
+          # bounded record remains private in the maintenance workspace; this
+          # summary contains only public fingerprints and endpoint metadata.
+          _mbs_auth_key_fp="${MERV_SSH_CANDIDATE_AUTH_KEY_FINGERPRINT:-${MERV_SSH_KEY_FINGERPRINT:-unknown}}"
+          _mbs_auth_trust_fp="${MERV_SSH_CANDIDATE_AUTH_TRUST_FINGERPRINT:-${SSH_TRUST_FINGERPRINT:-unknown}}"
+          # Keep the successful candidate side of a later Restore-vs-Sync
+          # differential bounded but useful after the private restore
+          # workspace is cleaned.  These are validated paths/metadata only;
+          # no private key, password, or arbitrary environment is logged.
+          _merv_log_info "Candidate SSH probe NODE${_mbs_auth_slot} passed: endpoint=$(merv_ssh_sanitize_diagnostic "$_mbs_auth_selected") user=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_USER:-unknown}") port=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_PORT:-unknown}") key_path=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_KEY:-unknown}") key_type=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_KEY_TYPE:-unknown}") key_mode=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_KEY_MODE:-unknown}") key_uid=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_KEY_UID:-unknown}") key_size=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_KEY_SIZE:-unknown}") key_fingerprint=$(merv_ssh_sanitize_diagnostic "$_mbs_auth_key_fp") trust_path=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_TRUST:-unknown}") trust_fingerprint=$(merv_ssh_sanitize_diagnostic "$_mbs_auth_trust_fp") dbclient=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_DBCLIENT:-dbclient}") tmpdir=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_TMPDIR:-}") ssh_tmpdir=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_SSH_TMPDIR:-}") worker_dir=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_WORKER_DIR:-}") cwd=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_WORKING_DIRECTORY:-}") umask=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_UMASK:-}") maintenance_sync=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_MAINTENANCE_SYNC:-0}") delegation=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_DELEGATION:-none}") action_lock=$(merv_ssh_sanitize_diagnostic "${MERV_SSH_CANDIDATE_AUTH_ACTION_LOCK:-none}") key_only=BatchMode=yes,PasswordAuthentication=no"
+          continue
+        else
+          _mbs_auth_rc=$?
+        fi
+        _mbs_auth_reason="${MERV_SSH_LAST_REASON:-command-or-session-failed}"
+        _mbs_auth_detail="${MERV_SSH_LAST_DETAIL:-Candidate authenticated SSH probe failed}"
+        MERV_SSH_LAST_REASON="candidate-remote-auth-failed"
+        MERV_SSH_LAST_DETAIL="NODE${_mbs_auth_slot} candidate remote authentication failed: $_mbs_auth_reason — $_mbs_auth_detail"
+        MERV_SSH_CANDIDATE_AUTH_NODE="$_mbs_auth_slot"
+        MERV_SSH_CANDIDATE_AUTH_ENDPOINT="${MERV_SSH_CANDIDATE_AUTH_ENDPOINT:-$_mbs_auth_endpoint}"
+        break
+      done <<EOF
+$_mbs_auth_nodes
+EOF
+    fi
+  fi
+  _mbs_auth_saved_reason="${MERV_SSH_LAST_REASON:-}"
+  _mbs_auth_saved_detail="${MERV_SSH_LAST_DETAIL:-}"
+  _mbs_auth_context_rc=0
+  # Context teardown has its own status; do not pass the probe result as the
+  # teardown return value or a legitimate authentication failure would be
+  # mistaken for a cleanup failure.
+  merv_backup_state_context_end 0 || _mbs_auth_context_rc=$?
+  if [ "$_mbs_auth_context_rc" -ne 0 ]; then
+    MERV_SSH_LAST_REASON="candidate-auth-context-cleanup-failed"
+    MERV_SSH_LAST_DETAIL="Candidate SSH authentication context cleanup failed; evidence was retained under $_mbs_auth_workspace/ssh_forensics"
+    return 1
+  fi
+  MERV_SSH_LAST_REASON="$_mbs_auth_saved_reason"
+  MERV_SSH_LAST_DETAIL="$_mbs_auth_saved_detail"
+  return "$_mbs_auth_rc"
+}
+
 merv_backup_state_configured_nodes() {
   _mbs_nodes_settings="$1"
   [ -f "$_mbs_nodes_settings" ] || return 1
