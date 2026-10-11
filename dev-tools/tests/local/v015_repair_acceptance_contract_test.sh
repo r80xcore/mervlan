@@ -13,6 +13,8 @@ trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || fail 'self-test helper load'
+merv_test_context_enable "$ROOT" "$WORK" || fail 'private self-test context'
 
 git cat-file -e "$V015_COMMIT^{commit}" 2>/dev/null || fail 'v0.53.15 tag commit is unavailable'
 
@@ -55,10 +57,17 @@ extract_function() {
 }
 STAGED="$CASE/staging/install.1234/mervlan-current"
 mkdir -p "$STAGED"
-cp -a "$ROOT"/. "$STAGED"/ || fail 'private installer support staging failed'
+# Stage explicit package files only; ignored profiles, keys, and local state
+# must never enter an acceptance fixture through a whole-checkout copy.
+while IFS=' ' read -r stage_mode stage_rel; do
+    case "$stage_mode" in 0644|0755) ;; *) continue ;; esac
+    mkdir -p "$STAGED/$(dirname "$stage_rel")"
+    cp -p "$ROOT/$stage_rel" "$STAGED/$stage_rel" || fail "private support source missing: $stage_rel"
+done < "$MANIFEST"
+cp -p "$ROOT/settings/settings.json" "$STAGED/settings/settings.json" || fail 'private settings staging failed'
 INSTALL_HELPERS="$CASE/install-helpers.sh"
 : >"$INSTALL_HELPERS"
-for helper in settings_file_looks_valid install_staged_support_root_valid install_tree_valid install_support_cohort_valid; do
+for helper in settings_file_looks_valid install_staged_support_root_valid install_tree_valid install_cleaner_valid install_support_cohort_valid; do
     extract_function "$ROOT/install.sh" "$helper" "$CASE/$helper.sh" || fail "installer helper extraction failed: $helper"
     cat "$CASE/$helper.sh" >>"$INSTALL_HELPERS"
 done

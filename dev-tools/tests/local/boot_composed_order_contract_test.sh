@@ -14,6 +14,8 @@ TEST_ROOT="/tmp/mervlan_tmp/selftest.boot-composed.$$"
 umask 077
 mkdir -p "$TEST_ROOT/tpls" "$TEST_ROOT/runtime" "$TEST_ROOT/logs" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 _FAILURES=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; _FAILURES=1; }
@@ -1076,6 +1078,7 @@ fi
   MERV_STATE_ROOT="$CASE_DIR/state"
   MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
   MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
+  MERV_UPDATE_MAINTENANCE_LOCK="$LOCKDIR/mervlan_maintenance.lock"
   mkdir -p "$MERV_STATE_ROOT"
   SETTINGS_FILE="$CASE_DIR/settings.json"
   LOG_chan_boot="$CASE_DIR/boot_wrap.log"

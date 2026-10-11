@@ -174,6 +174,15 @@ readonly COLLECTDIR="$TMPDIR/client_collection"
 : "${MERV_EXEC_NODES_LOCK_STALE_SEC:=900}"
 : "${MERV_NODE_STATUS_RETENTION_SEC:=86400}"
 : "${MERV_NODE_STATUS_ROOT:=$RESULTDIR/node_runs}"
+if [ -z "${LIB_SELFTEST_CONTEXT_LOADED:-}" ] &&
+   [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ]; then
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+fi
+if ! type merv_selftest_context_valid >/dev/null 2>&1 ||
+   ! merv_selftest_context_valid ||
+   ! merv_selftest_context_path_allowed "$MERV_NODE_STATUS_ROOT"; then
+  MERV_NODE_STATUS_ROOT=$RESULTDIR/node_runs
+fi
 
 # MerVLAN web loading progress is transient task state. It is deliberately
 # separate from persistent settings.json and is published to the UI by the

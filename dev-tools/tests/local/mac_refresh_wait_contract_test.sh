@@ -66,6 +66,23 @@ LIB_UPDATE_STATE_LOADED=1
 merv_update_mutation_blocked() { return 1; }
 EOF
 
+  cat >"$_case_root/settings/lib_action_lock.sh" <<'EOF'
+LIB_ACTION_LOCK_LOADED=1
+merv_action_lock_enter() {
+  MERV_ACTION_LOCK_MODE=self
+  MERV_ACTION_LOCK_NONCE=mac-refresh-test
+  MERV_ACTION_LOCK_START=1
+  return 0
+}
+merv_action_lock_export_child_context() { return 0; }
+merv_action_lock_leave() { return 0; }
+EOF
+
+  cat >"$_case_root/settings/lib_mutation_admission.sh" <<'EOF'
+LIB_MUTATION_ADMISSION_LOADED=1
+merv_mutation_admit_action() { return 0; }
+EOF
+
   cat >"$_case_root/settings/lib_action_progress.sh" <<'EOF'
 LIB_ACTION_PROGRESS_LOADED=1
 merv_action_progress_init() {

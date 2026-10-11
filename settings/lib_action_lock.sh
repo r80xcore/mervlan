@@ -9,13 +9,20 @@
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] && return 0 2>/dev/null
 LIB_ACTION_LOCK_LOADED=1
 
-: "${LOCKDIR:=/tmp/mervlan_tmp/locks}"
-: "${MERV_ACTION_LOCK_PATH:=$LOCKDIR/mervlan_action.lock}"
-
 if [ -z "${LIB_OWNER_LOCK_LOADED:-}" ]; then
   _mal_base="${MERV_BASE:-/jffs/addons/mervlan}"
   [ -r "$_mal_base/settings/lib_owner_lock.sh" ] || return 1 2>/dev/null || exit 1
   . "$_mal_base/settings/lib_owner_lock.sh" 2>/dev/null || return 1 2>/dev/null || exit 1
+fi
+
+MERV_ACTION_LOCK_CANONICAL_PATH=/tmp/mervlan_tmp/locks/mervlan_action.lock
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid &&
+   merv_selftest_context_path_allowed "${MERV_ACTION_LOCK_PATH:-}"; then
+  :
+else
+  MERV_ACTION_LOCK_PATH=$MERV_ACTION_LOCK_CANONICAL_PATH
+  MERV_ACTION_LOCK_PROC_ROOT=/proc
 fi
 
 # Keep the public state names used by existing callers, while making mode
@@ -32,6 +39,20 @@ merv_action_lock_path_valid() {
     ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;;
   esac
   case "$_malp_path" in */*) : ;; *) return 1 ;; esac
+  if [ "$_malp_path" != "$MERV_ACTION_LOCK_CANONICAL_PATH" ]; then
+    case "$_malp_path" in
+      /tmp/mervlan_tmp/locks/*.lock)
+        [ "${_malp_path%/*}" = /tmp/mervlan_tmp/locks ] || return 1
+        _malp_name=${_malp_path##*/}
+        case "$_malp_name" in *.lock) ;; *) return 1 ;; esac
+        ;;
+      /jffs/addons/mervlan_state/ssh_trust/state.lock) ;;
+      *)
+        type merv_selftest_context_path_allowed >/dev/null 2>&1 || return 1
+        merv_selftest_context_path_allowed "$_malp_path" || return 1
+        ;;
+    esac
+  fi
   type merv_owner_lock_path_chain_safe >/dev/null 2>&1 || return 1
   merv_owner_lock_path_chain_safe "$_malp_path"
 }
@@ -40,6 +61,7 @@ merv_action_lock_path_valid() {
 # parent marker is an unknown owner and must never fall back to self-
 # acquisition.
 merv_action_lock_parent_owned() {
+  local _mal_proc
   _mal_parent_lock="${1:-${MERV_ACTION_LOCK_PATH:-}}"
   merv_action_lock_path_valid "$_mal_parent_lock" || return 1
   [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ] || return 1
@@ -49,9 +71,10 @@ merv_action_lock_parent_owned() {
   # merv_owner_v2_matches checks the exact five-field record and validates the
   # PID/start identity against the live process.  No age/heartbeat shortcut is
   # permitted here.
+  _mal_proc=$(merv_owner_lock_proc_root "${MERV_ACTION_LOCK_PROC_ROOT:-/proc}") || return 1
   merv_owner_v2_matches "$_mal_parent_lock" \
     "$MERV_ACTION_LOCK_PARENT_PID" "$MERV_ACTION_LOCK_PARENT_START" \
-    "$MERV_ACTION_LOCK_PARENT_NONCE" "${MERV_ACTION_LOCK_PROC_ROOT:-/proc}" || return 1
+    "$MERV_ACTION_LOCK_PARENT_NONCE" "$_mal_proc" || return 1
   MERV_ACTION_LOCK_MODE=parent
   MERV_ACTION_LOCK_PATH_ACTIVE="$_mal_parent_lock"
   MERV_ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_PARENT_NONCE"

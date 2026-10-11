@@ -30,6 +30,65 @@
 # ============================================================================ #
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
+if [ -z "${LIB_SELFTEST_CONTEXT_LOADED:-}" ] &&
+   [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ]; then
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+fi
+
+_merv_wan_test_context_ok=0
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid &&
+   [ "${MERV_WAN_TEST_MODE:-0}" = 1 ] &&
+   [ "${MERV_WAN_TEST_ROOT:-}" = "$MERV_SELFTEST_CONTEXT_ROOT" ]; then
+  _merv_wan_test_context_ok=1
+  for _merv_wan_test_path in \
+    "${MERV_WAN_NET_ROOT:-}" \
+    "${MERV_WAN_PROC_VLAN_ROOT:-}" \
+    "${MERV_WAN_DHCP_PIDFILE:-}" \
+    "${MERV_WAN_DHCP_PROC_ROOT:-}" \
+    "${MERV_WAN_DHCP_TEST_ADDRESS_FILE:-}" \
+    "${MERV_WAN_DHCP_TEST_LIFECYCLE_FILE:-}" \
+    "${MERV_WAN_DHCP_TEST_SUPPRESS_FILE:-}" \
+    "${MERV_WAN_DHCP_TMP_ROOT:-}"; do
+    [ -z "$_merv_wan_test_path" ] && continue
+    merv_selftest_context_path_allowed "$_merv_wan_test_path" || {
+      _merv_wan_test_context_ok=0
+      break
+    }
+  done
+fi
+if [ "$_merv_wan_test_context_ok" = 1 ]; then
+  MERV_WAN_NET_ROOT="${MERV_WAN_NET_ROOT:-/sys/class/net}"
+  MERV_WAN_PROC_VLAN_ROOT="${MERV_WAN_PROC_VLAN_ROOT:-/proc/net/vlan}"
+  MERV_WAN_DHCP_PIDFILE="${MERV_WAN_DHCP_PIDFILE:-/var/run/udhcpc_lan.pid}"
+  MERV_WAN_DHCP_PROC_ROOT="${MERV_WAN_DHCP_PROC_ROOT:-/proc}"
+  MERV_WAN_DHCP_WAIT_SEC="${MERV_WAN_DHCP_WAIT_SEC:-15}"
+  MERV_WAN_DHCP_RELEASE_WAIT_SEC="${MERV_WAN_DHCP_RELEASE_WAIT_SEC:-5}"
+  MERV_WAN_DHCP_TERM_WAIT_SEC="${MERV_WAN_DHCP_TERM_WAIT_SEC:-5}"
+  MERV_WAN_DHCP_START_WAIT_SEC="${MERV_WAN_DHCP_START_WAIT_SEC:-5}"
+else
+  unset MERV_WAN_TEST_MODE MERV_WAN_TEST_ROOT
+  unset MERV_WAN_DHCP_EXPECTED_ADDRESS MERV_WAN_DHCP_TMP_ROOT
+  unset MERV_WAN_DHCP_TEST_ADDRESS_FILE MERV_WAN_DHCP_TEST_ADDRESS_PREFIX
+  unset MERV_WAN_DHCP_TEST_CMDLINE_CHANGE_AFTER_RELEASE MERV_WAN_DHCP_TEST_DELAY_POLLS
+  unset MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_START MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_TERM
+  unset MERV_WAN_DHCP_TEST_LAN_PROTO MERV_WAN_DHCP_TEST_LAUNCH_FAIL
+  unset MERV_WAN_DHCP_TEST_LIFECYCLE_FILE MERV_WAN_DHCP_TEST_NEW_PID MERV_WAN_DHCP_TEST_NEW_START
+  unset MERV_WAN_DHCP_TEST_RELEASE_STAYS_ALIVE MERV_WAN_DHCP_TEST_REUSE_AFTER_RELEASE
+  unset MERV_WAN_DHCP_TEST_STALE_ADDRESS MERV_WAN_DHCP_TEST_STALE_PIDFILE
+  unset MERV_WAN_DHCP_TEST_SUPPRESS_FILE MERV_WAN_DHCP_TEST_TERM_AFTER_RELEASE
+  unset MERV_WAN_DHCP_TEST_TERM_AFTER_TERMINATE MERV_WAN_DHCP_TEST_TERM_STICKS
+  unset MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_TERM MERV_WAN_DHCP_TEST_DUPLICATE_BEFORE_START
+  unset WAN_TEST_SIGNAL_PHASE WAN_TEST_SIGNAL_PID WAN_TEST_SIGNAL_ONCE WAN_TEST_SIGNAL_IF
+  MERV_WAN_NET_ROOT=/sys/class/net
+  MERV_WAN_PROC_VLAN_ROOT=/proc/net/vlan
+  MERV_WAN_DHCP_PIDFILE=/var/run/udhcpc_lan.pid
+  MERV_WAN_DHCP_PROC_ROOT=/proc
+  MERV_WAN_DHCP_WAIT_SEC=15
+  MERV_WAN_DHCP_RELEASE_WAIT_SEC=5
+  MERV_WAN_DHCP_TERM_WAIT_SEC=5
+  MERV_WAN_DHCP_START_WAIT_SEC=5
+fi
 
 if { [ -n "${VAR_SETTINGS_LOADED:-}" ] && [ -z "${LOG_SETTINGS_LOADED:-}" ]; } || \
    { [ -z "${VAR_SETTINGS_LOADED:-}" ] && [ -n "${LOG_SETTINGS_LOADED:-}" ]; }; then
@@ -67,19 +126,9 @@ fi
 [ -n "$UPLINK_PORT" ] || UPLINK_PORT="$(json_get_flag "WAN_IF" "eth0" "$SETTINGS_FILE" 2>/dev/null)"
 [ -n "$UPLINK_PORT" ] || UPLINK_PORT="eth0"
 
-# Test-only filesystem indirection. Production callers use the defaults.
-MERV_WAN_NET_ROOT="${MERV_WAN_NET_ROOT:-/sys/class/net}"
-MERV_WAN_PROC_VLAN_ROOT="${MERV_WAN_PROC_VLAN_ROOT:-/proc/net/vlan}"
-# DHCP handoff is MAIN-only and intentionally has test seams for the
-# otherwise firmware-owned NVRAM, process, address, and timeout state.
-MERV_WAN_DHCP_PIDFILE="${MERV_WAN_DHCP_PIDFILE:-/var/run/udhcpc_lan.pid}"
-MERV_WAN_DHCP_PROC_ROOT="${MERV_WAN_DHCP_PROC_ROOT:-/proc}"
-MERV_WAN_DHCP_WAIT_SEC="${MERV_WAN_DHCP_WAIT_SEC:-15}"
-MERV_WAN_DHCP_RELEASE_WAIT_SEC="${MERV_WAN_DHCP_RELEASE_WAIT_SEC:-5}"
-MERV_WAN_DHCP_TERM_WAIT_SEC="${MERV_WAN_DHCP_TERM_WAIT_SEC:-${MERV_WAN_DHCP_EXIT_WAIT_SEC:-5}}"
-MERV_WAN_DHCP_START_WAIT_SEC="${MERV_WAN_DHCP_START_WAIT_SEC:-5}"
+# DHCP handoff is MAIN-only. Its fake roots and lifecycle hooks were admitted
+# above only after validating the explicit private self-test context.
 MERV_WAN_DHCP_TEST_ADDRESS_FILE="${MERV_WAN_DHCP_TEST_ADDRESS_FILE:-}"
-MERV_WAN_DHCP_EXPECTED_ADDRESS="${MERV_WAN_DHCP_EXPECTED_ADDRESS:-}"
 MERV_WAN_DHCP_TEST_LIFECYCLE_FILE="${MERV_WAN_DHCP_TEST_LIFECYCLE_FILE:-}"
 
 NODE_ID="${NODE_ID:-${MERV_NODE_ID:-}}"

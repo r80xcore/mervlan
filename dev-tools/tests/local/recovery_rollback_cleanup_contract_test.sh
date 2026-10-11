@@ -49,6 +49,7 @@ RECOVERY_PRESERVE_JFFS=0
 RECOVERY_REPLACED=0
 RECOVERY_ROLLING_BACK=0
 RECOVERY_RECOVERY_REQUIRED=0
+RECOVERY_PRE_BOOT_ENABLED=0
 RECOVERY_DURABLE_RECOVERY_OWNED=0
 RECOVERY_EXISTING_DURABLE_RECOVERY=0
 RECOVERY_LOCK_OWNED=1
@@ -62,6 +63,12 @@ recovery_release_lock() {
   return 0
 }
 recovery_copy_tree() { return 1; }
+recovery_boot_integrity_load() { return 0; }
+merv_boot_rollback_legacy_mode() {
+  MERV_BOOT_ROLLBACK_ALLOW_LEGACY=0
+  MERV_BOOT_ROLLBACK_REASON=''
+  return 0
+}
 recovery_reconcile() {
   [ "$CASE_MODE" = rename-window-success ]
 }

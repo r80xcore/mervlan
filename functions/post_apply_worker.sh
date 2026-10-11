@@ -15,6 +15,25 @@ fi
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || :
 [ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || exit 75
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || exit 75
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
+OBS_SELFTEST_CONTEXT=0
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid; then
+  OBS_SELFTEST_CONTEXT=1
+else
+  unset MERV_OBSERVATION_ROOT MERV_OBSERVATION_CONFIG_LOCKDIR
+  unset MERV_OBS_SNAPSHOT_CMD MERV_OBS_COLLECTION_CMD
+fi
+OBS_PROC_ROOT=/proc
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid &&
+   [ -n "${MERV_OBSERVATION_PROC_ROOT:-}" ] &&
+   merv_selftest_context_path_allowed "$MERV_OBSERVATION_PROC_ROOT" &&
+   [ -d "$MERV_OBSERVATION_PROC_ROOT" ] && [ -r "$MERV_OBSERVATION_PROC_ROOT" ]; then
+  OBS_PROC_ROOT=$MERV_OBSERVATION_PROC_ROOT
+else
+  unset MERV_OBSERVATION_PROC_ROOT
+fi
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
@@ -48,12 +67,29 @@ case "$OBS_ACTION" in
     fi
     ;;
 esac
-OBS_ROOT="${MERV_OBSERVATION_ROOT:-$LOCKDIR/observation}"
+OBS_ROOT="$LOCKDIR/observation"
+if [ "$OBS_SELFTEST_CONTEXT" -eq 1 ] &&
+   [ -n "${MERV_OBSERVATION_ROOT:-}" ] &&
+   merv_selftest_context_path_allowed "$MERV_OBSERVATION_ROOT"; then
+  OBS_ROOT=$MERV_OBSERVATION_ROOT
+fi
 OBS_STATE="$OBS_ROOT/request.state"
 OBS_WORKER_LOCK="$OBS_ROOT/worker.lock"
 OBS_REQUEST_LOCK="$OBS_ROOT/request.lock"
 OBS_FAULTS="$OBS_ROOT/faults"
-OBS_CONFIG_LOCKDIR="${MERV_OBSERVATION_CONFIG_LOCKDIR:-$LOCKDIR}"
+OBS_CONFIG_LOCKDIR=$LOCKDIR
+if [ "$OBS_SELFTEST_CONTEXT" -eq 1 ] &&
+   [ -n "${MERV_OBSERVATION_CONFIG_LOCKDIR:-}" ] &&
+   merv_selftest_context_path_allowed "$MERV_OBSERVATION_CONFIG_LOCKDIR"; then
+  OBS_CONFIG_LOCKDIR=$MERV_OBSERVATION_CONFIG_LOCKDIR
+fi
+
+obs_test_command_valid() {
+  [ "$OBS_SELFTEST_CONTEXT" -eq 1 ] || return 1
+  _otcv_path=${1:-}
+  merv_selftest_context_path_allowed "$_otcv_path" || return 1
+  [ ! -L "$_otcv_path" ] && [ -f "$_otcv_path" ] && [ -x "$_otcv_path" ]
+}
 
 obs_log() {
   _ol_level="$1"; shift
@@ -141,11 +177,14 @@ obs_trust_gate_grant() {
 }
 
 obs_root_valid() {
-  if [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = 1 ]; then
-    merv_dhcp_hold_test_root_valid || return 1
-    case "$OBS_ROOT" in "$MERV_DHCP_HOLD_TEST_ROOT"/*) return 0 ;; *) return 1 ;; esac
+  if [ "$OBS_SELFTEST_CONTEXT" -eq 1 ] &&
+     [ "$OBS_ROOT" != "$LOCKDIR/observation" ]; then
+    merv_selftest_context_path_allowed "$OBS_ROOT" || return 1
+    merv_selftest_context_path_allowed "$OBS_CONFIG_LOCKDIR" || return 1
+    return 0
   fi
-  [ "$OBS_ROOT" = "${LOCKDIR:-/tmp/mervlan_tmp/locks}/observation" ]
+  [ "$OBS_ROOT" = /tmp/mervlan_tmp/locks/observation ] &&
+    [ "$OBS_CONFIG_LOCKDIR" = /tmp/mervlan_tmp/locks ]
 }
 
 obs_init() {
@@ -191,11 +230,9 @@ obs_state_write() {
 obs_lock_acquire() {
   _ola_lock="$1" _ola_wait="${2:-0}"
   case "$_ola_wait" in ''|*[!0-9]*) return 2 ;; esac
-  # Observation chooses its proc root for deterministic tests; the generic
-  # owner library retains /proc as the production default.
   _ola_prev_proc_root="${MERV_OWNER_LOCK_PROC_ROOT+x}"
   _ola_prev_proc_value="${MERV_OWNER_LOCK_PROC_ROOT:-}"
-  MERV_OWNER_LOCK_PROC_ROOT="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
+  MERV_OWNER_LOCK_PROC_ROOT="$OBS_PROC_ROOT"
   merv_owner_lock_acquire "$_ola_lock" 0 "$_ola_wait" observation
   _ola_rc=$?
   if [ -n "$_ola_prev_proc_root" ]; then
@@ -209,11 +246,28 @@ obs_lock_acquire() {
   return 0
 }
 
+obs_lock_admit_mutation() {
+  _olam_lock=${1:-}
+  [ -n "$_olam_lock" ] || return 1
+  _olam_prev_proc_root="${MERV_OWNER_LOCK_PROC_ROOT+x}"
+  _olam_prev_proc_value="${MERV_OWNER_LOCK_PROC_ROOT:-}"
+  MERV_OWNER_LOCK_PROC_ROOT="$OBS_PROC_ROOT"
+  merv_mutation_admit_r "$_olam_lock" "$$" "${OBS_LOCK_START:-}" \
+    "${OBS_LOCK_NONCE:-}"
+  _olam_rc=$?
+  if [ -n "$_olam_prev_proc_root" ]; then
+    MERV_OWNER_LOCK_PROC_ROOT="$_olam_prev_proc_value"
+  else
+    unset MERV_OWNER_LOCK_PROC_ROOT
+  fi
+  return "$_olam_rc"
+}
+
 obs_lock_release() {
   _olr_lock="$1" _olr_nonce="$2"
   _olr_prev_proc_root="${MERV_OWNER_LOCK_PROC_ROOT+x}"
   _olr_prev_proc_value="${MERV_OWNER_LOCK_PROC_ROOT:-}"
-  MERV_OWNER_LOCK_PROC_ROOT="${MERV_OBSERVATION_PROC_ROOT:-/proc}"
+  MERV_OWNER_LOCK_PROC_ROOT="$OBS_PROC_ROOT"
   merv_owner_lock_release "$_olr_lock" "$_olr_nonce"
   _olr_rc=$?
   if [ -n "$_olr_prev_proc_root" ]; then
@@ -296,7 +350,7 @@ obs_collection_failure_notice() {
 }
 
 obs_snapshot_run() {
-  if [ -n "${MERV_OBS_SNAPSHOT_CMD:-}" ]; then
+  if obs_test_command_valid "${MERV_OBS_SNAPSHOT_CMD:-}"; then
     "$MERV_OBS_SNAPSHOT_CMD"
     return $?
   fi
@@ -312,7 +366,7 @@ obs_snapshot_run() {
 }
 
 obs_collection_run() {
-  if [ -n "${MERV_OBS_COLLECTION_CMD:-}" ]; then
+  if obs_test_command_valid "${MERV_OBS_COLLECTION_CMD:-}"; then
     "$MERV_OBS_COLLECTION_CMD"
     return $?
   fi
@@ -514,6 +568,11 @@ obs_request() {
   fi
   obs_lock_acquire "$OBS_REQUEST_LOCK" 5 || return 2
   _or_nonce="$OBS_LOCK_NONCE"
+  if ! obs_lock_admit_mutation "$OBS_REQUEST_LOCK"; then
+    obs_lock_release "$OBS_REQUEST_LOCK" "$_or_nonce" >/dev/null 2>&1 || :
+    obs_log error "observation request refused by maintenance admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+    return 75
+  fi
   obs_state_load
   for _or_kind in "$@"; do
     case "$_or_kind" in
@@ -558,6 +617,11 @@ obs_run() {
     return 0
   }
   _ow_nonce="$OBS_LOCK_NONCE"
+  if ! obs_lock_admit_mutation "$OBS_WORKER_LOCK"; then
+    obs_lock_release "$OBS_WORKER_LOCK" "$_ow_nonce" >/dev/null 2>&1 || :
+    obs_log error "observation worker refused by maintenance admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+    return 75
+  fi
   trap 'obs_worker_cleanup' EXIT
   trap 'obs_handle_signal 130' INT
   trap 'obs_handle_signal 143' TERM

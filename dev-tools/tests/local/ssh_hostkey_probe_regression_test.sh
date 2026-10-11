@@ -11,6 +11,8 @@ umask 077
 mkdir -p /tmp/mervlan_tmp || exit 1
 mkdir "$TEST_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 ok() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -19,7 +21,8 @@ PROBE_BASE="$TEST_ROOT/probe-base"
 mkdir -p "$PROBE_BASE/functions" "$PROBE_BASE/settings" "$PROBE_BASE/.ssh" || fail fixture-root
 for _probe_file in \
   functions/ssh_hostkey_probe.sh \
-  settings/lib_json.sh settings/lib_identity.sh settings/lib_ssh_trust.sh; do
+  settings/lib_json.sh settings/lib_identity.sh settings/lib_selftest_context.sh \
+  settings/lib_ssh_trust.sh; do
   cp "$BASE_DIR/$_probe_file" "$PROBE_BASE/$_probe_file" || fail fixture-copy
 done
 
@@ -263,7 +266,7 @@ ok modern-preflight-uses-no-key-production-probe
 # any authenticated client invocation can occur.
 AUTH_BASE="$TEST_ROOT/auth-base"
 mkdir -p "$AUTH_BASE/settings" "$AUTH_BASE/.ssh" || fail auth-fixture-root
-for _auth_file in settings/var_settings.sh settings/lib_json.sh settings/lib_identity.sh settings/lib_ssh_trust.sh settings/lib_ssh.sh; do
+for _auth_file in settings/var_settings.sh settings/lib_json.sh settings/lib_identity.sh settings/lib_selftest_context.sh settings/lib_ssh_trust.sh settings/lib_ssh.sh; do
   cp "$BASE_DIR/$_auth_file" "$AUTH_BASE/$_auth_file" || fail auth-fixture-copy
 done
 printf '%s\n' '{"SSH_KEYS_INSTALLED":"0"}' > "$AUTH_BASE/settings/settings.json" || fail auth-settings

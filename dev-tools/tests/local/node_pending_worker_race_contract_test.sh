@@ -12,6 +12,9 @@ test_cleanup() {
     [ "${TEST_KEEP:-0}" = 1 ] || rm -rf "$TEST_ROOT"
 }
 trap test_cleanup 0 1 2 3 15
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$ROOT" "$TEST_ROOT" || exit 1
+cp "$ROOT/settings/lib_selftest_context.sh" "$FAKE_BASE/settings/lib_selftest_context.sh" || exit 1
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 require_file() { [ -s "$1" ] || fail "missing $1"; }

@@ -117,26 +117,29 @@ if merv_node_endpoint_candidates 1 "$SETTINGS_FILE" >/dev/null 2>&1; then
 fi
 printf '%s\n' "1 $ASUS_IP $WAN_IP" > "$ENDPOINT_MAP"
 
-# Fake only the network boundaries.  These calls mirror Sync's batch stream,
-# settings stream, and post-copy command; all must receive the pinned endpoint.
-merv_ssh_exec() {
+# Fake only the guarded network boundaries. These calls mirror Sync's staged
+# batch stream, settings stream, and post-copy command; every mutating target
+# operation must use the same pinned endpoint and node-local dispatcher.
+merv_ssh_node_mutate_exec() {
     printf 'exec|%s|%s\n' "$2" "$3" >> "$TRANSFER_CALLS"
     return 0
 }
-merv_ssh_stream_stdin() {
-    printf 'batch|%s|%s\n' "$2" "$3" >> "$TRANSFER_CALLS"
-    return 0
-}
-merv_ssh_stream_file() {
-    printf 'settings|%s|%s\n' "$2" "$4" >> "$TRANSFER_CALLS"
+merv_ssh_node_mutate_stream() {
+    case "$3" in
+        extract-stage) _kind=batch ;;
+        put-stage-settings) _kind=settings ;;
+        *) return 2 ;;
+    esac
+    printf '%s|%s|%s\n' "$_kind" "$2" "$3" >> "$TRANSFER_CALLS"
     return 0
 }
 
 SYNC_SELECTED_ENDPOINT=$(merv_node_endpoint_candidates 1 "$SETTINGS_FILE" | sed -n '1p') || \
     fail 'could not select endpoint for transfer fixture'
-merv_ssh_exec 1 "$SYNC_SELECTED_ENDPOINT" 'mkdir -p /jffs/addons/mervlan_backups' || fail exec
-merv_ssh_stream_stdin 1 "$SYNC_SELECTED_ENDPOINT" 'cd /jffs/addons/mervlan && tar -xf -' || fail batch
-merv_ssh_stream_file 1 "$SYNC_SELECTED_ENDPOINT" "$SETTINGS_FILE" '/jffs/addons/mervlan/settings/settings.json' || fail settings
+SYNC_RUN_ID=123-456
+merv_ssh_node_mutate_exec 1 "$SYNC_SELECTED_ENDPOINT" prepare-stage "$SYNC_RUN_ID" 1 || fail exec
+merv_ssh_node_mutate_stream 1 "$SYNC_SELECTED_ENDPOINT" extract-stage "$SYNC_RUN_ID" 1 settings/settings.json || fail batch
+merv_ssh_node_mutate_stream 1 "$SYNC_SELECTED_ENDPOINT" put-stage-settings "$SYNC_RUN_ID" 1 || fail settings
 
 if awk -F '|' -v expected="$WAN_IP" '$2 != expected { bad=1 } END { exit bad }' "$TRANSFER_CALLS"; then
     :
@@ -151,10 +154,10 @@ grep -q 'MERV_SSH_SYNC_ENDPOINT_MAP' "$ROOT/functions/sync_nodes.sh" || \
     fail 'Sync does not promote/consume the endpoint map'
 grep -q 'node_ip=$(merv_node_endpoint_candidates "$node_id"' "$ROOT/functions/sync_nodes.sh" || \
     fail 'Sync worker does not resolve its selected endpoint before operations'
-grep -q 'merv_ssh_stream_stdin "$node_id" "$node_ip"' "$ROOT/functions/sync_nodes.sh" || \
-    fail 'Sync batch transfer does not use the selected endpoint'
-grep -q 'merv_ssh_stream_file "$node_id" "$node_ip"' "$ROOT/functions/sync_nodes.sh" || \
-    fail 'Sync settings/file transfer does not use the selected endpoint'
+grep -q 'merv_ssh_node_mutate_stream "$node_id" "$node_ip"' "$ROOT/functions/sync_nodes.sh" || \
+    fail 'Sync staged streams do not use the guarded selected endpoint'
+grep -q 'merv_ssh_node_mutate_exec "$node_id" "$node_ip" finalize-stage' "$ROOT/functions/sync_nodes.sh" || \
+    fail 'Sync staged activation/flags do not use the guarded selected endpoint'
 
 printf 'PREFLIGHT: verified=%s canonical=%s map=%s\n' "$WAN_IP" "$ASUS_IP" "$(cat "$ENDPOINT_MAP")"
 printf 'RESOLVER: Sync-only pin=%s; ordinary resolver retains WAN+ASUS candidates\n' "$PINNED"

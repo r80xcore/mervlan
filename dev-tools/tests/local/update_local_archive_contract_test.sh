@@ -159,6 +159,8 @@ for f in $CORE_STAGE_FILES; do
   mkdir -p "$stage/$parent"
   printf x >"$stage/$f"
 done
+cp -p "$ROOT/functions/mervlan_full_cleanup.sh" "$stage/functions/mervlan_full_cleanup.sh"
+cp -p "$ROOT/settings/lib_full_uninstall.sh" "$stage/settings/lib_full_uninstall.sh"
 update_stage_core_valid "$stage" || fail 'complete synthetic core payload rejected'
 rm -f "$stage/install.sh"
 expect_reject update_stage_core_valid "$stage"

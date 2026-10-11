@@ -34,6 +34,7 @@ fi
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh"
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_BR0_GUARD_LOADED:-}" ] || . "$MERV_BASE/settings/lib_br0_guard.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh"
@@ -508,6 +509,12 @@ acquire_script_lock() {
     error -c cli,vlan "Could not export authenticated action ownership; aborting"
     exit 75
   }
+  if ! merv_mutation_admit_action "$ACTION_LOCK_PATH"; then
+    error -c cli,vlan "Manager refused: mutation admission failed (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+    merv_action_lock_leave "$ACTION_LOCK_PATH" "$ACTION_LOCK_NONCE" \
+      "$ACTION_LOCK_START" "$ACTION_LOCK_MODE" >/dev/null 2>&1 || :
+    exit 75
+  fi
 
   # Courtesy yield to an in-flight heal: heal is non-blocking and short-lived,
   # so a single brief wait lets it finish reading interface state before we
@@ -543,8 +550,10 @@ acquire_script_lock() {
 release_script_lock() {
   # No-op in dry-run
   [ "$DRY_RUN" = "yes" ] && return 0
+  _rsl_scope=${1:-all}
+  case "$_rsl_scope" in all|manager-only|action-only) ;; *) return 1 ;; esac
   _rsl_failed=0
-  if [ "$LOCK_ACQUIRED" -eq 1 ]; then
+  if [ "$_rsl_scope" != action-only ] && [ "$LOCK_ACQUIRED" -eq 1 ]; then
     if merv_owner_lock_release "$LOCK_PATH" "$MANAGER_LOCK_NONCE"; then
       LOCK_ACQUIRED=0
     else
@@ -552,7 +561,7 @@ release_script_lock() {
       error -c cli,vlan "Could not release mervlan_manager owner lock; recovery is required"
     fi
   fi
-  if [ "$ACTION_LOCK_ACQUIRED" -eq 1 ]; then
+  if [ "$_rsl_scope" != manager-only ] && [ "$ACTION_LOCK_ACQUIRED" -eq 1 ]; then
     if merv_action_lock_leave "${ACTION_LOCK_PATH:-$MERV_ACTION_LOCK_PATH}" "$ACTION_LOCK_NONCE" "$ACTION_LOCK_START" "$ACTION_LOCK_MODE"; then
       ACTION_LOCK_ACQUIRED=0
       merv_action_lock_clear_child_context
@@ -3209,13 +3218,11 @@ _APISO_EOF_
     fi
   fi
 
-  # The configuration mutation phase is complete: final placement passed and
-  # the manager's DHCP lease is released.  Observation deliberately defers
-  # while this lock is active, so release the manager/configuration lock before
-  # waiting for the post-apply worker.  The EXIT cleanup remains a fallback for
-  # every earlier failure, but normal client refresh must never depend on the
-  # observation timeout to retire this owner.
-  if ! release_script_lock; then
+  # Publish the next owner before releasing the global action lock.  The
+  # manager lock can end after final placement verification, but the durable
+  # observation generation must be visible first so strict quiescence never
+  # sees an idle gap before the worker claims its own request/worker locks.
+  if ! release_script_lock manager-only; then
     MANAGER_EXIT_REASON="configuration-lock-release-failed"
     return 1
   fi
@@ -3230,8 +3237,16 @@ _APISO_EOF_
   elif [ "$MERV_IS_NODE" = "1" ]; then
     sh "$FUNCDIR/post_apply_worker.sh" request snapshot >/dev/null 2>&1 || \
       warn -c cli,vlan "Node post-apply snapshot request failed"
+    if ! release_script_lock action-only; then
+      MANAGER_EXIT_REASON="action-lock-release-failed"
+      return 1
+    fi
   elif [ "$SKIP_COLLECT" = "yes" ]; then
     info -c cli,vlan "Parallel mode; cluster observation will follow node verification"
+    if ! release_script_lock action-only; then
+      MANAGER_EXIT_REASON="action-lock-release-failed"
+      return 1
+    fi
   elif [ -x "$FUNCDIR/post_apply_worker.sh" ]; then
     merv_action_progress_update complete 1 1 98 "Refreshing client inventory..."
     info -c cli,vlan "Refreshing client inventory after apply..."
@@ -3242,25 +3257,42 @@ _APISO_EOF_
       if MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
            request snapshot collect >/dev/null 2>&1; then
         info -c cli,vlan "VLAN client list refresh queued for post-shield boot work"
+        if ! release_script_lock action-only; then
+          MANAGER_EXIT_REASON="action-lock-release-failed"
+          return 1
+        fi
       else
         _manager_observation_rc=$?
         warn -c cli,vlan "Post-apply observation request failed in boot mode (rc=$_manager_observation_rc)"
         MANAGER_EXIT_REASON="post-apply-observation-request-failed"
         return 1
       fi
-    elif MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
-         request snapshot collect >/dev/null 2>&1 &&
-       sh "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
-      info -c cli,vlan "✓ VLAN client list refresh completed"
     else
+      MERV_OBS_NO_AUTOSTART=1 sh "$FUNCDIR/post_apply_worker.sh" \
+        request snapshot collect >/dev/null 2>&1
       _manager_observation_rc=$?
-      warn -c cli,vlan "✗ Post-apply observation failed (rc=$_manager_observation_rc); generation remains pending"
-      MANAGER_EXIT_REASON="post-apply-observation-failed"
-      return 1
+      if [ "$_manager_observation_rc" -ne 0 ]; then
+        warn -c cli,vlan "✗ Post-apply observation request failed (rc=$_manager_observation_rc); generation remains pending"
+        MANAGER_EXIT_REASON="post-apply-observation-request-failed"
+        return 1
+      fi
+      if ! release_script_lock action-only; then
+        MANAGER_EXIT_REASON="action-lock-release-failed"
+        return 1
+      fi
+      if sh "$FUNCDIR/post_apply_worker.sh" run-wait "${MERV_OBS_AUTOSTART_WAIT_SEC:-120}"; then
+        info -c cli,vlan "✓ VLAN client list refresh completed"
+      else
+        _manager_observation_rc=$?
+        warn -c cli,vlan "✗ Post-apply observation failed (rc=$_manager_observation_rc); generation remains pending"
+        MANAGER_EXIT_REASON="post-apply-observation-failed"
+        return 1
+      fi
     fi
   else
     warn -c cli,vlan "Post-apply observation unavailable; client inventory was not refreshed"
     MANAGER_EXIT_REASON="post-apply-observation-unavailable"
+    release_script_lock action-only || :
     return 1
   fi
 }

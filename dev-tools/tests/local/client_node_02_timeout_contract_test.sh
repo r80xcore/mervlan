@@ -15,6 +15,9 @@ TEST_TRACE="$TMP_ROOT/trace"
 umask 077
 mkdir -p "$FAKE_BASE/settings" "$FAKE_BASE/functions" "$TEST_RUNTIME" || exit 1
 trap 'rm -rf "$TMP_ROOT"' 0 1 2 3 15
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$ROOT" "$TMP_ROOT" || exit 1
+cp "$ROOT/settings/lib_selftest_context.sh" "$FAKE_BASE/settings/lib_selftest_context.sh" || exit 1
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -89,12 +92,14 @@ EOF
 
 cat > "$FAKE_BASE/settings/lib_mervqt.sh" <<'EOF'
 LIB_MERVQT_LOADED=1
+LIB_MUTATION_ADMISSION_LOADED=1
 merv_proc_start_time() { merv_identity_proc_start "$1" "${2:-/proc}"; }
 merv_process_identity_matches() { merv_identity_matches "$1" "$2" "${3:-/proc}"; }
 merv_lock_state() { printf '%s\n' inactive; }
-merv_lock_acquire() { MERV_LOCK_NONCE=node02-fixture; return 0; }
+merv_lock_acquire() { MERV_LOCK_NONCE=node02-fixture; MERV_LOCK_START=1; return 0; }
 merv_lock_release() { return 0; }
 merv_mac_best_db() { printf '%s\n' "$MERV_MAC_DB_ACTIVE"; }
+merv_mutation_admit_r() { return 0; }
 EOF
 
 cat > "$FAKE_BASE/settings/lib_update_state.sh" <<'EOF'

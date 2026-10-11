@@ -14,6 +14,8 @@ trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$1"; }
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || fail 'self-test helper load'
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || fail 'private self-test context'
 
 extract_function() {
   _fur_src="$1"
@@ -196,6 +198,7 @@ CRON_NAME=mervlan_health
 INJ_BASE="$TEST_ROOT/node/addon"
 warn() { :; }
 info() { :; }
+. "$BASE_DIR/settings/lib_boot_integrity.sh" || fail 'boot-integrity helper load'
 . "$CRON_FN" || fail 'cron helper load'
 
 "$FAKE_CRU" a "$CRON_NAME" "*/5 * * * * $INJ_BASE/functions/heal_event.sh cron"
@@ -244,12 +247,15 @@ EOF
 chmod 700 "$TEST_ROOT/bin/ebtables" || fail 'fake ebtables permissions'
 mkdir -p "$NODE_ROOT/addon/functions" || fail 'node addon fixture'
 printf '%s\n' \
+  '#!/bin/sh' \
   'unrelated-before' \
   '### >>> MERVLAN START: service-event [tpl=node-service-event.v1.tpl md5=test]' \
   'mervlan-node-hook' \
   '### <<< MERVLAN END: service-event [tpl=node-service-event.v1.tpl md5=test]' \
   'unrelated-after' > "$NODE_ROOT/service-event"
+chmod 755 "$NODE_ROOT/service-event" || fail 'node event hook permissions'
 printf '%s\n' \
+  '#!/bin/sh' \
   'unrelated-before' \
   '### >>> MERVLAN START: services-start [tpl=node-services.v1.tpl md5=test]' \
   'mervlan-manager-boot' \
@@ -258,6 +264,7 @@ printf '%s\n' \
   'mervlan-addon-boot' \
   '### <<< MERVLAN END: services-start [tpl=node-services-addon.v1.tpl md5=test]' \
   'unrelated-after' > "$NODE_ROOT/services-start" || fail 'node boot hook fixture'
+chmod 755 "$NODE_ROOT/services-start" || fail 'node services hook permissions'
 : > "$NODE_ROOT/qt.state"
 : > "$NODE_ROOT/mac.state"
 : > "$NODE_ROOT/mac.active"
@@ -273,6 +280,8 @@ CRON_NAME=mervlan_health
 INJ_BASE="$INJ_BASE"
 SERVICE_EVENT_WRAPPER="$NODE_ROOT/service-event"
 SERVICES_START="$NODE_ROOT/services-start"
+MERV_BASE="$NODE_ROOT/addon"
+MERV_BOOT_SCRIPTS_ROOT="$NODE_ROOT"
 TEMPLATE_SERVICE_EVENT=node-service-event
 TEMPLATE_SERVICES=node-services
 TEMPLATE_SERVICES_ADDON=node-services-addon
@@ -284,7 +293,7 @@ FAKE_REMOVE_FAIL="\${FAKE_REMOVE_FAIL:-}"
 FAKE_LEAVE_MARKER="\${FAKE_LEAVE_MARKER:-}"
 warn() { :; }
 info() { :; }
-error() { :; }
+error() { printf 'ERROR: %s\n' "\$*" >&2; }
 is_node() { return 0; }
 marker_present() {
   _rtn_name="\$1"
@@ -319,10 +328,13 @@ remove_template_block() {
       if (!skipping) print
     }
   ' "\$_rtn_dest" > "\$_rtn_tmp" || return 1
+  chmod 755 "\$_rtn_tmp" || return 1
   mv "\$_rtn_tmp" "\$_rtn_dest"
 }
 merv_qt_teardown() { rm -f "$NODE_ROOT/qt.state"; }
 ebt_mac_shield_teardown() { rm -f "$NODE_ROOT/mac.state"; }
+. "$BASE_DIR/settings/lib_json.sh"
+. "$BASE_DIR/settings/lib_boot_integrity.sh"
 . "$CRON_FN"
 $(cat "$NODE_BODY")
 EOF
@@ -330,7 +342,10 @@ chmod 700 "$NODE_SCRIPT" || fail 'nodedisable child permissions'
 FAKE_REMOVE_FAIL=
 FAKE_LEAVE_MARKER=
 export FAKE_REMOVE_FAIL FAKE_LEAVE_MARKER
-"$NODE_SCRIPT" >/dev/null 2>&1 || fail 'nodedisable local action'
+"$NODE_SCRIPT" >"$TEST_ROOT/nodedisable-output" 2>&1 || {
+  cat "$TEST_ROOT/nodedisable-output" >&2
+  fail 'nodedisable local action'
+}
 [ ! -s "$FAKE_CRU_STATE" ] || fail 'nodedisable left health cron'
 for _fur_hook in "$NODE_ROOT/service-event" "$NODE_ROOT/services-start"; do
   ! grep -Fq 'MERVLAN START' "$_fur_hook" || fail "nodedisable left hook: $_fur_hook"
@@ -348,12 +363,15 @@ pass 'nodedisable preserves existing teardown semantics'
 
 reset_node_fixture() {
   printf '%s\n' \
+    '#!/bin/sh' \
     'unrelated-before' \
     '### >>> MERVLAN START: service-event [tpl=node-service-event.v1.tpl md5=test]' \
     'mervlan-node-hook' \
     '### <<< MERVLAN END: service-event [tpl=node-service-event.v1.tpl md5=test]' \
     'unrelated-after' > "$NODE_ROOT/service-event" || fail 'node event reset'
+  chmod 755 "$NODE_ROOT/service-event" || fail 'node event reset permissions'
   printf '%s\n' \
+    '#!/bin/sh' \
     'unrelated-before' \
     '### >>> MERVLAN START: services-start [tpl=node-services.v1.tpl md5=test]' \
     'mervlan-manager-boot' \
@@ -362,6 +380,7 @@ reset_node_fixture() {
     'mervlan-addon-boot' \
     '### <<< MERVLAN END: services-start [tpl=node-services-addon.v1.tpl md5=test]' \
     'unrelated-after' > "$NODE_ROOT/services-start" || fail 'node services reset'
+  chmod 755 "$NODE_ROOT/services-start" || fail 'node services reset permissions'
   : > "$NODE_ROOT/qt.state"
   : > "$NODE_ROOT/mac.state"
   : > "$NODE_ROOT/mac.active"
@@ -397,7 +416,8 @@ if "$NODE_SCRIPT" >/dev/null 2>&1; then fail 'remaining addon boot-entry accepte
 pass 'remaining addon boot-entry returns non-zero'
 
 reset_node_fixture
-printf '%s\n' unrelated-only > "$NODE_ROOT/services-start"
+printf '%s\n' '#!/bin/sh' unrelated-only > "$NODE_ROOT/services-start"
+chmod 755 "$NODE_ROOT/services-start" || fail 'unrelated-only services-start permissions'
 FAKE_REMOVE_FAIL=
 FAKE_LEAVE_MARKER=
 export FAKE_REMOVE_FAIL FAKE_LEAVE_MARKER

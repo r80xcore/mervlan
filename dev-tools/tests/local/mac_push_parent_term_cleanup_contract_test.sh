@@ -15,6 +15,8 @@ TEST_ROOT="/tmp/mervlan_tmp/selftest.mac-push-parent-term.$$"
 umask 077
 mkdir -p "$TEST_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 

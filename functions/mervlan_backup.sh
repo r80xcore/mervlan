@@ -8,9 +8,30 @@
 # ============================================================================ #
 
 : "${MERV_BASE:=/jffs/addons/mervlan}"
+if [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ]; then
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+fi
+MB_TEST_CONTEXT=0
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid &&
+   [ "${MERVLAN_BACKUP_TEST_MODE:-0}" = 1 ]; then
+  MB_TEST_CONTEXT=1
+  for _mb_test_path in \
+    "${MERVLAN_TMP_ROOT_OVERRIDE:-}" "${MERVLAN_BACKUP_DIR_OVERRIDE:-}" \
+    "${MERVLAN_PUBLIC_ROOT_OVERRIDE:-}" "${MERVLAN_PUBLIC_RESULTS_OVERRIDE:-}" \
+    "${MERVLAN_WWW_USER_ROOT_OVERRIDE:-}" "${MERVLAN_UNDO_DIR_OVERRIDE:-}" \
+    "${MERVLAN_PUBLIC_ASP_OVERRIDE:-}"; do
+    [ -n "$_mb_test_path" ] || continue
+    merv_selftest_context_path_allowed "$_mb_test_path" || MB_TEST_CONTEXT=0
+  done
+fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_BOOT_INTEGRITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_boot_integrity.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the boot-integrity library; refusing maintenance operation"
+  exit 1
+}
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_BACKUP_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_backup_state.sh" 2>/dev/null || {
   error -c cli,vlan "Unable to load the backup-state library; refusing maintenance operation"
@@ -35,16 +56,46 @@ cd /tmp 2>/dev/null || cd / 2>/dev/null || {
 }
 [ -f /usr/sbin/helper.sh ] && . /usr/sbin/helper.sh
 
-readonly MB_TMP_ROOT="${MERVLAN_TMP_ROOT_OVERRIDE:-${TMPDIR:-/tmp/mervlan_tmp}}"
+if [ "$MB_TEST_CONTEXT" = 1 ]; then
+  readonly MB_TMP_ROOT="${MERVLAN_TMP_ROOT_OVERRIDE:-${TMPDIR:-/tmp/mervlan_tmp}}"
+  readonly MB_BACKUP_ROOT="${MERVLAN_BACKUP_DIR_OVERRIDE:-${MERV_BASE%/*}/mervlan_backups}"
+  readonly MB_PUBLIC_ROOT="${MERVLAN_PUBLIC_ROOT_OVERRIDE:-${PUBLIC_MERV_BASE:-/www/user/mervlan}}"
+  readonly MB_WWW_USER_ROOT="${MERVLAN_WWW_USER_ROOT_OVERRIDE:-/www/user}"
+  readonly MB_PUBLIC_RESULTS="${MERVLAN_PUBLIC_RESULTS_OVERRIDE:-$MB_PUBLIC_ROOT/tmp/results}"
+  readonly MB_UNDO_ROOT="${MERVLAN_UNDO_DIR_OVERRIDE:-$MB_TMP_ROOT/undo}"
+  readonly MB_TEST_MODE=1
+  readonly MB_TEST_FAIL_PHASE="${MERVLAN_BACKUP_TEST_FAIL_PHASE:-}"
+  readonly MB_TEST_PAUSE_PHASE="${MERVLAN_BACKUP_TEST_PAUSE_PHASE:-}"
+  readonly MB_TEST_PAUSE_SECONDS="${MERVLAN_BACKUP_TEST_PAUSE_SECONDS:-5}"
+  if [ -n "${MERVLAN_PUBLIC_ASP_OVERRIDE:-}" ]; then
+    _mb_public_asp_test_override=$MERVLAN_PUBLIC_ASP_OVERRIDE
+  fi
+else
+  readonly MB_TMP_ROOT=/tmp/mervlan_tmp
+  readonly MB_BACKUP_ROOT="${MERV_BASE%/*}/mervlan_backups"
+  readonly MB_PUBLIC_ROOT=/www/user/mervlan
+  readonly MB_WWW_USER_ROOT=/www/user
+  readonly MB_PUBLIC_RESULTS="$MB_PUBLIC_ROOT/tmp/results"
+  readonly MB_UNDO_ROOT="$MB_TMP_ROOT/undo"
+  readonly MB_TEST_MODE=0
+  readonly MB_TEST_FAIL_PHASE=
+  readonly MB_TEST_PAUSE_PHASE=
+  readonly MB_TEST_PAUSE_SECONDS=5
+  unset MERVLAN_BACKUP_TEST_MODE MERVLAN_BACKUP_TEST_FAIL_PHASE \
+    MERVLAN_BACKUP_TEST_PAUSE_PHASE MERVLAN_BACKUP_TEST_PAUSE_SECONDS \
+    MERVLAN_TMP_ROOT_OVERRIDE MERVLAN_BACKUP_DIR_OVERRIDE \
+    MERVLAN_PUBLIC_ROOT_OVERRIDE MERVLAN_PUBLIC_RESULTS_OVERRIDE \
+    MERVLAN_WWW_USER_ROOT_OVERRIDE MERVLAN_UNDO_DIR_OVERRIDE \
+    MERVLAN_PUBLIC_ASP_OVERRIDE
+fi
 readonly MB_WORK_ROOT="$MB_TMP_ROOT/backup_manager.$$"
-readonly MB_BACKUP_ROOT="${MERVLAN_BACKUP_DIR_OVERRIDE:-${MERV_BASE%/*}/mervlan_backups}"
-readonly MB_PUBLIC_ROOT="${MERVLAN_PUBLIC_ROOT_OVERRIDE:-${PUBLIC_MERV_BASE:-/www/user/mervlan}}"
-readonly MB_WWW_USER_ROOT="${MERVLAN_WWW_USER_ROOT_OVERRIDE:-/www/user}"
-readonly MB_PUBLIC_RESULTS="${MERVLAN_PUBLIC_RESULTS_OVERRIDE:-$MB_PUBLIC_ROOT/tmp/results}"
 readonly MB_INVENTORY_FILE="$MB_PUBLIC_RESULTS/backup_inventory.json"
 readonly MB_RESULT_FILE="$MB_PUBLIC_RESULTS/maintenance_result.json"
-readonly MB_LOCK="${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${LOCKDIR:-$MB_TMP_ROOT/locks}/mervlan_maintenance.lock}"
-readonly MB_UNDO_ROOT="${MERVLAN_UNDO_DIR_OVERRIDE:-$MB_TMP_ROOT/undo}"
+MB_LOCK=$(merv_update_maintenance_lock_path 2>/dev/null) || {
+  error -c cli,vlan "Unable to resolve canonical maintenance ownership; refusing maintenance operation"
+  exit 1
+}
+readonly MB_LOCK
 readonly MB_UNDO_RESTORE_ARCHIVE="$MB_UNDO_ROOT/mervlan.undo.restore.tar.gz"
 readonly MB_UNDO_RESTORE_META="$MB_UNDO_ROOT/restore.meta"
 readonly MB_UNDO_UPDATE_MARKER="$MB_UNDO_ROOT/update.meta"
@@ -52,20 +103,20 @@ readonly MB_RECOVERY_SOURCE="$MERV_BASE/functions/mervlan_recover.sh"
 readonly MB_RECOVERY_SCRIPT="$MB_BACKUP_ROOT/recover.sh"
 readonly MB_RECOVERY_STATE_SOURCE="$MERV_BASE/settings/lib_maintenance_recovery.sh"
 readonly MB_RECOVERY_STATE_SCRIPT="$MB_BACKUP_ROOT/recovery_state.sh"
+readonly MB_RECOVERY_JSON_SOURCE="$MERV_BASE/settings/lib_json.sh"
+readonly MB_RECOVERY_JSON_SCRIPT="$MB_BACKUP_ROOT/lib_json.sh"
+readonly MB_RECOVERY_INTEGRITY_SOURCE="$MERV_BASE/settings/lib_boot_integrity.sh"
+readonly MB_RECOVERY_INTEGRITY_SCRIPT="$MB_BACKUP_ROOT/lib_boot_integrity.sh"
 readonly MB_UPDATE_STATE_SOURCE="$MERV_BASE/settings/lib_update_state.sh"
 readonly MB_UPDATE_STATE_SCRIPT="$MB_BACKUP_ROOT/update_state.sh"
 readonly MB_JFFS_STAGE="$MB_BACKUP_ROOT/.mervlan.new.$$"
 readonly MB_JFFS_OLD="$MB_BACKUP_ROOT/.mervlan.old.$$"
 readonly MB_MANUAL_LIMIT=3
 readonly MB_AUTO_LIMIT=3
-readonly MB_TEST_MODE="${MERVLAN_BACKUP_TEST_MODE:-0}"
 MB_JFFS_RESERVE_KB="${MERV_BACKUP_JFFS_RESERVE_KB:-5120}"
 case "$MB_JFFS_RESERVE_KB" in
   ''|*[!0-9]*|0) MB_JFFS_RESERVE_KB="5120" ;;
 esac
-readonly MB_TEST_FAIL_PHASE="${MERVLAN_BACKUP_TEST_FAIL_PHASE:-}"
-readonly MB_TEST_PAUSE_PHASE="${MERVLAN_BACKUP_TEST_PAUSE_PHASE:-}"
-readonly MB_TEST_PAUSE_SECONDS="${MERVLAN_BACKUP_TEST_PAUSE_SECONDS:-5}"
 
 MERV_MAINTENANCE_RECOVERY_ROOT="$MB_BACKUP_ROOT"
 MERV_MAINTENANCE_RECOVERY_MARKER="$MB_BACKUP_ROOT/.mervlan.recovery"
@@ -568,6 +619,7 @@ mb_verify_archive_integrity() {
 
 mb_install_recovery_helper() {
   [ -f "$MB_RECOVERY_SOURCE" ] && [ -f "$MB_RECOVERY_STATE_SOURCE" ] && \
+    [ -f "$MB_RECOVERY_JSON_SOURCE" ] && [ -f "$MB_RECOVERY_INTEGRITY_SOURCE" ] && \
     [ -f "$MB_UPDATE_STATE_SOURCE" ] || return 1
   _mb_helper_saved_root="${MERV_MAINTENANCE_RECOVERY_ROOT:-}"
   _mb_helper_saved_marker="${MERV_MAINTENANCE_RECOVERY_MARKER:-}"
@@ -602,6 +654,17 @@ mb_install_recovery_helper() {
     rm -f "$_mb_update_state_tmp" 2>/dev/null || :
     return 1
   }
+  for _mb_recovery_lib in \
+      "$MB_RECOVERY_JSON_SOURCE|$MB_RECOVERY_JSON_SCRIPT" \
+      "$MB_RECOVERY_INTEGRITY_SOURCE|$MB_RECOVERY_INTEGRITY_SCRIPT"; do
+    _mb_recovery_src=${_mb_recovery_lib%%|*}
+    _mb_recovery_dst=${_mb_recovery_lib#*|}
+    _mb_recovery_tmp="$MB_BACKUP_ROOT/.${_mb_recovery_dst##*/}.partial.$$"
+    rm -f "$_mb_recovery_tmp" 2>/dev/null || return 1
+    cp -p "$_mb_recovery_src" "$_mb_recovery_tmp" 2>/dev/null || return 1
+    chmod 600 "$_mb_recovery_tmp" 2>/dev/null || { rm -f "$_mb_recovery_tmp" 2>/dev/null || :; return 1; }
+    mv -f "$_mb_recovery_tmp" "$_mb_recovery_dst" 2>/dev/null || { rm -f "$_mb_recovery_tmp" 2>/dev/null || :; return 1; }
+  done
   _mb_recovery_tmp="$MB_BACKUP_ROOT/.recover.sh.partial.$$"
   rm -f "$_mb_recovery_tmp" 2>/dev/null || return 1
   cp -p "$MB_RECOVERY_SOURCE" "$_mb_recovery_tmp" 2>/dev/null || return 1
@@ -799,6 +862,8 @@ mb_fail() {
 }
 
 mb_acquire_lock() {
+  type merv_update_full_fence_clear >/dev/null 2>&1 &&
+    merv_update_full_fence_clear || return 1
   # Update's inventory refresh is a child of the already-quiesced Update
   # transaction.  Authenticate that exact owner instead of attempting a
   # second acquisition of the same lock.
@@ -809,6 +874,7 @@ mb_acquire_lock() {
      merv_update_quiesce_active && \
      type merv_update_journal_active >/dev/null 2>&1 && \
      merv_update_journal_active; then
+    merv_update_full_fence_clear || return 1
     MB_LOCK_DELEGATED=1
     MB_LOCK_NONCE="${MERV_UPDATE_OWNER_NONCE:-}"
     return 0
@@ -817,6 +883,14 @@ mb_acquire_lock() {
   if merv_owner_lock_acquire "$MB_LOCK" 1800 2 "mervlan_maintenance"; then
     MB_LOCK_OWNED=1
     MB_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    if ! merv_update_full_fence_clear; then
+      if merv_owner_lock_release "$MB_LOCK" "$MB_LOCK_NONCE" >/dev/null 2>&1; then
+        MB_LOCK_OWNED=0
+      else
+        error -c cli,vlan "Full Uninstall admission appeared during maintenance acquisition and the exact owner could not be released"
+      fi
+      return 1
+    fi
     # Public refresh children must prove this exact live owner tuple.  A
     # Boolean maintenance flag alone is intentionally not authority.
     MERV_MAINTENANCE_DELEGATED=1
@@ -1662,11 +1736,7 @@ mb_validate_archive_tree() {
 
 mb_read_boot_state() {
   _mb_settings="$1/settings/settings.json"
-  if [ -f "$_mb_settings" ] && grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$_mb_settings" 2>/dev/null; then
-    printf '1'
-  else
-    printf '0'
-  fi
+  merv_boot_read_preference "$_mb_settings"
 }
 
 mb_refresh_public_tree() {
@@ -1734,12 +1804,27 @@ mb_runtime_report_matches() {
   _mb_report="$1"
   _mb_role="$2"
   _mb_expected_boot="$3"
+  _mb_allow_legacy_report="${4:-0}"
   _mb_expected_cron=absent
   [ "$_mb_expected_boot" = "1" ] && _mb_expected_cron=present
   case "$_mb_report" in REPORT\ *) ;; *) return 1 ;; esac
   case " $_mb_report " in *" boot=$_mb_expected_boot "*) ;; *) return 1 ;; esac
   case " $_mb_report " in *" event=active "*) ;; *) return 1 ;; esac
   case " $_mb_report " in *" cron=$_mb_expected_cron "*) ;; *) return 1 ;; esac
+  case " $_mb_report " in
+    *" manager_hook="*)
+      if [ "$_mb_expected_boot" = "1" ]; then
+        case " $_mb_report " in *" manager_hook=present "*) ;; *) return 1 ;; esac
+      else
+        case " $_mb_report " in *" manager_hook=absent "*) ;; *) return 1 ;; esac
+      fi
+      ;;
+    *) [ "$_mb_allow_legacy_report" = "1" ] || return 1 ;;
+  esac
+  case "$_mb_allow_legacy_report" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
   case "$_mb_role" in
     main)
       case " $_mb_report " in *" addon=active "*) ;; *) return 1 ;; esac
@@ -1757,14 +1842,24 @@ mb_verify_restored_runtime() {
   _mb_nodes="$1"
   _mb_expected_boot="$2"
   _mb_node_sync_ok="${3:-0}"
+  _mb_allow_legacy="${4:-0}"
   MB_VERIFY_PARTIAL=0
   [ "$MB_TEST_MODE" = "1" ] && return 0
   _mb_boot_script="$MERV_BASE/functions/mervlan_boot.sh"
 
+  if ! merv_boot_verify_local "$_mb_expected_boot" main \
+      "${SERVICES_START:-/jffs/scripts/services-start}" \
+      "${SERVICE_EVENT_WRAPPER:-/jffs/scripts/service-event}" \
+      "$MERV_BASE/settings/settings.json" "${CRU_BIN:-}" "$MERV_BASE" \
+      "${MERV_BOOT_SCRIPTS_ROOT:-${SCRIPTS_DIR:-/jffs/scripts}}" "$_mb_allow_legacy"; then
+    error -c cli,vlan "Restored main hook integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-unknown}"
+    return 1
+  fi
+
   _mb_main_report=$(sh "$_mb_boot_script" report 2>/dev/null)
   _mb_main_report_rc=$?
   [ "$_mb_main_report_rc" -eq 0 ] || warn -c cli,vlan "Restored main runtime report command failed (rc=$_mb_main_report_rc)"
-  if ! mb_runtime_report_matches "$_mb_main_report" main "$_mb_expected_boot"; then
+  if ! mb_runtime_report_matches "$_mb_main_report" main "$_mb_expected_boot" "$_mb_allow_legacy"; then
     error -c cli,vlan "Restored main runtime verification failed: ${_mb_main_report:-no report}"
     return 1
   fi
@@ -1842,6 +1937,19 @@ mb_rollback_restore() {
     if ! mb_apply_boot_state "$MERV_BASE" "$_mb_old_boot" 1 >/dev/null 2>&1; then
       error -c cli,vlan "Rollback restored the original tree but could not reapply its boot state"
       _mb_rollback_failed=1
+    fi
+    if [ "$MB_TEST_MODE" != "1" ]; then
+      if ! merv_boot_rollback_legacy_mode "$MERV_BASE"; then
+        error -c cli,vlan "Rollback restored the original tree but its boot-integrity library state is unsafe: ${MERV_BOOT_ROLLBACK_REASON:-unknown}"
+        _mb_rollback_failed=1
+      elif ! merv_boot_verify_local "$_mb_old_boot" main \
+          "${SERVICES_START:-/jffs/scripts/services-start}" \
+          "${SERVICE_EVENT_WRAPPER:-/jffs/scripts/service-event}" \
+          "$MERV_BASE/settings/settings.json" "${CRU_BIN:-}" "$MERV_BASE" \
+          "${MERV_BOOT_SCRIPTS_ROOT:-${SCRIPTS_DIR:-/jffs/scripts}}" "$MERV_BOOT_ROLLBACK_ALLOW_LEGACY"; then
+        error -c cli,vlan "Rollback restored the original tree but hook integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-unknown}"
+        _mb_rollback_failed=1
+      fi
     fi
     _mb_rollback_nodes=""
     if ! _mb_rollback_nodes=$(mb_list_configured_nodes 2>/dev/null); then
@@ -2023,7 +2131,14 @@ mb_restore() {
     mb_fail validation "Backup archive is corrupt, unsafe, or missing required MerVLAN files."
     return 1
   fi
-  _mb_current_boot=$(mb_read_boot_state "$MERV_BASE")
+  _mb_current_boot=$(mb_read_boot_state "$MERV_BASE") || {
+    mb_fail validation "Restore refused: current General.BOOT_ENABLED is missing, malformed, unreadable, or unsupported."
+    return 1
+  }
+  _mb_backup_boot=$(mb_read_boot_state "$MB_RESTORE_TREE") || {
+    mb_fail validation "Restore refused: selected backup General.BOOT_ENABLED is missing, malformed, unreadable, or unsupported."
+    return 1
+  }
   _mb_current_version=$(sed -n '1{/^[[:space:]]*$/d;p;q}' "$MERV_BASE/changelog.txt" 2>/dev/null)
   _mb_target_settings="$MB_RESTORE_TREE/settings/settings.json"
   _mb_activation_source="$MB_RESTORE_TREE"
@@ -2107,7 +2222,21 @@ mb_restore() {
     mb_fail ssh_trust "Restore blocked: the current durable SSH trust database could not be preserved."
     return 1
   }
-  _mb_target_boot=$(mb_read_boot_state "$_mb_activation_source")
+  _mb_target_boot=$(mb_read_boot_state "$_mb_activation_source") || {
+    mb_fail validation "Restore refused: selected backup General.BOOT_ENABLED is missing, malformed, unreadable, or unsupported."
+    return 1
+  }
+  [ "$_mb_target_boot" = "$_mb_backup_boot" ] || {
+    mb_fail validation "Restore refused: selected backup boot preference changed while preparing the activation candidate."
+    return 1
+  }
+  if ! merv_boot_rollback_legacy_mode "$_mb_activation_source"; then
+    mb_fail validation "Restore refused: selected backup boot-integrity library state is unsafe: ${MERV_BOOT_ROLLBACK_REASON:-unknown}"
+    return 1
+  fi
+  # Older archives are verified by the controller's retained read-only
+  # library; only its explicit known-legacy rollback path is enabled.
+  _mb_allow_legacy="$MERV_BOOT_ROLLBACK_ALLOW_LEGACY"
   if [ "$_mb_mode" = "restore" ]; then
     _mb_target_version="$_mb_current_version"
   else
@@ -2288,7 +2417,7 @@ mb_restore() {
     fi
   fi
   mb_write_result running verifying_runtime "Verifying restored hooks and boot state."
-  if ! mb_verify_restored_runtime "$_mb_restored_nodes" "$_mb_target_boot" "$_mb_node_sync_ok"; then
+  if ! mb_verify_restored_runtime "$_mb_restored_nodes" "$_mb_target_boot" "$_mb_node_sync_ok" "$_mb_allow_legacy"; then
     mb_rollback_after_activation reconciliation \
       "Restore could not verify the required runtime state; the original installation was restored." \
       "Restore could not verify the required runtime state; automatic rollback failed. Recovery data and the owner lock were preserved." \

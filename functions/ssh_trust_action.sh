@@ -14,6 +14,7 @@
 [ -n "${LIB_SSH_TRUST_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh_trust.sh" || exit 1
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh" || exit 1
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 
@@ -1450,6 +1451,15 @@ trust_main() {
         action_ack_lock_failure "$SSH_TRUST_TOKEN" "$SSH_TRUST_ACK_ACTION" 4 global >/dev/null 2>&1 || :
         merv_action_lock_leave "${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}" \
             "$SSH_TRUST_ACTION_NONCE" "$SSH_TRUST_ACTION_START" "$SSH_TRUST_ACTION_MODE" >/dev/null 2>&1 || :
+        exit 75
+    fi
+    if ! merv_mutation_admit_action "${MERV_ACTION_LOCK_PATH_ACTIVE:-${MERV_ACTION_LOCK_PATH:-/tmp/mervlan_tmp/locks/mervlan_action.lock}}"; then
+        MERV_ACTION_LOCK_LAST_FAILURE=mutation-admission-blocked
+        merv_action_progress_init "$SSH_TRUST_PROGRESS_TOKEN" "$SSH_TRUST_ACK_ACTION" \
+            "SSH trust action" "Preparing SSH trust action..."
+        merv_action_progress_fail "MerVLAN maintenance is active or its ownership state could not be verified; SSH trust was not changed."
+        action_ack_lock_failure "$SSH_TRUST_TOKEN" "$SSH_TRUST_ACK_ACTION" 4 global >/dev/null 2>&1 || :
+        trust_release_all_locks >/dev/null 2>&1 || :
         exit 75
     fi
     trap 'trust_release_all_locks >/dev/null 2>&1 || logger -t VLANMgr "ssh trust cleanup could not prove/release ownership"' EXIT

@@ -1,38 +1,121 @@
-# =============================================================================
-# Directories and generated directory contents
-# =============================================================================
-/.agent/
-/.agents/
-/.agent_docs/
-/.codex/
-/.codex-remote-attachments/
-/.tmp/
-/agent_docs/
-dev-tools/backup/*
-!dev-tools/backup/README.md
-dev-tools/evidence/*
-!dev-tools/evidence/README.md
-dev-tools/to-do/*
-!dev-tools/to-do/README.md
-/evidence/
-/tmp/
-/tools/
+# Deny repository-root material by default; admit project paths explicitly.
+/*
 
-# =============================================================================
-# Files
-# =============================================================================
-/.github/copilot-instructions.md
-/AGENT.md
-AGENTS.md
-# Keep the repository-level normal-development guide versioned.
-#!/AGENTS.md
-/agent.md
-/agents.md
-dev-tools/mervlan_ssh_credentials.md
-dev-tools/safety/observe_wan_native_main.ps1
-functions/sync_nodes.sh.bak
-functions/wireless_backhaul.sh
-/mervlan-audit.zip
-/puppeteer-config.json
-/roadmap.txt
-/UNINSTALL_CODEX_WORKFLOW.ps1
+# Intentional root-level repository files.
+!/.gitattributes
+!/.gitignore
+!/AGENTS.md
+!/LICENSE
+!/README.md
+!/changelog.txt
+!/install.sh
+!/mervlan.asp
+!/uninstall.sh
+
+# Approved GitHub metadata.
+!/.github/
+/.github/*
+!/.github/FUNDING.yml
+
+# Production shell libraries and scripts, plus the repair manifest.
+!/functions/
+/functions/*
+!/functions/*.sh
+!/functions/update_mervlan_repair.manifest
+/functions/wireless_backhaul.sh
+
+# Production settings libraries and the canonical shipped defaults.
+!/settings/
+/settings/*
+!/settings/*.sh
+!/settings/settings.json
+
+# Production shell templates.
+!/templates/
+/templates/*
+!/templates/*.sh
+
+# WebUI source assets. Settings and vendored assets are restricted below.
+!/www/
+/www/*
+!/www/*.html
+!/www/*.css
+!/www/*.js
+!/www/settings/
+/www/settings/*
+!/www/settings/loading_actions.json
+!/www/vendor/
+/www/vendor/*
+!/www/vendor/THIRD_PARTY_LICENSES.md
+!/www/vendor/github-markdown-dark.css
+!/www/vendor/marked.umd.js
+/www/tmp/
+/www/.ssh/
+/www/settings/hardware_profiles.json
+
+# Approved documentation source and diagrams.
+!/docs/
+/docs/*
+!/docs/HELP.md
+!/docs/diagrams-src/
+/docs/diagrams-src/*
+!/docs/diagrams-src/*.mmd
+!/docs/diagrams/
+/docs/diagrams/*
+!/docs/diagrams/*.svg
+!/docs/images/
+/docs/images/*
+!/docs/images/*.svg
+!/docs/images/*.png
+
+# Developer reference files admitted by exact path or source class.
+!/dev-tools/
+/dev-tools/*
+!/dev-tools/README.md
+!/dev-tools/RULES.md
+!/dev-tools/agent-context.json
+!/dev-tools/mervlan_ssh_credentials.example.md
+!/dev-tools/agent-rules/
+/dev-tools/agent-rules/*
+!/dev-tools/agent-rules/*.md
+!/dev-tools/docs/
+/dev-tools/docs/*
+!/dev-tools/docs/*.md
+
+# Developer test source. Generated output and nested directories stay denied.
+!/dev-tools/tests/
+/dev-tools/tests/*
+!/dev-tools/tests/README.md
+!/dev-tools/tests/local/
+/dev-tools/tests/local/*
+!/dev-tools/tests/local/*.sh
+!/dev-tools/tests/local/*.mjs
+!/dev-tools/tests/local/*.py
+!/dev-tools/tests/local/README.md
+!/dev-tools/tests/router/
+/dev-tools/tests/router/*
+!/dev-tools/tests/router/README.md
+!/dev-tools/tests/router/mervlan_selftest.sh
+!/dev-tools/tests/specs/
+/dev-tools/tests/specs/*
+!/dev-tools/tests/specs/*.md
+
+# Exact approved safety tools and area readmes.
+!/dev-tools/safety/
+/dev-tools/safety/*
+!/dev-tools/safety/README.md
+!/dev-tools/safety/mervlan_live_test_guard.sh
+/dev-tools/safety/observe_wan_native_main.ps1
+!/dev-tools/evidence/
+/dev-tools/evidence/*
+!/dev-tools/evidence/README.md
+!/dev-tools/to-do/
+/dev-tools/to-do/*
+!/dev-tools/to-do/README.md
+
+# Local credentials remain private.
+/dev-tools/mervlan_ssh_credentials.md
+
+# Only the root developer guide is admitted; nested agent files stay local.
+**/AGENTS.md
+!/AGENTS.md

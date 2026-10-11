@@ -1374,6 +1374,26 @@ _is_update_or_safe_boot_active() {
   esac
 }
 
+# A private process checkpoint for ownership lifecycle tests.  It is inactive
+# unless the existing authenticated self-test context is valid and both files
+# are inside that context; inherited TEST_RUN or arbitrary paths cannot pause
+# production boot recovery.
+merv_boot_wrap_test_pause_after_reinstall() {
+  type merv_selftest_context_valid >/dev/null 2>&1 &&
+    merv_selftest_context_valid || return 0
+  _mbwtp_pause=${MERV_BOOT_WRAP_SELFTEST_PAUSE_FILE:-}
+  _mbwtp_release=${MERV_BOOT_WRAP_SELFTEST_RELEASE_FILE:-}
+  merv_selftest_context_path_allowed "$_mbwtp_pause" &&
+    merv_selftest_context_path_allowed "$_mbwtp_release" || return 0
+  [ ! -e "$_mbwtp_pause" ] && [ ! -L "$_mbwtp_pause" ] || return 1
+  ( umask 077; : > "$_mbwtp_pause" ) || return 1
+  while [ ! -e "$_mbwtp_release" ]; do
+    [ ! -L "$_mbwtp_release" ] || return 1
+    sleep 1
+  done
+  [ ! -L "$_mbwtp_release" ]
+}
+
 # ============================================================================ #
 # MODE: install                                                                #
 # ============================================================================ #
@@ -1403,39 +1423,108 @@ _mode_install() {
       return 75
     fi
     warn -c boot "Incomplete Update journal detected; running installer projection recovery without starting the manager"
-    _update_recovery_run=$(merv_update_journal_get run_id '' 2>/dev/null || printf '')
-    _update_recovery_start=$(merv_identity_current_start 2>/dev/null || printf '')
-    if [ -z "$_update_recovery_run" ] || [ -z "$_update_recovery_start" ] ||
-       ! merv_update_state_value "$_update_recovery_run" >/dev/null; then
-      warn -c boot "Interrupted Update recovery context could not be authenticated; manager startup remains suppressed"
+    # Interrupted recovery owns M in this wrapper, across the delegated
+    # reinstall and transaction-marker retirement.  The child continuation
+    # is visible before spawn so wrapper death cannot make a live installer
+    # disappear from Q.
+    [ -n "${LIB_FULL_FENCE_LOADED:-}" ] ||
+      . "$MERV_BASE/settings/lib_full_fence.sh" 2>/dev/null || return 75
+    [ -n "${LIB_CONTINUATION_LOADED:-}" ] ||
+      . "$MERV_BASE/settings/lib_continuation.sh" 2>/dev/null || return 75
+    [ -n "${LIB_MAINTENANCE_QUIESCE_LOADED:-}" ] ||
+      . "$MERV_BASE/settings/lib_maintenance_quiesce.sh" 2>/dev/null || return 75
+    type merv_update_recovery_owner_admit >/dev/null 2>&1 &&
+      merv_update_recovery_owner_admit || {
+        warn -c boot "Interrupted Update recovery could not acquire canonical maintenance ownership or prove quiescence; manager startup remains suppressed"
+        return 75
+      }
+    merv_update_recovery_export_install_context || {
+      merv_maintenance_direct_release >/dev/null 2>&1 || :
+      warn -c boot "Interrupted Update recovery delegation could not be authenticated; manager startup remains suppressed"
       return 75
-    fi
-    MERV_UPDATE_RECOVERY=1
-    MERV_UPDATE_RECOVERY_RUN_ID="$_update_recovery_run"
-    MERV_UPDATE_RECOVERY_PARENT_PID="$$"
-    MERV_UPDATE_RECOVERY_PARENT_START="$_update_recovery_start"
-    export MERV_UPDATE_RECOVERY MERV_UPDATE_RECOVERY_RUN_ID \
-      MERV_UPDATE_RECOVERY_PARENT_PID MERV_UPDATE_RECOVERY_PARENT_START
-    if ! merv_update_recovery_context_valid; then
-      warn -c boot "Interrupted Update recovery context could not be authenticated; manager startup remains suppressed"
-      return 75
-    fi
-    if "$MERV_BASE/install.sh" reinstall >> "$LOG_chan_boot" 2>&1; then
-      if type merv_update_journal_active >/dev/null 2>&1 && merv_update_journal_active; then
-        if [ "$(merv_update_journal_get activation_started 0)" != "1" ]; then
-          merv_update_journal_clear || warn -c boot "Projection recovery succeeded but the pre-activation Update journal could not be cleared"
-          merv_update_quiesce_clear || warn -c boot "Projection recovery succeeded but the Update quiesce marker could not be cleared"
-          info -c boot "Interrupted Update was before activation; safe recovery state cleared"
-        else
-          info -c boot "Installer projection recovery completed; activation journal remains pending verification"
-        fi
-      else
-        merv_update_quiesce_clear || warn -c boot "Projection recovery succeeded but the Update quiesce marker could not be cleared"
-        info -c boot "Interrupted Update projection recovery completed"
+    }
+    _update_recovery_run=$MERV_UPDATE_RECOVERY_RUN_ID
+    _update_recovery_lock=$MERV_MAINTENANCE_ENTRY_LOCK
+    _update_recovery_nonce=$MERV_MAINTENANCE_ENTRY_NONCE
+    _update_recovery_start=$MERV_MAINTENANCE_ENTRY_START
+    merv_continuation_publish_pending interrupted-update-reinstall \
+      "$_update_recovery_run" maintenance "$_update_recovery_lock" \
+      "$$" "$_update_recovery_start" "$_update_recovery_nonce" || {
+        merv_maintenance_direct_release >/dev/null 2>&1 || :
+        warn -c boot "Interrupted Update continuation could not be published; manager startup remains suppressed"
+        return 75
+      }
+    _update_recovery_token=$MERV_CONTINUATION_TOKEN
+    export MERV_CONTINUATION_TOKEN
+
+    "$MERV_BASE/install.sh" reinstall >> "$LOG_chan_boot" 2>&1 &
+    _update_recovery_child=$!
+    _update_recovery_child_start=$(merv_identity_proc_start \
+      "$_update_recovery_child" /proc 2>/dev/null || printf '')
+    if [ -z "$_update_recovery_child_start" ] ||
+       ! merv_continuation_bind_child "$_update_recovery_token" \
+         "$_update_recovery_child" "$_update_recovery_child_start"; then
+      if [ -n "$_update_recovery_child_start" ] &&
+         merv_continuation_process_state "$_update_recovery_child" \
+           "$_update_recovery_child_start" | grep -qx live; then
+        kill -TERM "$_update_recovery_child" 2>/dev/null || :
       fi
-    else
-      warn -c boot "Installer projection recovery failed; manager startup remains suppressed"
+      wait "$_update_recovery_child" 2>/dev/null || :
+      warn -c boot "Interrupted Update child identity could not be bound; pending continuation remains fail-closed"
+      return 75
     fi
+    wait "$_update_recovery_child"
+    _update_recovery_rc=$?
+
+    merv_boot_wrap_test_pause_after_reinstall || {
+      warn -c boot "Interrupted Update test checkpoint failed; transaction markers were retained"
+      return 75
+    }
+
+    if ! merv_update_recovery_context_valid; then
+      warn -c boot "Interrupted Update returned after maintenance ownership changed; markers were retained"
+      return 75
+    fi
+    _update_recovery_lease=$(merv_continuation_path "$_update_recovery_token") || return 75
+    if ! merv_continuation_read "$_update_recovery_lease" ||
+       [ "$MERV_CONTINUATION_OPERATION" != interrupted-update-reinstall ] ||
+       [ "$MERV_CONTINUATION_RUN_TOKEN" != "$_update_recovery_run" ] ||
+       [ "$MERV_CONTINUATION_PARENT_PID" != "$$" ] ||
+       [ "$MERV_CONTINUATION_PARENT_NONCE" != "$_update_recovery_nonce" ] ||
+       [ "$MERV_CONTINUATION_STATE" != terminal ] ||
+       [ "$(merv_continuation_process_state \
+         "$MERV_CONTINUATION_CHILD_PID" "$MERV_CONTINUATION_CHILD_START")" != dead ]; then
+      warn -c boot "Interrupted Update child or descendants did not reach authoritative terminal state; markers were retained"
+      return 75
+    fi
+    if [ "$_update_recovery_rc" -ne 0 ]; then
+      warn -c boot "Interrupted Update reinstall failed (rc=$_update_recovery_rc); transaction markers were retained"
+      merv_maintenance_direct_release >/dev/null 2>&1 || :
+      return 75
+    fi
+
+    # Require the exact interrupted transaction to remain published until the
+    # delegated installer has returned and its continuation has gone terminal.
+    merv_update_journal_active && merv_update_quiesce_active &&
+      [ "$(merv_update_journal_get run_id '')" = "$_update_recovery_run" ] &&
+      grep -Fqx "run_id=$_update_recovery_run" "$MERV_UPDATE_QUIESCE_FILE" || {
+        warn -c boot "Interrupted Update transaction markers changed before retirement; maintenance ownership was retained"
+        return 75
+      }
+    merv_owner_v2_matches "$_update_recovery_lock" "$$" \
+      "$_update_recovery_start" "$_update_recovery_nonce" /proc || {
+        warn -c boot "Interrupted Update maintenance owner changed before marker retirement"
+        return 75
+      }
+    merv_update_journal_clear && merv_update_quiesce_clear || {
+      warn -c boot "Interrupted Update reinstall completed but transaction-marker retirement failed; maintenance ownership was retained"
+      return 75
+    }
+    merv_maintenance_direct_release || {
+      warn -c boot "Interrupted Update markers retired but exact maintenance-owner release failed"
+      return 75
+    }
+    info -c boot "Interrupted Update reinstall completed; transaction markers retired under wrapper-owned maintenance lock"
     return 0
   fi
 

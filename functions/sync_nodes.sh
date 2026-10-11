@@ -39,6 +39,10 @@ fi
     error -c cli,vlan "Unable to load the Update lifecycle state library; refusing node synchronization"
     exit 75
 }
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || {
+    error -c cli,vlan "Unable to load the mutation-admission library; refusing node synchronization"
+    exit 75
+}
 if [ "${MERV_MAINTENANCE_SYNC:-0}" = "1" ]; then
     if ! merv_maintenance_sync_context_valid; then
         error -c cli,vlan "Sync refused: maintenance synchronization lacks an authenticated owner"
@@ -105,6 +109,14 @@ if [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
             "${_sync_lock_ack_action}" "Preparing synchronization..."
         merv_action_progress_fail "The node synchronization owner context was invalid; no work was started."
         action_ack_lock_failure "$MERV_PROGRESS_TOKEN" "$_sync_lock_ack_action" 4 global >/dev/null 2>&1 || :
+        merv_action_lock_leave "$_sync_action_lock_path" "$_sync_action_lock_nonce" \
+            "$_sync_action_lock_start" "$_sync_action_lock_mode" >/dev/null 2>&1 || :
+        exit 75
+    fi
+    if ! merv_mutation_admit_action "$_sync_action_lock_path"; then
+        merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_sync_lock_ack_action" \
+            "${_sync_lock_ack_action}" "Preparing synchronization..."
+        merv_action_progress_fail "Node synchronization was refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})."
         merv_action_lock_leave "$_sync_action_lock_path" "$_sync_action_lock_nonce" \
             "$_sync_action_lock_start" "$_sync_action_lock_mode" >/dev/null 2>&1 || :
         exit 75
@@ -465,10 +477,18 @@ settings/settings.json
 settings/var_settings.sh 
 settings/log_settings.sh 
 settings/lib_json.sh
+settings/lib_boot_integrity.sh
 settings/lib_identity.sh
+settings/lib_selftest_context.sh
 settings/lib_owner_lock.sh
 settings/lib_ssh_trust.sh
 settings/lib_action_lock.sh
+settings/lib_full_fence.sh
+settings/lib_continuation.sh
+settings/lib_mutation_admission.sh
+settings/lib_maintenance_quiesce.sh
+functions/mervlan_node_mutate.sh
+functions/mervlan_full_cleanup.sh
 settings/lib_debug.sh
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh
@@ -502,6 +522,21 @@ functions/settings_reconcile.sh
 templates/mervlan_templates.sh
 "
 
+# The NODE bootstrap transports only this reviewed code cohort.  It lives in
+# private volatile storage and supplies code only; MERV_BASE, M, F, action R,
+# /proc, and all active destinations remain canonical on the target.
+SYNC_NODE_ADMISSION_FILES="
+settings/lib_selftest_context.sh
+settings/lib_identity.sh
+settings/lib_owner_lock.sh
+settings/lib_action_lock.sh
+settings/lib_update_state.sh
+settings/lib_full_fence.sh
+settings/lib_continuation.sh
+settings/lib_mutation_admission.sh
+functions/mervlan_node_mutate.sh
+"
+
 # Developer tools are present on development/test branches only. Keep this
 # manifest separate from the production runtime manifest, but feed it through
 # the same copy, staging, verification, and permission pipeline when present.
@@ -525,6 +560,8 @@ functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
 functions/mervlan_node_runner.sh
+functions/mervlan_node_mutate.sh
+functions/mervlan_full_cleanup.sh
 functions/post_apply_worker.sh
 functions/collect_local_clients.sh
 functions/heal_event.sh
@@ -542,10 +579,16 @@ FILES_TO_COPY_CHMOD_644="
 settings/var_settings.sh 
 settings/log_settings.sh 
 settings/lib_json.sh  
+settings/lib_boot_integrity.sh
 settings/lib_identity.sh
+settings/lib_selftest_context.sh
 settings/lib_owner_lock.sh
 settings/lib_ssh_trust.sh
 settings/lib_action_lock.sh
+settings/lib_full_fence.sh
+settings/lib_continuation.sh
+settings/lib_mutation_admission.sh
+settings/lib_maintenance_quiesce.sh
 settings/lib_debug.sh 
 settings/lib_ssh.sh
 settings/lib_ssid_filter.sh 
@@ -612,6 +655,159 @@ sync_job_tmp_path() {
 
 sync_expected_path() {
     sync_job_tmp_path "merv_sync_expected_$1"
+}
+
+sync_node_admission_digest() {
+    merv_ssh_digest "$1"
+}
+
+sync_node_admission_freeze() {
+    _snaf_node=$1
+    case "${SYNC_RUN_ID:-}" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+    case "${SYNC_RUN_ID%-*}:${SYNC_RUN_ID#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+    case "$_snaf_node" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+    [ -d /tmp ] && [ ! -L /tmp ] || return 1
+
+    if type merv_selftest_context_valid >/dev/null 2>&1 && merv_selftest_context_valid; then
+        SYNC_NODE_ADMISSION_LOCAL_PARENT="$MERV_SELFTEST_CONTEXT_ROOT/sync-admission.$SYNC_RUN_ID.$_snaf_node.$$"
+    else
+        SYNC_NODE_ADMISSION_LOCAL_PARENT="/tmp/.mervlan-sync-admission.$SYNC_RUN_ID.$_snaf_node.$$"
+    fi
+    [ ! -e "$SYNC_NODE_ADMISSION_LOCAL_PARENT" ] &&
+      [ ! -L "$SYNC_NODE_ADMISSION_LOCAL_PARENT" ] || return 1
+    ( umask 077; mkdir "$SYNC_NODE_ADMISSION_LOCAL_PARENT" ) || return 1
+    SYNC_NODE_ADMISSION_LOCAL_OWNED=1
+    chmod 700 "$SYNC_NODE_ADMISSION_LOCAL_PARENT" || return 1
+    SYNC_NODE_ADMISSION_LOCAL_ROOT="$SYNC_NODE_ADMISSION_LOCAL_PARENT/cohort"
+    mkdir "$SYNC_NODE_ADMISSION_LOCAL_ROOT" || return 1
+    mkdir "$SYNC_NODE_ADMISSION_LOCAL_ROOT/settings" "$SYNC_NODE_ADMISSION_LOCAL_ROOT/functions" 2>/dev/null || return 1
+    chmod 700 "$SYNC_NODE_ADMISSION_LOCAL_ROOT" "$SYNC_NODE_ADMISSION_LOCAL_ROOT/settings" \
+      "$SYNC_NODE_ADMISSION_LOCAL_ROOT/functions" || return 1
+
+    _snaf_manifest=
+    for _snaf_rel in $SYNC_NODE_ADMISSION_FILES; do
+        _snaf_src="$MERV_BASE/$_snaf_rel"
+        _snaf_dst="$SYNC_NODE_ADMISSION_LOCAL_ROOT/$_snaf_rel"
+        [ -f "$_snaf_src" ] && [ ! -L "$_snaf_src" ] && [ -s "$_snaf_src" ] || return 1
+        cp "$_snaf_src" "$_snaf_dst" 2>/dev/null && chmod 600 "$_snaf_dst" || return 1
+        [ -s "$_snaf_dst" ] || return 1
+        /bin/sh -n "$_snaf_dst" >/dev/null 2>&1 || return 1
+        _snaf_digest=$(sync_node_admission_digest "$_snaf_dst") || return 1
+        case "$_snaf_digest" in *[!0-9a-f]*|'') return 1 ;; esac
+        [ "${#_snaf_digest}" -eq 64 ] || return 1
+        _snaf_manifest="$_snaf_manifest$_snaf_rel|$_snaf_digest
+"
+    done
+    # The consumers parse one record per line through a here-document. Keep
+    # the serialized manifest newline-free at the end so the terminator does
+    # not create a spurious empty record.
+    _snaf_manifest=${_snaf_manifest%?}
+    MERV_NODE_MUTATE_SOURCE_ROOT=$SYNC_NODE_ADMISSION_LOCAL_ROOT
+    MERV_NODE_MUTATE_BOOTSTRAP_ROOT="/tmp/.mervlan-node-admission.$SYNC_RUN_ID.$_snaf_node/cohort"
+    MERV_NODE_MUTATE_BOOTSTRAP_RUN=$SYNC_RUN_ID
+    MERV_NODE_MUTATE_BOOTSTRAP_NODE=$_snaf_node
+    MERV_NODE_MUTATE_BOOTSTRAP_MANIFEST=$_snaf_manifest
+    MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE=1
+    return 0
+}
+
+sync_node_admission_stage_command() {
+    _snasc_run=$1
+    _snasc_node=$2
+    _snasc_parent=$3
+    _snasc_files=$4
+    _snasc_script=$(cat <<'EOF'
+set -f
+_run=$1 _node=$2 _parent=$3 _expected=$4
+case "$_run" in [0-9]*-[0-9]*) ;; *) exit 64 ;; esac
+case "${_run%-*}:${_run#*-}" in *[!0-9:]*|:*|*::*) exit 64 ;; esac
+case "$_node" in 1|2|3|4|5|6|7|8|9|10) ;; *) exit 64 ;; esac
+_root="/tmp/.mervlan-node-admission.$_run.$_node"
+[ "$_parent" = "$_root" ] && [ -d /tmp ] && [ ! -L /tmp ] || exit 64
+if [ -e "$_root" ] || [ -L "$_root" ]; then
+    cat >/dev/null || exit 1
+    printf 'NODE_ADMISSION_WORKSPACE_EXISTS\n' >&2
+    exit 73
+fi
+umask 077
+mkdir "$_root" || exit 1
+chmod 700 "$_root" || exit 1
+printf 'format=mervlan-node-admission-v1\nrun=%s\nnode=%s\n' "$_run" "$_node" > "$_root/.owner" || exit 1
+chmod 600 "$_root/.owner" || exit 1
+mkdir "$_root/cohort" || exit 1
+mkdir "$_root/cohort/settings" "$_root/cohort/functions" || exit 1
+chmod 700 "$_root/cohort" "$_root/cohort/settings" "$_root/cohort/functions" || exit 1
+_archive="$_root/.cohort.tar"
+_list="$_root/.cohort.list"
+[ ! -e "$_archive" ] && [ ! -L "$_archive" ] && [ ! -e "$_list" ] && [ ! -L "$_list" ] || exit 1
+_verbose="$_root/.cohort.verbose"
+cat > "$_archive" || exit 1
+[ -s "$_archive" ] || exit 1
+chmod 600 "$_archive" || exit 1
+tar -tf "$_archive" > "$_list" 2>/dev/null || exit 1
+_seen=' '
+_count=0
+while IFS= read -r _entry || [ -n "$_entry" ]; do
+    case " $_expected " in *" $_entry "*) ;; *) exit 1 ;; esac
+    case "$_seen" in *" $_entry "*) exit 1 ;; esac
+    _seen="$_seen$_entry "
+    _count=$((_count + 1))
+done < "$_list"
+[ "$_count" -eq 9 ] || exit 1
+for _entry in $_expected; do case "$_seen" in *" $_entry "*) ;; *) exit 1 ;; esac; done
+tar -tvf "$_archive" 2>/dev/null | awk '{print substr($1,1,1) "|" $NF}' > "$_verbose" || exit 1
+_verbose_count=0
+while IFS='|' read -r _type _entry || [ -n "$_type$_entry" ]; do
+    [ "$_type" = - ] || exit 1
+    case "$_seen" in *" $_entry "*) : ;; *) exit 1 ;; esac
+    _verbose_count=$((_verbose_count + 1))
+done < "$_verbose"
+[ "$_verbose_count" -eq 9 ] || exit 1
+tar -xf "$_archive" -C "$_root/cohort" 2>/dev/null || exit 1
+for _entry in $_expected; do
+    _file="$_root/cohort/$_entry"
+    [ -f "$_file" ] && [ ! -L "$_file" ] && [ -s "$_file" ] || exit 1
+done
+for _entry in $_expected; do chmod 600 "$_root/cohort/$_entry" || exit 1; done
+rm -f "$_archive" "$_list" "$_verbose" || exit 1
+printf 'NODE_ADMISSION_WORKSPACE_STAGED\n'
+EOF
+)
+    printf 'sh -c %s node-admission-bootstrap %s %s %s %s' \
+      "$(merv_ssh_shell_quote_word "$_snasc_script")" \
+      "$(merv_ssh_shell_quote_word "$_snasc_run")" \
+      "$(merv_ssh_shell_quote_word "$_snasc_node")" \
+      "$(merv_ssh_shell_quote_word "$_snasc_parent")" \
+      "$(merv_ssh_shell_quote_word "$_snasc_files")"
+}
+
+sync_node_admission_stage() {
+    _snas_node=$1
+    _snas_ip=$2
+    _snas_parent=${MERV_NODE_MUTATE_BOOTSTRAP_ROOT%/cohort}
+    _snas_archive="$SYNC_NODE_ADMISSION_LOCAL_PARENT/.cohort.tar"
+    ( cd "$SYNC_NODE_ADMISSION_LOCAL_ROOT" && tar -cf "$_snas_archive" $SYNC_NODE_ADMISSION_FILES ) || return 1
+    chmod 600 "$_snas_archive" 2>/dev/null || { rm -f "$_snas_archive"; return 1; }
+    _snas_command=$(sync_node_admission_stage_command "$SYNC_RUN_ID" "$_snas_node" \
+      "$_snas_parent" "$SYNC_NODE_ADMISSION_FILES") || { rm -f "$_snas_archive"; return 1; }
+    _snas_output=$(merv_ssh_stream_stdin "$_snas_node" "$_snas_ip" "$_snas_command" < "$_snas_archive" 2>/dev/null)
+    _snas_rc=$?
+    rm -f "$_snas_archive" 2>/dev/null || :
+    [ "$_snas_rc" -eq 0 ] || return 1
+    case "$_snas_output" in *NODE_ADMISSION_WORKSPACE_STAGED*) ;; *) return 1 ;; esac
+    merv_ssh_node_mutate_exec "$_snas_node" "$_snas_ip" verify-bootstrap-cohort \
+      "$SYNC_RUN_ID" "$_snas_node" >/dev/null
+}
+
+sync_node_admission_local_cleanup() {
+    [ "${SYNC_NODE_ADMISSION_LOCAL_OWNED:-0}" = 1 ] || return 0
+    for _snalc_rel in $SYNC_NODE_ADMISSION_FILES; do
+        rm -f "$SYNC_NODE_ADMISSION_LOCAL_ROOT/$_snalc_rel" 2>/dev/null || return 1
+    done
+    rmdir "$SYNC_NODE_ADMISSION_LOCAL_ROOT/settings" "$SYNC_NODE_ADMISSION_LOCAL_ROOT/functions" \
+      "$SYNC_NODE_ADMISSION_LOCAL_ROOT" "$SYNC_NODE_ADMISSION_LOCAL_PARENT" 2>/dev/null || return 1
+    SYNC_NODE_ADMISSION_LOCAL_OWNED=0
+    return 0
 }
 
 # ========================================================================== #
@@ -827,11 +1023,10 @@ check_remote_jffs_status() {
 enable_jffs_and_reboot() {
     node_ip="$1"
     node_id="${2:-?}"
-    remote_cmd="nvram set jffs2_on=1; nvram set jffs2_scripts=1; nvram commit; (sleep 2; reboot) &"
 
     info -c cli,vlan "Enabling JFFS and scripts on NODE${node_id} ($node_ip) and triggering reboot"
     dbg_log "enable_jffs_and_reboot issuing remote command"
-    dbg_var node_ip remote_cmd
+    dbg_var node_ip node_id
 
     if [ "$DRY_RUN" = "yes" ]; then
         info -c cli,vlan "[DRY-RUN] Would enable JFFS on $node_ip"
@@ -839,8 +1034,13 @@ enable_jffs_and_reboot() {
     fi
 
     # Use wrapper with short timeout since reboot will kill connection
-    MERV_SSH_TIMEOUT=5 merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" >/dev/null 2>&1
+    _ejr_saved_timeout=${MERV_SSH_TIMEOUT:-10}
+    MERV_SSH_TIMEOUT=5
+    export MERV_SSH_TIMEOUT
+    merv_ssh_node_mutate_exec "$node_id" "$node_ip" jffs-enable-reboot >/dev/null 2>&1
     rc=$?
+    MERV_SSH_TIMEOUT=$_ejr_saved_timeout
+    export MERV_SSH_TIMEOUT
     # rc=5 (ssh-failed) is expected since connection drops during reboot
     if [ $rc -eq 0 ] || [ $rc -eq 5 ]; then
         info -c cli,vlan "✓ JFFS enable commands sent to NODE${node_id} ($node_ip)"
@@ -961,22 +1161,8 @@ ensure_jffs_ready() {
 prepare_remote_sync_stage() {
     _prss_ip="$1"
     _prss_id="$2"
-    _prss_stage_cmd="$3"
-    [ -n "$_prss_stage_cmd" ] || return 1
-    # Do not let a failed stage mkdir be masked by the readiness marker.
-    # _prss_stage_cmd is assembled exclusively from validated run/node paths.
-    _prss_checked_stage_cmd="if ! ( $_prss_stage_cmd ); then exit 70; fi"
-    _prss_cmd="
-        jffs_on=\$(nvram get jffs2_on 2>/dev/null);
-        jffs_scripts=\$(nvram get jffs2_scripts 2>/dev/null);
-        if [ \"\$jffs_on\" = 1 ] && [ \"\$jffs_scripts\" = 1 ]; then
-            $_prss_checked_stage_cmd
-            printf 'SYNC_STAGE_READY\\n';
-        else
-            printf 'SYNC_STAGE_JFFS_NOT_READY|%s|%s\\n' \"\$jffs_on\" \"\$jffs_scripts\";
-        fi
-    "
-    _prss_output=$(merv_ssh_exec "$_prss_id" "$_prss_ip" "$_prss_cmd" 2>/dev/null) || {
+    _prss_output=$(merv_ssh_node_mutate_exec "$_prss_id" "$_prss_ip" \
+        prepare-stage "$SYNC_RUN_ID" "$_prss_id" 2>/dev/null) || {
         merv_ssh_skip_log "$_prss_id" "$_prss_ip" "check JFFS and prepare staged sync directory"
         return 1
     }
@@ -992,10 +1178,19 @@ prepare_remote_sync_stage() {
     if ! ensure_jffs_ready "$_prss_ip" "$_prss_id"; then
         return 1
     fi
-    if ! merv_ssh_exec "$_prss_id" "$_prss_ip" "$_prss_checked_stage_cmd" >/dev/null 2>&1; then
+    # JFFS remediation may reboot the NODE, which clears its volatile
+    # admission-code workspace. Re-stage the same frozen cohort before the
+    # next active operation.
+    sync_node_admission_stage "$_prss_id" "$_prss_ip" || {
+        error -c cli,vlan "Could not restore the verified NODE$_prss_id admission cohort after JFFS remediation"
+        return 1
+    }
+    _prss_output=$(merv_ssh_node_mutate_exec "$_prss_id" "$_prss_ip" \
+        prepare-stage "$SYNC_RUN_ID" "$_prss_id" 2>/dev/null) || {
         merv_ssh_skip_log "$_prss_id" "$_prss_ip" "prepare staged sync directory after JFFS remediation"
         return 1
-    fi
+    }
+    printf '%s\n' "$_prss_output" | grep -qx 'SYNC_STAGE_READY' || return 1
     info -c cli,vlan "✓ Ensured remote directories on NODE$_prss_id ($_prss_ip)"
     return 0
 }
@@ -1022,7 +1217,8 @@ create_remote_dirs_for_file() {
             info -c cli,vlan "[DRY-RUN] Would create directory $remote_dir on NODE${node_id} ($node_ip)"
             return 0
         fi
-        if merv_ssh_exec "$node_id" "$node_ip" "mkdir -p '$remote_dir'" >/dev/null 2>&1; then
+        if merv_ssh_node_mutate_exec "$node_id" "$node_ip" \
+            make-stage-dir "$SYNC_RUN_ID" "$node_id" "${remote_dir#"$REMOTE_MERV_BASE"/}" >/dev/null 2>&1; then
             info -c cli,vlan "✓ Created directory $remote_dir on NODE${node_id} ($node_ip)"
             return 0
         else
@@ -1085,7 +1281,8 @@ copy_file_to_node() {
         rm -f "$_cfn_node_hw_src" 2>/dev/null
 
         # Stream prepared file via SSH
-        if merv_ssh_stream_file "$node_id" "$node_ip" "$_cfn_tmp" "$remote_path"; then
+        if merv_ssh_node_mutate_stream "$node_id" "$node_ip" \
+            put-stage-settings "$SYNC_RUN_ID" "$node_id" < "$_cfn_tmp"; then
             _cfn_exp_size=$(wc -c < "$_cfn_tmp" 2>/dev/null | tr -cd '0-9')
             _cfn_exp_algo=""; _cfn_exp_digest=""
             if merv_has sha256sum; then
@@ -1115,7 +1312,13 @@ copy_file_to_node() {
     # which runs after nodeenable. This ensures new model definitions from updates are always applied.
 
     # Use cat piped with timeout wrapper for atomic file transfer
-    if merv_ssh_stream_file "$node_id" "$node_ip" "$MERV_BASE/$file" "$remote_path"; then
+    if [ "$file" = settings/settings.json ]; then
+        _copy_op=put-stage-settings
+    else
+        _copy_op=put-stage-file
+    fi
+    if merv_ssh_node_mutate_stream "$node_id" "$node_ip" \
+        "$_copy_op" "$SYNC_RUN_ID" "$node_id" "$file" < "$MERV_BASE/$file"; then
         info -c cli,vlan "✓ Copied $file to NODE${node_id} ($node_ip):$remote_path"
         return 0
     else
@@ -1151,7 +1354,8 @@ copy_batch_to_node() {
     # extracts under the same base. Subdirectories are pre-created in the main
     # loop's mkdir so extraction never fails on a missing path.
     if (cd "$MERV_BASE" && tar -cf - $batch_files 2>/dev/null) | \
-        merv_ssh_stream_stdin "$node_id" "$node_ip" "cd '$REMOTE_MERV_BASE' && tar -xf - 2>/dev/null" 2>/dev/null; then
+        merv_ssh_node_mutate_stream "$node_id" "$node_ip" extract-stage \
+            "$SYNC_RUN_ID" "$node_id" $batch_files 2>/dev/null; then
         info -c cli,vlan "✓ Batch copy successful to NODE${node_id} ($node_ip)"
         return 0
     else
@@ -1269,14 +1473,7 @@ batch_set_remote_permissions() {
         return 0
     fi
 
-    for _bsp_f in $FILES_TO_COPY_CHMOD; do
-        _bsp_c755="$_bsp_c755 '$REMOTE_MERV_BASE/$_bsp_f'"
-    done
-    for _bsp_f in $FILES_TO_COPY_CHMOD_644; do
-        _bsp_c644="$_bsp_c644 '$REMOTE_MERV_BASE/$_bsp_f'"
-    done
-
-    if merv_ssh_exec "$node_id" "$node_ip" "chmod 755 $_bsp_c755 2>/dev/null; chmod 644 $_bsp_c644 2>/dev/null; echo 'chmod_done'" 2>/dev/null | grep -q "chmod_done"; then
+    if set_node_flag_remote "$node_ip" "$node_id"; then
         info -c cli,vlan "✓ Permissions set (755/644) on NODE${node_id} ($node_ip)"
     else
         warn -c cli,vlan "⚠️  chmod may not have completed on NODE${node_id} ($node_ip)"
@@ -1581,32 +1778,23 @@ verify_batch_on_node() { sync_verify_batch_manifest "$@"; }
 batch_set_remote_permissions() {
     _bsp_ip="$1"; _bsp_id="$2"
     [ "$DRY_RUN" = yes ] && return 0
-    _bsp_cmd="set -e;"
-    for _bsp_file in $FILES_TO_COPY_CHMOD; do
-        case "$_bsp_file" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-        _bsp_cmd="$_bsp_cmd chmod 755 '$REMOTE_MERV_BASE/$_bsp_file';"
-    done
-    for _bsp_file in $FILES_TO_COPY_CHMOD_644; do
-        case "$_bsp_file" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-        _bsp_cmd="$_bsp_cmd chmod 644 '$REMOTE_MERV_BASE/$_bsp_file';"
-    done
-    _bsp_cmd="$_bsp_cmd printf 'PERMISSIONS_OK\\n'"
-    _bsp_result=$(merv_ssh_exec "$_bsp_id" "$_bsp_ip" "$_bsp_cmd" 2>/dev/null) || return 1
-    printf '%s\n' "$_bsp_result" | tail -n 1 | grep -qx 'PERMISSIONS_OK'
+    set_node_flag_remote "$_bsp_ip" "$_bsp_id"
 }
 
 set_remote_permissions() {
     _srp_ip="$1"; _srp_file="$2"; _srp_id="${3:-?}"
     case "$_srp_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
     [ "$DRY_RUN" = yes ] && return 0
-    merv_ssh_exec "$_srp_id" "$_srp_ip" "chmod 755 '$REMOTE_MERV_BASE/$_srp_file'" >/dev/null 2>&1
+    merv_ssh_node_mutate_exec "$_srp_id" "$_srp_ip" chmod-stage-file \
+        "$SYNC_RUN_ID" "$_srp_id" 755 "$_srp_file" >/dev/null 2>&1
 }
 
 set_remote_permissions_644() {
     _srp_ip="$1"; _srp_file="$2"; _srp_id="${3:-?}"
     case "$_srp_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
     [ "$DRY_RUN" = yes ] && return 0
-    merv_ssh_exec "$_srp_id" "$_srp_ip" "chmod 644 '$REMOTE_MERV_BASE/$_srp_file'" >/dev/null 2>&1
+    merv_ssh_node_mutate_exec "$_srp_id" "$_srp_ip" chmod-stage-file \
+        "$SYNC_RUN_ID" "$_srp_id" 644 "$_srp_file" >/dev/null 2>&1
 }
 
 # set_remote_permissions — Apply 755 to scripts that must be executable
@@ -1624,8 +1812,8 @@ set_remote_permissions() {
         return 0
     fi
 
-    result=$(merv_ssh_exec "$node_id" "$node_ip" "chmod 755 '$remote_file' 2>/dev/null; echo 'permissions_set'" 2>/dev/null)
-    if echo "$result" | grep -q "permissions_set"; then
+    if merv_ssh_node_mutate_exec "$node_id" "$node_ip" chmod-stage-file \
+        "$SYNC_RUN_ID" "$node_id" 755 "$file" >/dev/null 2>&1; then
         info -c cli,vlan "✓ Set executable permissions for $file on NODE${node_id} ($node_ip)"
         return 0
     else
@@ -1649,8 +1837,8 @@ set_remote_permissions_644() {
         return 0
     fi
 
-    result=$(merv_ssh_exec "$node_id" "$node_ip" "chmod 644 '$remote_file' 2>/dev/null; echo 'permissions_644_set'" 2>/dev/null)
-    if echo "$result" | grep -q "permissions_644_set"; then
+    if merv_ssh_node_mutate_exec "$node_id" "$node_ip" chmod-stage-file \
+        "$SYNC_RUN_ID" "$node_id" 644 "$file" >/dev/null 2>&1; then
         info -c cli,vlan "✓ Set 644 permissions for $file on NODE${node_id} ($node_ip)"
         return 0
     else
@@ -1666,62 +1854,37 @@ set_remote_permissions() {
     _srp_ip="$1"; _srp_file="$2"; _srp_id="${3:-?}"
     case "$_srp_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
     [ "$DRY_RUN" = yes ] && return 0
-    merv_ssh_exec "$_srp_id" "$_srp_ip" "chmod 755 '$REMOTE_MERV_BASE/$_srp_file'" >/dev/null 2>&1
+    merv_ssh_node_mutate_exec "$_srp_id" "$_srp_ip" chmod-stage-file \
+        "$SYNC_RUN_ID" "$_srp_id" 755 "$_srp_file" >/dev/null 2>&1
 }
 
 set_remote_permissions_644() {
     _srp_ip="$1"; _srp_file="$2"; _srp_id="${3:-?}"
     case "$_srp_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
     [ "$DRY_RUN" = yes ] && return 0
-    merv_ssh_exec "$_srp_id" "$_srp_ip" "chmod 644 '$REMOTE_MERV_BASE/$_srp_file'" >/dev/null 2>&1
+    merv_ssh_node_mutate_exec "$_srp_id" "$_srp_ip" chmod-stage-file \
+        "$SYNC_RUN_ID" "$_srp_id" 644 "$_srp_file" >/dev/null 2>&1
 }
 
 # set_node_flag_remote — Mark remote device as MerVLAN node via settings.json
 set_node_flag_remote() {
     node_ip="$1"
     node_id="$2"
-    _snfr_c755=""
-    _snfr_c644=""
-    for _snfr_file in $FILES_TO_COPY_CHMOD; do
-        case "$_snfr_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-        _snfr_c755="$_snfr_c755 '$REMOTE_MERV_BASE/$_snfr_file'"
-    done
-    for _snfr_file in $FILES_TO_COPY_CHMOD_644; do
-        case "$_snfr_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-        _snfr_c644="$_snfr_c644 '$REMOTE_MERV_BASE/$_snfr_file'"
-    done
-    remote_cmd="set -e;"
-    [ -z "$_snfr_c755" ] || remote_cmd="$remote_cmd chmod 755 $_snfr_c755;"
-    [ -z "$_snfr_c644" ] || remote_cmd="$remote_cmd chmod 644 $_snfr_c644;"
-    remote_cmd="$remote_cmd
-        SETTINGS_FILE='$REMOTE_MERV_BASE/settings/settings.json';
-        if [ ! -f \"\$SETTINGS_FILE\" ]; then
-            echo 'settings-missing' >&2
-            exit 1
-        fi
-        if [ ! -f '$REMOTE_MERV_BASE/settings/lib_json.sh' ]; then
-            echo 'lib-json-missing' >&2
-            exit 1
-        fi
-        . '$REMOTE_MERV_BASE/settings/lib_json.sh' 2>/dev/null || {
-            echo 'lib-json-load-failed' >&2
-            exit 1
-        }
-        json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
-        json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
-        json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
-        json_get_flag NODE_ID \"none\" \"\$SETTINGS_FILE\"
-    "
-
-    dbg_log "Setting IS_NODE flag remotely"
-    dbg_var node_ip remote_cmd
-
     if [ "$DRY_RUN" = "yes" ]; then
         info -c cli,vlan "[DRY-RUN] Would set IS_NODE=1 and NODE_ID=$node_id in settings.json on NODE${node_id} ($node_ip)"
         return 0
     fi
 
-    node_flags=$(merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd" 2>/dev/null)
+    set -- "$SYNC_RUN_ID" "$node_id"
+    for _snfr_file in $FILES_TO_COPY_CHMOD; do
+        case "$_snfr_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+        set -- "$@" "755:$_snfr_file"
+    done
+    for _snfr_file in $FILES_TO_COPY_CHMOD_644; do
+        case "$_snfr_file" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+        set -- "$@" "644:$_snfr_file"
+    done
+    node_flags=$(merv_ssh_node_mutate_exec "$node_id" "$node_ip" finalize-stage "$@" 2>/dev/null)
     node_flag_value=$(echo "$node_flags" | tail -n 2 | head -n 1 | tr -d '\r\n')
     node_id_value=$(echo "$node_flags" | tail -n 1 | tr -d '\r\n')
 
@@ -1787,13 +1950,10 @@ pull_node_hardware() {
         _pnh_output="$3"
     else
       info -c cli,vlan "Running hw_probe on NODE${_pnh_id} ($_pnh_ip)..."
-      _pnh_output=$(merv_ssh_exec "$_pnh_id" "$_pnh_ip" "
-        cd '$MERV_BASE/functions' && ./hw_probe.sh >/dev/null 2>&1 || echo 'HWPROBE_FAILED'
-        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null
-        printf 'PRODUCTID=%s\n' \"\$(json_get_section_value Hardware PRODUCTID '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
-        printf 'MAX_ETH_PORTS=%s\n' \"\$(json_get_section_value Hardware MAX_ETH_PORTS '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
-        printf 'LAN_PORT_LABEL_OVERRIDES=%s\n' \"\$(json_get_section_value Hardware LAN_PORT_LABEL_OVERRIDES '$MERV_BASE/settings/settings.json' 2>/dev/null)\"
-      " 2>/dev/null)
+      _pnh_output=$(merv_ssh_node_mutate_exec "$_pnh_id" "$_pnh_ip" hardware-probe 2>/dev/null) || {
+        warn -c cli,vlan "⚠️ hw_probe failed on NODE${_pnh_id} ($_pnh_ip)"
+        return 1
+      }
     fi
 
     if printf '%s' "$_pnh_output" | grep -q 'HWPROBE_FAILED'; then
@@ -1851,115 +2011,12 @@ cleanup_remote_stage() {
     _crs_id="$2"
     _crs_stage="$3"
     _crs_old="$4"
-    case "$_crs_stage" in /jffs/addons/mervlan_backups/.mervlan.new.*) ;; *) return 1 ;; esac
-    case "$_crs_old" in /jffs/addons/mervlan_backups/.mervlan.old.*) ;; *) return 1 ;; esac
+    case "$_crs_stage" in "/jffs/addons/mervlan_backups/.mervlan.new.${SYNC_RUN_ID}.${_crs_id}") ;; *) return 1 ;; esac
+    case "$_crs_old" in "/jffs/addons/mervlan_backups/.mervlan.old.${SYNC_RUN_ID}.${_crs_id}") ;; *) return 1 ;; esac
     # Remove only the unactivated new tree. A surviving old tree means rollback
     # did not finish and must remain available for manual recovery.
-    merv_ssh_exec "$_crs_id" "$_crs_ip" "rm -rf '$_crs_stage'" >/dev/null 2>&1
-}
-
-# Emit the node-local boot reconciliation helper used by staged activation.
-# nodeenable deliberately installs only the node baseline; this helper then
-# converges the effective boot lifecycle to the synchronized BOOT_ENABLED value
-# before the new tree is reported as active.
-sync_node_boot_reconcile_body() {
-    cat <<'EOF'
-        sync_node_boot_reconcile() {
-            _snbr_active="$1"
-            SYNC_NODE_BOOT_DETAIL=""
-            SYNC_NODE_BOOT_REPORT=""
-            _snbr_services="${SCRIPTS_DIR:-/jffs/scripts}/services-start"
-            _snbr_event="${SCRIPTS_DIR:-/jffs/scripts}/service-event"
-            _snbr_settings="$_snbr_active/settings/settings.json"
-            _snbr_boot="$_snbr_active/functions/mervlan_boot.sh"
-            _snbr_json="$_snbr_active/settings/lib_json.sh"
-
-            if [ ! -f "$_snbr_settings" ] || [ ! -f "$_snbr_json" ]; then
-                SYNC_NODE_BOOT_DETAIL=settings-cohort-missing
-                return 1
-            fi
-            if ! . "$_snbr_json" 2>/dev/null; then
-                SYNC_NODE_BOOT_DETAIL=settings-helper-load-failed
-                return 1
-            fi
-
-            _snbr_desired=$(json_get_flag BOOT_ENABLED "" "$_snbr_settings" 2>/dev/null | tr -d '[:space:]')
-            case "$_snbr_desired" in
-                1) _snbr_action=enable ;;
-                0) _snbr_action=disable ;;
-                *)
-                    SYNC_NODE_BOOT_DETAIL=invalid-boot-enabled
-                    return 1
-                    ;;
-            esac
-
-            MERV_NODE_CONTEXT=1 sh "$_snbr_boot" "$_snbr_action" >/dev/null 2>&1
-            _snbr_action_rc=$?
-            if [ "$_snbr_action_rc" -ne 0 ]; then
-                SYNC_NODE_BOOT_DETAIL="boot-${_snbr_action}-failed"
-                return 1
-            fi
-
-            _snbr_report=$(MERV_NODE_CONTEXT=1 sh "$_snbr_boot" report 2>/dev/null | tail -1)
-            SYNC_NODE_BOOT_REPORT="$_snbr_report"
-            _snbr_marker_count() {
-                _snbr_marker_file="$1"
-                _snbr_marker_text="$2"
-                [ -f "$_snbr_marker_file" ] || { printf '0\n'; return 0; }
-                _snbr_marker_result=$(grep -cF "$_snbr_marker_text" "$_snbr_marker_file" 2>/dev/null) || :
-                printf '%s\n' "${_snbr_marker_result:-0}"
-            }
-            _snbr_manager_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start [tpl=services-start.v')
-            _snbr_addon_count=$(_snbr_marker_count "$_snbr_services" '### >>> MERVLAN START: services-start [tpl=services-start-addon.v')
-            _snbr_event_count=$(_snbr_marker_count "$_snbr_event" '### >>> MERVLAN START: service-event [tpl=service-event.v')
-
-            case " $_snbr_report " in
-                *" addon=node-on "*|*" addon=node-on"*) : ;;
-                *) SYNC_NODE_BOOT_DETAIL=node-baseline-not-active; return 1 ;;
-            esac
-            case " $_snbr_report " in
-                *" event=active "*|*" event=active"*) : ;;
-                *) SYNC_NODE_BOOT_DETAIL=node-service-event-not-active; return 1 ;;
-            esac
-            [ "$_snbr_addon_count" = 1 ] || {
-                SYNC_NODE_BOOT_DETAIL=node-addon-block-invalid
-                return 1
-            }
-            [ "$_snbr_event_count" = 1 ] || {
-                SYNC_NODE_BOOT_DETAIL=node-service-event-block-invalid
-                return 1
-            }
-
-            if [ "$_snbr_desired" = 1 ]; then
-                case " $_snbr_report " in
-                    *" boot=1 "*|*" boot=1"*) : ;;
-                    *) SYNC_NODE_BOOT_DETAIL=node-boot-state-mismatch; return 1 ;;
-                esac
-                case " $_snbr_report " in
-                    *" cron=present "*|*" cron=present"*) : ;;
-                    *) SYNC_NODE_BOOT_DETAIL=node-cron-missing; return 1 ;;
-                esac
-                [ "$_snbr_manager_count" = 1 ] || {
-                    SYNC_NODE_BOOT_DETAIL=node-manager-block-missing
-                    return 1
-                }
-            else
-                case " $_snbr_report " in
-                    *" boot=0 "*|*" boot=0"*) : ;;
-                    *) SYNC_NODE_BOOT_DETAIL=node-boot-state-mismatch; return 1 ;;
-                esac
-                case " $_snbr_report " in
-                    *" cron=absent "*|*" cron=absent"*) : ;;
-                    *) SYNC_NODE_BOOT_DETAIL=node-cron-present; return 1 ;;
-                esac
-                [ "$_snbr_manager_count" = 0 ] || {
-                    SYNC_NODE_BOOT_DETAIL=node-manager-block-present
-                    return 1
-                }
-            fi
-            return 0
-        }
-EOF
+    merv_ssh_node_mutate_exec "$_crs_id" "$_crs_ip" cleanup-stage \
+        "$SYNC_RUN_ID" "$_crs_id" >/dev/null 2>&1
 }
 
 activate_staged_node() {
@@ -1972,87 +2029,6 @@ activate_staged_node() {
     case "$_asn_stage" in /jffs/addons/mervlan_backups/.mervlan.new.*) ;; *) return 1 ;; esac
     case "$_asn_old" in /jffs/addons/mervlan_backups/.mervlan.old.*) ;; *) return 1 ;; esac
 
-    _asn_cmd="
-        active='$MERV_BASE'; stage='$_asn_stage'; old='$_asn_old';
-        $(sync_node_boot_reconcile_body)
-        test -f \"\$stage/settings/settings.json\" || exit 21;
-        test -x \"\$stage/functions/mervlan_boot.sh\" || exit 22;
-        rm -rf \"\$old\" 2>/dev/null || exit 23;
-        had_old=0;
-        if [ -d \"\$active\" ]; then mv \"\$active\" \"\$old\" || exit 24; had_old=1; fi;
-        if [ \"\$had_old\" = 1 ] && [ -d \"\$old/tmp\" ]; then
-            if ! mkdir -p \"\$stage/tmp\" 2>/dev/null; then exit 23; fi;
-            for db in \"\$old\"/tmp/*.db; do
-                [ -f \"\$db\" ] || continue;
-                if ! cp -p \"\$db\" \"\$stage/tmp/\" 2>/dev/null; then exit 23; fi;
-            done;
-        fi;
-        if ! mv \"\$stage\" \"\$active\"; then
-            if [ \"\$had_old\" = 1 ] && ! mv \"\$old\" \"\$active\" 2>/dev/null; then exit 27; fi;
-            exit 25;
-        fi;
-        nodeenable_rc=0; nodeenable_out=\"\";
-        if cd \"\$active/functions\"; then
-            nodeenable_out=\$(MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local 2>&1);
-            nodeenable_rc=\$?;
-        else
-            nodeenable_rc=24;
-        fi;
-        boot_rc=1; boot_detail=\"\"; report=\"\";
-        if [ \"\$nodeenable_rc\" -eq 0 ]; then
-            sync_node_boot_reconcile \"\$active\";
-            boot_rc=\$?;
-            boot_detail=\"\${SYNC_NODE_BOOT_DETAIL:-}\";
-            report=\"\${SYNC_NODE_BOOT_REPORT:-}\";
-        fi;
-        if [ \"\$nodeenable_rc\" -eq 0 ] && [ \"\$boot_rc\" -eq 0 ]; then
-            if ! rm -rf \"\$old\" 2>/dev/null; then echo STAGED_NODE_CLEANUP_FAILED; exit 28; fi;
-            printf 'NODE_REPORT=%s\\n' \"\$report\";
-            echo STAGED_NODE_OK;
-            hwprobe_rc=1;
-            if cd \"\$active/functions\"; then
-                MERV_NODE_CONTEXT=1 sh ./hw_probe.sh >/dev/null 2>&1;
-                hwprobe_rc=\$?;
-            fi;
-            if [ \"\$hwprobe_rc\" -eq 0 ] && . \"\$active/settings/lib_json.sh\" 2>/dev/null; then
-                printf 'PRODUCTID=%s\\n' \"\$(json_get_section_value Hardware PRODUCTID \"\$active/settings/settings.json\" 2>/dev/null)\";
-                printf 'MAX_ETH_PORTS=%s\\n' \"\$(json_get_section_value Hardware MAX_ETH_PORTS \"\$active/settings/settings.json\" 2>/dev/null)\";
-                printf 'LAN_PORT_LABEL_OVERRIDES=%s\\n' \"\$(json_get_section_value Hardware LAN_PORT_LABEL_OVERRIDES \"\$active/settings/settings.json\" 2>/dev/null)\";
-            else
-                echo HWPROBE_FAILED;
-            fi;
-            exit 0;
-        fi;
-        node_msg=\$(printf '%s\\n' \"\${boot_detail:-\$nodeenable_out}\" | tail -n 1 | tr -cd 'A-Za-z0-9_.,:=-' | cut -c 1-120);
-        printf 'STAGED_NODE_FAIL nodeenable_rc=%s boot_rc=%s report=%s detail=%s\\n' \"\$nodeenable_rc\" \"\$boot_rc\" \"\$report\" \"\$node_msg\";
-        if ! rm -rf \"\$stage\" 2>/dev/null; then exit 26; fi;
-        mv \"\$active\" \"\$stage\" 2>/dev/null || exit 26;
-        if [ \"\$had_old\" = 1 ]; then
-            if mv \"\$old\" \"\$active\" 2>/dev/null; then
-                if ! cd \"\$active/functions\" 2>/dev/null; then
-                    echo STAGED_NODE_ROLLBACK_FAIL stage=nodeenable;
-                    exit 28;
-                fi;
-                nodeenable_out=\$(MERV_NODE_CONTEXT=1 sh ./mervlan_boot.sh nodeenable --local 2>&1);
-                nodeenable_rc=\$?;
-                if [ \"\$nodeenable_rc\" -ne 0 ]; then
-                    echo STAGED_NODE_ROLLBACK_FAIL stage=nodeenable;
-                    exit 28;
-                fi;
-                sync_node_boot_reconcile \"\$active\";
-                if [ \"\$?\" -ne 0 ]; then
-                    rollback_detail=\$(printf '%s\\n' \"\${SYNC_NODE_BOOT_DETAIL:-boot-reconcile-failed}\" | tr -cd 'A-Za-z0-9_.,:=-' | cut -c 1-120);
-                    printf 'STAGED_NODE_ROLLBACK_FAIL stage=boot-reconcile detail=%s\\n' \"\$rollback_detail\";
-                    exit 28;
-                fi;
-                if ! rm -rf \"\$stage\" 2>/dev/null; then exit 29; fi;
-                printf 'STAGED_NODE_ROLLBACK_OK\\n'; exit 0;
-            fi;
-            exit 27;
-        fi;
-        if ! mv \"\$stage\" \"\$active\" 2>/dev/null; then exit 26; fi;
-        printf 'STAGED_NODE_ROLLBACK_OK\\n'; exit 0
-    "
     # Staged activation is one bounded remote transaction containing nodeenable,
     # the synchronized boot-state reconciliation, a report, and hardware
     # probing.  That composed operation can legitimately exceed the generic
@@ -2063,7 +2039,8 @@ activate_staged_node() {
     _asn_activation_ssh_timeout=30
     MERV_SSH_TIMEOUT="$_asn_activation_ssh_timeout"
     export MERV_SSH_TIMEOUT
-    _asn_result=$(merv_ssh_exec "$_asn_id" "$_asn_ip" "$_asn_cmd" 2>/dev/null)
+    _asn_result=$(merv_ssh_node_mutate_exec "$_asn_id" "$_asn_ip" \
+        activate-full "$SYNC_RUN_ID" "$_asn_id" 2>/dev/null)
     _asn_rc=$?
     MERV_SSH_TIMEOUT="$_asn_saved_ssh_timeout"
     export MERV_SSH_TIMEOUT
@@ -2091,31 +2068,8 @@ activate_staged_node_settings_only() {
     _asns_id="$2"
     _asns_stage="$3"
 
-    _asns_cmd="
-        base=\"\${MERV_BASE:-/jffs/addons/mervlan}\";
-        target=\"\$base/settings/settings.json\";
-        pub_dir=\"/www/user/mervlan/settings\";
-        pub_target=\"\$pub_dir/settings.json\";
-        staged=\"$_asns_stage/settings/settings.json\";
-        temp=\"\$target.sync.${_asns_id}.\$\$\";
-        test -f \"\$staged\" || exit 21;
-        mkdir -p \"\$base/settings\" 2>/dev/null || exit 23;
-        rm -f \"\$temp\" 2>/dev/null || :;
-        cp \"\$staged\" \"\$temp\" || exit 25;
-        chmod 600 \"\$temp\" 2>/dev/null || :;
-        test -s \"\$temp\" || { rm -f \"\$temp\" 2>/dev/null || :; exit 26; };
-        cmp -s \"\$staged\" \"\$temp\" || { rm -f \"\$temp\" 2>/dev/null || :; exit 27; };
-        mv \"\$temp\" \"\$target\" || { rm -f \"\$temp\" 2>/dev/null || :; exit 28; };
-        cmp -s \"\$staged\" \"\$target\" || exit 29;
-        if [ -d \"\$pub_dir\" ]; then
-            cp \"\$target\" \"\$pub_target\" 2>/dev/null;
-            chmod 644 \"\$pub_target\" 2>/dev/null || :;
-        fi;
-        rm -rf \"$_asns_stage\" 2>/dev/null || :;
-        echo STAGED_SETTINGS_OK;
-        exit 0;
-    "
-    _asns_result=$(merv_ssh_exec "$_asns_id" "$_asns_ip" "$_asns_cmd" 2>/dev/null)
+    _asns_result=$(merv_ssh_node_mutate_exec "$_asns_id" "$_asns_ip" \
+        activate-settings "$SYNC_RUN_ID" "$_asns_id" 2>/dev/null)
     _asns_rc=$?
     if echo "$_asns_result" | grep -q STAGED_SETTINGS_OK; then
         return 0
@@ -2129,7 +2083,7 @@ activate_staged_node_settings_only() {
 # MAIN SYNCHRONIZATION LOOP — Iterate nodes and orchestrate copy workflow    #
 # ========================================================================== #
 
-sync_node_worker() {
+_sync_node_worker_body() {
     node_id="$1"
     node_canonical_ip="$2"
     node_ip="$node_canonical_ip"
@@ -2171,23 +2125,26 @@ sync_node_worker() {
     MERV_SSH_SKIP_PING=1
     export MERV_SSH_SKIP_PING
 
+    # The source cohort is frozen by the outer worker wrapper. Transfer it to
+    # a private inert NODE /tmp workspace and verify it before the first
+    # action-R guarded operation (including JFFS remediation). A dry run keeps
+    # its historical read-only behavior and does not stage target files.
+    if [ "$DRY_RUN" != "yes" ]; then
+        if ! sync_node_admission_stage "$node_id" "$node_ip"; then
+            error -c cli,vlan "Sync: NODE${node_id} admission bootstrap could not be staged and verified"
+            return 1
+        fi
+    fi
+
     REMOTE_MERV_BASE="/jffs/addons/mervlan_backups/.mervlan.new.${SYNC_RUN_ID}.${node_id}"
     REMOTE_MERV_OLD="/jffs/addons/mervlan_backups/.mervlan.old.${SYNC_RUN_ID}.${node_id}"
     
-    # Create base remote directories (addon path + runtime folders + the addon
-    # subdirs that tar will extract into — pre-creating them means batch extract
-    # never fails on a missing path, and we drop the per-file dir-creation SSH).
-    REMOTE_DEV_TOOLS_DIRS=""
-    if [ -n "$DEV_TOOLS_FILES_TO_COPY" ]; then
-        REMOTE_DEV_TOOLS_DIRS="'$REMOTE_MERV_BASE/dev-tools/tests/router' '$REMOTE_MERV_BASE/dev-tools/safety'"
-    fi
-    remote_mkdir_cmd="mkdir -p '/jffs/addons/mervlan_backups'; rm -rf '$REMOTE_MERV_BASE' '$REMOTE_MERV_OLD' 2>/dev/null || exit 70; mkdir -p '$REMOTE_MERV_BASE/settings' '$REMOTE_MERV_BASE/functions' '$REMOTE_MERV_BASE/templates' $REMOTE_DEV_TOOLS_DIRS '$TMPDIR' '$LOGDIR' '$LOCKDIR' '$RESULTDIR' '$CHANGES' '$COLLECTDIR'"
     dbg_log "Ensuring base directories on node"
-    dbg_var node_ip remote_mkdir_cmd
+    dbg_var node_ip REMOTE_MERV_BASE REMOTE_MERV_OLD
     if [ "$DRY_RUN" = "yes" ]; then
         info -c cli,vlan "[DRY-RUN] Would ensure remote directories on NODE${node_id} ($node_ip)"
     else
-        if ! prepare_remote_sync_stage "$node_ip" "$node_id" "$remote_mkdir_cmd"; then
+        if ! prepare_remote_sync_stage "$node_ip" "$node_id"; then
             return 1
         fi
         SYNC_STAGE_DIRS_PREPARED=1
@@ -2321,6 +2278,38 @@ sync_node_worker() {
     info -c cli,vlan "--- Completed node: $node_ip (NODE${node_id}) ---"
     echo ""
     return 0
+}
+
+sync_node_worker() {
+    local MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE MERV_NODE_MUTATE_SOURCE_ROOT
+    local MERV_NODE_MUTATE_BOOTSTRAP_ROOT MERV_NODE_MUTATE_BOOTSTRAP_RUN
+    local MERV_NODE_MUTATE_BOOTSTRAP_NODE MERV_NODE_MUTATE_BOOTSTRAP_MANIFEST
+    local SYNC_NODE_ADMISSION_LOCAL_PARENT SYNC_NODE_ADMISSION_LOCAL_ROOT
+    local SYNC_NODE_ADMISSION_LOCAL_OWNED
+    unset MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE MERV_NODE_MUTATE_SOURCE_ROOT
+    unset MERV_NODE_MUTATE_BOOTSTRAP_ROOT MERV_NODE_MUTATE_BOOTSTRAP_RUN
+    unset MERV_NODE_MUTATE_BOOTSTRAP_NODE MERV_NODE_MUTATE_BOOTSTRAP_MANIFEST
+    unset SYNC_NODE_ADMISSION_LOCAL_PARENT SYNC_NODE_ADMISSION_LOCAL_ROOT
+    SYNC_NODE_ADMISSION_LOCAL_OWNED=0
+    if ! sync_node_admission_freeze "${1:-}"; then
+        error -c cli,vlan "Sync: unable to freeze the NODE${1:-?} admission-code cohort"
+        sync_node_admission_local_cleanup >/dev/null 2>&1 || :
+        return 1
+    fi
+    _snw_rc=0
+    _sync_node_worker_body "$@" || _snw_rc=$?
+    if [ "$_snw_rc" -eq 0 ]; then
+        if ! merv_ssh_node_mutate_exec "${1:-}" "${2:-}" cleanup-bootstrap-cohort \
+          "$SYNC_RUN_ID" "${1:-}" >/dev/null 2>&1; then
+            error -c cli,vlan "Sync: NODE${1:-?} completed but its exact inert admission workspace could not be retired"
+            _snw_rc=1
+        fi
+    fi
+    sync_node_admission_local_cleanup || {
+        error -c cli,vlan "Sync: local frozen NODE admission cohort cleanup failed"
+        _snw_rc=1
+    }
+    return "$_snw_rc"
 }
 
 # Publish only copies of selected worker logs for the WebUI.  The public tree

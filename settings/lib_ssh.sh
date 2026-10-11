@@ -34,6 +34,17 @@ if ! type merv_has >/dev/null 2>&1; then
 fi
 # ---- end shim ----
 
+# Shared digest for admission cohorts. ASUSWRT may lack the command builtin.
+# Standalone pre-authentication programs use direct digest fallbacks because
+# they cannot source this installed library before verifying its bytes.
+merv_ssh_digest() {
+  _msd_hash=$(sha256sum "$1" 2>/dev/null | awk '{print $1}')
+  [ "${#_msd_hash}" = 64 ] || _msd_hash=$(openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}')
+  [ "${#_msd_hash}" = 64 ] || return 1
+  case "$_msd_hash" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$_msd_hash"
+}
+
 # Only set if not already set (allows override for testing)
 : "${MERV_BASE:?MERV_BASE must be set before sourcing folder_settings.sh}"
 [ -n "${LIB_JSON_LOADED:-}" ] || {
@@ -45,6 +56,14 @@ if [ -z "${LIB_SSH_TRUST_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_ssh_trust
   . "$MERV_BASE/settings/lib_ssh_trust.sh"
 fi
 [ -n "${LIB_SSH_LOADED:-}" ] && return 0 2>/dev/null
+
+# Bootstrap code-source context is installed only by Sync's worker after it
+# freezes and verifies a private per-node cohort. Never accept inherited
+# environment state as that transaction context.
+unset MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE MERV_NODE_MUTATE_SOURCE_ROOT
+unset MERV_NODE_MUTATE_BOOTSTRAP_ROOT MERV_NODE_MUTATE_BOOTSTRAP_RUN
+unset MERV_NODE_MUTATE_BOOTSTRAP_NODE MERV_NODE_MUTATE_BOOTSTRAP_MANIFEST
+
 [ -n "${SETTINGS_FILE:-}" ] || SETTINGS_FILE="$MERV_BASE/settings/settings.json"
 # ========================================================================== #
 # AUTO-DETECT NODES/AP - Auto-detect nodes and access points interactively   #
@@ -1155,8 +1174,9 @@ merv_ssh_client_run() {
 
 merv_ssh_sanitize_diagnostic() {
   # Collapse all line/control separators before the bounded printable filter;
-  # retained evidence is data, never a shell fragment or sourced marker.
-  printf '%s' "${1:-}" | tr '\r\n\t' '   ' | tr -cd '[:print:]' | cut -c 1-512
+  # retained evidence is data, never a shell fragment or sourced marker. C
+  # locale makes the 512-character cut an ASCII byte bound on every host.
+  printf '%s' "${1:-}" | LC_ALL=C tr '\r\n\t' '   ' | LC_ALL=C tr -cd '[:print:]' | LC_ALL=C cut -c 1-512
 }
 
 merv_ssh_diagnostic_root() {
@@ -1756,6 +1776,288 @@ merv_ssh_stream_stdin() {
   _msss_rc=$?
   merv_ssh_release_known_host || { MERV_SSH_LAST_REASON="known-host-temp-cleanup-failed"; MERV_SSH_LAST_DETAIL="NODE${_msss_node:-?} private SSH client home cleanup failed"; return 5; }
   return "$_msss_rc"
+}
+
+# Validate the closed remote mutation protocol before constructing the SSH
+# command.  The NODE still repeats every check and owns its canonical action R;
+# these checks are only an input-safety boundary on MAIN.
+merv_ssh_node_mutate_args_valid() {
+  _msnm_op=${1:-}
+  shift 2>/dev/null || :
+  case "$_msnm_op" in
+    verify-bootstrap-cohort|cleanup-bootstrap-cohort)
+      [ "${MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE:-0}" = 1 ] && [ "$#" -eq 2 ] || return 1
+      case "$1" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+      case "${1%-*}:${1#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+      case "$2" in 1|2|3|4|5|6|7|8|9|10) return 0 ;; *) return 1 ;; esac
+      ;;
+    jffs-enable-reboot|hardware-probe) [ "$#" -eq 0 ] || return 1 ;;
+    prepare-stage|put-stage-settings|cleanup-stage|activate-settings|activate-full)
+      [ "$#" -eq 2 ] || return 1
+      case "$1" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+      case "${1%-*}:${1#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+      case "$2" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+      ;;
+    extract-stage)
+      [ "$#" -ge 3 ] || return 1
+      case "$1" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+      case "${1%-*}:${1#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+      case "$2" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+      shift 2
+      for _msnm_arg do
+        case "$_msnm_arg" in ''|/*|*..*|*/|*//|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+      done
+      ;;
+    make-stage-dir|put-stage-file)
+      [ "$#" -eq 3 ] || return 1
+      case "$1" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+      case "${1%-*}:${1#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+      case "$2" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+      case "$3" in ''|/*|*..*|*/|*//|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+      ;;
+    chmod-stage-file)
+      [ "$#" -eq 4 ] || return 1
+      case "$1" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+      case "${1%-*}:${1#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+      case "$2" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+      case "$3" in 644|755) ;; *) return 1 ;; esac
+      case "$4" in ''|/*|*..*|*/|*//|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+      ;;
+    finalize-stage)
+      [ "$#" -ge 2 ] || return 1
+      case "$1" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+      case "${1%-*}:${1#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+      case "$2" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+      shift 2
+      for _msnm_arg do
+        case "$_msnm_arg" in 755:*|644:*) _msnm_path=${_msnm_arg#*:} ;; *) return 1 ;; esac
+        case "$_msnm_path" in ''|/*|*..*|*/|*//|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+      done
+      ;;
+    execute-ensure-settings|execute-put-settings|execute-node-flags)
+      [ "$#" -eq 1 ] || return 1
+      case "$1" in 1|2|3|4|5|6|7|8|9|10) return 0 ;; *) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+merv_ssh_node_mutate_bootstrap_valid() {
+  _msbv_op=${1:-}
+  shift 2>/dev/null || :
+  [ "${MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE:-0}" = 1 ] || return 1
+  _msbv_run=${MERV_NODE_MUTATE_BOOTSTRAP_RUN:-}
+  _msbv_node=${MERV_NODE_MUTATE_BOOTSTRAP_NODE:-}
+  _msbv_source=${MERV_NODE_MUTATE_SOURCE_ROOT:-}
+  _msbv_remote=${MERV_NODE_MUTATE_BOOTSTRAP_ROOT:-}
+  _msbv_manifest=${MERV_NODE_MUTATE_BOOTSTRAP_MANIFEST:-}
+  case "$_msbv_run" in [0-9]*-[0-9]*) ;; *) return 1 ;; esac
+  case "${_msbv_run%-*}:${_msbv_run#*-}" in *[!0-9:]*|:*|*::*) return 1 ;; esac
+  case "$_msbv_node" in 1|2|3|4|5|6|7|8|9|10) ;; *) return 1 ;; esac
+  if [ -n "${SYNC_RUN_ID:-}" ]; then [ "$_msbv_run" = "$SYNC_RUN_ID" ] || return 1; fi
+  case "$_msbv_source" in
+    "/tmp/.mervlan-sync-admission.$_msbv_run.$_msbv_node."*/cohort) ;;
+    *)
+      type merv_selftest_context_path_allowed >/dev/null 2>&1 &&
+        merv_selftest_context_path_allowed "$_msbv_source" || return 1
+      ;;
+  esac
+  case "$_msbv_remote" in
+    "/tmp/.mervlan-node-admission.$_msbv_run.$_msbv_node/cohort")
+      [ -d /tmp ] && [ ! -L /tmp ] || return 1
+      ;;
+    *)
+      type merv_selftest_context_path_allowed >/dev/null 2>&1 &&
+        merv_selftest_context_path_allowed "$_msbv_remote" || return 1
+      ;;
+  esac
+  [ -d "$_msbv_source" ] && [ ! -L "$_msbv_source" ] || return 1
+  [ -f "$_msbv_source/functions/mervlan_node_mutate.sh" ] &&
+    [ ! -L "$_msbv_source/functions/mervlan_node_mutate.sh" ] || return 1
+  case "$_msbv_source" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  _msbv_parent=${_msbv_source%/cohort}
+  [ "$_msbv_parent/cohort" = "$_msbv_source" ] &&
+    [ -d "$_msbv_parent" ] && [ ! -L "$_msbv_parent" ] || return 1
+  _msbv_parent_mode=$(LC_ALL=C ls -ldn "$_msbv_parent" 2>/dev/null | awk 'NR == 1 {print $1}')
+  [ "$_msbv_parent_mode" = drwx------ ] || return 1
+  _msbv_walk=/
+  _msbv_rest=${_msbv_source#/}
+  while [ -n "$_msbv_rest" ]; do
+    case "$_msbv_rest" in */*) _msbv_part=${_msbv_rest%%/*}; _msbv_rest=${_msbv_rest#*/} ;; *) _msbv_part=$_msbv_rest; _msbv_rest= ;; esac
+    case "$_msbv_part" in ''|.|..) return 1 ;; esac
+    _msbv_walk=${_msbv_walk%/}/$_msbv_part
+    [ ! -L "$_msbv_walk" ] || return 1
+  done
+  _msbv_dir_mode=$(LC_ALL=C ls -ldn "$_msbv_source" 2>/dev/null | awk 'NR == 1 {print $1}')
+  [ "$_msbv_dir_mode" = drwx------ ] || return 1
+  for _msbv_subdir in settings functions; do
+    [ -d "$_msbv_source/$_msbv_subdir" ] && [ ! -L "$_msbv_source/$_msbv_subdir" ] || return 1
+    _msbv_sub_mode=$(LC_ALL=C ls -ldn "$_msbv_source/$_msbv_subdir" 2>/dev/null | awk 'NR == 1 {print $1}')
+    [ "$_msbv_sub_mode" = drwx------ ] || return 1
+  done
+  _msbv_expected='settings/lib_selftest_context.sh settings/lib_identity.sh settings/lib_owner_lock.sh settings/lib_action_lock.sh settings/lib_update_state.sh settings/lib_full_fence.sh settings/lib_continuation.sh settings/lib_mutation_admission.sh functions/mervlan_node_mutate.sh'
+  _msbv_seen=' '
+  _msbv_count=0
+  while IFS='|' read -r _msbv_rel _msbv_digest _msbv_extra || [ -n "$_msbv_rel$_msbv_digest$_msbv_extra" ]; do
+    [ -z "$_msbv_extra" ] || return 1
+    case " $_msbv_expected " in *" $_msbv_rel "*) ;; *) return 1 ;; esac
+    case "$_msbv_seen" in *" $_msbv_rel "*) return 1 ;; esac
+    case "$_msbv_digest" in *[!0-9a-f]*|'') return 1 ;; esac
+    [ "${#_msbv_digest}" -eq 64 ] || return 1
+    _msbv_file="$_msbv_source/$_msbv_rel"
+    [ -f "$_msbv_file" ] && [ ! -L "$_msbv_file" ] && [ -s "$_msbv_file" ] || return 1
+    _msbv_file_mode=$(LC_ALL=C ls -ldn "$_msbv_file" 2>/dev/null | awk 'NR == 1 {print $1}')
+    [ "$_msbv_file_mode" = -rw------- ] || return 1
+    _msbv_actual=$(merv_ssh_digest "$_msbv_file") || return 1
+    [ "$_msbv_actual" = "$_msbv_digest" ] || return 1
+    /bin/sh -n "$_msbv_file" >/dev/null 2>&1 || return 1
+    _msbv_seen="$_msbv_seen$_msbv_rel "
+    _msbv_count=$((_msbv_count + 1))
+  done <<EOF
+$_msbv_manifest
+EOF
+  [ "$_msbv_count" -eq 9 ] || return 1
+  for _msbv_rel in $_msbv_expected; do
+    case "$_msbv_seen" in *" $_msbv_rel "*) ;; *) return 1 ;; esac
+  done
+  for _msbv_file in "$_msbv_source/settings"/.[!.]* "$_msbv_source/settings"/..?* "$_msbv_source/settings"/*; do
+    [ -e "$_msbv_file" ] || [ -L "$_msbv_file" ] || continue
+    case "${_msbv_file##*/}" in
+      lib_selftest_context.sh|lib_identity.sh|lib_owner_lock.sh|lib_action_lock.sh|lib_update_state.sh|lib_full_fence.sh|lib_continuation.sh|lib_mutation_admission.sh) ;;
+      *) return 1 ;;
+    esac
+  done
+  for _msbv_file in "$_msbv_source/functions"/.[!.]* "$_msbv_source/functions"/..?* "$_msbv_source/functions"/*; do
+    [ -e "$_msbv_file" ] || [ -L "$_msbv_file" ] || continue
+    [ "${_msbv_file##*/}" = mervlan_node_mutate.sh ] || return 1
+  done
+  [ "${#_msbv_manifest}" -lt 2048 ] || return 1
+  case "$_msbv_op" in
+    verify-bootstrap-cohort|cleanup-bootstrap-cohort)
+      [ "$#" -eq 2 ] && [ "$1" = "$_msbv_run" ] && [ "$2" = "$_msbv_node" ] || return 1
+      ;;
+    jffs-enable-reboot|hardware-probe) [ "$#" -eq 0 ] || return 1 ;;
+    prepare-stage|put-stage-settings|cleanup-stage|activate-settings|activate-full)
+      [ "$#" -eq 2 ] && [ "$1" = "$_msbv_run" ] && [ "$2" = "$_msbv_node" ] || return 1
+      ;;
+    extract-stage|make-stage-dir|put-stage-file|finalize-stage|chmod-stage-file)
+      [ "$#" -ge 2 ] && [ "$1" = "$_msbv_run" ] && [ "$2" = "$_msbv_node" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+merv_ssh_shell_quote_word() {
+  _mssq_value=${1-}
+  _mssq_escaped=$(printf '%s' "$_mssq_value" | sed "s/'/'\\\\''/g") || return 1
+  printf "'%s'" "$_mssq_escaped"
+}
+
+merv_ssh_node_mutate_command() {
+  _msnm_op=${1:-}
+  shift 2>/dev/null || :
+  merv_ssh_node_mutate_args_valid "$_msnm_op" "$@" || {
+    MERV_SSH_LAST_REASON=invalid-node-mutation-request
+    MERV_SSH_LAST_DETAIL="Remote node mutation operation or arguments were invalid"
+    return 2
+  }
+  _msnm_source_root=${MERV_BASE:-/jffs/addons/mervlan}
+  if [ "${MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE:-0}" = 1 ]; then
+    merv_ssh_node_mutate_bootstrap_valid "$_msnm_op" "$@" || {
+      MERV_SSH_LAST_REASON=node-admission-bootstrap-context-invalid
+      MERV_SSH_LAST_DETAIL="Private NODE admission cohort context was invalid"
+      return 2
+    }
+    _msnm_source_root=$MERV_NODE_MUTATE_SOURCE_ROOT
+  fi
+  _msnm_helper=$_msnm_source_root/functions/mervlan_node_mutate.sh
+  [ -f "$_msnm_helper" ] && [ ! -L "$_msnm_helper" ] && [ -r "$_msnm_helper" ] || {
+    MERV_SSH_LAST_REASON=node-mutation-helper-missing
+    MERV_SSH_LAST_DETAIL="Local node mutation dispatcher is missing or obstructed"
+    return 2
+  }
+  _msnm_program=$(cat "$_msnm_helper" 2>/dev/null) || return 2
+  if [ "${MERV_NODE_MUTATE_BOOTSTRAP_ACTIVE:-0}" = 1 ]; then
+    _msnm_remote_name=mervlan_node_mutate_remote
+    if type merv_selftest_context_valid >/dev/null 2>&1 && merv_selftest_context_valid; then
+      _msnm_remote_name=$MERV_NODE_MUTATE_BOOTSTRAP_ROOT/functions/mervlan_node_mutate.sh
+    fi
+    _msnm_command="MERV_NODE_MUTATE_LIB_ROOT=$(merv_ssh_shell_quote_word "$MERV_NODE_MUTATE_BOOTSTRAP_ROOT") MERV_NODE_MUTATE_LIB_MANIFEST=$(merv_ssh_shell_quote_word "$MERV_NODE_MUTATE_BOOTSTRAP_MANIFEST") sh -c $(merv_ssh_shell_quote_word "$_msnm_program") $(merv_ssh_shell_quote_word "$_msnm_remote_name")"
+  else
+    _msnm_command="sh -c $(merv_ssh_shell_quote_word "$_msnm_program") mervlan_node_mutate_remote"
+  fi
+  _msnm_command="$_msnm_command $(merv_ssh_shell_quote_word "$_msnm_op")"
+  for _msnm_arg do
+    _msnm_command="$_msnm_command $(merv_ssh_shell_quote_word "$_msnm_arg")"
+  done
+  printf '%s\n' "$_msnm_command"
+}
+
+merv_ssh_node_mutate_result() {
+  _msnr_op=$1
+  _msnr_output=$2
+  _msnr_status=$(printf '%s\n' "$_msnr_output" | tail -n 1 | tr -d '\r')
+  case "$_msnr_status" in
+    "NODE_MUTATION_OK|$_msnr_op")
+      printf '%s\n' "$_msnr_output" | sed '$d'
+      return 0
+      ;;
+    NODE_MUTATION_BLOCKED\|*)
+      MERV_SSH_LAST_REASON=node-mutation-admission-blocked
+      MERV_SSH_LAST_DETAIL=$(printf '%s' "$_msnr_status" | tr -cd 'A-Za-z0-9._|-')
+      printf '%s\n' "$_msnr_output"
+      return 73
+      ;;
+    "NODE_MUTATION_RELEASE_FAILED|$_msnr_op")
+      MERV_SSH_LAST_REASON=node-mutation-owner-release-failed
+      MERV_SSH_LAST_DETAIL="NODE action owner release could not be proven"
+      printf '%s\n' "$_msnr_output"
+      return 74
+      ;;
+    "NODE_MUTATION_INVALID_ARGUMENTS")
+      MERV_SSH_LAST_REASON=invalid-node-mutation-request
+      MERV_SSH_LAST_DETAIL="NODE mutation dispatcher rejected its arguments"
+      printf '%s\n' "$_msnr_output"
+      return 2
+      ;;
+    NODE_MUTATION_FAILED\|"$_msnr_op"\|*)
+      MERV_SSH_LAST_REASON=node-mutation-operation-failed
+      MERV_SSH_LAST_DETAIL=$(printf '%s' "$_msnr_status" | tr -cd 'A-Za-z0-9._|-')
+      printf '%s\n' "$_msnr_output" | sed '$d'
+      return 74
+      ;;
+    *)
+      MERV_SSH_LAST_REASON=node-mutation-result-unverified
+      MERV_SSH_LAST_DETAIL="NODE mutation returned no exact run result"
+      printf '%s\n' "$_msnr_output"
+      return 75
+      ;;
+  esac
+}
+
+merv_ssh_node_mutate_exec() {
+  _msne_node=$1; _msne_ip=$2; _msne_op=$3
+  shift 3
+  _msne_command=$(merv_ssh_node_mutate_command "$_msne_op" "$@") || return $?
+  _msne_saved_retry=${MERV_SSH_EXEC_RETRY_SAFE:-0}
+  MERV_SSH_EXEC_RETRY_SAFE=0
+  _msne_output=$(merv_ssh_exec "$_msne_node" "$_msne_ip" "$_msne_command")
+  _msne_rc=$?
+  MERV_SSH_EXEC_RETRY_SAFE=$_msne_saved_retry
+  [ "$_msne_rc" -eq 0 ] || return "$_msne_rc"
+  merv_ssh_node_mutate_result "$_msne_op" "$_msne_output"
+}
+
+merv_ssh_node_mutate_stream() {
+  _msns_node=$1; _msns_ip=$2; _msns_op=$3
+  shift 3
+  _msns_command=$(merv_ssh_node_mutate_command "$_msns_op" "$@") || return $?
+  _msns_output=$(merv_ssh_stream_stdin "$_msns_node" "$_msns_ip" "$_msns_command")
+  _msns_rc=$?
+  [ "$_msns_rc" -eq 0 ] || return "$_msns_rc"
+  merv_ssh_node_mutate_result "$_msns_op" "$_msns_output"
 }
 
 merv_ssh_test() {

@@ -10,11 +10,18 @@ SERVICE="$BASE_DIR/functions/service-event-handler.sh"
 TEST_ROOT="/tmp/mervlan_tmp/selftest.repair-terminal-order.$$"
 umask 077
 mkdir -p "$TEST_ROOT/functions" || exit 1
+mkdir -p "$TEST_ROOT/settings" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+
+cat > "$TEST_ROOT/settings/lib_mutation_admission.sh" <<'EOF'
+merv_continuation_activate_wait() { return 0; }
+merv_mutation_admit_action() { return 0; }
+EOF
+chmod 700 "$TEST_ROOT/settings/lib_mutation_admission.sh" || exit 1
 
 awk '
   /^dispatch_if_executable\(\) \{/ { in_dispatch=1 }
-  in_dispatch { print }
+ in_dispatch { print }
   in_dispatch && $0 == "}" { exit }
 ' "$SERVICE" > "$TEST_ROOT/dispatch_fn.sh" || exit 1
 . "$TEST_ROOT/dispatch_fn.sh" || exit 1
@@ -56,6 +63,18 @@ merv_action_lock_export_child_context() {
   return 0
 }
 merv_action_lock_clear_child_context() { return 0; }
+merv_mutation_admit_action() { return 0; }
+merv_continuation_publish_pending() {
+  MERV_CONTINUATION_TOKEN=repair-dispatch-test
+  MERV_CONTINUATION_STATE=pending
+  export MERV_CONTINUATION_TOKEN
+  return 0
+}
+merv_continuation_path() { printf '%s/settings/fake-lease\n' "$MERV_BASE"; }
+merv_continuation_read() { return 0; }
+merv_continuation_bind_child() { MERV_CONTINUATION_STATE=active; return 0; }
+merv_continuation_retire() { return 0; }
+merv_continuation_cancel_pending() { return 0; }
 merv_identity_proc_start() {
   [ "${IDENTITY_MODE:-ok}" = ok ] || return 1
   printf '1\n'

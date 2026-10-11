@@ -11,6 +11,8 @@ fi
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LOG_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/log_settings.sh"
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || exit 75
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 if ! type merv_action_progress_init >/dev/null 2>&1; then
   merv_action_progress_init() { :; }
@@ -20,12 +22,32 @@ if ! type merv_action_progress_init >/dev/null 2>&1; then
   merv_action_progress_fail() { :; }
 fi
 
-merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macrefresh_vlanmgr" "Rebuild MAC Shield" \
-  "Preparing MAC shield refresh..."
 if merv_update_mutation_blocked; then
-  merv_action_progress_fail "MAC shield refresh refused while Update maintenance is active"
   exit 75
 fi
+
+MAC_REFRESH_ACTION_LOCK="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+if ! merv_action_lock_enter "$MAC_REFRESH_ACTION_LOCK"; then
+  error -c cli,vlan "MAC Refresh refused because its action owner could not be acquired or verified"
+  exit 75
+fi
+MAC_REFRESH_ACTION_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+MAC_REFRESH_ACTION_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+MAC_REFRESH_ACTION_START="${MERV_ACTION_LOCK_START:-}"
+merv_action_lock_export_child_context || {
+  merv_action_lock_leave "$MAC_REFRESH_ACTION_LOCK" "$MAC_REFRESH_ACTION_NONCE" \
+    "$MAC_REFRESH_ACTION_START" "$MAC_REFRESH_ACTION_MODE" >/dev/null 2>&1 || :
+  exit 75
+}
+if ! merv_mutation_admit_action "$MAC_REFRESH_ACTION_LOCK"; then
+  error -c cli,vlan "MAC Refresh refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+  merv_action_lock_leave "$MAC_REFRESH_ACTION_LOCK" "$MAC_REFRESH_ACTION_NONCE" \
+    "$MAC_REFRESH_ACTION_START" "$MAC_REFRESH_ACTION_MODE" >/dev/null 2>&1 || :
+  exit 75
+fi
+
+merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "macrefresh_vlanmgr" "Rebuild MAC Shield" \
+  "Preparing MAC shield refresh..."
 
 # Allow the synchronous observation worker and MAC snapshot code to publish
 # detailed milestones into this same backend-owned progress record.
@@ -40,6 +62,11 @@ merv_action_progress_update prepare 0 0 5 \
 mac_refresh_progress_exit() {
   _mr_rc=$?
   trap - EXIT
+  if ! merv_action_lock_leave "$MAC_REFRESH_ACTION_LOCK" "$MAC_REFRESH_ACTION_NONCE" \
+       "$MAC_REFRESH_ACTION_START" "$MAC_REFRESH_ACTION_MODE" >/dev/null 2>&1; then
+    error -c cli,vlan "MAC Refresh could not release its action owner; recovery is required"
+    [ "$_mr_rc" -ne 0 ] || _mr_rc=75
+  fi
   if [ "$_mr_rc" -eq 0 ]; then
     merv_action_progress_complete "MAC shield refresh complete"
   else

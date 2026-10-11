@@ -29,6 +29,7 @@ fi
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 # =========================================== End of MerVLAN environment setup #
@@ -49,6 +50,12 @@ KEY_ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
 KEY_ACTION_LOCK_NONCE="$MERV_ACTION_LOCK_NONCE"
 KEY_ACTION_LOCK_START="$MERV_ACTION_LOCK_START"
 merv_action_lock_export_child_context || exit 75
+if ! merv_mutation_admit_action "$KEY_ACTION_LOCK_PATH"; then
+    error -c cli,vlan "SSH key generation refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+    merv_action_lock_leave "$KEY_ACTION_LOCK_PATH" "$KEY_ACTION_LOCK_NONCE" \
+        "$KEY_ACTION_LOCK_START" "$KEY_ACTION_LOCK_MODE" >/dev/null 2>&1 || :
+    exit 75
+fi
 
 ssh_key_progress_exit() {
     _progress_rc=$?

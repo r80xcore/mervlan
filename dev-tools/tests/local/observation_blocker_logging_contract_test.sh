@@ -6,11 +6,15 @@ BASE_DIR=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 TEST_ROOT="${TMPDIR:-/tmp}/mervlan_tmp/selftest.observation-blocker.$$"
 umask 077
 mkdir -p "$TEST_ROOT" || exit 1
+chmod 700 "$TEST_ROOT" || exit 1
 
 cleanup() {
   rm -rf "$TEST_ROOT"
 }
 trap cleanup 0 1 2 3 15
+
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 fail() {
   printf '%s\n' "FAIL: $*" >&2
@@ -52,14 +56,19 @@ setup_case() {
     fail "unable to copy observation worker for $_sc_name"
   chmod 700 "$_sc_root/functions/post_apply_worker.sh" ||
     fail "unable to mark observation worker executable for $_sc_name"
+  cp "$BASE_DIR/settings/lib_selftest_context.sh" \
+    "$_sc_root/settings/lib_selftest_context.sh" ||
+    fail "unable to copy self-test context helper for $_sc_name"
 
   cat >"$_sc_root/settings/var_settings.sh" <<'EOF'
+. "$MERV_TEST_ROOT/settings/lib_selftest_context.sh" || exit 1
 VAR_SETTINGS_LOADED=1
 LOG_SETTINGS_LOADED=1
 LIB_JSON_LOADED=1
 LIB_ACTION_ACK_LOADED=1
 LIB_IDENTITY_LOADED=1
 LIB_OWNER_LOCK_LOADED=1
+LIB_MUTATION_ADMISSION_LOADED=1
 LIB_MERVQT_LOADED=1
 LIB_UPDATE_STATE_LOADED=1
 LIB_SSID_FILTER_LOADED=1
@@ -70,8 +79,8 @@ LIB_PROGRESS_LOADED=1
 TMPDIR="$MERV_TEST_ROOT/tmp"
 LOCKDIR="$MERV_TEST_ROOT/locks"
 RESULTDIR="$MERV_TEST_ROOT/results"
-MERV_OBSERVATION_ROOT="$MERV_TEST_ROOT/observation"
-MERV_OBSERVATION_CONFIG_LOCKDIR="$MERV_TEST_ROOT/config-locks"
+: "${MERV_OBSERVATION_ROOT:=$MERV_TEST_ROOT/observation}"
+: "${MERV_OBSERVATION_CONFIG_LOCKDIR:=$MERV_TEST_ROOT/config-locks}"
 MERV_DHCP_HOLD_TEST_MODE=1
 MERV_DHCP_HOLD_TEST_ROOT="$MERV_TEST_ROOT"
 MERV_DHCP_HOLD_STATE_ROOT="$MERV_TEST_ROOT/dhcp"
@@ -99,6 +108,7 @@ error() { :; }
 merv_cap_ssids() { printf '%s\n' "$1"; }
 ssid_filter_init() { :; }
 merv_update_mutation_blocked() { return 1; }
+merv_mutation_admit_r() { return 0; }
 merv_identity_nonce_next() {
   MERV_IDENTITY_NONCE="fixture.$$"
   return 0
@@ -166,6 +176,15 @@ EOF
 run_worker() {
   _rw_root=$1
   shift
+  if [ "${OBS_TEST_NO_SELFTEST_CONTEXT:-0}" = 1 ]; then
+    MERV_BASE="$_rw_root" MERV_TEST_ROOT="$_rw_root" \
+    MERV_OBS_NO_AUTOSTART=1 \
+    MERV_OBS_SNAPSHOT_CMD="$_rw_root/snapshot_cmd" \
+    MERV_OBS_COLLECTION_CMD="$_rw_root/collection_cmd" \
+      sh -c 'unset MERVLAN_SELFTEST_CONTEXT; exec sh "$0" "$@"' \
+        "$_rw_root/functions/post_apply_worker.sh" "$@"
+    return $?
+  fi
   MERV_BASE="$_rw_root" \
   MERV_TEST_ROOT="$_rw_root" \
   MERV_TEST_SLEEP_SCENARIO="${MERV_TEST_SLEEP_SCENARIO:-}" \
@@ -306,5 +325,24 @@ assert_not_contains 'Observation: blocker cleared; resuming queued work' \
   "$_root/observation.log"
 assert_not_contains snapshot-action "$_root/timeline"
 printf '%s\n' 'PASS: no remaining work does not emit resume diagnostic'
+
+# A caller without the explicit context cannot redirect the observation state
+# or run inherited command hooks. The malformed fixture runtime root makes
+# the worker fail closed before any alternate state or hook can be used.
+setup_case hostile-production-environment
+_root="$TEST_ROOT/hostile-production-environment"
+OBS_TEST_NO_SELFTEST_CONTEXT=1 \
+  MERV_OBSERVATION_ROOT="$_root/redirected-observation" \
+  MERV_OBSERVATION_CONFIG_LOCKDIR="$_root/redirected-config-locks" \
+  run_worker "$_root" request snapshot >/dev/null 2>&1 &&
+  fail 'hostile production observation invocation unexpectedly succeeded'
+[ ! -f "$_root/timeline" ] || {
+  grep -Eq 'snapshot-action|collection-action' "$_root/timeline" &&
+    fail 'hostile production environment invoked a command hook'
+}
+[ ! -e "$_root/redirected-observation" ] &&
+  [ ! -e "$_root/redirected-config-locks" ] ||
+  fail 'hostile production environment created redirected observation state'
+printf '%s\n' 'PASS: production observation authority ignores ambient roots and command hooks'
 
 printf '%s\n' 'OBSERVATION_BLOCKER_LOGGING_CONTRACT_OK'

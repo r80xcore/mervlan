@@ -30,6 +30,10 @@ fi
   exit 1
 }
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_BOOT_INTEGRITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_boot_integrity.sh" 2>/dev/null || {
+	error -c cli,vlan "Unable to load the boot-integrity library; refusing update"
+	exit 1
+}
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_BACKUP_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_backup_state.sh" 2>/dev/null || {
 	error -c cli,vlan "Unable to load the backup-state library; refusing update"
@@ -49,6 +53,10 @@ fi
 }
 [ -n "${LIB_MAINTENANCE_RECOVERY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_maintenance_recovery.sh" 2>/dev/null || {
 	error -c cli,vlan "Unable to load the maintenance-recovery library; refusing update"
+	exit 1
+}
+[ -n "${LIB_MAINTENANCE_QUIESCE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_maintenance_quiesce.sh" 2>/dev/null || {
+	error -c cli,vlan "Unable to load the strict maintenance-quiesce classifier; refusing update"
 	exit 1
 }
 # =========================================== End of MerVLAN environment setup #
@@ -142,6 +150,13 @@ run_update_step() {
 # Original boot enabled state before teardown (0/1)
 PRE_BOOT_ENABLED="0"
 
+update_capture_boot_preference() {
+	PRE_BOOT_ENABLED=""
+	merv_boot_read_preference "$MERV_BASE/settings/settings.json" >/dev/null 2>&1 || return 1
+	PRE_BOOT_ENABLED="$MERV_BOOT_PREFERENCE"
+	case "$PRE_BOOT_ENABLED" in 0|1) return 0 ;; *) return 1 ;; esac
+}
+
 # Set to 1 once pre-update teardown of hooks has been performed
 TEARDOWN_DONE="0"
 
@@ -159,7 +174,10 @@ MAC_DB_BACKUP_PRESENT="0"
 UPDATE_PARTIAL="0"
 
 # Serialize updates with manual backup, deletion, and restore operations.
-UPDATE_MAINTENANCE_LOCK="${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}"
+UPDATE_MAINTENANCE_LOCK=$(merv_update_maintenance_lock_path 2>/dev/null) || {
+	error -c cli,vlan "Unable to resolve canonical maintenance ownership; refusing update"
+	exit 1
+}
 UPDATE_MAINTENANCE_LOCK_OWNED="0"
 UPDATE_MAINTENANCE_LOCK_NONCE=""
 UPDATE_MAINTENANCE_LOCK_START=""
@@ -202,118 +220,48 @@ update_wait_for_runtime_idle() {
 	_update_idle_max="${1:-${MERV_UPDATE_QUIESCE_WAIT_SEC:-180}}"
 	_update_idle_elapsed=0
 	case "$_update_idle_max" in ''|*[!0-9]*) return 1 ;; esac
-	# This is a safety gate, not a best-effort status display.  If the
-	# classifiers are unavailable, the updater cannot prove that runtime work
-	# and DHCP/observation handoffs are idle, so it must stop before teardown.
-	type merv_owner_lock_state >/dev/null 2>&1 || {
-		error -c cli,vlan "Update cannot quiesce safely: runtime lock classifier is unavailable"
+	type merv_maintenance_quiesce_classify >/dev/null 2>&1 || {
+		error -c cli,vlan "Update cannot quiesce safely: strict runtime classifier is unavailable"
 		return 1
 	}
-	type merv_observation_wait_idle >/dev/null 2>&1 || {
-		error -c cli,vlan "Update cannot quiesce safely: observation idle classifier is unavailable"
+	_update_m_pid="" _update_m_start="" _update_m_nonce=""
+	if [ "${UPDATE_MAINTENANCE_LOCK_OWNED:-0}" = 1 ]; then
+		_update_m_pid=$$
+		_update_m_start="${UPDATE_MAINTENANCE_LOCK_START:-}"
+		_update_m_nonce="${UPDATE_MAINTENANCE_LOCK_NONCE:-}"
+	elif type merv_update_owner_context_valid >/dev/null 2>&1 && merv_update_owner_context_valid; then
+		_update_m_pid="${MERV_UPDATE_OWNER_PID:-}"
+		_update_m_start="${MERV_UPDATE_OWNER_START:-}"
+		_update_m_nonce="${MERV_UPDATE_OWNER_NONCE:-}"
+	elif type merv_maintenance_delegation_valid >/dev/null 2>&1 && merv_maintenance_delegation_valid; then
+		_update_m_pid="${MERV_MAINTENANCE_OWNER_PID:-}"
+		_update_m_start="${MERV_MAINTENANCE_OWNER_START:-}"
+		_update_m_nonce="${MERV_MAINTENANCE_OWNER_NONCE:-}"
+	else
+		error -c cli,vlan "Update cannot quiesce safely: its maintenance owner is not authenticated"
 		return 1
-	}
-	type merv_dhcp_hold_status >/dev/null 2>&1 || {
-		error -c cli,vlan "Update cannot quiesce safely: DHCP handoff classifier is unavailable"
-		return 1
-	}
-	type merv_update_maintenance_lock_state >/dev/null 2>&1 || {
-		error -c cli,vlan "Update cannot quiesce safely: maintenance lock classifier is unavailable"
-		return 1
-	}
-	_update_maintenance_owned=0
-	if type merv_update_owner_context_valid >/dev/null 2>&1 &&
-	   merv_update_owner_context_valid; then
-		_update_maintenance_owned=1
-	elif type merv_maintenance_delegation_valid >/dev/null 2>&1 &&
-	     merv_maintenance_delegation_valid; then
-		_update_maintenance_owned=1
 	fi
 	while :; do
-		_update_busy="0"
-		# The Update parent may inspect the runtime while holding its own
-		# authenticated maintenance owner.  Every other caller must classify
-		# the exact lock path non-followingly; obstructions and unverifiable
-		# records remain busy rather than looking absent through a symlink.
-		if [ "$_update_maintenance_owned" -ne 1 ]; then
-			_update_maintenance_state=$(merv_update_maintenance_lock_state 2>/dev/null)
-			_update_maintenance_state_rc=$?
-			[ "$_update_maintenance_state_rc" -eq 0 ] || {
-				error -c cli,vlan "Update cannot classify the maintenance owner state"
+		if merv_maintenance_quiesce_classify \
+			"$_update_m_pid" "$_update_m_start" "$_update_m_nonce" >/dev/null 2>&1; then
+			_update_qstate="${MERV_QUIESCE_STATUS:-BLOCKING}"
+		else
+			_update_qstate=BLOCKING
+		fi
+		case "$_update_qstate" in
+			IDLE) return 0 ;;
+			BUSY) : ;;
+			*)
+				error -c cli,vlan "Update cannot prove runtime quiescence: ${MERV_QUIESCE_REASON:-$MERV_QUIESCE_STATUS}"
 				return 1
-			}
-			[ -n "$_update_maintenance_state" ] || {
-				error -c cli,vlan "Update received an empty maintenance owner state"
-				return 1
-			}
-			case "$_update_maintenance_state" in
-				absent|dead|reused) ;;
-				*) _update_busy="1" ;;
-			esac
-		fi
-		for _update_lock in \
-			"$LOCKDIR/mervlan_manager.lock" \
-			"$LOCKDIR/vlan_event.lock" \
-			"$LOCKDIR/execute_nodes.lock" \
-			"$LOCKDIR/client_collect.lock" \
-			"$LOCKDIR/sync_nodes.lock" \
-			"$LOCKDIR/mac_client_meta.lock" \
-			"$LOCKDIR/mac_snapshot.lock" \
-			"$LOCKDIR/observation/worker.lock"
-			do
-			ls -ld "$_update_lock" >/dev/null 2>&1 || continue
-			_update_lock_state=$(merv_owner_lock_state "$_update_lock" 2>/dev/null)
-			_update_lock_state_rc=$?
-			[ "$_update_lock_state_rc" -eq 0 ] || {
-				error -c cli,vlan "Update cannot classify runtime lock $_update_lock"
-				return 1
-			}
-			case "$_update_lock_state" in
-				live) _update_busy="1" ;;
-				dead|reused) : ;;
-				*) error -c cli,vlan "Update cannot classify runtime lock $_update_lock"; return 1 ;;
-				esac
-		done
-		# The service-event global action lock uses the canonical owner record, but
-		# its parent-delegation policy is action-specific. Presence is therefore
-		# treated as busy and allowed to drain, while malformed/stale state cannot
-		# be mistaken for an idle runtime.
-		if ls -ld "$LOCKDIR/mervlan_action.lock" >/dev/null 2>&1; then
-			if ! merv_action_lock_parent_owned "$LOCKDIR/mervlan_action.lock"; then
-				_update_busy="1"
-			fi
-		fi
-		if ! merv_observation_wait_idle 0 >/dev/null 2>&1; then
-			_update_busy="1"
-		fi
-		# A dangling marker is an obstruction, not an idle runtime. Keep the
-		# quiesce gate busy until the marker can be classified authoritatively.
-		for _update_shield_marker in \
-			"$LOCKDIR/merv_boot_shield.active" \
-			"$LOCKDIR/merv_boot_shield.ready" \
-			"$LOCKDIR/merv_boot_shield.handoff" \
-			"$LOCKDIR/merv_boot_shield.transient.lock" \
-			"$LOCKDIR/merv_dhcp_hold.active"
-		do
-			# ls -ld observes directories, devices, regular files, and dangling
-			# links without following them; every such object is busy/unknown.
-			if ls -ld "$_update_shield_marker" >/dev/null 2>&1; then
-				_update_busy="1"
-			fi
-		done
-		if [ "$_update_busy" = "0" ]; then
-			_update_dhcp_status=$(merv_dhcp_hold_status 2>/dev/null)
-			_update_dhcp_status_rc=$?
-			[ "$_update_dhcp_status_rc" -eq 0 ] || _update_busy="1"
-			printf '%s\n' "$_update_dhcp_status" | grep -q '^desired=hold$' && _update_busy="1"
-		fi
-		[ "$_update_busy" = "0" ] && return 0
+				;;
+		esac
 		[ "$_update_idle_elapsed" -lt "$_update_idle_max" ] || {
-			error -c cli,vlan "Update quiesce timed out after ${_update_idle_max}s while runtime protection was active"
+			error -c cli,vlan "Update quiesce timed out after ${_update_idle_max}s while runtime work remained active (${MERV_QUIESCE_REASON:-unknown})"
 			return 1
 		}
 		[ $((_update_idle_elapsed % 10)) -eq 0 ] &&
-			info -c cli,vlan "Update waiting for active manager/guard work to finish (${_update_idle_elapsed}s/${_update_idle_max}s)"
+			info -c cli,vlan "Update waiting for runtime work to finish (${_update_idle_elapsed}s/${_update_idle_max}s)"
 		sleep 2
 		_update_idle_elapsed=$((_update_idle_elapsed + 2))
 	done
@@ -391,6 +339,21 @@ restore_update_original_tree() {
 		else
 			run_update_step "rollback disable" env MERV_UPDATE_OWNER=1 MERV_SKIP_NODE_SYNC=1 sh "$MERV_BASE/functions/mervlan_boot.sh" disable || return 1
 		fi
+	fi
+	if ! merv_boot_rollback_legacy_mode "$MERV_BASE"; then
+		error -c cli,vlan "Rollback restored the original tree but its boot-integrity library state is unsafe: ${MERV_BOOT_ROLLBACK_REASON:-unknown}"
+		UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	_update_rollback_allow_legacy="$MERV_BOOT_ROLLBACK_ALLOW_LEGACY"
+	if ! merv_boot_verify_local "$PRE_BOOT_ENABLED" main \
+		"${SERVICES_START:-/jffs/scripts/services-start}" \
+		"${SERVICE_EVENT_WRAPPER:-/jffs/scripts/service-event}" \
+		"$MERV_BASE/settings/settings.json" "${CRU_BIN:-}" "$MERV_BASE" \
+		"${MERV_BOOT_SCRIPTS_ROOT:-${SCRIPTS_DIR:-/jffs/scripts}}" "$_update_rollback_allow_legacy"; then
+		error -c cli,vlan "Rollback restored the original tree but boot integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-unknown}"
+		UPDATE_PRESERVE_TMP="1"
+		return 1
 	fi
 	UPDATE_ACTIVATION_STARTED="0"
 	UPDATE_RUNTIME_RESTORED="1"
@@ -474,6 +437,21 @@ fail_update() {
 				_update_recovery_hooks_ok=0
 				error -c cli,vlan "Rollback could not restore the original disabled boot state"
 			fi
+		fi
+		if ! merv_boot_rollback_legacy_mode "$MERV_BASE"; then
+			UPDATE_PRESERVE_TMP="1"
+			_update_recovery_hooks_ok=0
+			error -c cli,vlan "Rollback hooks could not classify the restored boot-integrity library: ${MERV_BOOT_ROLLBACK_REASON:-unknown}"
+		fi
+		_update_rollback_allow_legacy="${MERV_BOOT_ROLLBACK_ALLOW_LEGACY:-0}"
+		if [ "$_update_recovery_hooks_ok" = "1" ] && ! merv_boot_verify_local "$PRE_BOOT_ENABLED" main \
+			"${SERVICES_START:-/jffs/scripts/services-start}" \
+			"${SERVICE_EVENT_WRAPPER:-/jffs/scripts/service-event}" \
+			"$MERV_BASE/settings/settings.json" "${CRU_BIN:-}" "$MERV_BASE" \
+			"${MERV_BOOT_SCRIPTS_ROOT:-/jffs/scripts}" "$_update_rollback_allow_legacy"; then
+			UPDATE_PRESERVE_TMP="1"
+			_update_recovery_hooks_ok=0
+			error -c cli,vlan "Rollback hooks failed direct integrity verification: ${MERV_BOOT_VERIFY_REASON:-unknown}"
 		fi
 		[ "$_update_recovery_hooks_ok" = "1" ] && UPDATE_RUNTIME_RESTORED="1"
 	fi
@@ -706,12 +684,13 @@ update_tree_valid() {
 	ls -ld "$_update_tree" >/dev/null 2>&1 && [ ! -L "$_update_tree" ] && [ -d "$_update_tree" ] || return 1
 	for _update_required in install.sh uninstall.sh changelog.txt mervlan.asp \
 		functions/update_mervlan.sh functions/mervlan_boot.sh \
-		functions/mervlan_wan.sh \
+		functions/mervlan_wan.sh functions/mervlan_node_mutate.sh \
 		settings/settings.json www/index.html
 	do
 		[ ! -L "$_update_tree/$_update_required" ] && [ -f "$_update_tree/$_update_required" ] || return 1
 	done
 	[ -x "$_update_tree/functions/mervlan_wan.sh" ] || return 1
+	[ -x "$_update_tree/functions/mervlan_node_mutate.sh" ] || return 1
 	return 0
 }
 
@@ -734,7 +713,13 @@ update_stage_core_valid() {
 			_update_stage_missing=1
 		fi
 	done
-	[ "$_update_stage_missing" -eq 0 ]
+	[ "$_update_stage_missing" -eq 0 ] || return 1
+	[ -f "$_update_stage_root/settings/lib_full_uninstall.sh" ] && [ ! -L "$_update_stage_root/settings/lib_full_uninstall.sh" ] &&
+		/bin/sh -n "$_update_stage_root/settings/lib_full_uninstall.sh" &&
+		grep -Fx '# Full helper protocol: full-uninstall-v1' "$_update_stage_root/settings/lib_full_uninstall.sh" >/dev/null &&
+	[ "$(LC_ALL=C ls -ldn "$_update_stage_root/functions/mervlan_full_cleanup.sh" | awk '{print $1}')" = -rwxr-xr-x ] &&
+		/bin/sh -n "$_update_stage_root/functions/mervlan_full_cleanup.sh" &&
+		grep -q '^# Cleaner protocol: phase6-v1$' "$_update_stage_root/functions/mervlan_full_cleanup.sh"
 }
 # CORE STAGE VALIDATOR END
 
@@ -1019,6 +1004,8 @@ mervlan.asp
 functions/mervlan_boot.sh
 functions/mervlan_boot_wrap.sh
 functions/mervlan_manager.sh
+functions/mervlan_node_mutate.sh
+functions/mervlan_full_cleanup.sh
 functions/hw_probe.sh
 functions/mervlan_trunk.sh
 functions/mervlan_wan.sh
@@ -1029,7 +1016,15 @@ settings/settings.json
 settings/var_settings.sh
 settings/log_settings.sh
 settings/lib_json.sh
+settings/lib_boot_integrity.sh
 settings/lib_owner_lock.sh
+settings/lib_identity.sh
+settings/lib_selftest_context.sh
+settings/lib_full_fence.sh
+settings/lib_continuation.sh
+settings/lib_mutation_admission.sh
+settings/lib_maintenance_quiesce.sh
+settings/lib_full_uninstall.sh
 settings/lib_ssh.sh
 settings/lib_backup_state.sh
 settings/lib_update_state.sh
@@ -1483,10 +1478,22 @@ consume_gui_update_ref() {
 if ! type merv_owner_lock_acquire >/dev/null 2>&1; then
 	fail_update lock "Owner-aware maintenance lock support is unavailable"
 fi
+if ! merv_update_full_fence_clear; then
+	fail_update lock "Full Uninstall admission is active or cannot be verified"
+fi
 if merv_owner_lock_acquire "$UPDATE_MAINTENANCE_LOCK" 1800 2 "mervlan_maintenance"; then
 	UPDATE_MAINTENANCE_LOCK_OWNED="1"
 	UPDATE_MAINTENANCE_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
 	UPDATE_MAINTENANCE_LOCK_START="${MERV_LOCK_START:-}"
+	if ! merv_update_full_fence_clear; then
+		if merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE" >/dev/null 2>&1; then
+			UPDATE_MAINTENANCE_LOCK_OWNED="0"
+		else
+			error -c cli,vlan "Full Uninstall admission appeared, and Update could not release its exact maintenance owner"
+			exit 1
+		fi
+		fail_update lock "Full Uninstall admission appeared during maintenance acquisition"
+	fi
 	# Every child that operates inside this quiesced Update uses the exact
 	# maintenance owner record; a bare MERV_UPDATE_OWNER flag is not authority.
 	MERV_UPDATE_OWNER=1
@@ -1777,18 +1784,11 @@ if [ -f "$MERV_BASE/changelog.txt" ]; then
 fi
 
 # ========================================================================== #
-# CAPTURE ORIGINAL BOOT STATE (BEFORE TEARDOWN)                              #
+# CAPTURE ORIGINAL BOOT PREFERENCE (BEFORE TEARDOWN)                         #
 # ========================================================================== #
-if [ -f "$MERV_BASE/settings/settings.json" ]; then
-	if merv_has json_get_section_value; then
-		PRE_BOOT_ENABLED="$(json_get_section_value "General" "BOOT_ENABLED" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
-	elif merv_has json_get_flag; then
-		PRE_BOOT_ENABLED="$(json_get_flag "BOOT_ENABLED" "0" "$MERV_BASE/settings/settings.json" 2>/dev/null)"
-	elif grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$MERV_BASE/settings/settings.json" 2>/dev/null; then
-		PRE_BOOT_ENABLED="1"
-	fi
+if ! update_capture_boot_preference; then
+	fail_update preflight "Update refused: General.BOOT_ENABLED is missing, malformed, unreadable, or unsupported (${MERV_BOOT_PREFERENCE_REASON:-unknown})"
 fi
-[ "$PRE_BOOT_ENABLED" = "1" ] || PRE_BOOT_ENABLED="0"
 update_record_phase preflight || fail_update journal "Could not persist the preflight Update journal"
 
 # ========================================================================== #
@@ -2257,6 +2257,7 @@ if ! update_remove_jffs_stage "$UPDATE_JFFS_STAGE" || ! update_remove_jffs_stage
 	fail_update preparing_activation "Could not clear the exact previous JFFS activation paths"
 fi
 if ! cp -pR "$MERVLAN_UPDATED_TREE_DIR" "$UPDATE_JFFS_STAGE" 2>/dev/null || \
+   ! update_stage_core_valid "$UPDATE_JFFS_STAGE" || \
    [ ! -f "$UPDATE_JFFS_STAGE/settings/settings.json" ] || \
    [ ! -x "$UPDATE_JFFS_STAGE/install.sh" ] || \
    [ ! -x "$UPDATE_JFFS_STAGE/functions/mervlan_boot.sh" ]; then
@@ -2278,6 +2279,7 @@ update_record_phase activation-started || fail_update journal "Could not persist
 if ! mv "$UPDATE_JFFS_STAGE" "$MERV_BASE" 2>/dev/null; then
 	fail_update swapping_installation "Failed to activate the validated installation stage"
 fi
+update_stage_core_valid "$MERV_BASE" || fail_update validating "Activated cleaner/core cohort failed validation"
 update_record_phase activated || fail_update journal "Could not persist the activated Update journal"
 
 # ========================================================================== #
@@ -2323,6 +2325,11 @@ runtime_report_matches() {
 	case " $_runtime_report " in *" boot=$PRE_BOOT_ENABLED "*) ;; *) return 1 ;; esac
 	case " $_runtime_report " in *" event=active "*) ;; *) return 1 ;; esac
 	case " $_runtime_report " in *" cron=$_runtime_expected_cron "*) ;; *) return 1 ;; esac
+	case " $_runtime_report " in
+		*" manager_hook=present "*) [ "$PRE_BOOT_ENABLED" = "1" ] || return 1 ;;
+		*" manager_hook=absent "*) [ "$PRE_BOOT_ENABLED" = "0" ] || return 1 ;;
+		*) return 1 ;;
+	esac
 
 	case "$_runtime_role" in
 		main)
@@ -2337,6 +2344,14 @@ runtime_report_matches() {
 	esac
 }
 
+update_local_runtime_matches() {
+	_update_local_role="${1:-main}"
+	merv_boot_verify_local "$PRE_BOOT_ENABLED" "$_update_local_role" \
+		"${SERVICES_START:-/jffs/scripts/services-start}" \
+		"${SERVICE_EVENT_WRAPPER:-/jffs/scripts/service-event}" \
+		"$MERV_BASE/settings/settings.json" "${CRU_BIN:-}" "$MERV_BASE"
+}
+
 verify_updated_runtime_state() {
 	_verify_scope="${1:-all}"
 	_verify_action=disable
@@ -2346,7 +2361,7 @@ verify_updated_runtime_state() {
 	if ! _verify_main_report=$(sh "$BOOT_SCRIPT" report 2>/dev/null); then
 		warn -c cli,vlan "Main runtime report command failed during update verification"
 	fi
-	if ! runtime_report_matches "$_verify_main_report" main; then
+	if ! update_local_runtime_matches main || ! runtime_report_matches "$_verify_main_report" main; then
 		warn -c cli,vlan "Main runtime verification mismatch; retrying target-version hook reconciliation"
 		if ! run_update_step "runtime verification setupenable" env MERV_UPDATE_OWNER=1 MERV_SKIP_NODE_SYNC=1 sh "$BOOT_SCRIPT" setupenable; then
 			warn -c cli,vlan "Main target-version hook reconciliation setup failed"
@@ -2359,8 +2374,8 @@ verify_updated_runtime_state() {
 			warn -c cli,vlan "Main runtime retry report command failed"
 		fi
 	fi
-	if ! runtime_report_matches "$_verify_main_report" main; then
-		error -c cli,vlan "Main runtime verification failed after retry: ${_verify_main_report:-no report}"
+	if ! update_local_runtime_matches main || ! runtime_report_matches "$_verify_main_report" main; then
+		error -c cli,vlan "Main runtime verification failed after retry: ${_verify_main_report:-no report} (${MERV_BOOT_VERIFY_REASON:-report-mismatch})"
 		return 1
 	fi
 	info -c cli,vlan "Verified main runtime: configured-node baseline active, BOOT_ENABLED=$PRE_BOOT_ENABLED"

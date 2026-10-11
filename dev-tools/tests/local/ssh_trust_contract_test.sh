@@ -12,6 +12,8 @@ mkdir "$TEST_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 
 export MERV_BASE="$BASE_DIR"
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 export MERV_SSH_TRUST_TEST_MODE=1
 export MERV_STATE_ROOT="$TEST_ROOT/state"
 . "$BASE_DIR/settings/var_settings.sh" || exit 1
@@ -28,11 +30,57 @@ export MERV_SSH_TRUST_LOCK_PATH="$MERV_SSH_TRUST_ROOT/state.lock"
 ok() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
+# Ambient production variables must not redirect the authoritative trust
+# database, owner, or probe and must not enable test-only probe controls.
+_hostile=$(env MERV_BASE="$BASE_DIR" \
+  MERV_STATE_ROOT=/tmp/evil-state \
+  MERV_SSH_TRUST_ROOT=/tmp/evil-trust \
+  MERV_SSH_TRUST_FILE=/tmp/evil-trust/known_hosts.v1 \
+  MERV_SSH_TRUST_PENDING_ROOT=/tmp/evil-pending \
+  MERV_SSH_TRUST_REQUESTS_ROOT=/tmp/evil-requests \
+  MERV_SSH_TRUST_STAGING_ROOT=/tmp/evil-staging \
+  MERV_SSH_TRUST_QUARANTINE_ROOT=/tmp/evil-quarantine \
+  MERV_SSH_TRUST_LOCK_PATH=/tmp/evil-trust/other.lock \
+  MERV_SSH_TRUST_TEST_MODE=1 MERV_SSH_TEST_MODE=1 \
+  MERV_SSH_TEST_FINGERPRINT=SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+  MERV_SSH_TEST_PROBE_FILE=/tmp/evil.tsv \
+  MERV_SSH_HOSTKEY_PROBE_CMD=/tmp/evil-probe \
+  MERV_SSH_CAPABILITY_PROVEN=0 sh -c '
+    unset MERVLAN_SELFTEST_CONTEXT LIB_SELFTEST_CONTEXT_LOADED LIB_SSH_TRUST_LOADED
+    . "$MERV_BASE/settings/lib_ssh_trust.sh" || exit 21
+    [ "$MERV_STATE_ROOT" = /jffs/addons/mervlan_state ] &&
+    [ "$MERV_SSH_TRUST_ROOT" = /jffs/addons/mervlan_state/ssh_trust ] &&
+    [ "$MERV_SSH_TRUST_FILE" = /jffs/addons/mervlan_state/ssh_trust/known_hosts.v1 ] &&
+    [ "$MERV_SSH_TRUST_PENDING_ROOT" = /jffs/addons/mervlan_state/ssh_trust/pending ] &&
+    [ "$MERV_SSH_TRUST_REQUESTS_ROOT" = /jffs/addons/mervlan_state/ssh_trust/requests ] &&
+    [ "$MERV_SSH_TRUST_STAGING_ROOT" = /jffs/addons/mervlan_state/ssh_trust/staging ] &&
+    [ "$MERV_SSH_TRUST_QUARANTINE_ROOT" = /jffs/addons/mervlan_state/ssh_trust/quarantine ] &&
+    [ "$MERV_SSH_TRUST_LOCK_PATH" = /jffs/addons/mervlan_state/ssh_trust/state.lock ] &&
+    [ "$MERV_SSH_TRUST_TEST_MODE" = 0 ] && [ "$MERV_SSH_TEST_MODE" != 1 ] &&
+    [ -z "${MERV_SSH_TEST_FINGERPRINT:-}" ] && [ -z "${MERV_SSH_TEST_PROBE_FILE:-}" ] &&
+    [ "$MERV_SSH_HOSTKEY_PROBE_CMD" = /jffs/addons/mervlan/functions/ssh_hostkey_probe.sh ] &&
+    [ "$MERV_SSH_CAPABILITY_PROVEN" = 1 ]
+  ' 2>&1) || fail production-trust-authority-canonical
+ok production-trust-authority-canonical
+
+[ "$MERV_STATE_ROOT" = "$TEST_ROOT/state" ] &&
+  [ "$MERV_SSH_TRUST_ROOT" = "$TEST_ROOT/ssh_trust" ] &&
+  [ "$MERV_SSH_TRUST_LOCK_PATH" = "$TEST_ROOT/ssh_trust/state.lock" ] ||
+  fail explicit-selftest-trust-roots
+ok explicit-selftest-trust-roots
+
 SYNC_FILE="$MERV_BASE/functions/sync_nodes.sh"
 TRUST_ACTION_FILE="$MERV_BASE/functions/ssh_trust_action.sh"
 grep -q 'MERV_SSH_TRUST_ORIGINAL_ACTION="$SYNC_PROGRESS_ACTION"' "$SYNC_FILE" || fail settings-only-trust-action
 grep -q 'syncsettings_vlanmgr) sh "\$MERV_BASE/functions/sync_nodes.sh" --settings-only' "$TRUST_ACTION_FILE" || fail settings-only-trust-resume
 grep -q 'sync_vlanmgr|syncsettings_vlanmgr|' "$TRUST_ACTION_FILE" || fail settings-only-trust-allowlist
+grep -q 'lib_mutation_admission.sh' "$TRUST_ACTION_FILE" || fail trust-admission-library
+awk '
+  /merv_action_lock_enter / { lock = NR }
+  /merv_mutation_admit_action / { admission = NR }
+  /case "\$SSH_TRUST_ACTION" in/ && admission { dispatch = NR }
+  END { exit !(lock && admission > lock && dispatch > admission) }
+' "$TRUST_ACTION_FILE" || fail trust-post-owner-admission-order
 grep -q '^functions/ssh_hostkey_probe.sh$' "$SYNC_FILE" || fail sync-hostkey-probe-payload
 grep -A20 '^FILES_TO_COPY_CHMOD="' "$SYNC_FILE" | grep -q '^functions/ssh_hostkey_probe.sh$' || fail sync-hostkey-probe-mode
 ok sync-hostkey-probe-payload
@@ -58,7 +106,8 @@ PROBE_PID_FILE="$TEST_ROOT/probe-client.pid"
 mkdir -p "$PROBE_BASE/functions" "$PROBE_BASE/settings" "$PROBE_BASE/.ssh" || fail probe-fixture-root
 for _probe_file in \
   functions/ssh_hostkey_probe.sh \
-  settings/var_settings.sh settings/lib_json.sh settings/lib_identity.sh settings/lib_ssh_trust.sh; do
+  settings/var_settings.sh settings/lib_selftest_context.sh settings/lib_json.sh \
+  settings/lib_identity.sh settings/lib_ssh_trust.sh; do
   mkdir -p "$PROBE_BASE/$(dirname "$_probe_file")" || fail probe-fixture-dir
   cp "$BASE_DIR/$_probe_file" "$PROBE_BASE/$_probe_file" || fail probe-fixture-copy
 done
@@ -161,6 +210,27 @@ merv_has() {
 MERV_SSH_TEST_PROBE_FILE="$TEST_ROOT/probe.tsv"
 export MERV_SSH_TEST_PROBE_FILE
 printf '%s\tssh-ed25519\t%s\n' "$NODE1" "$KEY1" > "$MERV_SSH_TEST_PROBE_FILE" || fail probe-fixture
+
+MERV_SSH_TEST_FINGERPRINT='SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
+export MERV_SSH_TEST_FINGERPRINT
+_test_fp=$(merv_ssh_trust_wire_fingerprint ssh-ed25519 "$KEY1") || fail selftest-fingerprint-override
+[ "$_test_fp" = "$MERV_SSH_TEST_FINGERPRINT" ] || fail selftest-fingerprint-value
+unset MERV_SSH_TEST_FINGERPRINT
+ok authenticated-selftest-fingerprint-override
+
+MERV_SSH_HOOK_MARKER="$TEST_ROOT/probe-hook-ran"
+export MERV_SSH_HOOK_MARKER
+MERV_SSH_HOSTKEY_PROBE_CMD="$TEST_ROOT/probe-command"
+unset MERV_SSH_TEST_PROBE_FILE
+printf '%s\n' '#!/bin/sh' 'printf called >> "$MERV_SSH_HOOK_MARKER"' 'printf malformed' \
+  > "$MERV_SSH_HOSTKEY_PROBE_CMD" || fail probe-command-fixture
+chmod 700 "$MERV_SSH_HOSTKEY_PROBE_CMD" || fail probe-command-mode
+merv_ssh_hostkey_probe 1 192.168.1.2 22 "$MAC1" >/dev/null 2>&1
+[ "$?" -eq 7 ] && [ -s "$MERV_SSH_HOOK_MARKER" ] || fail selftest-probe-command-override
+MERV_SSH_HOSTKEY_PROBE_CMD="$BASE_DIR/functions/ssh_hostkey_probe.sh"
+MERV_SSH_TEST_PROBE_FILE="$TEST_ROOT/probe.tsv"
+export MERV_SSH_HOSTKEY_PROBE_CMD MERV_SSH_TEST_PROBE_FILE
+ok authenticated-selftest-probe-command-override
 
 merv_ssh_hostkey_probe 1 192.168.1.2 22 "$MAC1"
 [ "$?" -eq 6 ] || fail untrusted-probe

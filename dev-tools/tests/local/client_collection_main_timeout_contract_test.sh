@@ -12,6 +12,8 @@ TEST_TRACE="$TMP_ROOT/trace"
 umask 077
 mkdir -p "$FAKE_BASE/settings" "$FAKE_BASE/functions" "$TEST_RUNTIME" || exit 1
 trap 'rm -rf "$TMP_ROOT"' 0 1 2 3 15
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$ROOT" "$TMP_ROOT" || exit 1
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
@@ -82,6 +84,14 @@ LIB_UPDATE_STATE_LOADED=1
 merv_update_mutation_blocked() { return 1; }
 EOF
 
+# This focused timeout fixture is not an ownership test. Supply a local
+# admission stub so production library loading does not escape the fake addon
+# tree or require real router lock infrastructure.
+cat > "$FAKE_BASE/settings/lib_mutation_admission.sh" <<'EOF'
+LIB_MUTATION_ADMISSION_LOADED=1
+merv_mutation_admit_r() { return 0; }
+EOF
+
 cat > "$FAKE_BASE/functions/collect_local_clients.sh" <<'EOF'
 #!/bin/sh
 printf 'main-start:%s\n' "$$" >> "$TEST_TRACE"
@@ -98,6 +108,7 @@ chmod 700 "$FAKE_BASE/functions/collect_local_clients.sh" || exit 1
 # the fixture aligned with production loading and process ownership.
 cp "$ROOT/settings/lib_node_jobs.sh" "$FAKE_BASE/settings/lib_node_jobs.sh" || exit 1
 cp "$ROOT/settings/lib_identity.sh" "$FAKE_BASE/settings/lib_identity.sh" || exit 1
+cp "$ROOT/settings/lib_selftest_context.sh" "$FAKE_BASE/settings/lib_selftest_context.sh" || exit 1
 
 export TEST_RUNTIME TEST_TRACE
 MERV_BASE="$FAKE_BASE"
@@ -130,7 +141,10 @@ ELAPSED=$((END_EPOCH - START_EPOCH))
 RESULT_FILE="$TEST_RUNTIME/results/vlan_clients.json"
 CURRENT_HASH=$(cksum "$RESULT_FILE" | awk '{print $1 ":" $2}')
 [ "$CURRENT_HASH" = "$PREVIOUS_HASH" ] || fail 'MAIN timeout replaced the previous public inventory'
-assert_contains "$TEST_TRACE" 'main-start:' 'MAIN fixture did not start'
+if ! grep -Fq -- 'main-start:' "$TEST_TRACE"; then
+  cat "$TMP_ROOT/collector.out" >&2
+  fail 'MAIN fixture did not start'
+fi
 if grep -Fq 'remote-start:' "$TEST_TRACE"; then
   fail 'remote pool started after synchronous MAIN timeout'
 fi

@@ -10,6 +10,8 @@ TEST_ROOT="/tmp/mervlan_tmp/selftest.mac-shield-callers.$$"
 umask 077
 mkdir -p "$TEST_ROOT/meta/settings" "$TEST_ROOT/meta/functions" "$TEST_ROOT/meta/db" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
@@ -20,7 +22,8 @@ export MERV_TEST_ROOT="$META_ROOT"
 printf '%s\n' \
   'VAR_SETTINGS_LOADED=1; LOG_SETTINGS_LOADED=1; LIB_JSON_LOADED=1; LIB_MERVQT_LOADED=1' \
   'LIB_MAC_SHIELD_SNAPSHOT_LOADED=1; LIB_SSH_LOADED=1; LIB_ACTION_LOCK_LOADED=1' \
-  'LIB_UPDATE_STATE_LOADED=1; LIB_ACTION_PROGRESS_LOADED=1' \
+  'LIB_UPDATE_STATE_LOADED=1; LIB_ACTION_PROGRESS_LOADED=1; LIB_MUTATION_ADMISSION_LOADED=1' \
+  'merv_mutation_admit_r() { return 0; }; merv_mutation_admit_action() { return 0; }' \
   'TMPDIR="$MERV_TEST_ROOT/tmp"; LOCKDIR="$MERV_TEST_ROOT/locks"; SETTINGS_FILE="$MERV_TEST_ROOT/settings.json"' \
   'MERV_MAC_OVERRIDE_DB="$MERV_TEST_ROOT/db/override.db"; MERV_CLIENT_NAME_DB="$MERV_TEST_ROOT/db/names.db"' \
   'MERV_MAC_DB_ACTIVE="$MERV_TEST_ROOT/db/active.db"; MERV_MAC_NODE_SYNC=1' \
@@ -67,7 +70,8 @@ export MERV_TEST_ROOT="$STAGED_ROOT"
 printf '%s\n' \
   'VAR_SETTINGS_LOADED=1; LOG_SETTINGS_LOADED=1; LIB_JSON_LOADED=1; LIB_MERVQT_LOADED=1' \
   'LIB_MAC_SHIELD_SNAPSHOT_LOADED=1; LIB_SSH_LOADED=1; LIB_ACTION_LOCK_LOADED=1' \
-  'LIB_UPDATE_STATE_LOADED=1; LIB_ACTION_PROGRESS_LOADED=1' \
+  'LIB_UPDATE_STATE_LOADED=1; LIB_ACTION_PROGRESS_LOADED=1; LIB_MUTATION_ADMISSION_LOADED=1' \
+  'merv_mutation_admit_r() { return 0; }; merv_mutation_admit_action() { return 0; }' \
   'TMPDIR="$MERV_TEST_ROOT/tmp"; LOCKDIR="$MERV_TEST_ROOT/locks"; SETTINGS_FILE="$MERV_TEST_ROOT/settings.json"' \
   'MERV_MAC_OVERRIDE_DB="$MERV_TEST_ROOT/db/override.db"; MERV_CLIENT_NAME_DB="$MERV_TEST_ROOT/db/names.db"' \
   'MERV_MAC_DB_ACTIVE="$MERV_TEST_ROOT/db/active.db"; MERV_MAC_NODE_SYNC=1' \
@@ -136,13 +140,16 @@ fi
 # and not invoke node propagation when strict local shield application fails.
 BOOT_ROOT="$TEST_ROOT/boot"
 mkdir -p "$BOOT_ROOT/settings" "$BOOT_ROOT/scripts" "$BOOT_ROOT/db" "$BOOT_ROOT/tmp" || exit 1
+cp "$BASE_DIR/settings/lib_selftest_context.sh" "$BOOT_ROOT/settings/lib_selftest_context.sh" || exit 1
 export MERV_TEST_ROOT="$BOOT_ROOT"
 printf '%s\n' \
-  'VAR_SETTINGS_LOADED=1; LOG_SETTINGS_LOADED=1; LIB_JSON_LOADED=1; LIB_SSH_LOADED=1; LIB_OWNER_LOCK_LOADED=1; LIB_MERVQT_LOADED=1' \
+  '. "$MERV_BASE/settings/lib_selftest_context.sh"; VAR_SETTINGS_LOADED=1; LOG_SETTINGS_LOADED=1; LIB_SSH_LOADED=1; LIB_OWNER_LOCK_LOADED=1; LIB_MERVQT_LOADED=1' \
+  'LIB_ACTION_LOCK_LOADED=1; LIB_MUTATION_ADMISSION_LOADED=1; MERV_ACTION_LOCK_MODE=self; MERV_ACTION_LOCK_NONCE=boot-test; MERV_ACTION_LOCK_START=1; merv_action_lock_enter() { return 0; }; merv_action_lock_export_child_context() { return 0; }; merv_action_lock_leave() { return 0; }; merv_mutation_admit_action() { return 0; }' \
   'TMPDIR="$MERV_TEST_ROOT/tmp"; LOCKDIR="$MERV_TEST_ROOT/locks"; SCRIPTS_DIR="$MERV_TEST_ROOT/scripts"' \
-  'SETTINGS_FILE="$MERV_TEST_ROOT/settings.json"; TEMPLATE_LIB="$MERV_BASE/settings/template.sh"; TEMPLATE_SERVICES="$MERV_TEST_ROOT/template"; SERVICES_START="$MERV_TEST_ROOT/services-start"; MERV_DISABLE_LOCKS=1' \
+  'SETTINGS_FILE="$MERV_TEST_ROOT/settings.json"; SERVICE_EVENT_WRAPPER="$MERV_TEST_ROOT/service-event"; TEMPLATE_LIB="$MERV_BASE/settings/template.sh"; TEMPLATE_SERVICES="services-start"; SERVICES_START="$MERV_TEST_ROOT/services-start"; MERV_DISABLE_LOCKS=1' \
   'MERV_MAC_DB_ACTIVE="$MERV_TEST_ROOT/db/active.db"; MERV_NODE_CONTEXT=0; MERV_SKIP_NODE_SYNC=0' \
-  'info() { :; }; warn() { :; }; error() { :; }; merv_has() { return 1; }' \
+  'merv_cmd() { printf "%s\n" "$MERV_TEST_ROOT/cru"; }' \
+  'info() { :; }; warn() { :; }; error() { printf "ERROR %s\n" "$*" >&2; }; merv_has() { [ "${1:-}" = cru ]; }' \
   'get_node_ssh_user() { printf "%s\n" admin; }; get_node_ssh_port() { printf "%s\n" 22; }' \
   'merv_update_mutation_blocked() { return 1; }; merv_ssh_preflight_configured_nodes() { return 0; }' \
   'json_set_flag() { return 0; }; inject_template() { return 0; }; merv_mac_best_db() { printf "%s\n" "$MERV_MAC_DB_ACTIVE"; }' \
@@ -151,15 +158,63 @@ printf '%s\n' \
   'action_ack_partial() { printf "%s\n" "$*" > "$MERV_TEST_ROOT/boot-partial"; return 0; }' \
   'action_ack_ok() { : > "$MERV_TEST_ROOT/boot-ok"; return 0; }' \
   > "$BOOT_ROOT/settings/common.sh" || exit 1
-for _lib in var_settings.sh log_settings.sh lib_json.sh lib_ssh.sh lib_owner_lock.sh lib_mervqt.sh lib_update_state.sh lib_node_reconcile.sh lib_action_ack.sh; do
+for _lib in var_settings.sh log_settings.sh lib_ssh.sh lib_owner_lock.sh lib_mervqt.sh lib_update_state.sh lib_node_reconcile.sh lib_action_ack.sh; do
   printf '%s\n' '. "$MERV_BASE/settings/common.sh"' > "$BOOT_ROOT/settings/$_lib" || exit 1
 done
+cp "$BASE_DIR/settings/lib_json.sh" "$BOOT_ROOT/settings/lib_json.sh" || exit 1
+cp "$BASE_DIR/settings/lib_boot_integrity.sh" "$BOOT_ROOT/settings/lib_boot_integrity.sh" || exit 1
 printf '%s\n' \
-  'tpl_path() { cp "$TEMPLATE_SERVICES" "$MERV_TEST_ROOT/rendered-template" || return 1; printf "%s\n" "$MERV_TEST_ROOT/rendered-template"; }' \
+  'tpl_path() { printf "%s/%s.v%s.tpl\n" "$MERV_TEST_ROOT" "$1" "$2"; }' \
   > "$BOOT_ROOT/settings/template.sh" || exit 1
-: > "$BOOT_ROOT/template"
 : > "$BOOT_ROOT/db/active.db"
-if ! MERV_BASE="$BOOT_ROOT" sh "$BASE_DIR/functions/mervlan_boot.sh" enable test-token > "$BOOT_ROOT/trace" 2>&1; then
+cat > "$BOOT_ROOT/settings.json" <<'EOF'
+{
+  "General": {
+    "BOOT_ENABLED": "1",
+    "IS_NODE": "0"
+  }
+}
+EOF
+cat > "$BOOT_ROOT/cru" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  d) : > "$MERV_TEST_ROOT/cron.list" ;;
+  a) printf '%s\n' "${3:-}" > "$MERV_TEST_ROOT/cron.list" ;;
+  l) cat "$MERV_TEST_ROOT/cron.list" 2>/dev/null ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod 700 "$BOOT_ROOT/cru"
+cat > "$BOOT_ROOT/services-start" <<EOF
+#!/bin/sh
+### >>> MERVLAN START: services-start [tpl=services-start.v2.tpl md5=0123456789abcdef0123456789abcdef]
+if $BOOT_ROOT/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1; then
+  $BOOT_ROOT/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
+fi
+sleep 10
+$BOOT_ROOT/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 2>&1 &
+### <<< MERVLAN END: services-start [tpl=services-start.v2.tpl md5=0123456789abcdef0123456789abcdef]
+### >>> MERVLAN START: services-start [tpl=services-start-addon.v2.tpl md5=0123456789abcdef0123456789abcdef]
+$BOOT_ROOT/functions/mervlan_boot_wrap.sh install </dev/null >/dev/null 2>&1 &
+### <<< MERVLAN END: services-start [tpl=services-start-addon.v2.tpl md5=0123456789abcdef0123456789abcdef]
+EOF
+cat > "$BOOT_ROOT/service-event" <<EOF
+#!/bin/sh
+### >>> MERVLAN START: service-event [tpl=service-event.v2.tpl md5=0123456789abcdef0123456789abcdef]
+$BOOT_ROOT/functions/service-event-handler.sh "\$@"
+### <<< MERVLAN END: service-event [tpl=service-event.v2.tpl md5=0123456789abcdef0123456789abcdef]
+EOF
+chmod 755 "$BOOT_ROOT/services-start" "$BOOT_ROOT/service-event"
+cp "$BOOT_ROOT/services-start" "$BOOT_ROOT/services-start.v2.tpl" || exit 1
+cat > "$BOOT_ROOT/services-start.v2.tpl" <<EOF
+# MerVLAN manager boot fixture
+if $BOOT_ROOT/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1; then
+  $BOOT_ROOT/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
+fi
+sleep 10
+$BOOT_ROOT/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 2>&1 &
+EOF
+if ! TEST_RUN=1 MERV_BASE="$BOOT_ROOT" sh "$BASE_DIR/functions/mervlan_boot.sh" enable test-token > "$BOOT_ROOT/trace" 2>&1; then
   cat "$BOOT_ROOT/trace" >&2
   fail 'boot fixture entry point failed before partial acknowledgement'
 fi

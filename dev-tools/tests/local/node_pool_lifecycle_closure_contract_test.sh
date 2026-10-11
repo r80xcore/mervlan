@@ -5,11 +5,14 @@
 set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd) || exit 1
-TEST_ROOT="${TMPDIR:-/tmp}/mervlan-lifecycle-closure.$$"
+TEST_ROOT="/tmp/mervlan-lifecycle-closure.$$"
 FAKE_BASE="$TEST_ROOT/addon"
 umask 077
 mkdir -p "$FAKE_BASE/settings" "$FAKE_BASE/functions" "$TEST_ROOT/tmp/node_jobs" "$TEST_ROOT/db" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$ROOT" "$TEST_ROOT" || exit 1
+cp "$ROOT/settings/lib_selftest_context.sh" "$FAKE_BASE/settings/lib_selftest_context.sh" || exit 1
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
@@ -92,7 +95,9 @@ fi
 # Source the production Shield library with its optional dependencies marked
 # loaded, then verify collection and direct push both stop before build/mkdir.
 LIB_OWNER_LOCK_LOADED=1 LIB_SSH_LOADED=1 LIB_ACTION_LOCK_LOADED=1 LIB_MAC_SHIELD_SNAPSHOT_LOADED=''
+LIB_MUTATION_ADMISSION_LOADED=1
 export LIB_OWNER_LOCK_LOADED LIB_SSH_LOADED LIB_ACTION_LOCK_LOADED
+export LIB_MUTATION_ADMISSION_LOADED
 MERV_MAC_DB_ACTIVE="$TEST_ROOT/db/active.db"
 MERV_MAC_DB_JFFS="$TEST_ROOT/db/jffs.db"
 MERV_MAC_OVERRIDE_DB="$TEST_ROOT/db/override.db"
@@ -113,6 +118,7 @@ merv_action_lock_enter() {
     return 0
 }
 merv_action_lock_leave() { return 0; }
+merv_mutation_admit_r() { return 0; }
 merv_mac_build_snapshot() { MERV_MAC_BUILD_CALLED=1; : > "$1"; printf '0\n'; }
 warn() { :; }
 if merv_mac_snapshot; then fail 'Shield collection accepted unresolved pool state'; fi

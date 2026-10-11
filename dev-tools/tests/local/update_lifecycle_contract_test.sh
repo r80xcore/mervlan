@@ -18,6 +18,9 @@ export MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
 export MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
 export MERV_UPDATE_MAINTENANCE_LOCK="$TEST_ROOT/maintenance.lock"
 export MERV_NODE_RECONCILE_FILE="$MERV_STATE_ROOT/node_reconcile.pending"
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
+export MERV_FULL_FENCE_PATH="$TEST_ROOT/full.lock"
 
 . "$BASE_DIR/settings/var_settings.sh" || exit 1
 . "$BASE_DIR/settings/lib_update_state.sh" || exit 1
@@ -115,6 +118,12 @@ mkdir -p "$MERV_UPDATE_MAINTENANCE_LOCK" || fail maintenance-marker-create
 merv_update_mutation_blocked || fail malformed-maintenance-lock-blocked
 rmdir "$MERV_UPDATE_MAINTENANCE_LOCK" || fail maintenance-marker-clear
 pass mutation-gate-lifecycle
+
+merv_full_fence_claim "$MERV_FULL_FENCE_PATH" || fail full-fence-claim
+merv_update_mutation_blocked || fail update-ignored-full-fence
+merv_full_fence_release "$MERV_FULL_FENCE_PATH" "$MERV_FULL_FENCE_PID" \
+  "$MERV_FULL_FENCE_START" "$MERV_FULL_FENCE_NONCE" || fail full-fence-release
+pass mutation-gate-full-fence
 
 # A dangling maintenance-lock symlink is an obstruction, not absence.  Clear
 # the journal first so this assertion exercises the maintenance path itself,

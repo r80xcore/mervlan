@@ -29,6 +29,10 @@ fi
 [ -f "$TEMPLATE_LIB" ] || { error -c vlan,cli "Missing template library: $TEMPLATE_LIB"; exit 1; }
 . "$TEMPLATE_LIB"
 [ -n "${LIB_JSON_LOADED:-}" ] || . "$MERV_BASE/settings/lib_json.sh"
+[ -n "${LIB_BOOT_INTEGRITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_boot_integrity.sh" 2>/dev/null || {
+  error -c vlan,cli "Unable to load the boot-integrity library; refusing boot action"
+  exit 1
+}
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || {
   error -c vlan,cli "Unable to load the owner-lock library; refusing boot action"
@@ -39,6 +43,14 @@ fi
   exit 1
 }
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || true
+[ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || {
+  error -c vlan,cli "Unable to load the action-lock library; refusing boot action"
+  exit 75
+}
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || {
+  error -c vlan,cli "Unable to load the mutation-admission library; refusing boot action"
+  exit 75
+}
 [ -n "${LIB_NODE_RECONCILE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_reconcile.sh" 2>/dev/null || true
 if [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
   [ -n "${LIB_ACTION_ACK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_ack.sh"
@@ -53,6 +65,47 @@ SSH_NODE_PORT=$(get_node_ssh_port)
 # Action from command line ($1 parameter: enable/disable/setupenable/etc)
 ACTION="$1"
 ACTION_REQUEST_TOKEN="$2"
+
+# Boot, setup, cron, and reconciliation entry points can alter durable hooks,
+# settings, or delayed health work. Supported service-event callers reuse their
+# authenticated parent action owner; direct and node-side invocations acquire
+# the canonical local action owner themselves.
+BOOT_ACTION_LOCKED=0
+BOOT_ACTION_LOCK_MODE=none
+BOOT_ACTION_LOCK_PATH="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+case "$ACTION" in
+  enable|disable|cronenable|crondisable|setupenable|setupdisable|nodeenable|nodedisable|reconcile-pending|status|report)
+    if ! merv_action_lock_enter "$BOOT_ACTION_LOCK_PATH"; then
+      error -c vlan,cli "Boot action refused because its action owner could not be acquired or verified"
+      exit 75
+    fi
+    BOOT_ACTION_LOCK_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+    BOOT_ACTION_LOCK_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+    BOOT_ACTION_LOCK_START="${MERV_ACTION_LOCK_START:-}"
+    if ! merv_action_lock_export_child_context ||
+       ! merv_mutation_admit_action "$BOOT_ACTION_LOCK_PATH"; then
+      error -c vlan,cli "Boot action refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-owner-context-invalid}); no boot mutation started"
+      merv_action_lock_leave "$BOOT_ACTION_LOCK_PATH" "$BOOT_ACTION_LOCK_NONCE" \
+        "$BOOT_ACTION_LOCK_START" "$BOOT_ACTION_LOCK_MODE" >/dev/null 2>&1 || :
+      exit 75
+    fi
+    [ "$BOOT_ACTION_LOCK_MODE" = self ] && BOOT_ACTION_LOCKED=1
+    boot_action_release_owner() {
+      _bar_exit_rc=$?
+      if [ "${BOOT_ACTION_LOCKED:-0}" = 1 ]; then
+        if merv_action_lock_leave "$BOOT_ACTION_LOCK_PATH" "$BOOT_ACTION_LOCK_NONCE" \
+             "$BOOT_ACTION_LOCK_START" "$BOOT_ACTION_LOCK_MODE" >/dev/null 2>&1; then
+          BOOT_ACTION_LOCKED=0
+        else
+          error -c vlan,cli "Boot action could not release its action owner; recovery is required"
+          [ "$_bar_exit_rc" -ne 0 ] || _bar_exit_rc=75
+        fi
+      fi
+      return "$_bar_exit_rc"
+    }
+    trap 'boot_action_release_owner' EXIT
+    ;;
+esac
 
 # Status/report is also a safe reconciliation entry point for owners left by a
 # killed manager. Mutating boot work reaches the same reconciliation through
@@ -212,6 +265,11 @@ _dest_id() {
 }
 
 : "${MERV_DISABLE_LOCKS:=0}"
+if ! type merv_selftest_context_valid >/dev/null 2>&1 ||
+   ! merv_selftest_context_valid; then
+  MERV_DISABLE_LOCKS=0
+  unset MERV_BOOT_TEST_FAULT
+fi
 
 # Compute content hash (md5 is in busybox; sha256 may not be)
 _content_md5() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
@@ -325,272 +383,258 @@ marker_present() {
   LC_ALL=C grep -qF "$start_base" "$dest" 2>/dev/null
 }
 
-cleanup_boot_temp_files() {
-  _boot_cleanup_failed=0
-  for _boot_cleanup_path in "$@"; do
-    [ -n "$_boot_cleanup_path" ] || continue
-    [ -e "$_boot_cleanup_path" ] || continue
-    if ! rm -f "$_boot_cleanup_path" 2>/dev/null; then
-      warn -c vlan,cli "Could not remove temporary boot-injection file $_boot_cleanup_path"
-      _boot_cleanup_failed=1
+boot_mutation_fault() {
+  [ "${TEST_RUN:-0}" = 1 ] &&
+    type merv_selftest_context_valid >/dev/null 2>&1 &&
+    merv_selftest_context_valid && [ "${MERV_BOOT_TEST_FAULT:-}" = "$1" ]
+}
+
+boot_mutation_lock_begin() {
+  _bml_dest="$1"
+  _boot_mutation_lock="$LOCKDIR/${_bml_dest##*/}.lock"
+  _boot_mutation_nonce=''
+  _boot_mutation_locked=0
+  if [ "${MERV_DISABLE_LOCKS:-0}" = 1 ] && [ "${TEST_RUN:-0}" = 1 ] &&
+     type merv_selftest_context_valid >/dev/null 2>&1 &&
+     merv_selftest_context_valid; then return 0; fi
+  if [ "${MERV_DISABLE_LOCKS:-0}" = 1 ]; then
+    warn -c vlan,cli "Ignoring MERV_DISABLE_LOCKS outside the installer test path"
+  fi
+  boot_mutation_fault lock_acquire && return 1
+  merv_owner_lock_acquire "$_boot_mutation_lock" 0 0 boot-file || return 1
+  _boot_mutation_nonce="$MERV_LOCK_NONCE"
+  _boot_mutation_locked=1
+}
+
+boot_mutation_lock_end() {
+  [ "${_boot_mutation_locked:-0}" = 1 ] || return 0
+  if merv_owner_lock_release "$_boot_mutation_lock" "$_boot_mutation_nonce" >/dev/null 2>&1; then
+    _boot_mutation_locked=0
+    return 0
+  fi
+  # Retry only with the original owner nonce; never remove a foreign claim.
+  merv_owner_lock_release "$_boot_mutation_lock" "$_boot_mutation_nonce" >/dev/null 2>&1 && _boot_mutation_locked=0
+  return 1
+}
+
+boot_mutation_tempdir_create() {
+  _bmtc_parent="$1"
+  _bmtc_now=$(date +%s 2>/dev/null || printf '0')
+  case "$_bmtc_now" in ''|*[!0-9]*) _bmtc_now=0 ;; esac
+  case "${_boot_mutation_seq:-0}" in ''|*[!0-9]*) _boot_mutation_seq=0 ;; esac
+  _bmtc_tries=0
+  while [ "$_bmtc_tries" -lt 32 ]; do
+    _boot_mutation_seq=$((_boot_mutation_seq + 1))
+    _boot_mutation_stage_dir="$_bmtc_parent/.mervlan-hook.$$.${_bmtc_now}.${_boot_mutation_seq}"
+    if mkdir "$_boot_mutation_stage_dir" 2>/dev/null; then
+      if ! boot_mutation_fault stage_chmod && chmod 700 "$_boot_mutation_stage_dir" 2>/dev/null; then return 0; fi
+      rmdir "$_boot_mutation_stage_dir" 2>/dev/null || :
+      _boot_mutation_stage_dir=''
+      return 1
+    fi
+    if [ ! -e "$_boot_mutation_stage_dir" ] && [ ! -L "$_boot_mutation_stage_dir" ]; then return 1; fi
+    _bmtc_tries=$((_bmtc_tries + 1))
+  done
+  return 1
+}
+
+boot_mutation_cleanup_stage() {
+  [ -n "${_boot_mutation_stage_dir:-}" ] || return 0
+  [ ! -L "$_boot_mutation_stage_dir" ] && [ -d "$_boot_mutation_stage_dir" ] || return 1
+  _bmcs_rc=0
+  for _bmcs_file in block services-start service-event; do
+    if [ -e "$_boot_mutation_stage_dir/$_bmcs_file" ] || [ -L "$_boot_mutation_stage_dir/$_bmcs_file" ]; then
+      [ ! -L "$_boot_mutation_stage_dir/$_bmcs_file" ] && [ -f "$_boot_mutation_stage_dir/$_bmcs_file" ] || { _bmcs_rc=1; continue; }
+      rm -f "$_boot_mutation_stage_dir/$_bmcs_file" 2>/dev/null || _bmcs_rc=1
     fi
   done
-  [ "$_boot_cleanup_failed" -eq 0 ]
+  [ "$_bmcs_rc" -eq 0 ] && rmdir "$_boot_mutation_stage_dir" 2>/dev/null || _bmcs_rc=1
+  [ "$_bmcs_rc" -eq 0 ] && _boot_mutation_stage_dir=''
+  return "$_bmcs_rc"
 }
 
-# copy_inject — Marker-bounded injection that preserves surrounding content
-# Args: $1=rendered_template_path, $2=dest_file
-# Returns: 0 on success (injected or updated), 1 on failure
-copy_inject() {
-  local tmpl="$1" dest="$2"
-  [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
+boot_mutation_signal() {
+  _bms_signal="$1"
+  boot_mutation_cleanup_stage || warn -c vlan,cli "Interrupted boot mutation retained staging evidence at ${_boot_mutation_stage_dir:-unknown}"
+  boot_mutation_lock_end || warn -c vlan,cli "Interrupted boot mutation could not release the boot-file owner lock"
+  exit "$_bms_signal"
+}
 
-  local block_file md5 tplid destid start_tag end_tag start_base end_base shebang_line tmp_sb first_line
+boot_mutation_old_mode() {
+  _bmom_file="$1"
+  [ -f "$_bmom_file" ] || { printf '755\n'; return 0; }
+  _bmom_mode=$(ls -ld "$_bmom_file" 2>/dev/null | awk '
+    function digit(s, n) { n=0; if (substr(s,1,1)=="r") n+=4; if (substr(s,2,1)=="w") n+=2; if (substr(s,3,1)=="x") n+=1; return n }
+    NR==1 { p=substr($1,1,10); if (substr(p,1,1)!="-" || p ~ /[sStT]/) exit 1; printf "%d%d%d\n", digit(substr(p,2,3)), digit(substr(p,5,3)), digit(substr(p,8,3)) }
+  ' 2>/dev/null)
+  case "$_bmom_mode" in [0-7][0-7][0-7]) ;; *) printf '755\n'; return 0 ;; esac
+  _bmom_owner=${_bmom_mode%??}
+  _bmom_group=$(printf '%s' "$_bmom_mode" | cut -c2)
+  _bmom_other=${_bmom_mode#??}
+  case "$_bmom_owner" in 5|7) ;; *) printf '755\n'; return 0 ;; esac
+  case "$_bmom_group:$_bmom_other" in *2*|*3*|*6*|*7*) printf '755\n' ;; *) printf '%s\n' "$_bmom_mode" ;; esac
+}
 
-  block_file="${TMPDIR:-/tmp}/merv_inj_block.$$"
-  [ ! -e "$block_file" ] || { error -c vlan,cli "Temporary injection path already exists"; return 1; }
-  ( umask 077; : > "$block_file" ) 2>/dev/null || return 1
+boot_mutation_mode_is_safe() {
+  _bmmis_file="$1"
+  _bmmis_mode=$(ls -ld "$_bmmis_file" 2>/dev/null | awk '
+    function digit(s, n) { n=0; if (substr(s,1,1)=="r") n+=4; if (substr(s,2,1)=="w") n+=2; if (substr(s,3,1)=="x") n+=1; return n }
+    NR==1 { p=substr($1,1,10); if (substr(p,1,1)!="-" || p ~ /[sStT]/) exit 1; printf "%d%d%d\n", digit(substr(p,2,3)), digit(substr(p,5,3)), digit(substr(p,8,3)) }
+  ' 2>/dev/null)
+  case "$_bmmis_mode" in [0-7][0-7][0-7]) ;; *) return 1 ;; esac
+  _bmmis_owner=${_bmmis_mode%??}
+  _bmmis_group=$(printf '%s' "$_bmmis_mode" | cut -c2)
+  _bmmis_other=${_bmmis_mode#??}
+  case "$_bmmis_owner" in 5|7) ;; *) return 1 ;; esac
+  case "$_bmmis_group:$_bmmis_other" in *2*|*3*|*6*|*7*) return 1 ;; esac
+  return 0
+}
 
-  md5="$(_content_md5 "$tmpl")"
-  tplid="$(_template_id "$tmpl")"
-  destid="$(_dest_id "$dest")"
-  start_tag="$MARKER_PREFIX $destid [tpl=$tplid md5=$md5]"
-  end_tag="$MARKER_SUFFIX $destid [tpl=$tplid md5=$md5]"
-  start_base="$MARKER_PREFIX $destid [tpl=$tplid "
-  end_base="$MARKER_SUFFIX $destid [tpl=$tplid "
-
-  if IFS= read -r first_line < "$tmpl" 2>/dev/null; then
-    case "$first_line" in
-      '#!'*) shebang_line="$first_line" ;;
-    esac
-  fi
-
-  {
-    printf '%s\n' "$start_tag"
-    if [ -n "$shebang_line" ]; then
-      sed '1d' "$tmpl"
-    else
-      cat "$tmpl"
-    fi
-    printf '%s\n' "$end_tag"
-  } > "$block_file"
-
-  if ! mkdir -p "$(dirname "$dest")" 2>/dev/null; then
-    cleanup_boot_temp_files "$block_file"
-    return 1
-  fi
-  if [ ! -f "$dest" ] && ! : > "$dest" 2>/dev/null; then
-    cleanup_boot_temp_files "$block_file"
-    return 1
-  fi
-
-  case "$dest" in
-    /jffs/scripts/*)
-      [ -n "$shebang_line" ] || shebang_line='#!/bin/sh'
-      ;;
+boot_mutation_state_usable() {
+  case "$1:${MERV_BOOT_HOOK_REASON:-}" in
+    present:*|absent:*|invalid:hook_shebang_invalid|invalid:hook_not_executable|invalid:legacy_replaceable) return 0 ;;
+    *) return 1 ;;
   esac
-
-  if [ -n "$shebang_line" ]; then
-    if [ -s "$dest" ]; then
-      if ! head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
-        tmp_sb="${dest}.shebang.$$"
-        if ! {
-          printf '%s\n' "$shebang_line"
-          cat "$dest"
-        } > "$tmp_sb" 2>/dev/null || ! mv -f "$tmp_sb" "$dest" 2>/dev/null; then
-          cleanup_boot_temp_files "$tmp_sb"
-          return 1
-        fi
-      fi
-    else
-      if ! printf '%s\n' "$shebang_line" > "$dest" 2>/dev/null; then
-        cleanup_boot_temp_files "$block_file"
-        return 1
-      fi
-    fi
-  fi
-
-  if LC_ALL=C grep -Fq "$start_base" "$dest"; then
-    if ! LC_ALL=C grep -Fq "$end_base" "$dest"; then
-      error -c vlan,cli "Cowardly refusing to modify $dest: found START marker without matching END. Please fix markers manually."
-      cleanup_boot_temp_files "$block_file" "$tmp_sb"
-      return 1
-    fi
-  fi
-
-  tmp_new="${dest}.new"
-  inject_block() {
-    local count dedupe_tmp last_char
-    awk -v start_base="$start_base" -v end_base="$end_base" -v blockf="$block_file" '
-      BEGIN { replaced = 0; skipping = 0; }
-      {
-        if (!replaced) {
-          if (index($0, start_base) == 1) {
-            while ((getline line < blockf) > 0) {
-              print line;
-            }
-            close(blockf);
-            replaced = 1;
-            skipping = 1;
-          } else {
-            print;
-          }
-        } else if (skipping) {
-          if (index($0, end_base) == 1) {
-            skipping = 0;
-          }
-        } else {
-          print;
-        }
-      }
-    ' "$dest" > "$tmp_new" || return 1
-
-    if LC_ALL=C grep -qF "$start_base" "$dest"; then
-      mv -f "$tmp_new" "$dest" || return 1
-    else
-      if ! rm -f "$tmp_new" 2>/dev/null; then
-        warn -c vlan,cli "Could not remove unused injection staging file $tmp_new"
-        return 1
-      fi
-      if [ -s "$dest" ]; then
-        last_char=$(tail -c 1 "$dest" 2>/dev/null | tr '\n' '_')
-        [ "$last_char" = "_" ] || printf '\n' >> "$dest"
-      fi
-      cat "$block_file" >> "$dest" || return 1
-    fi
-
-    while :; do
-      count=$(LC_ALL=C grep -Fc "$start_base" "$dest" 2>/dev/null || printf '0')
-      [ "$count" -gt 1 ] 2>/dev/null || break
-      dedupe_tmp="${dest}.dedupe.$$"
-      awk -v start_base="$start_base" -v end_base="$end_base" '
-        BEGIN { skipping = 0; seen = 0 }
-        {
-          if (!skipping) {
-            if (index($0, start_base) == 1) {
-              if (seen) { skipping = 1; next }
-              seen = 1
-            }
-            print
-          } else if (index($0, end_base) == 1) {
-            skipping = 0
-          }
-        }
-      ' "$dest" > "$dedupe_tmp" || {
-        if ! rm -f "$dedupe_tmp" 2>/dev/null; then
-          warn -c vlan,cli "Could not remove duplicate-injection staging file $dedupe_tmp"
-        fi
-        return 1
-      }
-      if ! mv -f "$dedupe_tmp" "$dest"; then
-        if ! rm -f "$dedupe_tmp" 2>/dev/null; then
-          warn -c vlan,cli "Could not remove duplicate-injection staging file $dedupe_tmp"
-        fi
-        return 1
-      fi
-    done
-
-    return 0
-  }
-
-  if [ "$MERV_DISABLE_LOCKS" = "1" ]; then
-    if ! inject_block; then
-      cleanup_boot_temp_files "$block_file" "$tmp_new"
-      return 1
-    fi
-  else
-    _boot_file_lock="$LOCKDIR/$(basename "$dest").lock"
-    merv_owner_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
-      cleanup_boot_temp_files "$block_file" "$tmp_new"
-      return 1
-    }
-    _boot_lock_nonce="$MERV_LOCK_NONCE"; _boot_lock_start="$MERV_LOCK_START"
-    if inject_block; then _boot_inject_rc=0; else _boot_inject_rc=$?; fi
-    if ! merv_owner_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_inject_rc=1; fi
-    if [ "$_boot_inject_rc" -ne 0 ]; then
-      cleanup_boot_temp_files "$block_file" "$tmp_new"
-      return 1
-    fi
-  fi
-
-  if [ ! -x "$dest" ] && head -n 1 "$dest" 2>/dev/null | grep -q '^#!'; then
-    chmod 755 "$dest" 2>/dev/null || warn -c vlan,cli "Could not set chmod on $dest"
-  fi
-
-  cleanup_boot_temp_files "$block_file" "$tmp_new" || return 1
-  return 0
 }
 
-# remove_inject — Remove only the marker-bounded block for the given template
-# Args: $1=template_path, $2=dest_file
-# Returns: 0 on success (or block absent), 1 on fatal error
-remove_inject() {
-  local tmpl="$1" dest="$2"
-  [ -f "$tmpl" ] || { error -c vlan,cli "Template missing: $tmpl"; return 1; }
-  [ -f "$dest" ] || return 0
-
-  local tplid destid start_base end_base
-  tplid="$(_template_id "$tmpl")"
-  destid="$(_dest_id "$dest")"
-  start_base="$MARKER_PREFIX $destid [tpl=$tplid "
-  end_base="$MARKER_SUFFIX $destid [tpl=$tplid "
-
-  if ! LC_ALL=C grep -Fq "$start_base" "$dest"; then
-    return 0
-  fi
-
-  if ! LC_ALL=C grep -Fq "$end_base" "$dest"; then
-    error -c vlan,cli "Cowardly refusing to modify $dest: found START marker without matching END. Please fix markers manually."
-    return 1
-  fi
-
-  tmp_new="${dest}.new"
-  remove_block() {
-    awk -v start_base="$start_base" -v end_base="$end_base" '
-      BEGIN { skipping = 0; removed = 0; }
-      {
-        if (!skipping) {
-          if (index($0, start_base) == 1) {
-            skipping = 1;
-            removed = 1;
-            next;
-          }
-          print;
-        } else {
-          if (index($0, end_base) == 1) {
-            skipping = 0;
-            next;
-          }
-        }
-      }
-      END { }
-    ' "$dest" > "$tmp_new" || return 1
-
-    mv -f "$tmp_new" "$dest"
-  }
-
-  if [ "$MERV_DISABLE_LOCKS" = "1" ]; then
-    if ! remove_block; then
-      cleanup_boot_temp_files "$tmp_new"
-      return 1
-    fi
+boot_mutate_template() {
+  _bmt_action="$1" _bmt_tmpl="$2" _bmt_dest="$3"
+  [ -f "$_bmt_tmpl" ] && [ -r "$_bmt_tmpl" ] || { error -c vlan,cli "Template missing or unreadable: $_bmt_tmpl"; return 1; }
+  _bmt_tplid=${_bmt_tmpl##*/}
+  case "$_bmt_tplid" in
+    services-start.v1.tpl|services-start.v2.tpl) _bmt_kind=services-start ;;
+    services-start-addon.v1.tpl|services-start-addon.v2.tpl) _bmt_kind=services-start-addon ;;
+    service-event.v1.tpl|service-event.v2.tpl) _bmt_kind=service-event ;;
+    *) error -c vlan,cli "Unsupported boot template id: $_bmt_tplid"; return 1 ;;
+  esac
+  case "$_bmt_kind:${_bmt_dest##*/}" in
+    services-start:services-start|services-start-addon:services-start|service-event:service-event) ;;
+    *) error -c vlan,cli "Boot template and destination do not match"; return 1 ;;
+  esac
+  boot_mutation_lock_begin "$_bmt_dest" || { error -c vlan,cli "Could not acquire boot-file owner lock for $_bmt_dest"; return 1; }
+  _boot_mutation_stage_dir=''
+  MERV_BOOT_MUTATION_POSTCOMMIT_FAILURE=0
+  trap 'boot_mutation_signal 129' HUP
+  trap 'boot_mutation_signal 130' INT
+  trap 'boot_mutation_signal 143' TERM
+  _bmt_rc=0
+  _bmt_check_name="$_bmt_kind"
+  merv_boot_hook_state "$_bmt_dest" "$_bmt_check_name" "$MERV_BASE" >/dev/null
+  _bmt_existing="$MERV_BOOT_HOOK_STATE"
+  if ! boot_mutation_state_usable "$_bmt_existing"; then
+    error -c vlan,cli "Refusing unsafe boot-hook destination $_bmt_dest (${MERV_BOOT_HOOK_REASON:-unknown})"
+    _bmt_rc=1
+  elif [ "$_bmt_action" = remove ] && [ "$_bmt_existing" = absent ]; then
+    _bmt_rc=0
   else
-    _boot_file_lock="$LOCKDIR/$(basename "$dest").lock"
-    merv_owner_lock_acquire "$_boot_file_lock" 0 0 boot-file || {
-      cleanup_boot_temp_files "$tmp_new"
-      return 1
-    }
-    _boot_lock_nonce="$MERV_LOCK_NONCE"; _boot_lock_start="$MERV_LOCK_START"
-    if remove_block; then _boot_remove_rc=0; else _boot_remove_rc=$?; fi
-    if ! merv_owner_lock_release "$_boot_file_lock" "$_boot_lock_nonce" >/dev/null 2>&1; then _boot_remove_rc=1; fi
-    if [ "$_boot_remove_rc" -ne 0 ]; then
-      cleanup_boot_temp_files "$tmp_new"
-      return 1
+    _bmt_start=${MERV_BOOT_HOOK_START_LINE:-0}
+    _bmt_end=${MERV_BOOT_HOOK_END_LINE:-0}
+    _bmt_keep_first=0
+    _bmt_shebang='#!/bin/sh'
+    if [ -f "$_bmt_dest" ]; then
+      IFS= read -r _bmt_first < "$_bmt_dest" || _bmt_first=''
+      _bmt_cr=$(printf '\r')
+      case "$_bmt_first" in *"$_bmt_cr") _bmt_first=${_bmt_first%"$_bmt_cr"} ;; esac
+      case "$_bmt_first" in
+        '#!/bin/sh'|'#!/bin/ash') _bmt_shebang="$_bmt_first"; _bmt_keep_first=1 ;;
+        '#!'*) error -c vlan,cli "Refusing unsupported startup shebang in $_bmt_dest"; _bmt_rc=1 ;;
+      esac
+    fi
+    _bmt_parent=${_bmt_dest%/*}
+    if [ "$_bmt_rc" -eq 0 ] && ! mkdir -p "$_bmt_parent" 2>/dev/null; then _bmt_rc=1; fi
+    if [ "$_bmt_rc" -eq 0 ] && { [ -L "$_bmt_dest" ] || { [ -e "$_bmt_dest" ] && [ ! -f "$_bmt_dest" ]; }; }; then _bmt_rc=1; fi
+    if [ "$_bmt_rc" -eq 0 ] && ! merv_boot_path_check "$_bmt_dest"; then _bmt_rc=1; fi
+    if [ "$_bmt_rc" -eq 0 ] && boot_mutation_tempdir_create "$_bmt_parent"; then
+      _bmt_block="$_boot_mutation_stage_dir/block"
+      _bmt_content="$_boot_mutation_stage_dir/${_bmt_dest##*/}"
+      _bmt_md5=$(_content_md5 "$_bmt_tmpl")
+      case "$_bmt_md5" in ????????????????????????????????) ;; *) _bmt_rc=1 ;; esac
+      if [ "$_bmt_rc" -eq 0 ]; then
+        if boot_mutation_fault stage_write || boot_mutation_fault no_space; then
+          printf '%s\n' "$MARKER_PREFIX ${_bmt_dest##*/} [tpl=$_bmt_tplid md5=$_bmt_md5]" > "$_bmt_block" 2>/dev/null || :
+          _bmt_rc=1
+        else
+          {
+            printf '%s\n' "$MARKER_PREFIX ${_bmt_dest##*/} [tpl=$_bmt_tplid md5=$_bmt_md5]"
+            if IFS= read -r _bmt_template_first < "$_bmt_tmpl" 2>/dev/null && [ "${_bmt_template_first#\#!}" != "$_bmt_template_first" ]; then sed '1d' "$_bmt_tmpl"; else cat "$_bmt_tmpl"; fi
+            printf '%s\n' "$MARKER_SUFFIX ${_bmt_dest##*/} [tpl=$_bmt_tplid md5=$_bmt_md5]"
+          } > "$_bmt_block" 2>/dev/null || _bmt_rc=1
+        fi
+      fi
+      if [ "$_bmt_rc" -eq 0 ]; then
+        if boot_mutation_fault signal_before_commit; then
+          kill -TERM "$$"
+          sleep 1
+          _bmt_rc=1
+        fi
+      fi
+      if [ "$_bmt_rc" -eq 0 ]; then
+        _bmt_input=/dev/null
+        [ ! -f "$_bmt_dest" ] || _bmt_input="$_bmt_dest"
+        LC_ALL=C awk -v start="$_bmt_start" -v end="$_bmt_end" -v block="$_bmt_block" -v action="$_bmt_action" -v add_shebang="$((1 - _bmt_keep_first))" '
+          function emit_block(   line) { while ((getline line < block) > 0) print line; close(block) }
+          BEGIN { if (add_shebang) print "#!/bin/sh" }
+          NR == start && start > 0 { if (action == "insert") emit_block(); next }
+          NR > start && NR <= end && start > 0 { next }
+          { print }
+          END { if (action == "insert" && start == 0) emit_block() }
+        ' "$_bmt_input" > "$_bmt_content" 2>/dev/null || _bmt_rc=1
+      fi
+      if [ "$_bmt_rc" -eq 0 ] && [ "$_bmt_action" = remove ] && [ "$_bmt_start" = 0 ]; then _bmt_rc=1; fi
+      if [ "$_bmt_rc" -eq 0 ] && [ "$_bmt_existing" = present ] && \
+         boot_mutation_mode_is_safe "$_bmt_dest" && cmp -s "$_bmt_content" "$_bmt_dest" 2>/dev/null; then
+        _bmt_noop=1
+      else
+        _bmt_noop=0
+      fi
+      if [ "$_bmt_rc" -eq 0 ] && [ "$_bmt_noop" = 0 ]; then
+        if boot_mutation_fault chmod; then
+          _bmt_rc=1
+        else
+          _bmt_mode=$(boot_mutation_old_mode "$_bmt_dest")
+          case "$_bmt_mode" in [0-7][0-7][0-7]) ;; *) _bmt_mode=755 ;; esac
+          chmod "$_bmt_mode" "$_bmt_content" 2>/dev/null || _bmt_rc=1
+          [ -x "$_bmt_content" ] || chmod 755 "$_bmt_content" 2>/dev/null || _bmt_rc=1
+        fi
+        if [ "$_bmt_rc" -eq 0 ]; then
+          if boot_mutation_fault syntax; then _bmt_rc=1; else "${MERV_BOOT_SH_BIN:-/bin/sh}" -n "$_bmt_content" >/dev/null 2>&1 || _bmt_rc=1; fi
+        fi
+        if [ "$_bmt_rc" -eq 0 ]; then
+          _bmt_check=$(merv_boot_hook_state "$_bmt_content" "$_bmt_check_name" "$MERV_BASE")
+          if [ "$_bmt_action" = insert ]; then [ "$_bmt_check" = present ] || _bmt_rc=1; else [ "$_bmt_check" = absent ] || _bmt_rc=1; fi
+        fi
+        if [ "$_bmt_rc" -eq 0 ] && boot_mutation_fault rename; then _bmt_rc=1; fi
+        if [ "$_bmt_rc" -eq 0 ]; then mv -f "$_bmt_content" "$_bmt_dest" 2>/dev/null || _bmt_rc=1; fi
+        if [ "$_bmt_rc" -eq 0 ]; then
+          if boot_mutation_fault post_readback; then
+            _bmt_rc=1
+          else
+            _bmt_post=$(merv_boot_hook_state "$_bmt_dest" "$_bmt_check_name" "$MERV_BASE")
+            if [ "$_bmt_action" = insert ]; then [ "$_bmt_post" = present ] || _bmt_rc=1; else [ "$_bmt_post" = absent ] || _bmt_rc=1; fi
+          fi
+          if [ "$_bmt_rc" -ne 0 ]; then
+            MERV_BOOT_MUTATION_POSTCOMMIT_FAILURE=1
+            error -c vlan,cli "Boot-hook rename committed but post-commit verification failed for $_bmt_dest; recovery is required"
+          fi
+        fi
+      fi
+    else
+      [ "$_bmt_rc" -ne 0 ] || { error -c vlan,cli "Could not allocate a same-directory boot-hook staging area"; _bmt_rc=1; }
     fi
   fi
+  boot_mutation_cleanup_stage || { warn -c vlan,cli "Boot-hook staging cleanup failed at ${_boot_mutation_stage_dir:-unknown}"; _bmt_rc=1; }
+  boot_mutation_lock_end || { warn -c vlan,cli "Could not release boot-file owner lock for $_bmt_dest"; _bmt_rc=1; }
+  trap - HUP INT TERM
+  [ "$_bmt_rc" -eq 0 ]
+}
 
-  cleanup_boot_temp_files "$tmp_new" || return 1
-  return 0
+# copy_inject — Marker-bounded atomic insertion/replacement.
+copy_inject() { boot_mutate_template insert "$1" "$2"; }
+
+# The public remover shares the same locked staging path as insertion. Keep the
+# original function name and template/destination caller contract.
+remove_inject() {
+  boot_mutate_template remove "$1" "$2"
 }
 
 # ============================================================================== #
@@ -750,7 +794,8 @@ enable_cron_now() {
     return 1
   fi
 
-  if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
+  if merv_boot_cron_state "$CRU_BIN" "$INJ_BASE" >/dev/null && \
+     [ "$MERV_BOOT_CRON_STATE" = present ]; then
     info -c vlan,cli "Cron confirmed for $CRON_NAME"
   else
     warn -c vlan,cli "Cron verification failed: $CRON_NAME not listed"
@@ -765,20 +810,48 @@ disable_cron_now() {
 
   "$CRU_BIN" d "$CRON_NAME" 2>/dev/null
 
-  _dcn_cron_list=$("$CRU_BIN" l 2>/dev/null)
-  _dcn_cron_list_rc=$?
-  if [ "$_dcn_cron_list_rc" -ne 0 ]; then
+  if ! merv_boot_cron_state "$CRU_BIN" "$INJ_BASE" >/dev/null; then
     warn -c vlan,cli "Cron disable verification failed; could not list cron entries"
     return 1
   fi
 
-  if printf '%s\n' "$_dcn_cron_list" | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
-    warn -c vlan,cli "Cron disable verification failed; entry still present"
-    return 1
-  else
-    info -c vlan,cli "Cron disabled: $CRON_NAME"
-  fi
+  case "$MERV_BOOT_CRON_STATE" in
+    present)
+      warn -c vlan,cli "Cron disable verification failed; entry still present"
+      return 1
+      ;;
+    invalid)
+      warn -c vlan,cli "Cron disable verification failed; malformed MerVLAN cron residue remains"
+      return 1
+      ;;
+    absent) info -c vlan,cli "Cron disabled: $CRON_NAME" ;;
+    *)
+      warn -c vlan,cli "Cron disable verification failed; state is unknown"
+      return 1
+      ;;
+  esac
   return 0
+}
+
+boot_verify_action_state() {
+  _bvas_expected="$1"
+  _bvas_role=main
+  is_node && _bvas_role=node
+  if merv_boot_verify_local "$_bvas_expected" "$_bvas_role" \
+      "$SERVICES_START" "$SERVICE_EVENT_WRAPPER" "$SETTINGS_FILE" \
+      "${CRU_BIN:-}" "$MERV_BASE"; then
+    _boot_verify_reason=verified
+    return 0
+  fi
+  _boot_verify_reason="${MERV_BOOT_VERIFY_REASON:-unknown}"
+  return 1
+}
+
+boot_verify_action_hard_failure() {
+  case "${_boot_verify_reason:-}" in
+    cron_unknown|cron_mismatch) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # =============================================================================== #
@@ -822,12 +895,6 @@ case "$ACTION" in
   enable)
     _boot_partial=0
     _boot_warnings='[]'
-    # Ensure /jffs/scripts directory exists for system startup scripts
-    mkdir -p "$SCRIPTS_DIR" || {
-      boot_action_ack_error "Failed to create scripts directory" "SCRIPTS_DIR_CREATE_FAILED"
-      exit 1
-    }
-
     # Inject services-start code to auto-load mervlan.asp at system boot
     inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || {
       error -c vlan,cli "Failed to install services-start"
@@ -846,6 +913,15 @@ case "$ACTION" in
     if ! enable_cron_now; then
       _boot_partial=1
       _boot_warnings='["One or more secondary enable operations failed"]'
+    fi
+    if ! boot_verify_action_state 1; then
+      if boot_verify_action_hard_failure; then
+        error -c vlan,cli "Boot enable local integrity verification failed: $_boot_verify_reason"
+        boot_action_ack_error "Boot enable local integrity verification failed" "{}" "BOOT_HOOK_VERIFY_FAILED"
+        exit 1
+      fi
+      _boot_partial=1
+      _boot_warnings='["Boot preference and manager hook match, but local cron could not be verified"]'
     fi
 
     # Required local enforcement precedes propagation; a failed reload is an
@@ -907,6 +983,15 @@ case "$ACTION" in
       _boot_partial=1
       _boot_warnings='["One or more secondary disable operations failed"]'
     fi
+    if ! boot_verify_action_state 0; then
+      if boot_verify_action_hard_failure; then
+        error -c vlan,cli "Boot disable local integrity verification failed: $_boot_verify_reason"
+        boot_action_ack_error "Boot disable local integrity verification failed" "{}" "BOOT_HOOK_VERIFY_FAILED"
+        exit 1
+      fi
+      _boot_partial=1
+      _boot_warnings='["Boot preference and manager hook match, but local cron could not be verified"]'
+    fi
 
     # Tear down MERV_MAC secondary shield (db files retained for re-enable)
     if type ebt_mac_shield_teardown >/dev/null 2>&1; then
@@ -960,14 +1045,18 @@ case "$ACTION" in
       error -c vlan,cli "Refusing setupenable while legacy boot-file lock state is ambiguous"
       exit 1
     fi
-    # Ensure /jffs/scripts directory exists
-    mkdir -p "$SCRIPTS_DIR" || { error -c vlan,cli "Failed to create $SCRIPTS_DIR"; exit 1; }
     # Inject service-event wrapper into system rc_service handler
     inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install service-event"; exit 1; }
     marker_present "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Service-event injection verification failed"; exit 1; }
     # Inject addon boot entry into services-start (for addon install.sh auto-load)
     inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install addon boot entry"; exit 1; }
     marker_present "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "services-start injection verification failed"; exit 1; }
+    _setup_role=main
+    is_node && _setup_role=node
+    if ! merv_boot_verify_baseline "$_setup_role" "$SERVICES_START" "$SERVICE_EVENT_WRAPPER" "$SETTINGS_FILE" "$MERV_BASE"; then
+      error -c vlan,cli "Setup hook integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-unknown}"
+      exit 1
+    fi
     info -c vlan,cli "Installed service-event with MERV_BASE=$MERV_BASE (setup-only)"
     # Propagate setupenable to all configured nodes via SSH
     handle_nodes_via_ssh "setupenable"
@@ -1006,6 +1095,10 @@ case "$ACTION" in
         _setupdisable_failed=1
       fi
     fi
+    merv_boot_hook_state "$SERVICE_EVENT_WRAPPER" service-event >/dev/null
+    [ "$MERV_BOOT_HOOK_STATE" = absent ] || _setupdisable_failed=1
+    merv_boot_hook_state "$SERVICES_START" services-start-addon >/dev/null
+    [ "$MERV_BOOT_HOOK_STATE" = absent ] || _setupdisable_failed=1
     # Tear down MERV_QT quarantine chain: flush rules, remove FORWARD/INPUT
     # jumps, then delete chain. Strict ebtables order: -F before -D, -D before
     # -X. No restart_wireless needed — rules vanish silently in milliseconds.
@@ -1062,7 +1155,6 @@ case "$ACTION" in
         error -c vlan,cli "Refusing nodeenable while legacy boot-file lock state is ambiguous"
         exit 1
       fi
-      mkdir -p "$SCRIPTS_DIR"
       # Shared handler now lives under functions/ and is synced from main
       if [ -n "${SERVICE_EVENT_HANDLER:-}" ] && [ -f "$SERVICE_EVENT_HANDLER" ]; then
         chmod 755 "$SERVICE_EVENT_HANDLER" 2>/dev/null || \
@@ -1076,8 +1168,10 @@ case "$ACTION" in
       # action; nodeenable only establishes service-event and addon mounting.
       inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
       inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install node addon boot entry"; exit 1; }
-      chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || \
-        warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"
+      if ! merv_boot_verify_baseline node "$SERVICES_START" "$SERVICE_EVENT_WRAPPER" "$SETTINGS_FILE" "$MERV_BASE"; then
+        error -c vlan,cli "Node baseline hook integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-unknown}"
+        exit 1
+      fi
       if [ -n "$BOOT_SCRIPT" ]; then
         chmod 755 "$BOOT_SCRIPT" 2>/dev/null || warn -c vlan,cli "Could not chmod 755 $BOOT_SCRIPT"
       fi
@@ -1155,6 +1249,12 @@ case "$ACTION" in
           _nodedisable_failed=1
         fi
       fi
+      merv_boot_hook_state "$SERVICES_START" services-start >/dev/null
+      [ "$MERV_BOOT_HOOK_STATE" = absent ] || _nodedisable_failed=1
+      merv_boot_hook_state "$SERVICES_START" services-start-addon >/dev/null
+      [ "$MERV_BOOT_HOOK_STATE" = absent ] || _nodedisable_failed=1
+      merv_boot_hook_state "$SERVICE_EVENT_WRAPPER" service-event >/dev/null
+      [ "$MERV_BOOT_HOOK_STATE" = absent ] || _nodedisable_failed=1
       # Tear down MERV_QT quarantine chain on this node
       if type ebtables >/dev/null 2>&1; then
         if ! merv_qt_teardown; then
@@ -1197,15 +1297,21 @@ case "$ACTION" in
   # ========================================================================== #
   status)
     # Initialize all state indicators to default (absent/disabled)
-    boot_state=disabled
+    boot_state=unknown
     addon_state=missing
     event_state=missing
-    cron_state=absent
+    cron_state=unknown
+    manager_hook_state=unknown
 
     # Check persisted boot state in settings.json
-    if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE")" = "1" ]; then
-      boot_state=enabled
+    if merv_boot_read_preference "$SETTINGS_FILE" >/dev/null 2>&1; then
+      case "$MERV_BOOT_PREFERENCE" in
+        1) boot_state=enabled ;;
+        0) boot_state=disabled ;;
+      esac
     fi
+    merv_boot_hook_state "$SERVICES_START" services-start >/dev/null
+    manager_hook_state="$MERV_BOOT_HOOK_STATE"
 
     # Check if addon boot entry exists in services-start
     # Matches either legacy install.sh or current mervlan_boot_wrap.sh install
@@ -1243,10 +1349,10 @@ case "$ACTION" in
       fi
     fi
 
-    if [ -n "$CRU_BIN" ]; then
-      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
-        cron_state=present
-      fi
+    if merv_boot_cron_state "$CRU_BIN" "$INJ_BASE" >/dev/null 2>&1; then
+      cron_state="$MERV_BOOT_CRON_STATE"
+    else
+      cron_state=unknown
     fi
 
     # Local hardware label (main router) and node flag
@@ -1269,7 +1375,7 @@ case "$ACTION" in
 
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
-      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
+      info -c vlan,cli "${hw_label} boot=${boot_state} manager_hook=${manager_hook_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
       info -c vlan,cli "<--- Configured Nodes --->"
 
       # NODE_STATUS_OUTPUT is newline-separated entries: ip:hw=LABEL boot=1 addon=.. event=.. cron=..
@@ -1281,9 +1387,11 @@ case "$ACTION" in
         # Default values
         node_hw="Unknown"
         node_boot_raw=""
+        node_boot_preference=""
         node_addon=""
         node_event=""
         node_cron=""
+        node_manager_hook="unknown"
         node_is_node=""
         node_mac_shield=""
 
@@ -1292,27 +1400,32 @@ case "$ACTION" in
           case "$kv" in
             hw=*)           node_hw="${kv#hw=}" ;;
             boot=*)         node_boot_raw="${kv#boot=}" ;;
+            boot_preference=*) node_boot_preference="${kv#boot_preference=}" ;;
             addon=*)        node_addon="${kv#addon=}" ;;
             event=*)        node_event="${kv#event=}" ;;
             cron=*)         node_cron="${kv#cron=}" ;;
+            manager_hook=*) node_manager_hook="${kv#manager_hook=}" ;;
             is_node=*)      node_is_node="${kv#is_node=}" ;;
             mac_shield=*)   node_mac_shield="${kv#mac_shield=}" ;;
           esac
         done
+
+        [ -z "$node_boot_preference" ] || node_boot_raw="$node_boot_preference"
 
         case "$node_boot_raw" in
           1) node_boot="enabled"  ;;
           0) node_boot="disabled" ;;
           *) node_boot="$node_boot_raw" ;;
         esac
+        case "$node_manager_hook" in present|absent|invalid|unknown) ;; *) node_manager_hook=unknown ;; esac
 
-        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} addon=${node_addon} event=${node_event} cron=${node_cron} is_node=${node_is_node} mac_shield=${node_mac_shield}"
+        info -c vlan,cli "${node_hw} ${node_ip}:boot=${node_boot} manager_hook=${node_manager_hook} addon=${node_addon} event=${node_event} cron=${node_cron} is_node=${node_is_node} mac_shield=${node_mac_shield}"
       done
     else
       # No nodes configured; output local status only
       info -c vlan,cli "Status:"
       info -c vlan,cli "<--- Main Unit --->"
-      info -c vlan,cli "${hw_label} boot=${boot_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
+      info -c vlan,cli "${hw_label} boot=${boot_state} manager_hook=${manager_hook_state} addon=${addon_state} service-event=${event_state} cron=${cron_state} is_node=${is_node_state} mac_shield=${mac_shield_state}"
     fi
 
     if type merv_dhcp_hold_status >/dev/null 2>&1; then
@@ -1348,28 +1461,32 @@ case "$ACTION" in
         while IFS= read -r _e; do
           _nip="${_e%%:*}"; _nr="${_e#*:}"
           [ -n "$_nip" ] || continue
-          _nh="Unknown"; _nb="?"; _na="?"; _nev="?"; _nc="?"; _nm="off"
+          _nh="Unknown"; _nb="?"; _bp=""; _na="?"; _nev="?"; _nc="?"; _nm="off"; _mh="unknown"
           for _kv in $_nr; do
             case "$_kv" in
               hw=*)         _nh="${_kv#hw=}" ;;
               boot=*)       _nb="${_kv#boot=}" ;;
+              boot_preference=*) _bp="${_kv#boot_preference=}" ;;
               addon=*)      _na="${_kv#addon=}" ;;
               event=*)      _nev="${_kv#event=}" ;;
               cron=*)       _nc="${_kv#cron=}" ;;
+              manager_hook=*) _mh="${_kv#manager_hook=}" ;;
               mac_shield=*) _nm="${_kv#mac_shield=}" ;;
             esac
           done
+          [ -z "$_bp" ] || _nb="$_bp"
           case "$_nb" in 1) _nb="enabled";; 0) _nb="disabled";; esac
-          printf '%s{"ip":"%s","hw":"%s","boot":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"}' \
-            "$_sep" "$_nip" "$(_json_str "$_nh")" "$_nb" "$_na" "$_nev" "$_nc" "$_nm"
+          case "$_mh" in present|absent|invalid|unknown) ;; *) _mh=unknown ;; esac
+          printf '%s{"ip":"%s","hw":"%s","boot":"%s","manager_hook":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"}' \
+            "$_sep" "$_nip" "$(_json_str "$_nh")" "$_nb" "$_mh" "$_na" "$_nev" "$_nc" "$_nm"
           _sep=","
         done
       }
     )"
 
-    if ! printf '{"ts":"%s","main":{"hw":"%s","boot":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"},"nodes":[%s]}\n' \
+    if ! printf '{"ts":"%s","main":{"hw":"%s","boot":"%s","manager_hook":"%s","addon":"%s","event":"%s","cron":"%s","mac":"%s"},"nodes":[%s]}\n' \
       "$_sj_ts" "$(_json_str "$hw_label")" \
-      "$boot_state" "$addon_state" "$event_state" "$cron_state" "$mac_shield_state" \
+      "$boot_state" "$manager_hook_state" "$addon_state" "$event_state" "$cron_state" "$mac_shield_state" \
       "$_sj_nodes" \
       > "${_sj_dir}/service_status.json" 2>/dev/null; then
       error -c vlan,cli "Could not publish service-status JSON"
@@ -1387,12 +1504,19 @@ case "$ACTION" in
   report)
     # Initialize state counters (boot uses 0/1 for machine readability)
     boot_state=0
+    boot_preference=unknown
     addon_state=missing
     event_state=missing
-    cron_state=absent
+    cron_state=unknown
+    manager_hook_state=unknown
     is_node_state=no
     # Check persisted boot state and set boot_state to 1 if enabled
-    if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE")" = "1" ]; then boot_state=1; fi
+    if merv_boot_read_preference "$SETTINGS_FILE" >/dev/null 2>&1; then
+      boot_preference="$MERV_BOOT_PREFERENCE"
+      boot_state="$MERV_BOOT_PREFERENCE"
+    fi
+    merv_boot_hook_state "$SERVICES_START" services-start >/dev/null
+    manager_hook_state="$MERV_BOOT_HOOK_STATE"
     # Check for addon boot entry in services-start (wrapper or legacy install.sh)
     if [ -f "$SERVICES_START" ] && grep -qE "mervlan/(install\.sh|functions/mervlan_boot_wrap\.sh install)" "$SERVICES_START" 2>/dev/null; then addon_state=active; fi
     # Check service-event wrapper and determine state: disabled/active/custom
@@ -1424,10 +1548,10 @@ case "$ACTION" in
         addon_state="missing"
       fi
     fi
-    if [ -n "$CRU_BIN" ]; then
-      if "$CRU_BIN" l 2>/dev/null | grep -q "$INJ_BASE/functions/heal_event.sh cron"; then
-        cron_state=present
-      fi
+    if merv_boot_cron_state "$CRU_BIN" "$INJ_BASE" >/dev/null 2>&1; then
+      cron_state="$MERV_BOOT_CRON_STATE"
+    else
+      cron_state=unknown
     fi
 
         # Determine node state using the same helper as the rest of the script
@@ -1443,7 +1567,7 @@ case "$ACTION" in
 
     check_mac_shield_state
 
-    echo "REPORT hw=$hw_label boot=$boot_state addon=$addon_state event=$event_state cron=$cron_state is_node=$is_node_state mac_shield=$mac_shield_state"
+    echo "REPORT hw=$hw_label boot=$boot_state boot_preference=$boot_preference addon=$addon_state event=$event_state cron=$cron_state is_node=$is_node_state mac_shield=$mac_shield_state manager_hook=$manager_hook_state"
     exit 0
     ;;
 

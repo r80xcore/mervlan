@@ -46,6 +46,7 @@ fi
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || true
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || true
 [ -n "${LIB_SSH_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssh.sh"
 # The shared bounded node pool is the only parallelism boundary for remote
 # observation and Shield propagation.  Keep this optional at source time so
@@ -2154,17 +2155,29 @@ merv_mac_snapshot_body() {
   local _snap_lock="${LOCKDIR:-/tmp/mervlan_tmp/locks}/mac_snapshot.lock"
   local _snap_owned=0
   local _snap_nonce=""
-  if type merv_owner_lock_acquire >/dev/null 2>&1; then
-    if merv_owner_lock_acquire "$_snap_lock" "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:-60}" 0 "mac_snapshot"; then
-      _snap_owned=1
-      _snap_nonce="${MERV_LOCK_NONCE:-}"
-    else
-      # Pre-build return: counts legitimately stay at their zero-init values —
-      # nothing was observed. Do NOT call _merv_mac_set_counts here.
-      MERV_MAC_LAST_STATUS="busy"
-      _merv_mac_logv info "MERV_MAC: snapshot skipped — another snapshot/refresh in progress"
-      return 0
+  local _snap_start=""
+  if ! type merv_owner_lock_acquire >/dev/null 2>&1 ||
+     ! type merv_mutation_admit_r >/dev/null 2>&1; then
+    MERV_MAC_LAST_STATUS="admission_unavailable"
+    MERV_MAC_LAST_REASON="owner_or_admission_unavailable"
+    return 75
+  fi
+  if merv_owner_lock_acquire "$_snap_lock" "${MERV_MAC_SNAPSHOT_LOCK_STALE_SEC:-60}" 0 "mac_snapshot"; then
+    _snap_owned=1
+    _snap_nonce="${MERV_LOCK_NONCE:-}"
+    _snap_start="${MERV_LOCK_START:-}"
+    if ! merv_mutation_admit_r "$_snap_lock" "$$" "$_snap_start" "$_snap_nonce"; then
+      MERV_MAC_LAST_STATUS="admission_blocked"
+      MERV_MAC_LAST_REASON="${MERV_MUTATION_ADMISSION_REASON:-unknown}"
+      merv_owner_lock_release "$_snap_lock" "$_snap_nonce" >/dev/null 2>&1 || :
+      return 75
     fi
+  else
+    # Pre-build return: counts legitimately stay at their zero-init values —
+    # nothing was observed. Do NOT call _merv_mac_set_counts here.
+    MERV_MAC_LAST_STATUS="busy"
+    _merv_mac_logv info "MERV_MAC: snapshot skipped — another snapshot/refresh in progress"
+    return 0
   fi
 
   # --- Reset per-run status globals ----------------------------------------

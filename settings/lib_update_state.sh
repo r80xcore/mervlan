@@ -19,6 +19,17 @@
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] ||
   [ ! -r "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_owner_lock.sh" ] ||
   . "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_owner_lock.sh"
+[ -n "${LIB_FULL_FENCE_LOADED:-}" ] ||
+  [ ! -r "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_full_fence.sh" ] ||
+  . "${MERV_BASE:-/jffs/addons/mervlan}/settings/lib_full_fence.sh" 2>/dev/null || :
+
+merv_update_full_fence_clear() {
+  type merv_full_fence_classify >/dev/null 2>&1 || return 1
+  # The fence helper resolves its private fixture path only inside the
+  # authenticated self-test context; ordinary production callers therefore
+  # still classify the one canonical production path.
+  [ "$(merv_full_fence_classify 2>/dev/null || printf unknown)" = absent ]
+}
 
 merv_update_state_path_valid() {
   local _mus_path="${1:-}"
@@ -298,12 +309,22 @@ merv_update_journal_state() {
 }
 
 merv_update_maintenance_lock_path() {
-  if [ "${MERV_RECOVERY_DELEGATION:-0}" = "1" ] &&
-    [ -n "${MERVLAN_RECOVERY_LOCK_OVERRIDE:-}" ]; then
-    printf '%s\n' "$MERVLAN_RECOVERY_LOCK_OVERRIDE"
-  else
-    printf '%s\n' "${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${MERV_UPDATE_MAINTENANCE_LOCK:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}}"
+  _mul_path=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock
+  if type merv_selftest_context_valid >/dev/null 2>&1 &&
+     merv_selftest_context_valid; then
+    if [ "${MERV_RECOVERY_DELEGATION:-0}" = "1" ] &&
+       [ -n "${MERVLAN_RECOVERY_LOCK_OVERRIDE:-}" ]; then
+      _mul_path=$MERVLAN_RECOVERY_LOCK_OVERRIDE
+    elif [ -n "${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-}" ]; then
+      _mul_path=$MERVLAN_MAINTENANCE_LOCK_OVERRIDE
+    elif [ -n "${MERV_UPDATE_MAINTENANCE_LOCK:-}" ]; then
+      _mul_path=$MERV_UPDATE_MAINTENANCE_LOCK
+    fi
+    if [ "$_mul_path" != /tmp/mervlan_tmp/locks/mervlan_maintenance.lock ]; then
+      merv_selftest_context_path_allowed "$_mul_path" || return 1
+    fi
   fi
+  printf '%s\n' "$_mul_path"
 }
 
 # Return the maintenance lock's non-following lifecycle classification.  A
@@ -421,20 +442,123 @@ merv_update_legacy_reinstall_context_valid() {
 merv_update_recovery_context_valid() {
   [ "${MERV_UPDATE_RECOVERY:-0}" = "1" ] || return 1
   type merv_identity_positive_uint >/dev/null 2>&1 || return 1
-  type merv_identity_matches >/dev/null 2>&1 || return 1
+  type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
+  type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
+  type merv_owner_v2_matches >/dev/null 2>&1 || return 1
   merv_update_journal_requires_safe_boot || return 1
   _murc_run=$(merv_update_journal_get run_id '') || return 1
   [ -n "$_murc_run" ] && [ "${MERV_UPDATE_RECOVERY_RUN_ID:-}" = "$_murc_run" ] || return 1
   merv_update_state_value "$MERV_UPDATE_RECOVERY_RUN_ID" >/dev/null || return 1
-  merv_identity_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_PID:-}" || return 1
-  merv_identity_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_START:-}" || return 1
-  merv_identity_matches "$MERV_UPDATE_RECOVERY_PARENT_PID" \
-    "$MERV_UPDATE_RECOVERY_PARENT_START" || return 1
-  _murc_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf 'unknown')
-  case "$_murc_state" in
-    absent|dead|reused) return 0 ;;
-    *) return 1 ;;
-  esac
+  merv_owner_v2_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_PID:-}" || return 1
+  merv_owner_v2_positive_uint "${MERV_UPDATE_RECOVERY_PARENT_START:-}" || return 1
+  merv_owner_v2_positive_uint "${MERV_UPDATE_RECOVERY_M_PID:-}" || return 1
+  merv_owner_v2_positive_uint "${MERV_UPDATE_RECOVERY_M_START:-}" || return 1
+  merv_owner_v2_nonce_valid "${MERV_UPDATE_RECOVERY_M_NONCE:-}" || return 1
+  _murc_lock=$(merv_update_maintenance_lock_path) || return 1
+  [ "${MERV_UPDATE_RECOVERY_M_PATH:-}" = "$_murc_lock" ] || return 1
+  [ "$MERV_UPDATE_RECOVERY_PARENT_PID" = "$MERV_UPDATE_RECOVERY_M_PID" ] &&
+    [ "$MERV_UPDATE_RECOVERY_PARENT_START" = "$MERV_UPDATE_RECOVERY_M_START" ] || return 1
+  merv_owner_v2_matches "$_murc_lock" "$MERV_UPDATE_RECOVERY_M_PID" \
+    "$MERV_UPDATE_RECOVERY_M_START" "$MERV_UPDATE_RECOVERY_M_NONCE" /proc
+}
+
+# Boot-time interrupted-Update recovery is the only caller allowed to take
+# over a stale Update journal. The wrapper first proves the journal identity,
+# then owns canonical M, rechecks F and the journal, and finally asks shared Q
+# to prove that no pre-existing runtime work remains. This deliberately does
+# not weaken normal maintenance admission.
+merv_update_recovery_owner_admit() {
+  local _muro_run _muro_lock _muro_state _muro_start _muro_q
+  MERV_MAINTENANCE_ENTRY_OWNED=0
+  MERV_MAINTENANCE_ENTRY_DELEGATED=0
+  MERV_MAINTENANCE_ENTRY_LOCK=
+  MERV_MAINTENANCE_ENTRY_NONCE=
+  MERV_MAINTENANCE_ENTRY_START=
+  unset MERV_UPDATE_RECOVERY MERV_UPDATE_RECOVERY_RUN_ID \
+    MERV_UPDATE_RECOVERY_PARENT_PID MERV_UPDATE_RECOVERY_PARENT_START \
+    MERV_UPDATE_RECOVERY_M_PATH MERV_UPDATE_RECOVERY_M_PID \
+    MERV_UPDATE_RECOVERY_M_START MERV_UPDATE_RECOVERY_M_NONCE \
+    MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
+    MERV_RECOVERY_DELEGATION MERV_UPDATE_RECOVERY_DELEGATION \
+    MERV_MAINTENANCE_OWNER_PID \
+    MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
+
+  type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
+  type merv_update_full_fence_clear >/dev/null 2>&1 || return 1
+  type merv_maintenance_quiesce_classify >/dev/null 2>&1 || return 1
+  merv_update_journal_requires_safe_boot || return 1
+  _muro_run=$(merv_update_journal_get run_id '') || return 1
+  merv_update_state_value "$_muro_run" >/dev/null || return 1
+  _muro_state=$(merv_update_maintenance_lock_state 2>/dev/null || printf unknown)
+  case "$_muro_state" in absent|dead|reused) ;; *) return 1 ;; esac
+  merv_update_full_fence_clear || return 1
+  _muro_lock=$(merv_update_maintenance_lock_path) || return 1
+  _muro_start=$(merv_identity_current_start /proc 2>/dev/null) || return 1
+
+  merv_owner_lock_acquire "$_muro_lock" 0 0 mervlan_maintenance || return 1
+  MERV_MAINTENANCE_ENTRY_OWNED=1
+  MERV_MAINTENANCE_ENTRY_LOCK=$_muro_lock
+  MERV_MAINTENANCE_ENTRY_NONCE=${MERV_LOCK_NONCE:-}
+  MERV_MAINTENANCE_ENTRY_START=${MERV_LOCK_START:-}
+  [ -n "$MERV_MAINTENANCE_ENTRY_NONCE" ] &&
+    [ "$MERV_MAINTENANCE_ENTRY_START" = "$_muro_start" ] || {
+      merv_maintenance_direct_release >/dev/null 2>&1 || :
+      return 1
+    }
+  merv_update_full_fence_clear || {
+    merv_maintenance_direct_release >/dev/null 2>&1 || :
+    return 1
+  }
+  merv_update_journal_requires_safe_boot &&
+    [ "$(merv_update_journal_get run_id '')" = "$_muro_run" ] || {
+      merv_maintenance_direct_release >/dev/null 2>&1 || :
+      return 1
+    }
+  merv_owner_v2_matches "$_muro_lock" "$$" "$MERV_MAINTENANCE_ENTRY_START" \
+    "$MERV_MAINTENANCE_ENTRY_NONCE" /proc || {
+      merv_maintenance_direct_release >/dev/null 2>&1 || :
+      return 1
+    }
+
+  MERV_UPDATE_RECOVERY=1
+  MERV_UPDATE_RECOVERY_RUN_ID=$_muro_run
+  MERV_UPDATE_RECOVERY_PARENT_PID=$$
+  MERV_UPDATE_RECOVERY_PARENT_START=$MERV_MAINTENANCE_ENTRY_START
+  MERV_UPDATE_RECOVERY_M_PATH=$_muro_lock
+  MERV_UPDATE_RECOVERY_M_PID=$$
+  MERV_UPDATE_RECOVERY_M_START=$MERV_MAINTENANCE_ENTRY_START
+  MERV_UPDATE_RECOVERY_M_NONCE=$MERV_MAINTENANCE_ENTRY_NONCE
+  if ! merv_update_recovery_context_valid; then
+    merv_maintenance_direct_release >/dev/null 2>&1 || :
+    return 1
+  fi
+
+  _muro_q=$(merv_maintenance_quiesce_classify \
+    "$$" "$MERV_MAINTENANCE_ENTRY_START" \
+    "$MERV_MAINTENANCE_ENTRY_NONCE")
+  if [ "$_muro_q" != IDLE ]; then
+    merv_maintenance_direct_release >/dev/null 2>&1 || :
+    return 1
+  fi
+  return 0
+}
+
+merv_update_recovery_export_install_context() {
+  [ "${MERV_MAINTENANCE_ENTRY_OWNED:-0}" = 1 ] || return 1
+  merv_update_recovery_context_valid || return 1
+  MERV_MAINTENANCE_DELEGATED=1
+  MERV_MAINTENANCE_DELEGATION_KIND=interrupted-update
+  MERV_UPDATE_RECOVERY_DELEGATION=1
+  MERV_MAINTENANCE_OWNER_PID=$MERV_UPDATE_RECOVERY_M_PID
+  MERV_MAINTENANCE_OWNER_START=$MERV_UPDATE_RECOVERY_M_START
+  MERV_MAINTENANCE_OWNER_NONCE=$MERV_UPDATE_RECOVERY_M_NONCE
+  export MERV_UPDATE_RECOVERY MERV_UPDATE_RECOVERY_RUN_ID \
+    MERV_UPDATE_RECOVERY_PARENT_PID MERV_UPDATE_RECOVERY_PARENT_START \
+    MERV_UPDATE_RECOVERY_M_PATH MERV_UPDATE_RECOVERY_M_PID \
+    MERV_UPDATE_RECOVERY_M_START MERV_UPDATE_RECOVERY_M_NONCE \
+    MERV_MAINTENANCE_DELEGATED MERV_MAINTENANCE_DELEGATION_KIND \
+    MERV_UPDATE_RECOVERY_DELEGATION MERV_MAINTENANCE_OWNER_PID \
+    MERV_MAINTENANCE_OWNER_START MERV_MAINTENANCE_OWNER_NONCE
 }
 
 merv_update_maintenance_sync_context_valid() {
@@ -484,6 +608,20 @@ merv_maintenance_delegation_valid() {
       merv_update_quiesce_active || return 1
       merv_update_journal_requires_safe_boot || return 1
       ;;
+    interrupted-update)
+      [ "${MERV_MAINTENANCE_DELEGATED:-0}" = "1" ] || return 1
+      [ "${MERV_UPDATE_RECOVERY_DELEGATION:-0}" = "1" ] || return 1
+      merv_update_recovery_context_valid || return 1
+      type merv_owner_v2_positive_uint >/dev/null 2>&1 || return 1
+      type merv_owner_v2_nonce_valid >/dev/null 2>&1 || return 1
+      type merv_owner_v2_matches >/dev/null 2>&1 || return 1
+      merv_owner_v2_positive_uint "${MERV_MAINTENANCE_OWNER_PID:-}" || return 1
+      merv_owner_v2_positive_uint "${MERV_MAINTENANCE_OWNER_START:-}" || return 1
+      merv_owner_v2_nonce_valid "${MERV_MAINTENANCE_OWNER_NONCE:-}" || return 1
+      merv_owner_v2_matches "$_mmd_lock" \
+        "$MERV_MAINTENANCE_OWNER_PID" "$MERV_MAINTENANCE_OWNER_START" \
+        "$MERV_MAINTENANCE_OWNER_NONCE"
+      ;;
     backup|recovery|install|uninstall)
       [ "${MERV_MAINTENANCE_DELEGATED:-0}" = "1" ] || return 1
       case "$_mmd_kind" in
@@ -527,6 +665,13 @@ merv_maintenance_direct_admit() {
     fresh-bootstrap) _mda_fresh=1 ;;
     *) return 1 ;;
   esac
+  MERV_MAINTENANCE_ENTRY_OWNED=0
+  MERV_MAINTENANCE_ENTRY_DELEGATED=0
+  MERV_MAINTENANCE_ENTRY_LOCK=
+
+  # The fence is checked before M acquisition and again while M is held. It
+  # is never waited on and is never reclaimed by a maintenance transaction.
+  merv_update_full_fence_clear || return 1
 
   if [ "$_mda_fresh" = "1" ]; then
     type merv_maintenance_recovery_root_chain_safe >/dev/null 2>&1 || return 1
@@ -547,6 +692,7 @@ merv_maintenance_direct_admit() {
   # A genuine fresh bootstrap must claim the canonical owner itself.  Do not
   # turn an externally supplied delegation environment into fresh authority.
   if [ "$_mda_fresh" = "0" ] && merv_maintenance_delegation_valid; then
+    merv_update_full_fence_clear || return 1
     MERV_MAINTENANCE_ENTRY_DELEGATED=1
     return 0
   fi
@@ -555,6 +701,12 @@ merv_maintenance_direct_admit() {
   MERV_MAINTENANCE_ENTRY_NONCE="${MERV_LOCK_NONCE:-}"
   MERV_MAINTENANCE_ENTRY_START="${MERV_LOCK_START:-}"
   MERV_MAINTENANCE_ENTRY_OWNED=1
+
+  if ! merv_update_full_fence_clear; then
+    merv_maintenance_direct_release >/dev/null 2>&1 || :
+    MERV_MAINTENANCE_ENTRY_OWNED=0
+    return 1
+  fi
 
   if [ "$_mda_fresh" = "1" ]; then
     # Recheck after claiming the owner so a concurrent appearance cannot be
@@ -645,6 +797,7 @@ merv_maintenance_direct_release() {
 # the maintenance lock, quiesce marker, or incomplete-update recovery state is
 # active. An unreadable owner record is treated as blocked rather than safe.
 merv_update_mutation_blocked() {
+  merv_update_full_fence_clear || return 0
   merv_update_owner_context_valid && return 1
   # A direct installer may invoke a hardware-profile child while retaining
   # the maintenance lock.  Permit only that child context after exact owner

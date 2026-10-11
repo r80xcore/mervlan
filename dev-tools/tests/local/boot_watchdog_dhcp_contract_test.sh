@@ -13,6 +13,8 @@ BASE_DIR=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd) || exit 1
 TEST_ROOT="/tmp/mervlan_tmp/selftest.boot-watchdog.$$"
 umask 077
 mkdir -p "$TEST_ROOT" || exit 1
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 _p_before=""; _p_during=""; _p_after=""; _p_normal=""; _p_kill=""; _p_issue48=""
 _replace_writer_pid=""
@@ -328,6 +330,7 @@ _purity_root="$TEST_ROOT/enforce-purity"
 _purity_fake="$_purity_root/fake-ebtables"
 _purity_script="$_purity_root/run.sh"
 mkdir -p "$_purity_root" || fail enforce-purity-root
+merv_selftest_context_create "$_purity_root" || fail enforce-purity-context
 cat > "$_purity_fake" <<'EOF'
 #!/bin/sh
 set -u

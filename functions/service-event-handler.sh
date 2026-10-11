@@ -46,6 +46,8 @@ MERV_HEAL_DELAY="${MERV_HEAL_DELAY:-3}"
 if [ -z "${LIB_ACTION_LOCK_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
   . "$MERV_BASE/settings/lib_action_lock.sh" 2>/dev/null || exit 1
 fi
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] ||
+  . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 if [ -z "${LIB_ACTION_ACK_LOADED:-}" ] && [ -f "$MERV_BASE/settings/lib_action_ack.sh" ]; then
   . "$MERV_BASE/settings/lib_action_ack.sh" 2>/dev/null || exit 1
 fi
@@ -988,6 +990,58 @@ dispatch_if_executable() {
   }
   _se_cleanup_done=0
   _se_repair_deferred=0
+  if [ "$_se_global_needed" -eq 1 ]; then
+    _se_admission_lock="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+  else
+    _se_admission_lock="$_se_event_lock"
+  fi
+  if ! merv_mutation_admit_action "$_se_admission_lock"; then
+    logger -t "VLANMgr" "handler: refusing $_se_key before dispatch (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+    merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+    merv_action_progress_fail "The action was refused by maintenance admission; no work was started."
+    _se_release_owner_locks || logger -t "VLANMgr" "handler: lock cleanup failed after admission refusal"
+    return 75
+  fi
+  _se_continuation_token=""
+  _se_continuation_published=0
+  if [ "$_se_global_needed" -eq 1 ]; then
+    # The dispatcher owns this per-event R even when its global action R is
+    # inherited. Bind the continuation to the immediate supervisor so it can
+    # publish the direct child's identity before waiting.
+    _se_parent_type=runtime
+    _se_parent_path="$_se_event_lock"
+    _se_parent_pid=$$
+    _se_parent_start="$_se_event_start"
+    _se_parent_nonce="$_se_event_nonce"
+    _se_run_token="$_se_key.$$.$_se_parent_start"
+    if ! merv_continuation_publish_pending "$_se_key" "$_se_run_token" \
+         "$_se_parent_type" "$_se_parent_path" "$_se_parent_pid" \
+         "$_se_parent_start" "$_se_parent_nonce"; then
+      logger -t "VLANMgr" "handler: could not publish pending continuation for $_se_key; worker was not launched"
+      merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_se_key" "$_se_key" "Preparing action..."
+      merv_action_progress_fail "The action handoff could not be made visible; no work was started."
+      _se_release_owner_locks || :
+      trap - EXIT INT TERM
+      return 75
+    fi
+    _se_continuation_token=$MERV_CONTINUATION_TOKEN
+    _se_continuation_published=1
+    MERV_CONTINUATION_TOKEN=$_se_continuation_token
+    export MERV_CONTINUATION_TOKEN
+  fi
+  _se_retire_child_continuation() {
+    [ "${_se_continuation_published:-0}" = 1 ] || return 0
+    _se_cc_file=$(merv_continuation_path "$_se_continuation_token") || return 1
+    merv_continuation_read "$_se_cc_file" || return 1
+    case "$MERV_CONTINUATION_STATE" in
+      active) merv_continuation_retire "$_se_continuation_token" || return 1 ;;
+      pending) merv_continuation_cancel_pending "$_se_continuation_token" direct-child-reaped || return 1 ;;
+      terminal) return 0 ;;
+      *) return 1 ;;
+    esac
+    unset MERV_CONTINUATION_TOKEN
+    return 0
+  }
   # Publish a terminal repair result after the worker has deferred its own
   # terminal record. Prefer the shared helper, but keep this narrow fallback
   # independent of the pre-repair helper copy that the repair may just have
@@ -1095,6 +1149,9 @@ dispatch_if_executable() {
       trap - EXIT
       exit 75
     fi
+    if ! _se_retire_child_continuation; then
+      logger -t "VLANMgr" "handler: interrupted child continuation is unresolved; its lease remains visible"
+    fi
     _se_release_owner_locks
     _se_release_rc=$?
     [ "${_se_repair_deferred:-0}" -eq 1 ] && _se_repair_terminal_progress failed || :
@@ -1153,7 +1210,19 @@ dispatch_if_executable() {
       # Execute the script as the supervised child itself.  The dispatcher
       # records its authenticated PID/start identity before waiting, allowing
       # signal reconciliation without descendant-wide kills.
-      sh "$SCRIPT_PATH" "$@" &
+      if [ "$_se_global_needed" -eq 1 ]; then
+        sh -c '
+          _se_child_script=$1
+          _se_child_lock=$2
+          shift 2
+          . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
+          merv_continuation_activate_wait "${MERV_CONTINUATION_TOKEN:-}" || exit 75
+          merv_mutation_admit_action "$_se_child_lock" || exit 75
+          exec sh "$_se_child_script" "$@"
+        ' merv-event-worker "$SCRIPT_PATH" "$_se_admission_lock" "$@" &
+      else
+        sh "$SCRIPT_PATH" "$@" &
+      fi
       _se_worker_pid=$!
       # lib_action_lock loads lib_identity; use that lightweight, authoritative
       # identity API directly.  merv_proc_start_time is a lib_mervqt wrapper
@@ -1170,8 +1239,20 @@ dispatch_if_executable() {
           _se_worker_start=""
           ;;
         *)
-          wait "$_se_worker_pid" 2>/dev/null
-          _se_script_rc=$?
+          if [ "$_se_global_needed" -ne 1 ]; then
+            wait "$_se_worker_pid" 2>/dev/null
+            _se_script_rc=$?
+          else
+            if ! merv_continuation_bind_child "$_se_continuation_token" \
+                 "$_se_worker_pid" "$_se_worker_start"; then
+              logger -t "VLANMgr" "handler: continuation child identity could not be published; waiting for the direct child"
+              wait "$_se_worker_pid" 2>/dev/null || :
+              _se_script_rc=75
+            else
+              wait "$_se_worker_pid" 2>/dev/null
+              _se_script_rc=$?
+            fi
+          fi
           _se_worker_pid=""
           _se_worker_start=""
           ;;
@@ -1180,6 +1261,10 @@ dispatch_if_executable() {
   else
     logger -t "VLANMgr" "handler: missing script ${SCRIPT_PATH##*/}"
     _se_script_rc=1
+  fi
+  if [ "$_se_continuation_published" = 1 ] && ! _se_retire_child_continuation; then
+    logger -t "VLANMgr" "handler: child continuation could not be retired safely; its lease remains visible"
+    [ "${_se_script_rc:-0}" -eq 0 ] && _se_script_rc=75
   fi
   _se_script_rc=${_se_script_rc:-$?}
   _se_worker_result_rc=$_se_script_rc
@@ -1577,6 +1662,24 @@ case "${TYPE}_${EVENT}" in
         ;;
     esac
 
+    {
+    # The inline shield repair is mutation too. Its ordinary event owner
+    # covers the timestamp/re-link lifetime before the delayed worker exists.
+    # The delayed worker independently takes R and checks F/M on waking.
+    _se_heal_lock="$LOCKDIR/vlan_event.lock"
+    merv_owner_lock_acquire "$_se_heal_lock" 0 0 system-event-relink || exit 75
+    _se_heal_nonce=$MERV_LOCK_NONCE; _se_heal_start=$MERV_LOCK_START
+    _se_heal_cleanup() {
+      _se_heal_rc=$?
+      merv_owner_lock_release "$_se_heal_lock" "$_se_heal_nonce" >/dev/null 2>&1 || _se_heal_rc=75
+      trap - 0
+      exit "$_se_heal_rc"
+    }
+    trap _se_heal_cleanup 0
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    merv_mutation_admit_r "$_se_heal_lock" "$$" "$_se_heal_start" "$_se_heal_nonce" || exit 75
+
     # Handler-level debounce for system events (prevents heal storms from rc event floods)
     HEAL_STAMP="$LOCKDIR/heal_event.last"
     HEAL_WINDOW="$MERV_HEAL_EVENT_DEBOUNCE"
@@ -1636,11 +1739,16 @@ case "${TYPE}_${EVENT}" in
         _se_heal_delay="$MERV_HEAL_DELAY"
         ;;
     esac
+    # Retire the synchronous owner before queueing. A late worker cannot
+    # inherit or release this owner, and must obtain its own identity.
+    merv_owner_lock_release "$_se_heal_lock" "$_se_heal_nonce" || exit 75
+    trap - 0 INT TERM
     logger -t "VLANMgr" "handler: queued heal_event ${COMBINED_NORM} (async, delay=${_se_heal_delay}s)"
     (
       sleep "$_se_heal_delay"
       /jffs/addons/mervlan/functions/heal_event.sh "$COMBINED_NORM"
     ) >/dev/null 2>&1 &
+    } || exit $?
     ;;
   *)
     # Unknown event: no matching handler found

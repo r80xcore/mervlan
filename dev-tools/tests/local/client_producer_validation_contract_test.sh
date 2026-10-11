@@ -29,6 +29,8 @@ export MERV_UPDATE_MAINTENANCE_LOCK
 _FAILURES=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; _FAILURES=1; }
 pass() { printf 'PASS: %s\n' "$1"; }
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || fail 'private self-test context'
 
 # Minimum libraries required by the outer test harness (contract parser + identity helpers)
 [ -n "${LIB_JSON_LOADED:-}" ]     || . "$BASE_DIR/settings/lib_json.sh" 2>/dev/null || :

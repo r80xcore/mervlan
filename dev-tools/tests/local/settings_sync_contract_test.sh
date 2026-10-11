@@ -163,12 +163,19 @@ run_contract_tests() {
 
     # Load activate_staged_node_settings_only function from sync_nodes.sh
     eval "$(sed -n '/^activate_staged_node_settings_only()/,/^}/p' "$MERV_BASE/functions/sync_nodes.sh")"
-    merv_ssh_exec() {
-        MERV_BASE="$_act_merv" eval "$3"
+    SYNC_RUN_ID=123-456
+    SYNC_MUTATE_CALL_FILE="$_act_stage/mutation-call"
+    export SYNC_MUTATE_CALL_FILE
+    merv_ssh_node_mutate_exec() {
+        [ "$3" = activate-settings ] || return 2
+        [ "$4" = "$SYNC_RUN_ID" ] || return 2
+        [ "$5" = 1 ] || return 2
+        printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" > "$SYNC_MUTATE_CALL_FILE"
+        printf '%s\n' STAGED_SETTINGS_OK
     }
     activate_staged_node_settings_only "127.0.0.1" "1" "$_act_stage" || fail "$_prefix: activate_staged_node_settings_only execution failed"
-    [ -d "$_act_stage" ] && fail "$_prefix: staged settings directory was not cleaned up"
-    [ -f "$_act_merv/settings/settings.json" ] || fail "$_prefix: target settings.json was not created"
+    assert_eq '1|127.0.0.1|activate-settings|123-456|1' "$(cat "$SYNC_MUTATE_CALL_FILE")" \
+        "$_prefix: settings activation did not use the guarded node mutation protocol"
 }
 
 run_contract_tests "Host awk"

@@ -34,9 +34,10 @@ fi
 # lib_mervqt provides merv_lock_acquire/release (collection self-lock) and the
 # MAC validators reused by the client-metadata annotation pass. Best-effort:
 # if absent we degrade to unguarded collection rather than fail.
-[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
+[ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || exit 75
 [ -n "${LIB_NODE_JOBS_LOADED:-}" ] || . "$MERV_BASE/settings/lib_node_jobs.sh" 2>/dev/null || exit 75
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ] || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 umask 022
@@ -270,15 +271,23 @@ if type merv_lock_state >/dev/null 2>&1; then
   esac
 fi
 
-if type merv_lock_acquire >/dev/null 2>&1; then
-  mkdir -p "$LOCKDIR" 2>/dev/null || { error -c cli,vlan "Client collection: lock directory unavailable"; exit 1; }
-  if merv_lock_acquire "$COLLECT_LOCK" "${COLLECT_STALE_SEC:-300}" 0 "client_collect"; then
-    COLLECT_LOCK_ACQUIRED=1
-    COLLECT_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
-  else
-    info -c cli,vlan "Client collection already running — skipping"
+if ! type merv_lock_acquire >/dev/null 2>&1; then
+  error -c cli,vlan "Client collection owner-lock support is unavailable; refusing to run"
+  exit 75
+fi
+mkdir -p "$LOCKDIR" 2>/dev/null || { error -c cli,vlan "Client collection: lock directory unavailable"; exit 1; }
+if merv_lock_acquire "$COLLECT_LOCK" "${COLLECT_STALE_SEC:-300}" 0 "client_collect"; then
+  COLLECT_LOCK_ACQUIRED=1
+  COLLECT_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+  if ! merv_mutation_admit_r "$COLLECT_LOCK" "$$" "${MERV_LOCK_START:-}" "$COLLECT_LOCK_NONCE"; then
+    error -c cli,vlan "Client collection refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+    merv_lock_release "$COLLECT_LOCK" "$COLLECT_LOCK_NONCE" >/dev/null 2>&1 || :
+    COLLECT_LOCK_ACQUIRED=0
     exit 75
   fi
+else
+  info -c cli,vlan "Client collection already running — skipping"
+  exit 75
 fi
 
 info -c cli,vlan "Refreshing client list started"

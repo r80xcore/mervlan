@@ -10,6 +10,8 @@ mkdir -p "$TEST_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || fail 'self-test helper load'
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || fail 'private self-test context'
 
 export MERV_BASE="$BASE_DIR"
 export VAR_SETTINGS_LOADED=1

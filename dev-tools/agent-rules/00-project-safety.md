@@ -5,6 +5,17 @@ Use for every task.
 - Inspect current code and `git status` before editing; preserve unrelated changes.
 - Make the smallest coherent change. Do not bundle unrelated refactors.
 - Current code is evidence. If it conflicts with a written plan, stop and reconcile the difference.
+- MerVLAN uses a deny-by-default repository `.gitignore`. Before creating a
+  tracked file, determine whether its path already matches an approved
+  allowlisted class. If so, add it normally without changing `.gitignore`
+  (for example, a new `functions/*.sh` file). If a legitimate project file is
+  outside the existing allowlist, extend `.gitignore` with the narrowest
+  appropriate path or class in the same change. Never use `git add -f` or an
+  equivalent bypass to admit ignored material, and do not broaden a directory
+  exception just to admit one unrelated file. Generated evidence, logs,
+  archives, credentials, runtime data, caches, backups, and temporary files
+  remain prohibited. When an otherwise legitimate file is ignored, inspect
+  the active rule with `git check-ignore -v -- <path>`.
 - Do not commit, push, deploy, synchronize nodes, reboot, restore, or change backups without explicit approval.
 - Preserve DHCP Hold, MAC Shield, healing, observation, settings, backups, client refresh, and node identity unless the approved task explicitly changes them.
 - `dev-tools/` is developer/test-branch material. Never deploy its

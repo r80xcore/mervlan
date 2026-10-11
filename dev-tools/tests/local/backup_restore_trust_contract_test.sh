@@ -8,6 +8,8 @@ TEST_ROOT="/tmp/mervlan_tmp/selftest.backup-trust.$$"
 umask 077
 mkdir -p "$TEST_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$1"; }
@@ -55,7 +57,7 @@ SOURCE="$TEST_ROOT/source"
 mkdir -p "$SOURCE/settings" "$SOURCE/functions" "$SOURCE/www" || fail source-mkdir
 cp -p "$NODE_SETTINGS" "$SOURCE/settings/settings.json" || fail source-settings
 for _required in \
-  settings/var_settings.sh settings/lib_json.sh settings/lib_ssh.sh \
+  settings/var_settings.sh settings/lib_selftest_context.sh settings/lib_json.sh settings/lib_ssh.sh \
   settings/lib_ssh_trust.sh settings/lib_backup_state.sh; do
   mkdir -p "$SOURCE/$(dirname "$_required")" || fail source-required-dir
   cp -p "$BASE_DIR/$_required" "$SOURCE/$_required" || fail source-required-copy
@@ -172,6 +174,9 @@ RECOVERY_ROOT="$TEST_ROOT/recovery-backups"
 RECOVERY_TMP="$TEST_ROOT/recovery-tmp"
 RECOVERY_ID=mervlan.manual.backup.20260924-000000.trust_dr_test.tar.gz
 mkdir -p "$RECOVERY_ROOT" || fail recovery-root
+cp -p "$BASE_DIR/settings/lib_json.sh" "$RECOVERY_ROOT/lib_json.sh" || fail recovery-json-helper
+cp -p "$BASE_DIR/settings/lib_boot_integrity.sh" "$RECOVERY_ROOT/lib_boot_integrity.sh" || fail recovery-integrity-helper
+chmod 600 "$RECOVERY_ROOT/lib_json.sh" "$RECOVERY_ROOT/lib_boot_integrity.sh" || fail recovery-helper-mode
 cp -p "$MODERN_ARCHIVE" "$RECOVERY_ROOT/$RECOVERY_ID" || fail recovery-archive-copy
 RECOVERY_MD5=$(md5sum "$RECOVERY_ROOT/$RECOVERY_ID" | awk '{print $1}') || fail recovery-md5
 {
@@ -181,7 +186,10 @@ MERVLAN_RECOVERY_BACKUP_ROOT="$RECOVERY_ROOT" \
 MERVLAN_RECOVERY_TMP_ROOT="$RECOVERY_TMP" \
 MERVLAN_RECOVERY_ACTIVE_ROOT="$TEST_ROOT/recovery-active" \
 MERVLAN_RECOVERY_STATE_ROOT="$TEST_ROOT/recovery-state" \
-  sh "$BASE_DIR/functions/mervlan_recover.sh" check "$RECOVERY_ID" >/dev/null 2>&1 || fail recovery-modern-check
+  sh "$BASE_DIR/functions/mervlan_recover.sh" check "$RECOVERY_ID" >"$TEST_ROOT/recovery-check.out" 2>&1 || {
+    cat "$TEST_ROOT/recovery-check.out" >&2
+    fail recovery-modern-check
+  }
 pass recover-check-modern-payload
 
 # Exercise the production wrapper used by manual backups and the production
@@ -292,6 +300,9 @@ MERVLAN_BACKUP_DIR="$TEST_ROOT/update-backups"
 MERV_STATE_ROOT="$TEST_ROOT/update-state"
 UPDATE_PRESERVE_TMP="0"
 mkdir -p "$TMP_BASE" "$MERVLAN_BACKUP_DIR" || fail preupdate-work
+cp -p "$BASE_DIR/settings/lib_json.sh" "$MERVLAN_BACKUP_DIR/lib_json.sh" || fail preupdate-json-helper
+cp -p "$BASE_DIR/settings/lib_boot_integrity.sh" "$MERVLAN_BACKUP_DIR/lib_boot_integrity.sh" || fail preupdate-integrity-helper
+chmod 600 "$MERVLAN_BACKUP_DIR/lib_json.sh" "$MERVLAN_BACKUP_DIR/lib_boot_integrity.sh" || fail preupdate-helper-mode
 merv_maintenance_recovery_root_prepare() { mkdir -p "$MERVLAN_BACKUP_DIR"; }
 update_cleanup_files() { for _brt_file in "$@"; do rm -f "$_brt_file"; done; }
 update_cleanup_tree() { [ -e "$1" ] || return 0; rm -rf "$1"; }

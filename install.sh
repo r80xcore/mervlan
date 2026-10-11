@@ -160,14 +160,16 @@ install_staged_support_root_valid() {
         settings/lib_identity.sh settings/lib_owner_lock.sh \
         settings/lib_update_state.sh settings/lib_maintenance_recovery.sh \
         settings/lib_backup_state.sh \
-        settings/lib_json.sh settings/var_settings.sh \
+        settings/lib_json.sh settings/lib_boot_integrity.sh settings/var_settings.sh \
         settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh \
         functions/update_mervlan.sh functions/mervlan_recover.sh \
-        functions/mervlan_backup.sh functions/mervlan_wan.sh; do
+        functions/mervlan_backup.sh functions/mervlan_wan.sh \
+        functions/mervlan_node_mutate.sh; do
         [ ! -L "$_isrsv_root/$_isrsv_file" ] &&
             [ -f "$_isrsv_root/$_isrsv_file" ] || return 1
     done
     [ -x "$_isrsv_root/functions/mervlan_wan.sh" ] || return 1
+    [ -x "$_isrsv_root/functions/mervlan_node_mutate.sh" ] || return 1
     return 0
 }
 
@@ -447,6 +449,23 @@ install_maintenance_admit() {
         echo "[install] ERROR: could not export authenticated maintenance context to installer children" >&2
         return 1
     fi
+    if [ "${MERV_MAINTENANCE_DELEGATION_KIND:-}" = interrupted-update ]; then
+        [ -r "$MERV_BASE/settings/lib_continuation.sh" ] &&
+            [ -r "$MERV_BASE/settings/lib_maintenance_quiesce.sh" ] || {
+                echo "[install] ERROR: recovery continuation support is unavailable" >&2
+                return 1
+            }
+        [ -n "${LIB_CONTINUATION_LOADED:-}" ] ||
+            . "$MERV_BASE/settings/lib_continuation.sh" 2>/dev/null || return 1
+        [ -n "${LIB_MAINTENANCE_QUIESCE_LOADED:-}" ] ||
+            . "$MERV_BASE/settings/lib_maintenance_quiesce.sh" 2>/dev/null || return 1
+        [ -n "${MERV_CONTINUATION_TOKEN:-}" ] &&
+            merv_continuation_activate_wait "$MERV_CONTINUATION_TOKEN" || {
+                echo "[install] ERROR: interrupted-recovery continuation could not be authenticated" >&2
+                return 1
+            }
+        INSTALL_RECOVERY_LEASE_TOKEN=$MERV_CONTINUATION_TOKEN
+    fi
     MERV_MAINTENANCE_ENTRY_ADMITTED=1
     return 0
 }
@@ -523,6 +542,19 @@ install_maintenance_exit_handler() {
     fi
     if ! install_maintenance_release; then
         _ime_status=1
+    fi
+    if [ -n "${INSTALL_RECOVERY_LEASE_TOKEN:-}" ]; then
+        _ile_q=$(merv_maintenance_quiesce_classify \
+            "${MERV_UPDATE_RECOVERY_M_PID:-}" \
+            "${MERV_UPDATE_RECOVERY_M_START:-}" \
+            "${MERV_UPDATE_RECOVERY_M_NONCE:-}" "" "" "" \
+            "$INSTALL_RECOVERY_LEASE_TOKEN" 2>/dev/null || printf BLOCKING)
+        if [ "$_ile_q" = IDLE ]; then
+            merv_continuation_retire "$INSTALL_RECOVERY_LEASE_TOKEN" || _ime_status=1
+        else
+            echo "[install] ERROR: recovery child state is not quiescent; continuation remains active" >&2
+            _ime_status=1
+        fi
     fi
     exit "$_ime_status"
 }
@@ -2195,6 +2227,7 @@ install_capture_original_contract() {
       for _icoc_path in \
           install.sh uninstall.sh mervlan.asp www/index.html \
           settings/settings.json settings/var_settings.sh settings/lib_json.sh \
+          settings/lib_boot_integrity.sh \
           settings/lib_update_state.sh settings/lib_maintenance_recovery.sh \
           settings/lib_backup_state.sh \
           settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh \
@@ -2270,38 +2303,61 @@ install_tree_valid() {
     [ -d "$_itv_root" ] && [ ! -L "$_itv_root" ] || return 1
     for _itv_required in \
         install.sh uninstall.sh mervlan.asp www/index.html \
-        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
+        settings/settings.json settings/var_settings.sh settings/lib_json.sh settings/lib_boot_integrity.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh \
         settings/lib_ssh_trust.sh settings/lib_action_ack.sh \
+        functions/mervlan_node_mutate.sh \
         functions/ssh_trust_action.sh
     do
         [ ! -L "$_itv_root/$_itv_required" ] &&
             [ -f "$_itv_root/$_itv_required" ] || return 1
     done
+    [ -x "$_itv_root/functions/mervlan_node_mutate.sh" ] || return 1
     settings_file_looks_valid "$_itv_root/settings/settings.json"
 }
 
+# Qualify the new canonical cleaner without running destructive cleanup.
+install_cleaner_valid() {
+    _icv_file="$1/functions/mervlan_full_cleanup.sh"
+    [ ! -L "$1/functions" ] && [ -d "$1/functions" ] &&
+        [ ! -L "$_icv_file" ] && [ -f "$_icv_file" ] &&
+        [ "$(LC_ALL=C ls -ldn "$_icv_file" | awk '{print $1}')" = -rwxr-xr-x ] &&
+        /bin/sh -n "$_icv_file" >/dev/null 2>&1 &&
+        grep -q '^# Cleaner protocol: phase6-v1$' "$_icv_file"
+}
+
 # Validate the complete maintenance/support cohort while it is still private.
-# This is intentionally separate from active-tree validation: the detached
-# installer may be running over an older tree that cannot provide these files.
+# Keep historical active-tree/rollback validation compatible with old installs.
 install_support_cohort_valid() {
     _iscv_root="$1"
     install_staged_support_root_valid "$_iscv_root" || return 1
     install_tree_valid "$_iscv_root" || return 1
+    install_cleaner_valid "$_iscv_root" || return 1
+    for _iscv_exclusion in settings/lib_identity.sh settings/lib_owner_lock.sh \
+        settings/lib_selftest_context.sh settings/lib_full_fence.sh \
+        settings/lib_continuation.sh settings/lib_mutation_admission.sh \
+        settings/lib_maintenance_quiesce.sh settings/lib_full_uninstall.sh; do
+        [ ! -L "$_iscv_root/$_iscv_exclusion" ] && [ -f "$_iscv_root/$_iscv_exclusion" ] &&
+            /bin/sh -n "$_iscv_root/$_iscv_exclusion" || return 1
+    done
+    grep -Fx '# Full helper protocol: full-uninstall-v1' "$_iscv_root/settings/lib_full_uninstall.sh" >/dev/null || return 1
     for _iscv_file in \
         settings/lib_identity.sh settings/lib_owner_lock.sh \
         settings/lib_update_state.sh settings/lib_maintenance_recovery.sh \
         settings/lib_backup_state.sh \
+        settings/lib_boot_integrity.sh \
         settings/lib_action_lock.sh settings/lib_action_runtime.sh \
         settings/lib_action_progress.sh settings/lib_progress.sh \
         settings/lib_node_jobs.sh settings/lib_node_reconcile.sh \
         settings/lib_settings_reconcile.sh functions/update_mervlan.sh \
         functions/update_mervlan_repair.sh functions/mervlan_recover.sh \
-        functions/mervlan_backup.sh functions/mervlan_wan.sh; do
+        functions/mervlan_backup.sh functions/mervlan_wan.sh \
+        functions/mervlan_node_mutate.sh; do
         [ ! -L "$_iscv_root/$_iscv_file" ] && [ -f "$_iscv_root/$_iscv_file" ] || return 1
     done
     for _iscv_shell in install.sh uninstall.sh functions/update_mervlan.sh \
         functions/update_mervlan_repair.sh functions/mervlan_recover.sh \
-        functions/mervlan_backup.sh functions/mervlan_wan.sh; do
+        functions/mervlan_backup.sh functions/mervlan_wan.sh \
+        functions/mervlan_node_mutate.sh; do
         sh -n "$_iscv_root/$_iscv_shell" >/dev/null 2>&1 || return 1
     done
     return 0
@@ -3315,8 +3371,8 @@ download_mervlan() {
         }
         echo "[download_mervlan] payload filtered: dev-tools=$( [ "$BRANCH" = "dev" ] && echo 1 || echo 0 )"
         for required in install.sh uninstall.sh changelog.txt mervlan.asp \
-            functions/mervlan_boot.sh functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
-            settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
+            functions/mervlan_boot.sh functions/mervlan_full_cleanup.sh functions/mervlan_wan.sh functions/mervlan_node_mutate.sh functions/hw_probe.sh functions/ssh_trust_action.sh settings/settings.json settings/lib_owner_lock.sh \
+            settings/lib_json.sh settings/lib_boot_integrity.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh functions/settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh www/index.html \
             www/settings/loading_actions.json; do
             if [ ! -f "$topdir/$required" ]; then
                 echo "[download_mervlan] ERROR: Package missing required file: $required" >&2
@@ -3324,6 +3380,8 @@ download_mervlan() {
                 return 1
             fi
         done
+        chmod 755 "$topdir/functions/mervlan_full_cleanup.sh" || return 1
+        install_cleaner_valid "$topdir" || return 1
         if [ "$INSTALL_STAGE_ONLY" = "1" ]; then
             install_support_cohort_valid "$topdir" || {
                 echo "[download_mervlan] ERROR: staged maintenance/support cohort is incomplete" >&2
@@ -4143,16 +4201,36 @@ FINAL_STATUS=0
 
 # Verify concrete outcomes before saying the installation succeeded.
 for _req in install.sh uninstall.sh changelog.txt mervlan.asp functions/mervlan_boot.sh \
-    functions/mervlan_wan.sh functions/hw_probe.sh functions/ssh_trust_action.sh functions/settings_reconcile.sh settings/settings.json settings/lib_json.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
+    functions/mervlan_wan.sh functions/mervlan_node_mutate.sh functions/hw_probe.sh functions/ssh_trust_action.sh functions/settings_reconcile.sh settings/settings.json settings/lib_json.sh settings/lib_boot_integrity.sh settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh settings/lib_node_reconcile.sh settings/lib_settings_reconcile.sh settings/lib_progress.sh settings/lib_action_progress.sh settings/lib_action_runtime.sh \
     www/index.html \
     www/settings/loading_actions.json
 do
     case "$_req" in
-        functions/mervlan_wan.sh) [ -x "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing or non-executable $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
+        functions/mervlan_wan.sh|functions/mervlan_node_mutate.sh) [ -x "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing or non-executable $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
         *) [ -f "$MERV_BASE/$_req" ] || { RESULT_DETAIL="final verification missing $MERV_BASE/$_req"; FINAL_STATUS=1; } ;;
     esac
 done
+install_cleaner_valid "$MERV_BASE" || { RESULT_DETAIL="final cleaner validation failed"; FINAL_STATUS=1; }
 settings_file_looks_valid "$SETTINGS_FILE" || { RESULT_DETAIL="final settings validation failed"; FINAL_STATUS=1; }
+if [ "$TEST_RUN" != "1" ] && [ "$MODE" != "reinstall" ] && [ "$RESULT_HOOKS" = "PASS" ]; then
+    if [ -f "$MERV_BASE/settings/lib_json.sh" ] && [ -f "$MERV_BASE/settings/lib_boot_integrity.sh" ] && \
+       . "$MERV_BASE/settings/lib_json.sh" 2>/dev/null && \
+       . "$MERV_BASE/settings/lib_boot_integrity.sh" 2>/dev/null; then
+        _install_boot_role=$(merv_boot_read_role "$SETTINGS_FILE" "$MERV_BASE" 2>/dev/null)
+        if [ -z "$_install_boot_role" ] || \
+           ! merv_boot_verify_baseline "$_install_boot_role" \
+             "${SCRIPTS_DIR:-/jffs/scripts}/services-start" \
+             "${SCRIPTS_DIR:-/jffs/scripts}/service-event" "$SETTINGS_FILE" "$MERV_BASE"; then
+            RESULT_DETAIL="final boot-hook integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-role-unknown}"
+            RESULT_HOOKS="FAIL - boot-hook integrity"
+            FINAL_STATUS=1
+        fi
+    else
+        RESULT_DETAIL="final boot-hook integrity verifier unavailable"
+        RESULT_HOOKS="FAIL - verifier unavailable"
+        FINAL_STATUS=1
+    fi
+fi
 [ -d "$MERV_STATE_ROOT/ssh_trust" ] || { RESULT_DETAIL="durable SSH trust state root missing"; FINAL_STATUS=1; }
 [ -f "$TMP_DIR/logs/cli_output.log" ] || { RESULT_DETAIL="runtime cli log missing"; FINAL_STATUS=1; }
 [ -f "$TMP_DIR/logs/vlan_manager.log" ] || { RESULT_DETAIL="runtime manager log missing"; FINAL_STATUS=1; }

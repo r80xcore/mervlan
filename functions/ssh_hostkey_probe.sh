@@ -68,9 +68,39 @@ if [ "$_shkp_identity_temporary" -eq 1 ]; then
   fi
 fi
 
-_shkp_root="${TMPDIR:-/tmp/mervlan_tmp}/ssh_hostkey_probe.$$"
-case "$_shkp_root" in /tmp/mervlan_tmp/ssh_hostkey_probe.[0-9]*) ;; *) exit 2 ;; esac
-mkdir -p "$_shkp_root/.ssh" 2>/dev/null || exit 4
+_shkp_parent="${4:-${TMPDIR:-/tmp/mervlan_tmp}}"
+# Full supplies its already-created private run directory, never an ambient
+# override. Ordinary callers keep their established volatile parent. Validate
+# every ancestor and owner before creating an absent-only nonce workspace.
+case "$_shkp_parent" in
+  /tmp/mervlan_tmp) ;;
+  /tmp/.mervlan-full.[0-9]*/probe-tmp)
+    _shkp_full_run=${_shkp_parent#/tmp/.mervlan-full.}; _shkp_full_run=${_shkp_full_run%/probe-tmp}
+    printf '%s\n' "$_shkp_full_run" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || exit 2
+    ;;
+  *)
+    [ "$SSH_TRUST_SELFTEST_CONTEXT" = 1 ] &&
+      merv_selftest_context_path_allowed "$_shkp_parent" || exit 2
+    ;;
+esac
+_shkp_walk=/; _shkp_rest=${_shkp_parent#/}
+while [ -n "$_shkp_rest" ]; do
+  case "$_shkp_rest" in */*) _shkp_part=${_shkp_rest%%/*}; _shkp_rest=${_shkp_rest#*/} ;;
+    *) _shkp_part=$_shkp_rest; _shkp_rest= ;; esac
+  case "$_shkp_part" in ''|.|..) exit 2 ;; esac
+  _shkp_walk=$_shkp_walk$_shkp_part
+  [ ! -L "$_shkp_walk" ] || exit 2
+  _shkp_walk=$_shkp_walk/
+done
+[ -d "$_shkp_parent" ] || mkdir "$_shkp_parent" 2>/dev/null || exit 4
+if [ -n "${4:-}" ]; then
+  _shkp_uid=$(id -u) || exit 2
+  [ "$(ls -ldn "$_shkp_parent" | awk '{print $1 " " $3}')" = "drwx------ $_shkp_uid" ] || exit 2
+fi
+merv_identity_nonce_next || exit 4
+_shkp_root="$_shkp_parent/ssh_hostkey_probe.$MERV_IDENTITY_NONCE"
+mkdir "$_shkp_root" 2>/dev/null || exit 4
+mkdir "$_shkp_root/.ssh" 2>/dev/null || { rmdir "$_shkp_root" 2>/dev/null || :; exit 4; }
 chmod 700 "$_shkp_root" "$_shkp_root/.ssh" 2>/dev/null || exit 4
 _shkp_pid=""
 _shkp_start=""
@@ -134,7 +164,7 @@ export HOME="$_shkp_home"
 unset DROPBEAR_PASSWORD SSH_ASKPASS SSH_ASKPASS_ALWAYS DISPLAY SSH_AUTH_SOCK SSH_AGENT_PID
 "$_shkp_client_path" -y -N -p "$_shkp_port" \
   -o BatchMode=yes -o PasswordAuthentication=no -i "$_shkp_identity" \
-  "$_shkp_user@$_shkp_host" >"$_shkp_root/client.stdout" 2>"$_shkp_root/client.stderr" &
+  "$_shkp_user@$_shkp_host" < /dev/null >"$_shkp_root/client.stdout" 2>"$_shkp_root/client.stderr" &
 _shkp_pid=$!
 _shkp_start=$(merv_identity_proc_start "$_shkp_pid" 2>/dev/null || printf '')
 case "$_shkp_start" in

@@ -28,6 +28,7 @@ LOG_SETTINGS_LOADED=1
 LIB_JSON_LOADED=1
 LIB_SSH_LOADED=1
 LIB_ACTION_LOCK_LOADED=1
+LIB_MUTATION_ADMISSION_LOADED=1
 LIB_UPDATE_STATE_LOADED=1
 LIB_ACTION_PROGRESS_LOADED=1
 
@@ -43,6 +44,7 @@ warn() { :; }
 error() { :; }
 
 merv_update_mutation_blocked() { return 1; }
+merv_mutation_admit_action() { return 0; }
 
 merv_action_lock_enter() {
     MERV_ACTION_LOCK_MODE=self

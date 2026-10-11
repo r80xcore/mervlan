@@ -97,4 +97,29 @@ run_case host-key-failure 6 host-key-mismatch 'NODE1 pinned host key did not mat
 run_case session-timeout 5 session-timeout 'NODE1 command/session timed out'
 run_case wrong-output 1 "" ""
 
+# The node-job writer's terminal producer output has a byte-bounded sanitizer,
+# private namespace/record modes, and removes its publication scratch files.
+LC_ALL=C
+export LC_ALL
+LONG_DIAGNOSTIC=$(awk 'BEGIN { for (i = 0; i < 600; i++) printf "X" }')
+MERV_SSH_DIAGNOSTIC_CONTEXT="$LONG_DIAGNOSTIC"
+MERV_SSH_LAST_REASON="$LONG_DIAGNOSTIC"
+MERV_SSH_FORENSIC_SEQ=0
+if ! merv_ssh_write_forensic 1 192.0.2.1 192.0.2.1 fixture 22 255 failure "$LONG_DIAGNOSTIC"; then
+    fail 'forensic writer did not publish synthetic node-job evidence'
+fi
+FORENSIC_ROOT="$JOB_ROOT/ssh_forensics"
+FORENSIC_FILE="$MERV_SSH_FORENSIC_LAST_FILE"
+[ -d "$FORENSIC_ROOT" ] && [ ! -L "$FORENSIC_ROOT" ] || fail 'forensic root is not a real directory'
+[ "$(LC_ALL=C ls -ldn "$FORENSIC_ROOT" | awk 'NR == 1 {print $1}')" = drwx------ ] || fail 'forensic root mode'
+[ "$(LC_ALL=C ls -ldn "$FORENSIC_FILE" | awk 'NR == 1 {print $1}')" = -rw------- ] || fail 'forensic record mode'
+assert_eq "${FORENSIC_FILE##*/}" "attempt.$$.1.log" 'forensic final filename grammar'
+assert_eq "$(awk -F= '/^phase=/ {print length(substr($0,7))}' "$FORENSIC_FILE")" 512 'forensic field byte bound'
+[ -f "$FORENSIC_FILE" ] && [ ! -L "$FORENSIC_FILE" ] && [ -r "$FORENSIC_FILE" ] || fail 'forensic record is not a readable regular file'
+FORENSIC_SIZE=$(wc -c < "$FORENSIC_FILE" | tr -d '[:space:]')
+case "$FORENSIC_SIZE" in ''|*[!0-9]*) fail 'forensic record size unreadable' ;; esac
+[ "$FORENSIC_SIZE" -le 14811 ] || fail 'forensic record exceeded the source-derived maximum'
+[ ! -e "$FORENSIC_ROOT/.attempt.$$.1.tmp" ] && [ ! -e "$FORENSIC_ROOT/.list.$$" ] || fail 'forensic publication scratch remained'
+printf 'PASS ssh forensic producer grammar, modes, byte bound, and cleanup\n'
+
 printf 'PASS ssh test diagnostic contract\n'

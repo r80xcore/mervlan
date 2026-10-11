@@ -130,14 +130,20 @@ pass 'dead maintenance owner remains reclaimable without durable state'
 
 MB_RECOVERY_SOURCE="$BASE_DIR/functions/mervlan_recover.sh"
 MB_RECOVERY_STATE_SOURCE="$BASE_DIR/settings/lib_maintenance_recovery.sh"
+MB_RECOVERY_JSON_SOURCE="$BASE_DIR/settings/lib_json.sh"
+MB_RECOVERY_INTEGRITY_SOURCE="$BASE_DIR/settings/lib_boot_integrity.sh"
 MB_UPDATE_STATE_SOURCE="$BASE_DIR/settings/lib_update_state.sh"
 MB_RECOVERY_SCRIPT="$TEST_ROOT/published/recover.sh"
 MB_RECOVERY_STATE_SCRIPT="$TEST_ROOT/published/recovery_state.sh"
+MB_RECOVERY_JSON_SCRIPT="$TEST_ROOT/published/lib_json.sh"
+MB_RECOVERY_INTEGRITY_SCRIPT="$TEST_ROOT/published/lib_boot_integrity.sh"
 MB_UPDATE_STATE_SCRIPT="$TEST_ROOT/published/update_state.sh"
 MB_BACKUP_ROOT="$TEST_ROOT/published"
 mb_install_recovery_helper || fail 'Recovery helper publication'
-[ -x "$MB_RECOVERY_SCRIPT" ] && [ -r "$MB_RECOVERY_STATE_SCRIPT" ] && [ -r "$MB_UPDATE_STATE_SCRIPT" ] || fail 'Recovery helper publication omitted durable parser'
-pass 'standalone Recovery publishes both durable-state parsers'
+[ -x "$MB_RECOVERY_SCRIPT" ] && [ -r "$MB_RECOVERY_STATE_SCRIPT" ] && \
+  [ -r "$MB_RECOVERY_JSON_SCRIPT" ] && [ -r "$MB_RECOVERY_INTEGRITY_SCRIPT" ] && \
+  [ -r "$MB_UPDATE_STATE_SCRIPT" ] || fail 'Recovery helper publication omitted durable or boot-integrity parser'
+pass 'standalone Recovery publishes its durable-state and boot-integrity parsers'
 MB_BACKUP_ROOT="$TEST_ROOT/backups"
 MB_RECOVERY_SCRIPT="$TEST_ROOT/backups/recover.sh"
 

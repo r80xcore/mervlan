@@ -30,6 +30,10 @@ fi
 [ -n "${LIB_JSON_LOADED:-}" ]   || . "$MERV_BASE/settings/lib_json.sh"
 [ -n "${LIB_SSID_FILTER_LOADED:-}" ] || . "$MERV_BASE/settings/lib_ssid_filter.sh"
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || {
+  error -c vlan "Heal: mutation-admission support is unavailable; refusing to run"
+  exit 75
+}
 # Graceful-degradation: load MERV_MAC enforcement libs if present.
 # heal_event.sh degrades safely if the files are missing (partial install).
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" 2>/dev/null || true
@@ -45,14 +49,6 @@ fi
 if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
   info -c vlan "Heal deferred: Update maintenance is active"
   exit 0
-fi
-
-# Every event and health-cron entry reconciles interrupted token owners before
-# observing or mutating bridge state. Compatibility heal ownership remains in
-# place until the Round 3 handoff migration.
-if type merv_dhcp_hold_reconcile >/dev/null 2>&1; then
-  merv_dhcp_hold_reconcile heal-start >/dev/null 2>&1 || \
-    warn -c vlan "Heal: DHCP ownership reconciliation reported an unresolved fault"
 fi
 
 # Bootstrap hardware layout (MAX_SSIDS, ETH_PORTS) similar to mervlan_manager.sh
@@ -190,37 +186,6 @@ case "$_any_vlan_rc" in
     ;;
 esac
 
-# Skip if vlan manager already busy (avoid holding our lock needlessly).
-# Uses the shared lock-state helper so a CRASHED manager (lock dir left behind
-# with a dead/absent PID) cannot block every future heal forever — that was the
-# old failure mode that required a manual cleanup or reboot.
-MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
-if type merv_owner_lock_state >/dev/null 2>&1; then
-  _mgr_state=$(merv_owner_lock_state "$MANAGER_LOCK")
-else
-  # The owner-aware lock contract is mandatory for mutating heal work.
-  error -c vlan "Heal: owner-aware lock support is unavailable; refusing to run"
-  exit 1
-fi
-case "$_mgr_state" in
-  live|unknown)
-    type merv_dhcp_handoff_coalesce >/dev/null 2>&1 &&
-      merv_dhcp_handoff_coalesce heal manager manager-active >/dev/null 2>&1 || :
-    info -c vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active (${_mgr_state})"
-    exit 0
-    ;;
-  dead|reused)
-    warn -c vlan "Heal: mervlan_manager.lock has a dead owner; continuing without deleting it"
-    ;;
-  absent)
-    :
-    ;;
-  *)
-    error -c vlan "Heal: invalid manager lock state '${_mgr_state}'; refusing to run"
-    exit 1
-    ;;
-esac
-
 # Ensure locks directory exists for all lock/cooldown files
 mkdir -p "$LOCKDIR" 2>/dev/null
 
@@ -273,6 +238,7 @@ if type merv_owner_lock_acquire >/dev/null 2>&1; then
   if merv_owner_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
     HEAL_LOCK_ACQUIRED=1
     HEAL_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    HEAL_LOCK_START="${MERV_LOCK_START:-}"
     trap 'HEAL_EXIT_REASON=signal-int; exit 130' INT
     trap 'HEAL_EXIT_REASON=signal-term; exit 143' TERM
     trap heal_cleanup_on_exit EXIT
@@ -286,6 +252,47 @@ else
   error -c vlan "Heal: owner-aware lock support is unavailable; refusing to run"
   exit 1
 fi
+
+if ! type merv_mutation_admit_r >/dev/null 2>&1 ||
+   ! merv_mutation_admit_r "$LOCK" "$$" "$HEAL_LOCK_START" "$HEAL_LOCK_NONCE"; then
+  error -c vlan "Heal refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unavailable}); no DHCP or bridge mutation started"
+  exit 75
+fi
+
+# Reconcile interrupted DHCP ownership only after the event owner and the
+# authoritative Full/maintenance admission check are established.
+if type merv_dhcp_hold_reconcile >/dev/null 2>&1; then
+  merv_dhcp_hold_reconcile heal-start >/dev/null 2>&1 || \
+    warn -c vlan "Heal: DHCP ownership reconciliation reported an unresolved fault"
+fi
+
+# Skip if the manager is active. The owner is held while a DHCP handoff is
+# coalesced so Q can see the state transition as part of this mutation.
+MANAGER_LOCK="$LOCKDIR/mervlan_manager.lock"
+if type merv_owner_lock_state >/dev/null 2>&1; then
+  _mgr_state=$(merv_owner_lock_state "$MANAGER_LOCK")
+else
+  error -c vlan "Heal: owner-aware lock support is unavailable; refusing to run"
+  exit 1
+fi
+case "$_mgr_state" in
+  live|unknown)
+    type merv_dhcp_handoff_coalesce >/dev/null 2>&1 &&
+      merv_dhcp_handoff_coalesce heal manager manager-active >/dev/null 2>&1 || :
+    info -c cli,vlan "Heal: skipping [${1:-initial}] because mervlan_manager is active (${_mgr_state})"
+    exit 0
+    ;;
+  dead|reused)
+    warn -c vlan "Heal: mervlan_manager.lock has a dead owner; continuing without deleting it"
+    ;;
+  absent)
+    :
+    ;;
+  *)
+    error -c vlan "Heal: invalid manager lock state '${_mgr_state}'; refusing to run"
+    exit 1
+    ;;
+esac
 
 if type merv_observation_wait_idle >/dev/null 2>&1 &&
    ! merv_observation_wait_idle "${MERV_OBSERVATION_WAIT_SEC:-120}"; then

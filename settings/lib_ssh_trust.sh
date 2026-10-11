@@ -10,24 +10,75 @@
 [ -n "${LIB_SSH_TRUST_LOADED:-}" ] && return 0 2>/dev/null
 LIB_SSH_TRUST_LOADED=1
 
-: "${MERV_STATE_ROOT:=/jffs/addons/mervlan_state}"
-: "${MERV_SSH_TRUST_ROOT:=$MERV_STATE_ROOT/ssh_trust}"
-: "${MERV_SSH_TRUST_FILE:=$MERV_SSH_TRUST_ROOT/known_hosts.v1}"
-: "${MERV_SSH_TRUST_PENDING_ROOT:=$MERV_SSH_TRUST_ROOT/pending}"
-: "${MERV_SSH_TRUST_REQUESTS_ROOT:=$MERV_SSH_TRUST_ROOT/requests}"
-: "${MERV_SSH_TRUST_STAGING_ROOT:=$MERV_SSH_TRUST_ROOT/staging}"
-: "${MERV_SSH_TRUST_QUARANTINE_ROOT:=$MERV_SSH_TRUST_ROOT/quarantine}"
-: "${MERV_SSH_TRUST_LOCK_PATH:=$MERV_SSH_TRUST_ROOT/state.lock}"
-: "${MERV_SSH_TRUST_TTL_SEC:=31536000}"
-: "${MERV_SSH_TRUST_PENDING_TTL_SEC:=300}"
-: "${MERV_SSH_TRUST_RETENTION_SEC:=86400}"
-: "${MERV_SSH_TRUST_MAX_PENDING:=64}"
-: "${MERV_SSH_TRUST_MAX_STAGING:=64}"
-: "${MERV_SSH_TRUST_MAX_QUARANTINE:=64}"
-: "${MERV_SSH_TRUST_MAX_RECORDS:=64}"
-: "${MERV_SSH_HOSTKEY_PROBE_CMD:=$MERV_BASE/functions/ssh_hostkey_probe.sh}"
-: "${MERV_SSH_CAPABILITY_PROVEN:=1}"
-: "${MERV_SSH_TRUST_TEST_MODE:=0}"
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+[ -n "${LIB_SELFTEST_CONTEXT_LOADED:-}" ] ||
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+SSH_TRUST_SELFTEST_CONTEXT=0
+if type merv_selftest_context_valid >/dev/null 2>&1 && merv_selftest_context_valid; then
+  SSH_TRUST_SELFTEST_CONTEXT=1
+else
+  unset MERV_SSH_TRUST_TEST_MODE MERV_SSH_TEST_MODE
+  unset MERV_SSH_TEST_FINGERPRINT MERV_SSH_TEST_PROBE_FILE
+  unset MERV_SSH_HOSTKEY_PROBE_CMD MERV_SSH_CAPABILITY_PROVEN
+  unset MERV_STATE_ROOT MERV_SSH_TRUST_ROOT MERV_SSH_TRUST_FILE
+  unset MERV_SSH_TRUST_PENDING_ROOT MERV_SSH_TRUST_REQUESTS_ROOT
+  unset MERV_SSH_TRUST_STAGING_ROOT MERV_SSH_TRUST_QUARANTINE_ROOT
+  unset MERV_SSH_TRUST_LOCK_PATH
+fi
+
+# Production trust is a single persistent authority observed by Q. Only an
+# authenticated private self-test context may redirect these roots or supply
+# fake probe material/commands.
+if [ "$SSH_TRUST_SELFTEST_CONTEXT" -eq 1 ]; then
+  if [ -z "${MERV_STATE_ROOT:-}" ] ||
+     ! merv_selftest_context_path_allowed "$MERV_STATE_ROOT"; then
+    MERV_STATE_ROOT="$MERV_SELFTEST_CONTEXT_ROOT/state"
+  fi
+  : "${MERV_SSH_TRUST_ROOT:=$MERV_STATE_ROOT/ssh_trust}"
+  : "${MERV_SSH_TRUST_FILE:=$MERV_SSH_TRUST_ROOT/known_hosts.v1}"
+  : "${MERV_SSH_TRUST_PENDING_ROOT:=$MERV_SSH_TRUST_ROOT/pending}"
+  : "${MERV_SSH_TRUST_REQUESTS_ROOT:=$MERV_SSH_TRUST_ROOT/requests}"
+  : "${MERV_SSH_TRUST_STAGING_ROOT:=$MERV_SSH_TRUST_ROOT/staging}"
+  : "${MERV_SSH_TRUST_QUARANTINE_ROOT:=$MERV_SSH_TRUST_ROOT/quarantine}"
+  : "${MERV_SSH_TRUST_LOCK_PATH:=$MERV_SSH_TRUST_ROOT/state.lock}"
+  : "${MERV_SSH_TRUST_TTL_SEC:=31536000}"
+  : "${MERV_SSH_TRUST_PENDING_TTL_SEC:=300}"
+  : "${MERV_SSH_TRUST_RETENTION_SEC:=86400}"
+  : "${MERV_SSH_TRUST_MAX_PENDING:=64}"
+  : "${MERV_SSH_TRUST_MAX_STAGING:=64}"
+  : "${MERV_SSH_TRUST_MAX_QUARANTINE:=64}"
+  : "${MERV_SSH_TRUST_MAX_RECORDS:=64}"
+  : "${MERV_SSH_HOSTKEY_PROBE_CMD:=$MERV_BASE/functions/ssh_hostkey_probe.sh}"
+  : "${MERV_SSH_CAPABILITY_PROVEN:=1}"
+  : "${MERV_SSH_TRUST_TEST_MODE:=0}"
+  if [ -n "${MERV_SSH_TEST_PROBE_FILE:-}" ] &&
+     ! merv_selftest_context_path_allowed "$MERV_SSH_TEST_PROBE_FILE"; then
+    unset MERV_SSH_TEST_PROBE_FILE
+  fi
+  if [ -n "${MERV_SSH_HOSTKEY_PROBE_CMD:-}" ] &&
+     ! merv_selftest_context_path_allowed "$MERV_SSH_HOSTKEY_PROBE_CMD"; then
+    MERV_SSH_HOSTKEY_PROBE_CMD="$MERV_BASE/functions/ssh_hostkey_probe.sh"
+  fi
+else
+  MERV_STATE_ROOT=/jffs/addons/mervlan_state
+  MERV_SSH_TRUST_ROOT=/jffs/addons/mervlan_state/ssh_trust
+  MERV_SSH_TRUST_FILE=/jffs/addons/mervlan_state/ssh_trust/known_hosts.v1
+  MERV_SSH_TRUST_PENDING_ROOT=/jffs/addons/mervlan_state/ssh_trust/pending
+  MERV_SSH_TRUST_REQUESTS_ROOT=/jffs/addons/mervlan_state/ssh_trust/requests
+  MERV_SSH_TRUST_STAGING_ROOT=/jffs/addons/mervlan_state/ssh_trust/staging
+  MERV_SSH_TRUST_QUARANTINE_ROOT=/jffs/addons/mervlan_state/ssh_trust/quarantine
+  MERV_SSH_TRUST_LOCK_PATH=/jffs/addons/mervlan_state/ssh_trust/state.lock
+  MERV_SSH_TRUST_TTL_SEC=31536000
+  MERV_SSH_TRUST_PENDING_TTL_SEC=300
+  MERV_SSH_TRUST_RETENTION_SEC=86400
+  MERV_SSH_TRUST_MAX_PENDING=64
+  MERV_SSH_TRUST_MAX_STAGING=64
+  MERV_SSH_TRUST_MAX_QUARANTINE=64
+  MERV_SSH_TRUST_MAX_RECORDS=64
+  MERV_SSH_HOSTKEY_PROBE_CMD=/jffs/addons/mervlan/functions/ssh_hostkey_probe.sh
+  MERV_SSH_CAPABILITY_PROVEN=1
+  MERV_SSH_TRUST_TEST_MODE=0
+fi
 
 if ! type merv_has >/dev/null 2>&1; then
   merv_has() { type "$1" >/dev/null 2>&1; }
@@ -37,15 +88,11 @@ merv_ssh_trust_root_valid() {
   _mst_root="${MERV_SSH_TRUST_ROOT:-}"
   [ -n "$_mst_root" ] || return 1
   case "$_mst_root" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-  if [ "${MERV_SSH_TRUST_TEST_MODE:-0}" = "1" ]; then
-    case "$_mst_root" in /tmp/mervlan_tmp/selftest.*|/tmp/mervlan_tmp/selftest.*/*) return 0 ;; esac
-    return 1
+  if [ "$SSH_TRUST_SELFTEST_CONTEXT" -eq 1 ]; then
+    merv_selftest_context_path_allowed "$_mst_root" || return 1
+    return 0
   fi
-  case "$_mst_root" in
-    /jffs/addons/mervlan_state/ssh_trust|/jffs/addons/mervlan_state/ssh_trust/*) return 0 ;;
-    "$MERV_STATE_ROOT/ssh_trust"|"$MERV_STATE_ROOT/ssh_trust"/*) return 0 ;;
-    *) return 1 ;;
-  esac
+  case "$_mst_root" in /jffs/addons/mervlan_state/ssh_trust|/jffs/addons/mervlan_state/ssh_trust/*) return 0 ;; *) return 1 ;; esac
 }
 
 merv_ssh_trust_path_valid() {
@@ -582,7 +629,7 @@ merv_ssh_trust_derive_fingerprint() {
 merv_ssh_trust_wire_fingerprint() {
   _mstfp_alg="$1"; _mstfp_key="$2"
   merv_ssh_trust_algorithm_valid "$_mstfp_alg" && merv_ssh_trust_key_valid "$_mstfp_key" || return 1
-  if [ -n "${MERV_SSH_TEST_FINGERPRINT:-}" ]; then
+  if [ "$SSH_TRUST_SELFTEST_CONTEXT" -eq 1 ] && [ -n "${MERV_SSH_TEST_FINGERPRINT:-}" ]; then
     merv_ssh_trust_fingerprint_valid "$MERV_SSH_TEST_FINGERPRINT" || return 1
     printf '%s\n' "$MERV_SSH_TEST_FINGERPRINT"; return 0
   fi
@@ -751,13 +798,18 @@ merv_ssh_hostkey_probe() {
   _mshkp_canonical=$(merv_ssh_trust_normalize_host "$_mshkp_canonical") || { MERV_SSH_TRUST_LAST_REASON=invalid-endpoint; return 3; }
   _mshkp_node=$(merv_ssh_trust_node_id "$_mshkp_slot" "$_mshkp_mac" "$_mshkp_canonical" "$_mshkp_port") || return 3
   MERV_SSH_TRUST_LAST_REASON=""; MERV_SSH_TRUST_LAST_STATUS=""
-  if [ -n "${MERV_SSH_TEST_PROBE_FILE:-}" ] && [ -f "$MERV_SSH_TEST_PROBE_FILE" ]; then
+  if [ "$SSH_TRUST_SELFTEST_CONTEXT" -eq 1 ] &&
+     [ -n "${MERV_SSH_TEST_PROBE_FILE:-}" ] &&
+     merv_selftest_context_path_allowed "$MERV_SSH_TEST_PROBE_FILE" &&
+     [ ! -L "$MERV_SSH_TEST_PROBE_FILE" ] && [ -f "$MERV_SSH_TEST_PROBE_FILE" ]; then
     _mshkp_line=$(awk -F '\t' -v n="$_mshkp_node" '$1==n {print; exit}' "$MERV_SSH_TEST_PROBE_FILE" 2>/dev/null)
     [ -n "$_mshkp_line" ] || { MERV_SSH_TRUST_LAST_REASON=probe-no-record; return 7; }
     _mshkp_tab=$(printf '\t'); OLDIFS=$IFS; IFS="$_mshkp_tab"; set -- $_mshkp_line; IFS=$OLDIFS
     [ "$#" -ge 3 ] || return 7
     _mshkp_alg="$2"; _mshkp_key="$3"; _mshkp_fp="${4:-}"
-  elif [ "${MERV_SSH_CAPABILITY_PROVEN:-0}" = "1" ] && [ -n "${MERV_SSH_HOSTKEY_PROBE_CMD:-}" ]; then
+  elif [ "${MERV_SSH_CAPABILITY_PROVEN:-0}" = "1" ] &&
+       { [ "$SSH_TRUST_SELFTEST_CONTEXT" -eq 1 ] || [ "$MERV_SSH_HOSTKEY_PROBE_CMD" = /jffs/addons/mervlan/functions/ssh_hostkey_probe.sh ]; } &&
+       [ -n "${MERV_SSH_HOSTKEY_PROBE_CMD:-}" ]; then
     case "$MERV_SSH_HOSTKEY_PROBE_CMD" in *[!A-Za-z0-9_./-]*) MERV_SSH_TRUST_LAST_REASON=capability-unknown; return 7 ;; esac
     if [ -f "$MERV_SSH_HOSTKEY_PROBE_CMD" ]; then
       _mshkp_probe=$(sh "$MERV_SSH_HOSTKEY_PROBE_CMD" "$_mshkp_node" "$_mshkp_host" "$_mshkp_port" 2>/dev/null)

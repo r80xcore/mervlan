@@ -13,6 +13,8 @@ trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 
 fail() { printf '%s\n' "FAIL: $*" >&2; exit 1; }
 assert_eq() { [ "$1" = "$2" ] || fail "$3"; }
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || fail 'self-test helper load'
+merv_test_context_enable "$ROOT" "$WORK" || fail 'private self-test context'
 
 build_remote() {
   remote="$1"; branch="$2"
@@ -80,11 +82,14 @@ run_repair() {
   sh "$REPAIR" "$1"
 }
 
-grep -Eq '^[[:space:]]*\.[[:space:]]|^[[:space:]]*source[[:space:]]' "$REPAIR" && fail 'repair script must not source MerVLAN code'
+grep -Eq '^[[:space:]]*\.[[:space:]]|^[[:space:]]*source[[:space:]]' "$REPAIR" |
+  grep -v 'lib_selftest_context\.sh' && fail 'repair script must not source MerVLAN code'
+grep -Fq '[ -n "${MERVLAN_SELFTEST_CONTEXT:-}" ]' "$REPAIR" || fail 'repair test seam must require explicit context'
 sh -n "$REPAIR" || fail 'repair shell syntax'
 [ "$(grep -Fc 'if ! run_trunk_if_configured; then' "$MANAGER")" -ge 1 ] || fail 'manager must stop after trunk failure'
 grep -Fq '[ -x "$_update_tree/functions/mervlan_wan.sh" ]' "$UPDATER" || fail 'updater tree validation must require executable WAN helper'
-[ "$(grep -Fc 'functions/mervlan_wan.sh) [ -x "$MERV_BASE/$_req" ]' "$INSTALLER")" -ge 2 ] || fail 'installer standard/final validation must require executable WAN helper'
+grep -Fq '[ -x "$_isrsv_root/functions/mervlan_wan.sh" ]' "$INSTALLER" || fail 'installer staged-support validation must require executable WAN helper'
+grep -Fq 'functions/mervlan_wan.sh|functions/mervlan_node_mutate.sh)' "$INSTALLER" || fail 'installer final validation must require executable runtime helpers'
 [ "$(sed -n '1p' "$MANIFEST")" = 'format=2' ] || fail 'manifest format header'
 grep -Fq '0644 settings/settings.json' "$MANIFEST" && fail 'manifest must not replace settings.json'
 

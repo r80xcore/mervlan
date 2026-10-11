@@ -39,6 +39,8 @@ fi
 if [ -f "$MERV_BASE/settings/lib_update_state.sh" ]; then
     . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 fi
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] ||
+    . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
     error -c vlan "save_settings.sh: Update maintenance is active; refusing a concurrent settings mutation"
     exit 75
@@ -89,6 +91,12 @@ if [ -f "$MERV_BASE/settings/lib_action_lock.sh" ]; then
     _save_action_lock_mode="${MERV_ACTION_LOCK_MODE:-none}"
     _save_action_lock_nonce="$MERV_ACTION_LOCK_NONCE"; _save_action_lock_start="$MERV_ACTION_LOCK_START"
     merv_action_lock_export_child_context || exit 75
+    if ! merv_mutation_admit_action "$_save_action_lock_path"; then
+        error -c vlan "save_settings.sh: mutation admission refused (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+        merv_action_lock_leave "$_save_action_lock_path" "$_save_action_lock_nonce" \
+            "$_save_action_lock_start" "$_save_action_lock_mode" >/dev/null 2>&1 || :
+        exit 75
+    fi
     _save_release_lock() {
         _save_exit_rc=$?
         if ! merv_action_lock_leave "$_save_action_lock_path" "$_save_action_lock_nonce" "$_save_action_lock_start" "$_save_action_lock_mode" >/dev/null 2>&1; then

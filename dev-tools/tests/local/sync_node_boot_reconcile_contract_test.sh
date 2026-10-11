@@ -5,6 +5,7 @@ set -eu
 
 BASE_DIR=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd) || exit 1
 SOURCE="$BASE_DIR/functions/sync_nodes.sh"
+NODE_MUTATE_SOURCE="$BASE_DIR/functions/mervlan_node_mutate.sh"
 TEST_ROOT="${TMPDIR:-/tmp}/mervlan-sync-node-boot.$(date +%s).$$"
 SCRIPTS_DIR="$TEST_ROOT/scripts"
 export SCRIPTS_DIR
@@ -37,23 +38,34 @@ assert_file_count() {
 }
 
 mkdir -p "$TEST_ROOT" "$SCRIPTS_DIR"
+CRU_BIN="$TEST_ROOT/cru"
+export CRU_BIN
+cat > "$CRU_BIN" <<'CRU'
+#!/bin/sh
+case "${1:-}" in
+    d) rm -f "$MERV_TEST_ROOT/cron" ;;
+    a) printf '%s\n' "${3:-}" > "$MERV_TEST_ROOT/cron" ;;
+    l) [ ! -f "$MERV_TEST_ROOT/cron" ] || cat "$MERV_TEST_ROOT/cron" ;;
+    *) exit 2 ;;
+esac
+CRU
+chmod 755 "$CRU_BIN"
 
-# Extract and execute the production-generated remote helper.  This keeps the
-# fixture on the same code path that activate_staged_node embeds in its remote
-# transaction, without sourcing sync_nodes.sh (which dispatches immediately).
-eval "$(sed -n '/^sync_node_boot_reconcile_body()/,/^}/p' "$SOURCE")"
-REMOTE_BODY="$TEST_ROOT/remote-body.sh"
-sync_node_boot_reconcile_body > "$REMOTE_BODY"
-/bin/sh -n "$REMOTE_BODY" || fail 'generated remote reconciliation body is not valid POSIX shell'
-eval "$(cat "$REMOTE_BODY")"
+# Extract the node-local production reconciliation function without running the
+# dispatcher. It now lives inside the guarded node mutation boundary, so this
+# exercises the function that activate-full runs while NODE action R is held.
+eval "$(sed -n '/^mnm_sync_boot_reconcile()/,/^}/p' "$NODE_MUTATE_SOURCE")"
 
 make_fake_boot() {
     _root="$1"
     mkdir -p "$_root/settings" "$_root/functions"
     cp "$BASE_DIR/settings/lib_json.sh" "$_root/settings/lib_json.sh"
+    cp "$BASE_DIR/settings/lib_boot_integrity.sh" "$_root/settings/lib_boot_integrity.sh"
     cat > "$_root/functions/mervlan_boot.sh" <<'FAKE_BOOT'
 #!/bin/sh
 base=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+MERV_BASE="$base"
+export MERV_BASE
 scripts="${SCRIPTS_DIR:?}"
 services="$scripts/services-start"
 event="$scripts/service-event"
@@ -65,35 +77,75 @@ marker_count() {
     printf '%s\n' "${_count:-0}"
 }
 
+write_addon() {
+    cat > "$services" <<HOOK
+#!/bin/sh
+### >>> MERVLAN START: services-start [tpl=services-start-addon.v2.tpl md5=0123456789abcdef0123456789abcdef]
+$base/functions/mervlan_boot_wrap.sh install </dev/null >/dev/null 2>&1 &
+### <<< MERVLAN END: services-start [tpl=services-start-addon.v2.tpl md5=0123456789abcdef0123456789abcdef]
+HOOK
+    chmod 755 "$services"
+}
+
+write_event() {
+    cat > "$event" <<HOOK
+#!/bin/sh
+### >>> MERVLAN START: service-event [tpl=service-event.v2.tpl md5=0123456789abcdef0123456789abcdef]
+$base/functions/service-event-handler.sh "\$@"
+### <<< MERVLAN END: service-event [tpl=service-event.v2.tpl md5=0123456789abcdef0123456789abcdef]
+HOOK
+    chmod 755 "$event"
+}
+
+write_manager() {
+    {
+      cat <<HOOK
+#!/bin/sh
+### >>> MERVLAN START: services-start [tpl=services-start.v2.tpl md5=0123456789abcdef0123456789abcdef]
+if $base/functions/mervlan_boot_wrap.sh shield </dev/null >/dev/null 2>&1; then
+  $base/functions/mervlan_boot_wrap.sh manager </dev/null >/dev/null 2>&1 &
+fi
+sleep 10
+$base/functions/mervlan_boot_wrap.sh cron </dev/null >/dev/null 2>&1 &
+### <<< MERVLAN END: services-start [tpl=services-start.v2.tpl md5=0123456789abcdef0123456789abcdef]
+HOOK
+      if [ -f "$services" ]; then sed '1d' "$services"; fi
+    } > "$SCRIPTS_DIR/services-start.tmp"
+    mv "$SCRIPTS_DIR/services-start.tmp" "$services"
+    chmod 755 "$services"
+}
+
 case "$1" in
     nodeenable)
         [ "${2:-}" = "--local" ] || exit 2
-        : > "$event"
-        : > "$services"
-        printf '%s\n' '### >>> MERVLAN START: service-event [tpl=service-event.v2.tpl md5=test]' >> "$event"
-        printf '%s\n' '### <<< MERVLAN END: service-event [tpl=service-event.v2.tpl md5=test]' >> "$event"
-        printf '%s\n' '### >>> MERVLAN START: services-start [tpl=services-start-addon.v2.tpl md5=test]' >> "$services"
-        printf '%s\n' '### <<< MERVLAN END: services-start [tpl=services-start-addon.v2.tpl md5=test]' >> "$services"
+        write_addon
+        write_event
         ;;
     enable)
         if [ -f "$base/fail-enable" ]; then exit 17; fi
         if [ "$(marker_count '### >>> MERVLAN START: services-start [tpl=services-start.v' "$services")" = 0 ]; then
-            printf '%s\n' '### >>> MERVLAN START: services-start [tpl=services-start.v2.tpl md5=test]' >> "$services"
-            printf '%s\n' '### <<< MERVLAN END: services-start [tpl=services-start.v2.tpl md5=test]' >> "$services"
+            write_manager
         fi
-        if [ ! -f "$base/omit-cron" ]; then : > "$base/cron"; fi
+        if [ ! -f "$base/omit-cron" ]; then "$CRU_BIN" a mervlan_health "*/5 * * * * $base/functions/heal_event.sh cron"; fi
         ;;
     disable)
-        sed '/tpl=services-start\.v/d' "$services" > "$services.tmp" && mv "$services.tmp" "$services"
-        rm -f "$base/cron"
+        awk '
+            /### >>> MERVLAN START: services-start \[tpl=services-start\.v/ { skip=1; next }
+            /### <<< MERVLAN END: services-start \[tpl=services-start\.v/ { skip=0; next }
+            !skip { print }
+        ' "$services" > "$services.tmp" && mv "$services.tmp" "$services"
+        chmod 755 "$services"
+        "$CRU_BIN" d mervlan_health
         ;;
     report)
         . "$base/settings/lib_json.sh"
+        . "$base/settings/lib_boot_integrity.sh"
         desired=$(json_get_flag BOOT_ENABLED 0 "$base/settings/settings.json")
-        if [ -f "$base/cron" ]; then cron=present; else cron=absent; fi
+        merv_boot_cron_state "$CRU_BIN" "$base" >/dev/null; cron=$MERV_BOOT_CRON_STATE
         if [ "$(marker_count '### >>> MERVLAN START: services-start [tpl=services-start-addon.v' "$services")" = 1 ]; then addon=node-on; else addon=node-off; fi
         if [ -f "$event" ] && grep -qF '### >>> MERVLAN START: service-event [tpl=service-event.v' "$event"; then event_state=active; else event_state=missing; fi
-        printf 'REPORT hw=test boot=%s addon=%s event=%s cron=%s is_node=yes mac_shield=off\n' "$desired" "$addon" "$event_state" "$cron"
+        merv_boot_hook_state "$services" services-start "$base" >/dev/null; manager_hook=$MERV_BOOT_HOOK_STATE
+        printf 'REPORT hw=test boot=%s addon=%s event=%s cron=%s is_node=yes mac_shield=off manager_hook=%s\n' "$desired" "$addon" "$event_state" "$cron" "$manager_hook"
         ;;
     *) exit 2 ;;
 esac
@@ -111,6 +163,7 @@ make_fixture() {
     printf '%s\n' '{' '  "General": {' "    \"BOOT_ENABLED\": \"$_desired\"," '    "IS_NODE": "1"' '  }' '}' > "$_root/settings/settings.json"
     : > "$SCRIPTS_DIR/services-start"
     : > "$SCRIPTS_DIR/service-event"
+    export MERV_TEST_ROOT="$_root"
     case "$_initial" in
         enabled)
             MERV_NODE_CONTEXT=1 sh "$_root/functions/mervlan_boot.sh" nodeenable --local
@@ -130,10 +183,12 @@ make_fixture() {
 
 run_helper() {
     _root="$1"
+    MERV_TEST_ROOT="$_root"
+    export MERV_TEST_ROOT
     SYNC_NODE_BOOT_DETAIL=""
     SYNC_NODE_BOOT_REPORT=""
     export SYNC_NODE_BOOT_DETAIL SYNC_NODE_BOOT_REPORT
-    sync_node_boot_reconcile "$_root"
+    mnm_sync_boot_reconcile "$_root"
 }
 
 enabled_root=$(make_fixture enabled 1 baseline)
@@ -181,14 +236,14 @@ verification_failure_root=$(make_fixture verification-failure 1 baseline)
 if run_helper "$verification_failure_root"; then
     fail 'effective-state verification failure was accepted'
 fi
-[ "${SYNC_NODE_BOOT_DETAIL:-}" = node-cron-missing ] || fail 'effective-state failure reason was not precise'
+[ "${SYNC_NODE_BOOT_DETAIL:-}" = node-local-integrity-cron_mismatch ] || fail 'effective-state failure reason was not precise'
 
 # The production activation path must reconcile both the new tree and the
 # restored old tree, and must expose failures instead of emitting success.
-_reconcile_calls=$(grep -cF 'sync_node_boot_reconcile \"\$active\"' "$SOURCE" 2>/dev/null) || :
+_reconcile_calls=$(grep -cF 'mnm_sync_boot_reconcile "$MNM_ACTIVE"' "$NODE_MUTATE_SOURCE" 2>/dev/null) || :
 _reconcile_calls=${_reconcile_calls:-0}
 [ "$_reconcile_calls" -ge 2 ] || fail 'activation and rollback do not both reconcile boot state'
-grep -qF 'STAGED_NODE_ROLLBACK_FAIL' "$SOURCE" || fail 'rollback boot reconciliation failure is not surfaced'
-grep -qF 'STAGED_NODE_OK' "$SOURCE" || fail 'staged success marker missing'
+grep -qF 'STAGED_NODE_ROLLBACK_FAIL' "$NODE_MUTATE_SOURCE" || fail 'rollback boot reconciliation failure is not surfaced'
+grep -qF 'STAGED_NODE_OK' "$NODE_MUTATE_SOURCE" || fail 'staged success marker missing'
 
 printf 'SYNC_NODE_BOOT_RECONCILE_CONTRACT_OK\n'

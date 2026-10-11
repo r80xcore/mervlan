@@ -149,7 +149,9 @@ function runServiceEvent(action) {
       encoding: 'utf8',
       env: {
         ...process.env,
-        MERV_BASE: `/tmp/mervlan-archive-transport-${process.pid}`,
+        // The extracted dispatcher sources production admission helpers from
+        // MERV_BASE before it reaches the stubbed dispatch function.
+        MERV_BASE: root,
         LOCKDIR: `/tmp/mervlan-archive-transport-locks-${process.pid}`
       }
     }

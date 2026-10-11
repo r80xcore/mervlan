@@ -7,6 +7,44 @@
 # This file must remain usable when /jffs/addons/mervlan is missing or broken.  #
 # ============================================================================ #
 
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+if [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ]; then
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+fi
+RECOVERY_TEST_CONTEXT=0
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid; then
+  RECOVERY_TEST_CONTEXT=1
+fi
+if [ "$RECOVERY_TEST_CONTEXT" = 1 ]; then
+  for _mrc_name in MERVLAN_RECOVERY_BACKUP_ROOT MERVLAN_RECOVERY_ACTIVE_ROOT \
+    MERVLAN_RECOVERY_TMP_ROOT MERVLAN_RECOVERY_STATE_ROOT \
+    MERVLAN_RECOVERY_STATE_HELPER MERVLAN_RECOVERY_UPDATE_STATE_HELPER; do
+    case "$_mrc_name" in
+      MERVLAN_RECOVERY_BACKUP_ROOT) _mrc_value=${MERVLAN_RECOVERY_BACKUP_ROOT:-} ;;
+      MERVLAN_RECOVERY_ACTIVE_ROOT) _mrc_value=${MERVLAN_RECOVERY_ACTIVE_ROOT:-} ;;
+      MERVLAN_RECOVERY_TMP_ROOT) _mrc_value=${MERVLAN_RECOVERY_TMP_ROOT:-} ;;
+      MERVLAN_RECOVERY_STATE_ROOT) _mrc_value=${MERVLAN_RECOVERY_STATE_ROOT:-} ;;
+      MERVLAN_RECOVERY_STATE_HELPER) _mrc_value=${MERVLAN_RECOVERY_STATE_HELPER:-} ;;
+      MERVLAN_RECOVERY_UPDATE_STATE_HELPER) _mrc_value=${MERVLAN_RECOVERY_UPDATE_STATE_HELPER:-} ;;
+    esac
+    if [ -n "$_mrc_value" ]; then
+      merv_selftest_context_path_allowed "$_mrc_value" || unset "$_mrc_name"
+    fi
+  done
+  case "${MERVLAN_RECOVERY_TEST_MODE:-0}" in 0|1) ;; *) MERVLAN_RECOVERY_TEST_MODE=0 ;; esac
+else
+  MERVLAN_RECOVERY_BACKUP_ROOT=/jffs/addons/mervlan_backups
+  MERVLAN_RECOVERY_ACTIVE_ROOT=/jffs/addons/mervlan
+  MERVLAN_RECOVERY_TMP_ROOT=/tmp/mervlan_recovery
+  MERVLAN_RECOVERY_STATE_ROOT=/jffs/addons/mervlan_state
+  MERVLAN_RECOVERY_STATE_HELPER=
+  MERVLAN_RECOVERY_UPDATE_STATE_HELPER=
+  MERVLAN_RECOVERY_TEST_MODE=0
+  unset MERVLAN_RECOVERY_LOCK_OVERRIDE MERVLAN_MAINTENANCE_LOCK_OVERRIDE \
+    MERV_UPDATE_MAINTENANCE_LOCK MERVLAN_RECOVERY_PROC_ROOT \
+    MERVLAN_RECOVERY_OWNER_PROC_ROOT MERVLAN_RECOVERY_FAULT
+fi
 : "${MERVLAN_RECOVERY_BACKUP_ROOT:=/jffs/addons/mervlan_backups}"
 : "${MERVLAN_RECOVERY_ACTIVE_ROOT:=/jffs/addons/mervlan}"
 : "${MERVLAN_RECOVERY_TMP_ROOT:=/tmp/mervlan_recovery}"
@@ -19,7 +57,22 @@ RECOVERY_ORIGINAL="$RECOVERY_WORK/original"
 RECOVERY_TREE=""
 RECOVERY_JFFS_STAGE="$MERVLAN_RECOVERY_BACKUP_ROOT/.mervlan.new.$$"
 RECOVERY_JFFS_OLD="$MERVLAN_RECOVERY_BACKUP_ROOT/.mervlan.old.$$"
-RECOVERY_LOCK="${MERVLAN_RECOVERY_LOCK_OVERRIDE:-${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${LOCKDIR:-/tmp/mervlan_tmp/locks}/mervlan_maintenance.lock}}"
+RECOVERY_LOCK=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock
+if [ "$RECOVERY_TEST_CONTEXT" = 1 ]; then
+  _mrc_lock="${MERVLAN_RECOVERY_LOCK_OVERRIDE:-${MERVLAN_MAINTENANCE_LOCK_OVERRIDE:-${MERV_UPDATE_MAINTENANCE_LOCK:-}}}"
+  if [ -n "$_mrc_lock" ] && merv_selftest_context_path_allowed "$_mrc_lock"; then
+    RECOVERY_LOCK=$_mrc_lock
+  fi
+  _mrc_proc="${MERVLAN_RECOVERY_PROC_ROOT:-${MERVLAN_RECOVERY_OWNER_PROC_ROOT:-}}"
+  if [ -n "$_mrc_proc" ] && merv_selftest_context_path_allowed "$_mrc_proc" &&
+     [ -d "$_mrc_proc" ] && [ -r "$_mrc_proc" ]; then
+    RECOVERY_PROC_ROOT=$_mrc_proc
+  else
+    RECOVERY_PROC_ROOT=/proc
+  fi
+else
+  RECOVERY_PROC_ROOT=/proc
+fi
 RECOVERY_LOCK_OWNED=0
 RECOVERY_LOCK_NONCE=""
 RECOVERY_LOCK_START=""
@@ -39,6 +92,8 @@ RECOVERY_TRUST_ORIGINAL_PRESENT=0
 RECOVERY_TRUST_ORIGINAL_FILE=""
 RECOVERY_STATE_HELPER="${MERVLAN_RECOVERY_STATE_HELPER:-$MERVLAN_RECOVERY_BACKUP_ROOT/recovery_state.sh}"
 RECOVERY_UPDATE_STATE_HELPER="${MERVLAN_RECOVERY_UPDATE_STATE_HELPER:-$MERVLAN_RECOVERY_BACKUP_ROOT/update_state.sh}"
+RECOVERY_PRE_BOOT_ENABLED=""
+RECOVERY_BOOT_LIBS_LOADED=0
 
 recovery_log() { printf '[MerVLAN recovery] %s\n' "$*"; }
 recovery_error() { printf '[MerVLAN recovery] ERROR: %s\n' "$*" >&2; }
@@ -126,18 +181,28 @@ recovery_path_present() {
 }
 
 recovery_lock_path_valid() {
-  case "$RECOVERY_LOCK" in
-    /tmp/mervlan_tmp/locks/mervlan_maintenance.lock|/tmp/mervlan_tmp/selftest.*/*) ;;
-    *) return 1 ;;
-  esac
+  if [ "$RECOVERY_LOCK" != /tmp/mervlan_tmp/locks/mervlan_maintenance.lock ]; then
+    [ "$RECOVERY_TEST_CONTEXT" = 1 ] || return 1
+    merv_selftest_context_path_allowed "$RECOVERY_LOCK" || return 1
+  fi
   case "$RECOVERY_LOCK" in *..*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
   recovery_path_chain_safe "$RECOVERY_LOCK"
+}
+
+recovery_full_fence_absent() {
+  recovery_fence=/tmp/.mervlan-full-uninstall.lock
+  if [ "$RECOVERY_TEST_CONTEXT" = 1 ] && [ -n "${MERV_FULL_FENCE_PATH:-}" ]; then
+    merv_selftest_context_path_allowed "$MERV_FULL_FENCE_PATH" || return 1
+    recovery_fence=$MERV_FULL_FENCE_PATH
+  fi
+  recovery_path_chain_safe "$recovery_fence" || return 1
+  recovery_path_absent_authoritative "$recovery_fence"
 }
 
 recovery_proc_start() {
   recovery_pid="$1"
   recovery_positive_uint "$recovery_pid" || return 1
-  recovery_stat=$(cat "/proc/$recovery_pid/stat" 2>/dev/null) || return 1
+  recovery_stat=$(cat "$RECOVERY_PROC_ROOT/$recovery_pid/stat" 2>/dev/null) || return 1
   case "$recovery_stat" in *") "*) recovery_tail=${recovery_stat##*) } ;; *) return 1 ;; esac
   recovery_start=$(printf '%s\n' "$recovery_tail" | awk '{print $20}')
   recovery_positive_uint "$recovery_start" || return 1
@@ -226,7 +291,7 @@ recovery_lock_owner_state() {
     [ "$recovery_actual_start" = "$RECOVERY_OWNER_START" ] || { printf 'reused'; return 0; }
     kill -0 "$RECOVERY_OWNER_PID" 2>/dev/null && { printf 'live'; return 0; }
     printf 'unknown'
-  elif [ -e "/proc/$RECOVERY_OWNER_PID/stat" ]; then
+  elif [ -e "$RECOVERY_PROC_ROOT/$RECOVERY_OWNER_PID/stat" ]; then
     printf 'unknown'
   else
     printf 'dead'
@@ -281,6 +346,10 @@ recovery_owner_v2_write_atomic() {
 }
 
 recovery_acquire_lock() {
+  recovery_full_fence_absent || {
+    recovery_error "Full Uninstall admission is active or cannot be verified; recovery is blocked."
+    return 1
+  }
   recovery_lock_path_valid || { recovery_error "Unsafe recovery lock path; refusing to run."; return 1; }
   recovery_path_parent_prepare "$RECOVERY_LOCK" || {
     recovery_error "Recovery lock parent is unavailable or obstructed; refusing to run."
@@ -322,6 +391,11 @@ recovery_acquire_lock() {
   RECOVERY_LOCK_NONCE="$RECOVERY_NEXT_NONCE"
   RECOVERY_LOCK_START="$recovery_lock_start"
   RECOVERY_LOCK_OWNED=1
+  if ! recovery_full_fence_absent; then
+    recovery_error "Full Uninstall admission appeared during Recovery ownership acquisition."
+    recovery_release_lock || :
+    return 1
+  fi
   return 0
 }
 
@@ -719,6 +793,7 @@ recovery_tree_valid() {
 # a subshell and bind them to a private trust root.  No canonical trust file is
 # changed by validation.
 recovery_validate_backup_state() {
+  recovery_boot_integrity_load || return 1
   RECOVERY_TRUST_MODE=legacy
   RECOVERY_TRUST_PRESENT=0
   RECOVERY_TRUST_FILE=""
@@ -729,13 +804,12 @@ recovery_validate_backup_state() {
     MERV_BASE="$RECOVERY_TREE"
     MERV_STATE_ROOT="$RECOVERY_WORK/trust-context"
     MERV_SSH_TRUST_TEST_MODE=0
-    unset VAR_SETTINGS_LOADED LIB_JSON_LOADED LIB_SSH_LOADED LIB_SSH_TRUST_LOADED LIB_BACKUP_STATE_LOADED
+    unset VAR_SETTINGS_LOADED LIB_SSH_LOADED LIB_SSH_TRUST_LOADED LIB_BACKUP_STATE_LOADED
     unset MERV_SSH_TRUST_ROOT MERV_SSH_TRUST_FILE MERV_SSH_TRUST_PENDING_ROOT \
       MERV_SSH_TRUST_REQUESTS_ROOT MERV_SSH_TRUST_STAGING_ROOT \
       MERV_SSH_TRUST_QUARANTINE_ROOT MERV_SSH_TRUST_LOCK_PATH
     export MERV_BASE MERV_STATE_ROOT MERV_SSH_TRUST_TEST_MODE
     . "$RECOVERY_TREE/settings/var_settings.sh" || exit 1
-    . "$RECOVERY_TREE/settings/lib_json.sh" || exit 1
     . "$RECOVERY_TREE/settings/lib_ssh.sh" || exit 1
     . "$RECOVERY_TREE/settings/lib_backup_state.sh" || exit 1
     merv_backup_state_validate_tree "$RECOVERY_TREE" \
@@ -897,11 +971,62 @@ recovery_list() {
 }
 
 recovery_boot_state() {
-  if grep -q '"BOOT_ENABLED"[[:space:]]*:[[:space:]]*"1"' "$1/settings/settings.json" 2>/dev/null; then
-    printf '1'
-  else
-    printf '0'
+  recovery_boot_integrity_load || return 1
+  merv_boot_read_preference "$1/settings/settings.json"
+}
+
+# The selected tree is data, never a source of its own verification logic.
+# Recovery's protected helper cohort is installed beside recover.sh by Backup
+# and remains available even when the active MerVLAN tree is missing or broken.
+recovery_boot_integrity_load() {
+  [ "$RECOVERY_BOOT_LIBS_LOADED" = 1 ] && return 0
+  recovery_path_chain_safe "$MERVLAN_RECOVERY_BACKUP_ROOT" || return 1
+  [ ! -L "$MERVLAN_RECOVERY_BACKUP_ROOT" ] && \
+    [ -d "$MERVLAN_RECOVERY_BACKUP_ROOT" ] && \
+    [ -r "$MERVLAN_RECOVERY_BACKUP_ROOT" ] && \
+    [ -x "$MERVLAN_RECOVERY_BACKUP_ROOT" ] || return 1
+  recovery_helper_dir_mode=$(ls -ld "$MERVLAN_RECOVERY_BACKUP_ROOT" 2>/dev/null | awk 'NR == 1 { print substr($1, 1, 10) }')
+  [ "$recovery_helper_dir_mode" = drwx------ ] || return 1
+  recovery_json_lib="$MERVLAN_RECOVERY_BACKUP_ROOT/lib_json.sh"
+  recovery_integrity_lib="$MERVLAN_RECOVERY_BACKUP_ROOT/lib_boot_integrity.sh"
+  for recovery_library in "$recovery_json_lib" "$recovery_integrity_lib"; do
+    [ ! -L "$recovery_library" ] && [ -f "$recovery_library" ] && \
+      [ -r "$recovery_library" ] || return 1
+    recovery_library_has_read=$(ls -ld "$recovery_library" 2>/dev/null | awk '
+      NR == 1 {
+        p = substr($1, 1, 10)
+        if (substr(p, 1, 1) == "-" &&
+            (substr(p, 2, 1) == "r" || substr(p, 5, 1) == "r" || substr(p, 8, 1) == "r")) print "yes"
+      }
+    ')
+    [ "$recovery_library_has_read" = yes ] || return 1
+  done
+  unset LIB_JSON_LOADED LIB_BOOT_INTEGRITY_LOADED
+  . "$recovery_json_lib" 2>/dev/null || return 1
+  . "$recovery_integrity_lib" 2>/dev/null || return 1
+  type json_validate_file >/dev/null 2>&1 && \
+    type merv_boot_verify_local >/dev/null 2>&1 || return 1
+  RECOVERY_BOOT_LIBS_LOADED=1
+  return 0
+}
+
+recovery_verify_boot_state() {
+  recovery_verify_root="$1"
+  recovery_verify_expected="$2"
+  recovery_allow_legacy="${3:-0}"
+  recovery_boot_integrity_load || {
+    recovery_error "Read-only boot-integrity libraries are unavailable."
+    return 1
+  }
+  if ! merv_boot_verify_local "$recovery_verify_expected" main \
+      "${SCRIPTS_DIR:-/jffs/scripts}/services-start" \
+      "${SCRIPTS_DIR:-/jffs/scripts}/service-event" \
+      "$recovery_verify_root/settings/settings.json" "${CRU_BIN:-}" "$recovery_verify_root" \
+      "${MERV_BOOT_SCRIPTS_ROOT:-${SCRIPTS_DIR:-/jffs/scripts}}" "$recovery_allow_legacy"; then
+    recovery_error "Recovery boot hook integrity verification failed: ${MERV_BOOT_VERIFY_REASON:-unknown}"
+    return 1
   fi
+  return 0
 }
 
 recovery_copy_tree() {
@@ -916,6 +1041,7 @@ recovery_copy_tree() {
 recovery_reconcile() {
   recovery_target="$1"
   recovery_boot="$2"
+  recovery_allow_legacy="${3:-0}"
   [ "$MERVLAN_RECOVERY_TEST_MODE" = "1" ] && return 0
   recovery_export_maintenance_context || {
     recovery_error "Could not authenticate the Recovery maintenance context."
@@ -939,6 +1065,7 @@ recovery_reconcile() {
     MERV_SKIP_NODE_SYNC=1 sh "$recovery_target/functions/mervlan_boot.sh" setupenable >/dev/null 2>&1 || return 1
     MERV_SKIP_NODE_SYNC=1 sh "$recovery_target/functions/mervlan_boot.sh" disable >/dev/null 2>&1 || return 1
   fi
+  recovery_verify_boot_state "$recovery_target" "$recovery_boot" "$recovery_allow_legacy" || return 1
 }
 
 recovery_rollback() {
@@ -966,7 +1093,18 @@ recovery_rollback() {
     recovery_error "Recovery restored the original tree but could not restore the pre-recovery SSH trust database."
     return 1
   fi
-  if ! recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT")"; then
+  if [ "$RECOVERY_PRE_BOOT_ENABLED" != 0 ] && [ "$RECOVERY_PRE_BOOT_ENABLED" != 1 ]; then
+    recovery_mark_rollback_required
+    return 1
+  fi
+  if ! recovery_boot_integrity_load || \
+     ! merv_boot_rollback_legacy_mode "$MERVLAN_RECOVERY_ACTIVE_ROOT"; then
+    recovery_mark_rollback_required
+    recovery_error "Recovery rollback tree has an unsafe boot-integrity library state: ${MERV_BOOT_ROLLBACK_REASON:-protected_libraries_unavailable}"
+    return 1
+  fi
+  recovery_rollback_allow_legacy="$MERV_BOOT_ROLLBACK_ALLOW_LEGACY"
+  if ! recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$RECOVERY_PRE_BOOT_ENABLED" "$recovery_rollback_allow_legacy"; then
     recovery_mark_rollback_required
     return 1
   fi
@@ -1024,6 +1162,19 @@ recovery_restore() {
   trap 'recovery_on_signal 143' TERM
   recovery_log "Validating $recovery_id"
   recovery_validate_archive "$recovery_archive" || return 1
+  # Recovery must remain usable when the installed tree is absent or broken.
+  # Capture a rollback preference when possible; if the saved original cannot
+  # be classified later, recovery_rollback fails closed and preserves evidence.
+  RECOVERY_PRE_BOOT_ENABLED=$(recovery_boot_state "$MERVLAN_RECOVERY_ACTIVE_ROOT" 2>/dev/null) || RECOVERY_PRE_BOOT_ENABLED=""
+  recovery_target_boot=$(recovery_boot_state "$RECOVERY_TREE") || {
+    recovery_error "Recovery refused: selected backup General.BOOT_ENABLED is missing, malformed, unreadable, or unsupported."
+    return 1
+  }
+  if ! merv_boot_rollback_legacy_mode "$RECOVERY_TREE"; then
+    recovery_error "Recovery refused: selected backup boot-integrity library state is unsafe: ${MERV_BOOT_ROLLBACK_REASON:-unknown}"
+    return 1
+  fi
+  recovery_target_allow_legacy="$MERV_BOOT_ROLLBACK_ALLOW_LEGACY"
   if ! recovery_reconcile_stale_stages; then
     recovery_error "Stale recovery trees could not be reconciled; restore is blocked."
     return 1
@@ -1035,7 +1186,6 @@ recovery_restore() {
     0:active) ;;
     *) recovery_error "Durable maintenance-recovery metadata became malformed during validation."; return 1 ;;
   esac
-  recovery_target_boot=$(recovery_boot_state "$RECOVERY_TREE")
   recovery_prepare_trust_transaction || { recovery_error "Could not preserve the current durable SSH trust database."; return 1; }
   if [ "$recovery_confirm" != "yes" ]; then
     printf 'Restore %s to %s? [y/N]: ' "$recovery_id" "$MERVLAN_RECOVERY_ACTIVE_ROOT"
@@ -1105,7 +1255,7 @@ recovery_restore() {
     if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
     return 1
   }
-  recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$recovery_target_boot" || {
+  recovery_reconcile "$MERVLAN_RECOVERY_ACTIVE_ROOT" "$recovery_target_boot" "$recovery_target_allow_legacy" || {
     if ! recovery_rollback; then RECOVERY_PRESERVE_JFFS=1; fi
     return 1
   }

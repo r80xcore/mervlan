@@ -2033,7 +2033,8 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 16px;
+        gap: 12px;
+        min-width: 0;
         padding: 11px 0;
         border-bottom: 1px solid rgba(255, 255, 255, 0.07);
       }
@@ -2044,8 +2045,10 @@
 
       .svc-settings-label {
         display: flex;
+        flex: 1 1 auto;
         flex-direction: column;
         gap: 3px;
+        min-width: 0;
       }
 
       .svc-settings-label>span:first-child {
@@ -2055,8 +2058,61 @@
 
       .svc-settings-hint {
         font-size: 0.81em;
+        font-weight: 400;
         color: #777;
         line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+
+      #serviceSettingsModal {
+        height: 100vh;
+        height: 100dvh;
+        max-height: 100vh;
+        max-height: 100dvh;
+        overflow: hidden;
+        flex-direction: column;
+        padding: 16px;
+      }
+
+      #serviceSettingsModal .modal__header,
+      #serviceSettingsModal .modal__actions {
+        flex: 0 0 auto;
+      }
+
+      #serviceSettingsModal .modal__body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        margin-bottom: 12px;
+        padding-right: 5px;
+        scrollbar-width: thin;
+        scrollbar-color: #569AC7 #1F2D35;
+      }
+
+      #serviceSettingsModal .modal__body::-webkit-scrollbar {
+        width: 10px;
+      }
+
+      #serviceSettingsModal .modal__body::-webkit-scrollbar-track {
+        background: #1F2D35;
+      }
+
+      #serviceSettingsModal .modal__body::-webkit-scrollbar-thumb {
+        background: #569AC7;
+        border: 2px solid #1F2D35;
+        border-radius: 8px;
+      }
+
+      #serviceSettingsModal .modal__actions {
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        width: auto;
+        min-width: 0;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
       }
 
       /* ---- status bar and detail panel ---- */
@@ -2069,8 +2125,41 @@
         font-size: 0.87em;
         color: #aaa;
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         gap: 8px;
+      }
+
+      .svc-status-summary {
+        display: grid;
+        flex: 1 1 220px;
+        min-width: 0;
+        gap: 3px;
+      }
+
+      .svc-status-preference {
+        color: #ddd;
+      }
+
+      .svc-status-item {
+        display: inline-block;
+        line-height: 1.35;
+      }
+
+      .svc-status-good {
+        color: #4caf50;
+      }
+
+      .svc-status-bad {
+        color: #ff8a8a;
+      }
+
+      .svc-status-warning {
+        color: #ffaa6b;
+      }
+
+      .svc-status-neutral {
+        color: #aaa;
       }
 
       .svc-status-hint {
@@ -2099,6 +2188,26 @@
         background: rgba(108, 186, 245, 0.04);
         border: 1px solid rgba(108, 186, 245, 0.10);
         border-radius: 4px;
+        overflow-wrap: anywhere;
+      }
+
+      .svc-status-refresh-message {
+        min-height: 1.25em;
+        padding: 2px 3px 0;
+        font-size: 0.82em;
+      }
+
+      .svc-status-refresh-message.is-info,
+      .svc-status-refresh-message.is-neutral {
+        color: #aaa;
+      }
+
+      .svc-status-refresh-message.is-success {
+        color: #4caf50;
+      }
+
+      .svc-status-refresh-message.is-error {
+        color: #ff8a8a;
       }
 
       .svc-status-ts {
@@ -2112,6 +2221,7 @@
         align-items: center;
         flex-wrap: wrap;
         gap: 6px;
+        min-width: 0;
         padding: 3px 0;
         font-size: 0.85em;
         border-top: 1px solid rgba(255, 255, 255, 0.04);
@@ -2136,17 +2246,23 @@
         font-size: 0.88em;
       }
 
-      .svc-dot-on {
-        color: #4caf50;
-      }
-
-      .svc-dot-off {
-        color: #555;
-      }
-
       .svc-unit-mac {
         font-size: 0.82em;
-        margin-left: auto;
+      }
+
+      @media (max-width: 520px) {
+        #serviceSettingsModal {
+          width: min(var(--form-pane-effective-width, var(--form-pane-width, 560px)), calc(100vw - 20px));
+          padding: 14px 10px;
+        }
+
+        .svc-settings-status {
+          align-items: flex-start;
+        }
+
+        .svc-status-hint {
+          white-space: normal;
+        }
       }
 
       .svc-transaction-status {
@@ -2347,9 +2463,7 @@
         <div class="svc-settings-row">
           <div class="svc-settings-label">
             <span>Pause Event Reactions</span>
-            <span class="svc-settings-hint">Suspend router-triggered rebuilds during bulk ASUS WiFi changes to avoid
-              repeated rebuilds. Not needed for single changes. Disable to resume normal operation. If nodes are used,
-              run a node sync whenever this setting is changed. Cleared automatically on reboot.</span>
+            <span class="svc-settings-hint">Temporarily pauses automatic MerVLAN event handling to prevent repeated rebuilds during ASUS setting changes. Resets on reboot. Sync Nodes afterward to apply it to nodes.</span>
           </div>
           <label class="merv-toggle" title="Pause router-event-driven rebuilds (UI buttons still work)">
             <input type="checkbox" id="svcTogglePause" onchange="markSvcSettingsDirty()">
@@ -2385,13 +2499,17 @@
 
         <!-- Service status (read-only) with refresh -->
         <div class="svc-settings-status">
-          <span id="svcBootStatusLine" style="flex:1;">Boot service: —</span>
+          <div class="svc-status-summary">
+            <span id="svcBootPreferenceLine" class="svc-status-preference">Apply on Boot: Unknown</span>
+            <span id="svcBootStatusLine" class="svc-status-item svc-status-neutral" aria-live="polite">○ Boot startup: Checking…</span>
+          </div>
           <span class="svc-status-hint">Refresh for full status</span>
           <button type="button" class="button_gen svc-refresh-btn" id="svcStatusRefreshBtn"
             onclick="refreshServiceStatus(this)"
-            title="Run Service Status check — results shown here and in CLI log">&#x27F3;</button>
+            aria-label="Refresh status" title="Refresh boot and runtime status">&#x27F3;</button>
         </div>
-        <!-- Full status detail panel: hidden until ⟳ is pressed -->
+        <div id="svcStatusRefreshMessage" class="svc-status-refresh-message" role="status" aria-live="polite"></div>
+        <!-- Full status detail panel: shown after the first status check -->
         <div id="svcStatusDetail" class="svc-status-detail" style="display:none;"></div>
         <div id="svcTransactionStatus" class="svc-transaction-status" role="status" aria-live="polite">
           <div id="svcTransactionSettings" class="svc-transaction-row">
@@ -9915,6 +10033,8 @@
       // Last successful status check result — persists for the page session so
       // reopening the modal still shows the previous check. Cleared on page reload.
       let _svcLastStatusData = null;
+      let _svcStatusRequestSequence = 0;
+      let _svcStatusRefreshActive = false;
 
       function getServiceSettingValue(definition, source = CURRENT_SETTINGS_CACHE) {
         const raw = source && source[definition.key];
@@ -10099,7 +10219,7 @@
         const cancelBtn = document.getElementById('svcSettingsCancelBtn');
         if (cancelBtn) cancelBtn.disabled = busy;
         const refreshBtn = document.getElementById('svcStatusRefreshBtn');
-        if (refreshBtn) refreshBtn.disabled = busy || _svcSettingsLoadState !== 'ready';
+        if (refreshBtn) refreshBtn.disabled = busy || _svcSettingsLoadState !== 'ready' || _svcStatusRefreshActive;
       }
 
       function setServiceSettingsLoadState(state, message, status = '') {
@@ -10432,12 +10552,48 @@
         btn.classList.toggle('is-paused', paused);
       }
 
-      function updateBootStatusLineFromCache() {
+      function setServiceStatusRefreshMessage(message, state = '') {
+        const messageEl = document.getElementById('svcStatusRefreshMessage');
+        if (!messageEl) return;
+        messageEl.textContent = message || '';
+        messageEl.className = 'svc-status-refresh-message' + (state ? ' is-' + state : '');
+      }
+
+      function updateBootStatusLineFromCache(observation) {
+        const preferenceLine = document.getElementById('svcBootPreferenceLine');
         const statusLine = document.getElementById('svcBootStatusLine');
         if (!statusLine) return;
-        const bootOn = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['BOOT_ENABLED'] === '1';
-        statusLine.textContent = 'Boot service: ' + (bootOn ? '\u25CF enabled' : '\u25CB disabled');
-        statusLine.style.color = bootOn ? '#4caf50' : '#aaa';
+        const configured = CURRENT_SETTINGS_CACHE && CURRENT_SETTINGS_CACHE['BOOT_ENABLED'];
+        const configuredLabel = configured === '1' ? 'Enabled' : configured === '0' ? 'Disabled' : 'Unknown';
+        if (preferenceLine) preferenceLine.textContent = 'Apply on Boot: ' + configuredLabel;
+
+        if (observation && observation.pending) {
+          statusLine.textContent = '○ Boot startup: Checking…';
+          statusLine.className = 'svc-status-item svc-status-neutral';
+          return;
+        }
+
+        let state = observation && observation.verified ? observation.managerHook : 'unknown';
+        if (!['present', 'absent', 'invalid', 'unknown'].includes(state)) state = 'unknown';
+        let label = 'Unknown';
+        let tone = 'warning';
+        let marker = '●';
+        if (state === 'present') {
+          label = 'Ready';
+          tone = configured === '0' ? 'warning' : 'good';
+        } else if (state === 'absent' && configured === '0') {
+          label = 'Disabled';
+          tone = 'neutral';
+          marker = '○';
+        } else if (state === 'absent') {
+          label = 'Missing';
+          tone = configured === '1' ? 'bad' : 'warning';
+        } else if (state === 'invalid') {
+          label = 'Invalid';
+          tone = 'bad';
+        }
+        statusLine.textContent = marker + ' Boot startup: ' + label;
+        statusLine.className = 'svc-status-item svc-status-' + tone;
       }
 
       async function showServiceSettingsModal() {
@@ -10448,7 +10604,8 @@
         // Open immediately, then load authoritative settings into the visible
         // shell. Controls remain disabled until this request reaches a terminal
         // state, so a slow router cannot expose stale values for editing.
-        modal.style.display = 'block';
+        modal.style.display = 'flex';
+        updateBootStatusLineFromCache({ pending: true });
         anchorModalToForm(modal);
         scheduleHostIframeResize();
         const overlay = document.getElementById('leftPanelOverlay');
@@ -10478,6 +10635,7 @@
         if (loadToken !== _svcSettingsLoadSequence || modal.style.display === 'none') return false;
         if (!loaded || !CURRENT_SETTINGS_CACHE) {
           setServiceSettingsLoadState('error', 'Could not load settings.json from the router.', 'error');
+          updateBootStatusLineFromCache({ verified: true, managerHook: 'unknown' });
           return false;
         }
 
@@ -10493,7 +10651,9 @@
         // Populate modal toggles — all read from the fresh cache
         // Snapshot initial state for dirty-diffing
         _svcSnapshot = captureServiceSettingsSnapshot(cache);
-        setServiceSettingsLoadState('ready', 'Settings loaded.');
+        // Loading Settings JSON is not the runtime-status refresh result. Clear
+        // the generic row so it cannot linger while the status check runs.
+        setServiceSettingsLoadState('ready', '');
 
         // Reset Apply before restoring a Developer Tools round-trip.  Restoring
         // the draft below must be allowed to mark the editor dirty again.
@@ -10505,24 +10665,24 @@
         // persisted load has established the normal Settings baseline.
         restoreDeveloperSettingsDraft();
 
-        // Status line: only the persisted BOOT_ENABLED value — never stale.
-        // Press the ⟳ button in the modal to run a full status check (CLI log).
-        const statusLine = document.getElementById('svcBootStatusLine');
-        if (statusLine) {
-          const bootOn = cache['BOOT_ENABLED'] === '1';
-          statusLine.textContent = 'Boot service: ' + (bootOn ? '\u25CF enabled' : '\u25CB disabled');
-          statusLine.style.color = bootOn ? '#4caf50' : '#aaa';
-        }
-        // Restore the last status check result if one exists for this session,
-        // otherwise hide the panel (it's populated by pressing ⟳).
+        // Saved preference is separate from observed hook health. Reuse the
+        // previous verified status for this page session, or run the initial
+        // read-only status check after Settings has loaded.
         const detail = document.getElementById('svcStatusDetail');
         if (detail) {
           if (_svcLastStatusData) {
+            updateBootStatusLineFromCache({
+              verified: true,
+              managerHook: _svcLastStatusData.main && _svcLastStatusData.main.manager_hook
+            });
             detail.innerHTML = renderServiceStatusHtml(_svcLastStatusData);
             detail.style.display = '';
           } else {
+            updateBootStatusLineFromCache({ pending: true });
             detail.style.display = 'none';
             detail.innerHTML = '';
+            const refreshBtn = document.getElementById('svcStatusRefreshBtn');
+            void refreshServiceStatus(refreshBtn, { initial: true });
           }
         }
 
@@ -10541,6 +10701,8 @@
         _svcSettingsLoadSequence++;
         _svcSettingsLoadPromise = null;
         _svcSettingsLoadState = 'idle';
+        _svcStatusRequestSequence++;
+        _svcStatusRefreshActive = false;
         stopServiceConvergenceObservation();
         const modal = document.getElementById('serviceSettingsModal');
         if (modal) {
@@ -10690,77 +10852,104 @@
         }
       }
 
-      async function refreshServiceStatus(btn) {
-        const statusLine = document.getElementById('svcBootStatusLine');
+      async function refreshServiceStatus(btn, options) {
+        options = options || {};
+        if (_svcStatusRefreshActive) return false;
+        const refreshBtn = btn || document.getElementById('svcStatusRefreshBtn');
         const detail = document.getElementById('svcStatusDetail');
-        if (statusLine) { statusLine.textContent = 'Boot service: checking…'; statusLine.style.color = '#aaa'; }
+        const requestSequence = ++_svcStatusRequestSequence;
+        _svcStatusRefreshActive = true;
+        if (refreshBtn) refreshBtn.disabled = true;
+        setServiceStatusRefreshMessage(options.initial ? 'Checking status…' : 'Refreshing status…', 'info');
+        _svcLastStatusData = null;
+        updateBootStatusLineFromCache({ pending: true });
         if (detail) { detail.style.display = 'none'; detail.innerHTML = ''; }
 
-        // Snapshot the current ts before triggering so we can detect when the
-        // new file has been written (ts changed = fresh data).
-        let _prevTs = '';
         let _statusReadErrors = 0;
         try {
-          const _pr = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
-            { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
-          if (_pr.ok) { const _pd = await _pr.json(); _prevTs = _pd.ts || ''; }
-        } catch (error) {
-          _statusReadErrors++;
-          appendCliText('Service status baseline read failed: ' + error.message + '\n', { scroll: 'force' });
-        }
-
-        // Fire the check action — full output still goes to CLI log as before
-        const actionSubmitted = await triggerAction('checkservice_vlanmgr', btn, 'Service Status');
-        if (actionSubmitted === false) {
-          if (statusLine) {
-            statusLine.textContent = 'Boot service: request rejected (see CLI log)';
-            statusLine.style.color = '#ffaa6b';
-          }
-          appendCliText('Service status request could not be started.\n', { scroll: 'force' });
-          return;
-        }
-
-        // Poll until the file has a new ts (max 20s, 1s interval)
-        const _deadline = Date.now() + 20000;
-        let data = null;
-        while (Date.now() < _deadline) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Snapshot the current timestamp before triggering the existing
+          // read-only status action so a previous report cannot look fresh.
+          let _prevTs = '';
           try {
-            const _r = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
+            const _pr = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
               { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
-            if (!_r.ok) {
-              _statusReadErrors++;
-              if (_statusReadErrors === 3) {
-                appendCliText('Service status polling is temporarily unavailable (HTTP ' + _r.status + '). Retrying...\n', { scroll: 'force' });
-              }
-            } else {
-              const _d = await _r.json();
-              _statusReadErrors = 0;
-              if (_d.ts && _d.ts !== _prevTs) { data = _d; break; }
+            if (_pr.ok) {
+              const _pd = await _pr.json();
+              _prevTs = _pd.ts || '';
             }
           } catch (error) {
             _statusReadErrors++;
-            if (_statusReadErrors === 3) {
-              appendCliText('Service status polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+            appendCliText('Service status baseline read failed: ' + error.message + '\n', { scroll: 'force' });
+          }
+          if (requestSequence !== _svcStatusRequestSequence) return false;
+
+          // This routine owns the Refresh button until the report is read back;
+          // keep the backend action from applying its shorter button cooldown.
+          const actionSubmitted = await triggerAction('checkservice_vlanmgr', null, 'Service Status');
+          if (requestSequence !== _svcStatusRequestSequence) return false;
+          if (actionSubmitted === false) {
+            appendCliText('Service status request could not be started.\n', { scroll: 'force' });
+            updateBootStatusLineFromCache({ verified: true, managerHook: 'unknown' });
+            setServiceStatusRefreshMessage('Status refresh failed', 'error');
+            return false;
+          }
+
+          // Poll until the file has a new timestamp (max 20s, 1s interval).
+          const _deadline = Date.now() + 20000;
+          let data = null;
+          while (Date.now() < _deadline) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            if (requestSequence !== _svcStatusRequestSequence) return false;
+            try {
+              const _r = await fetch(PATHS.SERVICE_STATUS + '?_=' + Date.now(),
+                { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
+              if (!_r.ok) {
+                _statusReadErrors++;
+                if (_statusReadErrors === 3) {
+                  appendCliText('Service status polling is temporarily unavailable (HTTP ' + _r.status + '). Retrying...\n', { scroll: 'force' });
+                }
+              } else {
+                const _d = await _r.json();
+                _statusReadErrors = 0;
+                if (_d.ts && _d.ts !== _prevTs) { data = _d; break; }
+              }
+            } catch (error) {
+              _statusReadErrors++;
+              if (_statusReadErrors === 3) {
+                appendCliText('Service status polling is temporarily unavailable (' + error.message + '). Retrying...\n', { scroll: 'force' });
+              }
             }
           }
-        }
+          if (requestSequence !== _svcStatusRequestSequence) return false;
 
-        if (data) {
-          if (statusLine && data.main) {
-            const bootOn = data.main.boot === 'enabled';
-            statusLine.textContent = 'Boot service: ' + (bootOn ? '\u25CF enabled' : '\u25CB disabled');
-            statusLine.style.color = bootOn ? '#4caf50' : '#aaa';
-          }
-          if (detail) {
+          if (data && data.main && typeof data.main === 'object') {
             _svcLastStatusData = data;
-            detail.innerHTML = renderServiceStatusHtml(data);
-            detail.style.display = '';
+            updateBootStatusLineFromCache({
+              verified: true,
+              managerHook: data.main.manager_hook
+            });
+            if (detail) {
+              detail.innerHTML = renderServiceStatusHtml(data);
+              detail.style.display = '';
+            }
+            setServiceStatusRefreshMessage('Status refreshed', 'success');
+            return true;
           }
-        } else {
-          if (statusLine) {
-            statusLine.textContent = 'Boot service: \u2014  (see CLI log)';
-            statusLine.style.color = '#aaa';
+
+          updateBootStatusLineFromCache({ verified: true, managerHook: 'unknown' });
+          setServiceStatusRefreshMessage('Status refresh failed', 'error');
+          return false;
+        } catch (error) {
+          if (requestSequence === _svcStatusRequestSequence) {
+            appendCliText('Service status refresh failed: ' + (error.message || error) + '\n', { scroll: 'force' });
+            updateBootStatusLineFromCache({ verified: true, managerHook: 'unknown' });
+            setServiceStatusRefreshMessage('Status refresh failed', 'error');
+          }
+          return false;
+        } finally {
+          if (requestSequence === _svcStatusRequestSequence) {
+            _svcStatusRefreshActive = false;
+            if (refreshBtn) refreshBtn.disabled = _svcTransactionActive || _svcSettingsLoadState !== 'ready';
           }
         }
       }
@@ -10769,34 +10958,85 @@
         const escapeHtml = value => String(value == null ? '' : value)
           .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        const escapeAttr = value => escapeHtml(value).replace(/`/g, '&#96;');
-        function dot(val, on) {
-          const text = escapeHtml(val || '?');
-          return '<span class="' + (on ? 'svc-dot-on' : 'svc-dot-off') + '" title="' + escapeAttr(val || '') + '">'
-            + (on ? '\u25CF' : '\u25CB') + '\u202f' + text + '</span>';
+        function item(label, value, tone) {
+          const marker = tone === 'good' || tone === 'bad' || tone === 'warning' ? '\u25CF' : '\u25CB';
+          return '<span class="svc-status-item svc-status-' + tone + '">' + marker + '\u202f' +
+            escapeHtml(label + ': ' + value) + '</span>';
         }
-        function unitRow(label, ip, m) {
+        function mappedState(raw, accepted, labels) {
+          return Object.prototype.hasOwnProperty.call(labels, raw) && accepted.includes(raw)
+            ? labels[raw] : { value: 'Unknown', tone: 'warning' };
+        }
+        function startupState(boot, hook) {
+          if (hook === 'present') return { value: 'Ready', tone: boot === 'disabled' ? 'warning' : 'good' };
+          if (hook === 'absent') {
+            if (boot === 'disabled') return { value: 'Disabled', tone: 'neutral' };
+            return { value: 'Missing', tone: boot === 'enabled' ? 'bad' : 'warning' };
+          }
+          if (hook === 'invalid') return { value: 'Invalid', tone: 'bad' };
+          return { value: 'Unknown', tone: 'warning' };
+        }
+        function healthState(boot, cron) {
+          if (cron === 'present') return { value: 'Active', tone: 'good' };
+          if (cron === 'absent') {
+            if (boot === 'disabled') return { value: 'Disabled', tone: 'neutral' };
+            return { value: 'Missing', tone: boot === 'enabled' ? 'bad' : 'warning' };
+          }
+          if (cron === 'invalid') return { value: 'Invalid', tone: 'bad' };
+          return { value: 'Unknown', tone: 'warning' };
+        }
+        function macState(raw) {
+          const value = String(raw || 'off');
+          const onMatch = value.match(/^on(?:\((\d+)\))?$/i);
+          if (onMatch) return { value: onMatch[1] ? 'On (' + onMatch[1] + ')' : 'On', tone: 'good' };
+          if (value.toLowerCase() === 'off') return { value: 'Off', tone: 'neutral' };
+          if (value.toLowerCase() === 'invalid') return { value: 'Invalid', tone: 'bad' };
+          return { value: 'Unknown', tone: 'warning' };
+        }
+        function unitRow(label, ip, m, isNode) {
           m = (m && typeof m === 'object') ? m : {};
-          const bootOn = m.boot === 'enabled';
-          const addonOn = m.addon === 'active' || m.addon === 'node-on' || m.addon === 'node-custom';
-          const cronOn = m.cron === 'present';
-          const macOn = m.mac && m.mac !== 'off';
+          const configured = m.boot === 'enabled' ? 'Enabled' : m.boot === 'disabled' ? 'Disabled' : 'Unknown';
+          const hook = ['present', 'absent', 'invalid', 'unknown'].includes(m.manager_hook) ? m.manager_hook : 'unknown';
+          const startup = startupState(m.boot, hook);
+          const integration = isNode
+            ? mappedState(m.addon, ['node-on', 'node-custom', 'node-off', 'missing'], {
+              'node-on': { value: 'Active', tone: 'good' },
+              'node-custom': { value: 'Custom', tone: 'warning' },
+              'node-off': { value: m.boot === 'disabled' ? 'Disabled' : 'Off', tone: m.boot === 'disabled' ? 'neutral' : 'warning' },
+              missing: { value: 'Missing', tone: 'bad' }
+            })
+            : mappedState(m.addon, ['active', 'missing'], {
+              active: { value: 'Active', tone: 'good' },
+              missing: { value: 'Missing', tone: 'bad' }
+            });
+          const event = mappedState(m.event, ['active', 'disabled', 'custom', 'missing', 'invalid', 'unknown'], {
+            active: { value: 'Active', tone: 'good' },
+            disabled: { value: 'Disabled', tone: 'neutral' },
+            custom: { value: 'Custom', tone: 'warning' },
+            missing: { value: 'Missing', tone: 'bad' },
+            invalid: { value: 'Invalid', tone: 'bad' },
+            unknown: { value: 'Unknown', tone: 'warning' }
+          });
+          const health = healthState(m.boot, m.cron);
+          const mac = macState(m.mac);
           return '<div class="svc-status-row">'
             + '<span class="svc-unit-label">' + escapeHtml(label) + '</span>'
             + '<span class="svc-unit-hw">' + escapeHtml(m.hw || '?') + '</span>'
             + (ip ? '<span class="svc-unit-ip">@' + escapeHtml(ip) + '</span>' : '')
-            + dot(m.boot, bootOn)
-            + dot(m.addon, addonOn)
-            + dot(m.cron, cronOn)
-            + '<span class="svc-unit-mac ' + (macOn ? 'svc-dot-on' : 'svc-dot-off') + '">mac ' + escapeHtml(m.mac || 'off') + '</span>'
+            + '<span class="svc-status-preference">Apply on Boot: ' + escapeHtml(configured) + '</span>'
+            + item('Boot startup', startup.value, startup.tone)
+            + item(isNode ? 'Node integration' : 'Runtime integration', integration.value, integration.tone)
+            + (isNode ? '' : item('Event handler', event.value, event.tone))
+            + item('Health check', health.value, health.tone)
+            + item('MAC Shield', mac.value, mac.tone)
             + '</div>';
         }
         data = (data && typeof data === 'object') ? data : {};
         let html = data.ts
           ? '<div class="svc-status-ts">Last checked: ' + escapeHtml(data.ts) + '</div>' : '';
-        if (data.main) html += unitRow('Main', '', data.main);
+        if (data.main) html += unitRow('Main', '', data.main, false);
         if (data.nodes) data.nodes.forEach(function (n, i) {
-          html += unitRow('Node' + (i + 1), n.ip, n);
+          html += unitRow('Node' + (i + 1), n.ip, n, true);
         });
         return html;
       }
@@ -11583,15 +11823,29 @@
           const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
 
           const isSshTrustUi = modal.id === 'sshTrustModal' || modal.id === 'sshTrustPausedTray';
+          const isServiceSettingsModal = modal.id === 'serviceSettingsModal';
           const assignExtension = isSshTrustUi && form.classList.contains('ssid-assign-view')
             ? Math.max(0, Number.parseFloat(window.getComputedStyle(form).getPropertyValue('--ssid-assign-extension')) || 0)
             : 0;
           let anchorOffset = 0;
-          if (modal.id === 'versionModal' || modal.id === 'sshKeyModal' || modal.id === 'developerToolsModal' || isSshTrustUi) {
+          if (isServiceSettingsModal) {
             const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
             const visibleTop = Math.max(0, formRect.top);
             const visibleBottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;
-            const availableHeight = Math.max(0, visibleBottom - visibleTop);
+            const visibleAreaHeight = Math.max(0, visibleBottom - visibleTop);
+            const settingsHeight = Math.max(0, Math.floor(visibleAreaHeight));
+            if (settingsHeight > 0) {
+              modal.style.height = `${settingsHeight}px`;
+              modal.style.maxHeight = `${settingsHeight}px`;
+            }
+            anchorOffset = Math.max(0, visibleTop - formRect.top);
+          } else if (modal.id === 'versionModal' || modal.id === 'sshKeyModal' ||
+            modal.id === 'developerToolsModal' || isSshTrustUi) {
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+            const visibleTop = Math.max(0, formRect.top);
+            const visibleBottom = viewportHeight ? Math.min(viewportHeight, formRect.bottom) : formRect.bottom;
+            const visibleAreaHeight = Math.max(0, visibleBottom - visibleTop);
+            const availableHeight = visibleAreaHeight;
             if (availableHeight > 0) {
               modal.style.maxHeight = `${Math.floor(availableHeight)}px`;
             }
@@ -11599,7 +11853,7 @@
               modal.offsetHeight || modal.getBoundingClientRect().height || 0,
               availableHeight || Number.MAX_SAFE_INTEGER
             );
-            const balancedGap = availableHeight > modalHeight ? (availableHeight - modalHeight) / 2 : 0;
+            const balancedGap = visibleAreaHeight > modalHeight ? (visibleAreaHeight - modalHeight) / 2 : 0;
             anchorOffset = Math.max(0, visibleTop - formRect.top + balancedGap);
           } else if (modal.id === 'vlanManagerModal' || modal.id === 'wanNativeConfigPopup') {
             const modalHeight = modal.offsetHeight || 0;
@@ -11632,6 +11886,7 @@
         modal.style.top = '';
         modal.style.transform = '';
         modal.style.position = '';
+        modal.style.height = '';
         modal.style.maxHeight = '';
       }
 

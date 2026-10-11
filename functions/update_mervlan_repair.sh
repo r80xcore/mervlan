@@ -9,9 +9,48 @@ set -u
 : "${MERV_REPAIR_SNAPSHOT_BASE:=https://codeload.github.com/r80xcore/mervlan/tar.gz}"
 : "${MERV_REPAIR_CONNECT_TIMEOUT:=15}"
 : "${MERV_REPAIR_MAX_TIME:=120}"
-: "${MERV_REPAIR_MAINTENANCE_LOCK:=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock}"
-: "${MERV_REPAIR_LEGACY_LOCK_ROOT:=/tmp/mervlan_tmp/locks}"
-: "${MERV_REPAIR_PROC_ROOT:=/proc}"
+if [ -n "${MERVLAN_SELFTEST_CONTEXT:-}" ] &&
+   { [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ] ||
+     [ -r "${0%/*}/../settings/lib_selftest_context.sh" ]; }; then
+  if [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ]; then
+    . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+  else
+    . "${0%/*}/../settings/lib_selftest_context.sh" 2>/dev/null || :
+  fi
+fi
+REPAIR_TEST_CONTEXT=0
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid; then
+  REPAIR_TEST_CONTEXT=1
+fi
+if [ "$REPAIR_TEST_CONTEXT" = 1 ]; then
+  for _rrp_path in "${MERV_REPAIR_TMP_ROOT:-}" \
+    "${MERV_REPAIR_MAINTENANCE_LOCK:-}" "${MERV_REPAIR_LEGACY_LOCK_ROOT:-}" \
+    "${MERV_REPAIR_PROC_ROOT:-}" "${MERV_ACTION_LOCK_PATH:-}"; do
+    [ -n "$_rrp_path" ] || continue
+    case "$_rrp_path" in
+      /tmp|/proc|/tmp/mervlan_tmp/locks/mervlan_maintenance.lock|\
+      /tmp/mervlan_tmp/locks/mervlan_action.lock) ;;
+      *) merv_selftest_context_path_allowed "$_rrp_path" || {
+        REPAIR_TEST_CONTEXT=0
+      } ;;
+    esac
+    [ "$REPAIR_TEST_CONTEXT" = 1 ] || break
+  done
+fi
+if [ "$REPAIR_TEST_CONTEXT" = 1 ]; then
+  : "${MERV_REPAIR_MAINTENANCE_LOCK:=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock}"
+  : "${MERV_REPAIR_LEGACY_LOCK_ROOT:=/tmp/mervlan_tmp/locks}"
+  : "${MERV_REPAIR_PROC_ROOT:=/proc}"
+else
+  MERV_REPAIR_TMP_ROOT=/tmp
+  MERV_REPAIR_MAINTENANCE_LOCK=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock
+  MERV_REPAIR_LEGACY_LOCK_ROOT=/tmp/mervlan_tmp/locks
+  MERV_REPAIR_PROC_ROOT=/proc
+  MERV_ACTION_LOCK_PATH=/tmp/mervlan_tmp/locks/mervlan_action.lock
+  unset MERV_REPAIR_TEST_FAIL_LEDGER MERV_REPAIR_TEST_FAIL_PATH \
+    MERV_REPAIR_TEST_FAULT MERV_REPAIR_FAULT MERV_REPAIR_LOCK_FAULT
+fi
 
 RUN_DIR=""
 EXTRACT_DIR=""
@@ -232,15 +271,16 @@ repair_path_allowed() {
     install.sh|uninstall.sh|changelog.txt|mervlan.asp) return 0 ;;
     www/index.html|www/vlan_index_style.css|www/vlan_form_style.css|www/help.html|www/view_logs.html|www/settings/loading_actions.json) return 0 ;;
     functions/mervlan_boot.sh|functions/mervlan_boot_wrap.sh|functions/mervlan_wan.sh|functions/hw_probe.sh|functions/settings_reconcile.sh|functions/ssh_trust_action.sh) return 0 ;;
-    functions/device_support_mapper.sh|functions/heal_event.sh|functions/mervlan_trunk.sh|functions/mervlan_node_runner.sh) return 0 ;;
+    functions/device_support_mapper.sh|functions/heal_event.sh|functions/mervlan_trunk.sh|functions/mervlan_node_runner.sh|functions/mervlan_node_mutate.sh|functions/mervlan_full_cleanup.sh) return 0 ;;
     functions/update_mervlan.sh|functions/update_mervlan_repair.sh|functions/update_mervlan_repair.manifest|functions/mervlan_backup.sh|functions/mervlan_recover.sh|functions/sync_nodes.sh) return 0 ;;
     functions/service-event-handler.sh|functions/mervlan_manager.sh|functions/execute_nodes.sh|functions/post_apply_worker.sh|functions/collect_clients.sh|functions/collect_local_clients.sh) return 0 ;;
     functions/save_settings.sh|functions/mac_refresh.sh|functions/mac_client_meta.sh|functions/dropbear_sshkey_gen.sh|functions/ssh_hostkey_probe.sh) return 0 ;;
-    settings/var_settings.sh|settings/log_settings.sh|settings/lib_identity.sh|settings/lib_owner_lock.sh|settings/lib_action_lock.sh) return 0 ;;
+    settings/var_settings.sh|settings/log_settings.sh|settings/lib_identity.sh|settings/lib_owner_lock.sh|settings/lib_action_lock.sh|settings/lib_selftest_context.sh) return 0 ;;
     settings/lib_action_ack.sh|settings/lib_action_progress.sh|settings/lib_action_runtime.sh|settings/lib_maintenance_recovery.sh) return 0 ;;
+    settings/lib_continuation.sh|settings/lib_full_fence.sh|settings/lib_maintenance_quiesce.sh|settings/lib_mutation_admission.sh|settings/lib_full_uninstall.sh) return 0 ;;
     settings/lib_br0_guard.sh|settings/lib_debug.sh|settings/lib_radio.sh|settings/lib_ssid_filter.sh|settings/lib_stp.sh) return 0 ;;
     settings/lib_update_state.sh|settings/lib_json.sh|settings/lib_ssh.sh|settings/lib_ssh_trust.sh|settings/lib_backup_state.sh|settings/lib_mervqt.sh) return 0 ;;
-    settings/lib_node_jobs.sh|settings/lib_node_reconcile.sh|settings/lib_settings_reconcile.sh|settings/lib_progress.sh) return 0 ;;
+    settings/lib_node_jobs.sh|settings/lib_node_reconcile.sh|settings/lib_settings_reconcile.sh|settings/lib_progress.sh|settings/lib_boot_integrity.sh) return 0 ;;
     settings/log_settings.sh|settings/mac_shield_snapshot.sh|settings/var_settings.sh) return 0 ;;
     templates/mervlan_templates.sh) return 0 ;;
     *) return 1 ;;
@@ -281,11 +321,15 @@ parse_manifest() {
   [ "$_pm_format" -eq 1 ] && [ "$_pm_cohort" -eq 1 ] && [ "$_pm_entries" -gt 0 ] || return 1
   for _pm_required in install.sh uninstall.sh functions/update_mervlan.sh \
     functions/update_mervlan_repair.sh functions/update_mervlan_repair.manifest \
+    functions/mervlan_node_mutate.sh functions/mervlan_full_cleanup.sh \
     functions/mervlan_boot.sh functions/mervlan_wan.sh settings/lib_owner_lock.sh \
-    settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh
+    settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh \
+    settings/lib_selftest_context.sh settings/lib_full_fence.sh settings/lib_continuation.sh \
+    settings/lib_mutation_admission.sh settings/lib_maintenance_quiesce.sh settings/lib_full_uninstall.sh
   do
     grep -Fq " $_pm_required" "$PATHS_FILE" || return 1
   done
+  grep -Fqx '0755 functions/mervlan_full_cleanup.sh' "$PATHS_FILE" || return 1
   grep -Fqx '0755 functions/mervlan_wan.sh' "$PATHS_FILE" || return 1
   grep -Fqx '0644 functions/update_mervlan_repair.manifest' "$PATHS_FILE" || return 1
   return 0
@@ -308,6 +352,8 @@ validate_stage() {
     case "$_vs_path" in *.sh) sh -n "$_vs_file" >/dev/null 2>&1 || return 1 ;; esac
   done <"$PATHS_FILE"
   [ -x "$STAGE_DIR/functions/mervlan_wan.sh" ] || return 1
+  grep -q '^# Cleaner protocol: phase6-v1$' "$STAGE_DIR/functions/mervlan_full_cleanup.sh" || return 1
+  grep -Fx '# Full helper protocol: full-uninstall-v1' "$STAGE_DIR/settings/lib_full_uninstall.sh" >/dev/null || return 1
   return 0
 }
 
@@ -657,6 +703,20 @@ repair_legacy_exclusion_check() {
   return 0
 }
 
+repair_full_fence_absent() {
+  _rffa_path=/tmp/.mervlan-full-uninstall.lock
+  if [ "$REPAIR_TEST_CONTEXT" = 1 ] && [ -n "${MERV_FULL_FENCE_PATH:-}" ]; then
+    merv_selftest_context_path_allowed "$MERV_FULL_FENCE_PATH" || return 1
+    _rffa_path=$MERV_FULL_FENCE_PATH
+  fi
+  path_chain_safe "$_rffa_path" || return 1
+  path_present "$_rffa_path" && return 1
+  _rffa_parent=${_rffa_path%/*}
+  [ -n "$_rffa_parent" ] && [ ! -L "$_rffa_parent" ] &&
+    [ -d "$_rffa_parent" ] && [ -r "$_rffa_parent" ] &&
+    [ -x "$_rffa_parent" ]
+}
+
 repair_lock_path_valid() {
   case "$MERV_REPAIR_MAINTENANCE_LOCK" in
     ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
@@ -719,6 +779,7 @@ repair_lock_release() {
 }
 
 repair_admit() {
+  repair_full_fence_absent || { log 'Full Uninstall admission is active or cannot be verified; repair is blocked.'; return 1; }
   repair_lock_path_valid || { log 'Maintenance lock path is unsafe or unverifiable.'; return 1; }
   repair_legacy_exclusion_check || {
     _rac_rc=$?
@@ -786,6 +847,11 @@ repair_admit() {
     return 1
   fi
   REPAIR_LOCK_OWNED=1
+  if ! repair_full_fence_absent; then
+    log 'Full Uninstall admission appeared during repair ownership acquisition.'
+    repair_lock_release || :
+    return 1
+  fi
   repair_legacy_exclusion_check || { repair_lock_release || :; return 1; }
   return 0
 }

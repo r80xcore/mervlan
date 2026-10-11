@@ -16,6 +16,8 @@ cleanup() {
 }
 trap cleanup 0 1 2 3 15
 mkdir -p "$ROOT/state" || exit 1
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$ROOT" || exit 1
 
 export MERV_BASE="$BASE_DIR"
 export MERV_STATE_ROOT="$ROOT/state"

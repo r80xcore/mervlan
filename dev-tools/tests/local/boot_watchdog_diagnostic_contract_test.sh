@@ -38,6 +38,8 @@ trap _cleanup_test 0 1 2 3 15
 _FAILURES=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; _FAILURES=$((_FAILURES + 1)); }
 pass() { printf 'PASS: %s\n' "$1"; }
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || fail 'private self-test context'
 
 # Build the fixture runner around production watchdog functions
 FIXTURE="$TEST_ROOT/watchdog_fixture.sh"

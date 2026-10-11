@@ -49,7 +49,12 @@ SELFTEST_FAILURES=0
 SELFTEST_PASSES=0
 
 case "$SELFTEST_ROOT" in /tmp/mervlan_tmp/selftest.*) ;; *) exit 2 ;; esac
+umask 077
 mkdir -p "$SELFTEST_ROOT/bin" "$SELFTEST_STATE" "$SELFTEST_FAKE_STATE" "$SELFTEST_PROC" || exit 2
+chmod 700 "$SELFTEST_ROOT" 2>/dev/null || exit 2
+[ -r "$MERV_BASE/settings/lib_selftest_context.sh" ] || exit 2
+. "$MERV_BASE/settings/lib_selftest_context.sh" || exit 2
+merv_selftest_context_create "$SELFTEST_ROOT" || exit 2
 
 MERV_DHCP_HOLD_TEST_MODE=1
 MERV_DHCP_HOLD_TEST_ROOT="$SELFTEST_ROOT"
@@ -61,6 +66,7 @@ FAKE_EBTABLES_STATE="$SELFTEST_FAKE_STATE"
 export MERV_BASE MERV_DHCP_HOLD_TEST_MODE MERV_DHCP_HOLD_TEST_ROOT
 export MERV_DHCP_HOLD_STATE_ROOT MERV_DHCP_HOLD_LEGACY_MARKER
 export MERV_DHCP_HOLD_EBTABLES MERV_DHCP_HOLD_PROC_ROOT FAKE_EBTABLES_STATE
+export MERVLAN_SELFTEST_CONTEXT
 
 # Minimal log shims keep test output deterministic when the production logging
 # library is not loaded.
@@ -5103,6 +5109,7 @@ MERV_WAN_IP
       MERV_WAN_DHCP_WAIT_SEC="${WAN_TEST_DHCP_WAIT_SEC:-1}" \
       MERV_WAN_DHCP_RELEASE_WAIT_SEC="${WAN_TEST_DHCP_RELEASE_WAIT_SEC:-1}" \
       MERV_WAN_DHCP_TERM_WAIT_SEC="${WAN_TEST_DHCP_TERM_WAIT_SEC:-1}" \
+      MERV_WAN_TEST_MODE=1 MERV_WAN_TEST_ROOT="$SELFTEST_ROOT" \
       MERV_WAN_NET_ROOT="$_twn_net" MERV_WAN_PROC_VLAN_ROOT="$_twn_proc" MERV_WAN_DHCP_PROC_ROOT="$_twn_proc" \
       sh -c 'WAN_TEST_SIGNAL_PID=$$; export WAN_TEST_SIGNAL_PID; exec sh "$1" "$2"' \
       sh "$_twn_base/functions/mervlan_wan.sh" "$1"

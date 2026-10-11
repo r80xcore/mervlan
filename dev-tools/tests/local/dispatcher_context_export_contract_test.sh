@@ -5,10 +5,24 @@ set -u
 
 BASE_DIR=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd) || exit 1
 SERVICE="$BASE_DIR/functions/service-event-handler.sh"
-TEST_ROOT="/tmp/mervlan_tmp/selftest.dispatch-export.$$"
+TEST_ROOT="/tmp/mervlan_tmp/selftest.dispatch-export.$(date +%s).$$"
 umask 077
 mkdir -p "$TEST_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
+
+# The extracted dispatcher test uses a narrow in-process continuation stub;
+# production lease parsing and child activation are exercised separately by
+# continuation_contract_test.sh.
+MERV_BASE="$TEST_ROOT/fake-base"
+mkdir -p "$MERV_BASE/settings" || exit 1
+cat > "$MERV_BASE/settings/lib_mutation_admission.sh" <<'EOF'
+merv_continuation_activate_wait() { return 0; }
+merv_mutation_admit_action() { return 0; }
+EOF
+chmod 700 "$MERV_BASE" "$MERV_BASE/settings" "$MERV_BASE/settings/lib_mutation_admission.sh"
+export MERV_BASE
 
 # Extract only the dispatch function; the event router itself is intentionally
 # not sourced because production paths are fixed to /jffs on ASUSWRT.
@@ -49,6 +63,18 @@ merv_action_lock_enter() {
 merv_action_lock_leave() { printf '%s\n' "$1" >> "$RELEASES"; return 0; }
 merv_action_lock_export_child_context() { return 1; }
 merv_action_lock_clear_child_context() { return 0; }
+merv_mutation_admit_action() { return 0; }
+merv_continuation_publish_pending() {
+  MERV_CONTINUATION_TOKEN=dispatch-test
+  MERV_CONTINUATION_STATE=pending
+  export MERV_CONTINUATION_TOKEN
+  return 0
+}
+merv_continuation_path() { printf '%s/fake-lease\n' "$MERV_BASE"; }
+merv_continuation_read() { return 0; }
+merv_continuation_bind_child() { MERV_CONTINUATION_STATE=active; return 0; }
+merv_continuation_retire() { return 0; }
+merv_continuation_cancel_pending() { return 0; }
 
 dispatch_if_executable "$WORKER"
 _dispatch_rc=$?

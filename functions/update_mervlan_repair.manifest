@@ -16,7 +16,9 @@ cohort=control-plane
 0755 functions/mervlan_boot.sh
 0755 functions/mervlan_boot_wrap.sh
 0755 functions/mervlan_manager.sh
+0755 functions/mervlan_full_cleanup.sh
 0755 functions/mervlan_node_runner.sh
+0755 functions/mervlan_node_mutate.sh
 0755 functions/mervlan_recover.sh
 0755 functions/mervlan_trunk.sh
 0755 functions/mervlan_wan.sh
@@ -39,13 +41,19 @@ cohort=control-plane
 0644 settings/lib_debug.sh
 0644 settings/lib_identity.sh
 0644 settings/lib_json.sh
+0644 settings/lib_boot_integrity.sh
+0644 settings/lib_continuation.sh
+0644 settings/lib_full_fence.sh
 0644 settings/lib_maintenance_recovery.sh
+0644 settings/lib_maintenance_quiesce.sh
 0644 settings/lib_backup_state.sh
+0644 settings/lib_mutation_admission.sh
 0644 settings/lib_mervqt.sh
 0644 settings/lib_node_jobs.sh
 0644 settings/lib_node_reconcile.sh
 0644 settings/lib_settings_reconcile.sh
 0644 settings/lib_owner_lock.sh
+0644 settings/lib_selftest_context.sh
 0644 settings/lib_progress.sh
 0644 settings/lib_radio.sh
 0644 settings/lib_ssh.sh
@@ -58,3 +66,4 @@ cohort=control-plane
 0644 settings/var_settings.sh
 0644 templates/mervlan_templates.sh
 0755 uninstall.sh
+0644 settings/lib_full_uninstall.sh

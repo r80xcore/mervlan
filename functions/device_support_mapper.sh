@@ -235,8 +235,6 @@ detect_wan() {
     return 1
   }
 
-  ip neigh del "$gw" dev br0 >/dev/null 2>&1
-
   tmp="/tmp/uplink.$$"
   : > "$tmp"
   for i in $members; do
@@ -390,6 +388,101 @@ patch_hw_probe() {
   }
 
   return 0
+}
+
+# The optional installed-code replacement is Class A maintenance work. Keep
+# the standalone discovery/report path dependency-free; load maintenance
+# authority only after the user has chosen the patch operation.
+MAPPER_PATCH_LOCK=""
+MAPPER_PATCH_NONCE=""
+MAPPER_PATCH_START=""
+
+mapper_patch_target_valid() {
+  case "$HW_PROBE_PATH" in
+    "$DEFAULT_HW_PROBE") return 0 ;;
+  esac
+  type merv_selftest_context_valid >/dev/null 2>&1 &&
+    merv_selftest_context_valid &&
+    merv_selftest_context_path_allowed "$HW_PROBE_PATH"
+}
+
+mapper_patch_maintenance_enter() {
+  [ -r "$MERV_BASE/settings/lib_owner_lock.sh" ] || return 1
+  [ -r "$MERV_BASE/settings/lib_update_state.sh" ] || return 1
+  [ -r "$MERV_BASE/settings/lib_maintenance_recovery.sh" ] || return 1
+  [ -r "$MERV_BASE/settings/lib_maintenance_quiesce.sh" ] || return 1
+  MERV_STATE_ROOT=/jffs/addons/mervlan_state
+  export MERV_STATE_ROOT
+  . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || return 1
+  . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || return 1
+  . "$MERV_BASE/settings/lib_maintenance_recovery.sh" 2>/dev/null || return 1
+  . "$MERV_BASE/settings/lib_maintenance_quiesce.sh" 2>/dev/null || return 1
+
+  mapper_patch_target_valid || return 1
+  merv_update_full_fence_clear || return 1
+  MAPPER_PATCH_LOCK=$(merv_update_maintenance_lock_path) || return 1
+  [ "$MAPPER_PATCH_LOCK" = /tmp/mervlan_tmp/locks/mervlan_maintenance.lock ] || {
+    type merv_selftest_context_valid >/dev/null 2>&1 &&
+      merv_selftest_context_valid || return 1
+  }
+  merv_owner_lock_acquire "$MAPPER_PATCH_LOCK" 0 0 device_support_mapper || return 1
+  MAPPER_PATCH_NONCE=${MERV_LOCK_NONCE:-}
+  MAPPER_PATCH_START=${MERV_LOCK_START:-}
+  [ -n "$MAPPER_PATCH_NONCE" ] && [ -n "$MAPPER_PATCH_START" ] || return 1
+  merv_owner_v2_matches "$MAPPER_PATCH_LOCK" "$$" \
+    "$MAPPER_PATCH_START" "$MAPPER_PATCH_NONCE" || return 1
+  if ! merv_update_full_fence_clear ||
+     ! merv_maintenance_recovery_direct_gate ||
+     ! merv_update_direct_admission_gate; then
+    mapper_patch_maintenance_leave || :
+    return 1
+  fi
+  _mpme_quiesce=$(merv_maintenance_quiesce_classify \
+    "$$" "$MAPPER_PATCH_START" "$MAPPER_PATCH_NONCE" 2>/dev/null || printf BLOCKING)
+  [ "$_mpme_quiesce" = IDLE ] || {
+    mapper_patch_maintenance_leave || :
+    return 1
+  }
+  merv_owner_v2_matches "$MAPPER_PATCH_LOCK" "$$" \
+    "$MAPPER_PATCH_START" "$MAPPER_PATCH_NONCE" || {
+      mapper_patch_maintenance_leave || :
+      return 1
+    }
+  merv_update_full_fence_clear || {
+    mapper_patch_maintenance_leave || :
+    return 1
+  }
+  return 0
+}
+
+mapper_patch_maintenance_leave() {
+  [ -n "$MAPPER_PATCH_LOCK" ] && [ -n "$MAPPER_PATCH_NONCE" ] || return 0
+  merv_owner_lock_release "$MAPPER_PATCH_LOCK" "$MAPPER_PATCH_NONCE" || return 1
+  MAPPER_PATCH_LOCK=""
+  MAPPER_PATCH_NONCE=""
+  MAPPER_PATCH_START=""
+  return 0
+}
+
+mapper_patch_with_maintenance() {
+  mapper_patch_maintenance_enter || {
+    say "ERROR: Maintenance ownership, Full fence, or quiescence admission blocked the patch."
+    return 1
+  }
+  trap 'exit 130' INT TERM
+  trap 'mapper_patch_maintenance_leave' EXIT
+  patch_hw_probe "$HW_PROBE_PATH" "$PRODUCTID" "$PAYLOAD"
+  _mpwm_rc=$?
+  # The probe writes the detected device profile into persistent settings.
+  # Keep that follow-up mutation inside the same Class A maintenance window
+  # as publication of the installed hw_probe.sh patch.
+  if [ "$_mpwm_rc" -eq 0 ] && [ "$HW_PROBE_PATH" = "$DEFAULT_HW_PROBE" ]; then
+    say "Running hw_probe.sh once to apply the mapping into MerVLAN hardware settings..."
+    sh "$HW_PROBE_PATH" || say "WARNING: hw_probe.sh returned non-zero."
+  fi
+  mapper_patch_maintenance_leave || _mpwm_rc=1
+  trap - EXIT INT TERM
+  return "$_mpwm_rc"
 }
 
 # -----------------------------
@@ -630,15 +723,10 @@ STAMP_HUMAN="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown-time")"
 PAYLOAD="# [Custom Support Mapper] added/updated ${STAMP_HUMAN}
 $SUGGESTED_CASE"
 
-patch_hw_probe "$HW_PROBE_PATH" "$PRODUCTID" "$PAYLOAD" || exit 1
+mapper_patch_with_maintenance || exit 1
 
 say ""
 say "Patched hw_probe.sh successfully (custom mapping stored under the Custom Support Mapper header)."
-
-if [ "$HW_PROBE_PATH" = "$DEFAULT_HW_PROBE" ]; then
-  say "Running hw_probe.sh once to apply the mapping into MerVLAN hardware settings..."
-  sh "$HW_PROBE_PATH" || say "WARNING: hw_probe.sh returned non-zero."
-fi
 
 say ""
 say "Done."

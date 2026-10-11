@@ -15,10 +15,13 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$1"; }
 
 export MERV_BASE="$BASE_DIR"
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || fail load-selftest-helper
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || fail private-selftest-context
 export MERV_STATE_ROOT="$TEST_ROOT/state"
 export MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
 export MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
 export MERV_UPDATE_MAINTENANCE_LOCK="$TEST_ROOT/maintenance.lock"
+export MERV_FULL_FENCE_PATH="$TEST_ROOT/full.lock"
 
 . "$BASE_DIR/settings/var_settings.sh" || fail load-settings
 . "$BASE_DIR/settings/lib_update_state.sh" || fail load-maintenance
@@ -28,6 +31,14 @@ merv_maintenance_direct_admit || fail standalone-admission
 merv_maintenance_direct_release || fail standalone-release
 [ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = "absent" ] || fail owner-leaked
 pass standalone-admission-and-release
+
+# Maintenance rejects an existing live Full fence before claiming M.
+merv_full_fence_claim "$MERV_FULL_FENCE_PATH" || fail full-fence-claim
+if merv_maintenance_direct_admit; then fail maintenance-entered-live-full-fence; fi
+[ "$(merv_owner_lock_state "$MERV_UPDATE_MAINTENANCE_LOCK")" = absent ] || fail maintenance-owner-created-under-full
+merv_full_fence_release "$MERV_FULL_FENCE_PATH" "$MERV_FULL_FENCE_PID" \
+  "$MERV_FULL_FENCE_START" "$MERV_FULL_FENCE_NONCE" || fail full-fence-release
+pass maintenance-refuses-full-fence
 
 # Direct maintenance admission must not claim a new owner over a live or
 # malformed Update transaction.  Rejection also has to release the owner it

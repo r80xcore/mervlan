@@ -15,10 +15,13 @@ edits on a node.
 5. Check file presence, mode/owner, and BusyBox `sh -n` in staging.
 6. Activate with an exact same-filesystem move and retain rollback information.
 7. After the node baseline is installed, staged activation reads the
-   synchronized `BOOT_ENABLED` value and runs the node-local `enable` or
-   `disable` action under node context. It verifies the resulting manager
-   boot marker, addon/event markers, and health cron before publishing success;
-   this does not recursively propagate back to other nodes.
+   synchronized `BOOT_ENABLED` preference and runs the node-local `enable` or
+   `disable` action under node context. The shared read-only hook verifier
+   checks the manager block, addon/event baseline, executable script state,
+   and matching health cron before the node report can publish success. An
+   enabled preference requires exactly one valid manager block; a disabled
+   preference requires none. This does not recursively propagate back to
+   other nodes.
 8. Publish a validated per-node terminal result and aggregate the run.
 9. Verify node hashes, versions, observation state, and idle workers afterward.
 

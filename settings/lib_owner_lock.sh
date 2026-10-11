@@ -5,12 +5,26 @@
 # record contract.  Subsystems retain their own policy; in particular, a
 # generic owner is never reclaimed merely because its heartbeat is old.
 
+: "${MERV_BASE:=/jffs/addons/mervlan}"
+if [ -z "${LIB_SELFTEST_CONTEXT_LOADED:-}" ] &&
+   [ -r "$MERV_BASE/settings/lib_selftest_context.sh" ]; then
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
+fi
+
+# Ordinary inherited variables are not authority. Only a harness-created,
+# private context can enable alternate ownership roots or fault injection.
+if ! type merv_selftest_context_valid >/dev/null 2>&1 ||
+   ! merv_selftest_context_valid; then
+  MERV_OWNER_LOCK_PROC_ROOT=/proc
+  MERV_OWNER_LOCK_PUBLICATION_GRACE_SEC=10
+  unset MERV_OWNER_LOCK_FAULT
+fi
+
 if [ -n "${LIB_OWNER_LOCK_LOADED:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 LIB_OWNER_LOCK_LOADED=1
 
-: "${MERV_BASE:=/jffs/addons/mervlan}"
 [ -n "${LIB_IDENTITY_LOADED:-}" ] ||
   [ ! -r "$MERV_BASE/settings/lib_identity.sh" ] ||
   . "$MERV_BASE/settings/lib_identity.sh"
@@ -37,6 +51,21 @@ merv_owner_v2_nonce_valid() {
     ''|*[!A-Za-z0-9._:-]*) return 1 ;;
   esac
   [ "${#1}" -le "$MERV_OWNER_V2_MAX_NONCE" ]
+}
+
+# Resolve process identity source. Alternate roots are available only beneath
+# the validated private fixture context; production always uses /proc.
+merv_owner_lock_proc_root() {
+  _molpr_requested=${1:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}
+  if [ "$_molpr_requested" = /proc ]; then
+    printf '%s\n' /proc
+    return 0
+  fi
+  type merv_selftest_context_path_allowed >/dev/null 2>&1 || return 1
+  merv_selftest_context_path_allowed "$_molpr_requested" || return 1
+  merv_owner_lock_path_chain_safe "$_molpr_requested" || return 1
+  [ -d "$_molpr_requested" ] && [ -r "$_molpr_requested" ] || return 1
+  printf '%s\n' "$_molpr_requested"
 }
 
 # Resolve either a lock directory or an owner file.  Public callers normally
@@ -178,7 +207,7 @@ merv_owner_v2_write_atomic() {
 # proc-root is used by isolated self-tests; normal callers use /proc.
 merv_owner_v2_matches() {
   _mom_file="${1:-}"; _mom_pid="${2:-}"; _mom_start="${3:-}"
-  _mom_nonce="${4:-}"; _mom_proc="${5:-/proc}"
+  _mom_nonce="${4:-}"; _mom_proc=$(merv_owner_lock_proc_root "${5:-/proc}") || return 1
   merv_owner_v2_positive_uint "$_mom_pid" || return 1
   merv_owner_v2_positive_uint "$_mom_start" || return 1
   merv_owner_v2_nonce_valid "$_mom_nonce" || return 1
@@ -201,6 +230,8 @@ MERV_OWNER_LOCK_TMP_SEQ="${MERV_OWNER_LOCK_TMP_SEQ:-0}"
 merv_owner_lock_fault() {
   _molf_stage="${1:-}"
   [ -n "$_molf_stage" ] || return 1
+  type merv_selftest_context_valid >/dev/null 2>&1 &&
+    merv_selftest_context_valid || return 1
   case ",${MERV_OWNER_LOCK_FAULT:-}," in *",$_molf_stage,"*) return 0 ;; esac
   return 1
 }
@@ -490,7 +521,12 @@ merv_owner_lock_state_emit() {
 # only complete owners proven dead or PID-reused.  A non-directory object at
 # the lock path is never equivalent to absence.
 merv_owner_lock_state() {
-  _mols_lock="${1:-}"; _mols_proc="${2:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}"
+  _mols_lock="${1:-}"
+  _mols_proc=$(merv_owner_lock_proc_root "${2:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}") || {
+    MERV_OWNER_LOCK_STATE=unknown
+    printf 'unknown'
+    return 1
+  }
   MERV_OWNER_LOCK_STATE=unknown
   [ -n "$_mols_lock" ] || { merv_owner_lock_state_emit unknown; return 1; }
   merv_owner_lock_path_chain_safe "$_mols_lock" || {
@@ -614,7 +650,7 @@ merv_owner_lock_state() {
 merv_owner_lock_acquire() {
   _mola_lock="${1:-}"; _mola_unused_stale="${2:-}"; _mola_max="${3:-30}"
   _mola_label="${4:-${1##*/}}"; _mola_attempt=0
-  _mola_proc="${MERV_OWNER_LOCK_PROC_ROOT:-/proc}"
+  _mola_proc=$(merv_owner_lock_proc_root "${MERV_OWNER_LOCK_PROC_ROOT:-/proc}") || return 1
   MERV_LOCK_NONCE=''; MERV_LOCK_START=''
   [ -n "$_mola_lock" ] || return 1
   merv_owner_lock_path_chain_safe "$_mola_lock" || return 1
@@ -676,7 +712,7 @@ merv_owner_lock_acquire() {
 # merv_owner_lock_owner_matches <lock-dir> <nonce> [proc-root]
 merv_owner_lock_owner_matches() {
   _molom_lock="${1:-}"; _molom_nonce="${2:-}"
-  _molom_proc="${3:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}"
+  _molom_proc=$(merv_owner_lock_proc_root "${3:-${MERV_OWNER_LOCK_PROC_ROOT:-/proc}}") || return 1
   _molom_start=$(merv_identity_current_start "$_molom_proc" 2>/dev/null) || return 1
   merv_owner_v2_matches "$_molom_lock" "$$" "$_molom_start" "$_molom_nonce" "$_molom_proc"
 }

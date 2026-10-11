@@ -9,6 +9,8 @@ TEST_ROOT="/tmp/mervlan_tmp/selftest.mac-node-pool.$$"
 umask 077
 mkdir -p "$TEST_ROOT/locks" "$TEST_ROOT/db" "$TEST_ROOT/tmp" "$TEST_ROOT/tmp/node_jobs" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 export MERV_BASE="$BASE_DIR"
 export VAR_SETTINGS_LOADED=1

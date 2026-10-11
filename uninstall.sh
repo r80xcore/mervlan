@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                   - File: uninstall.sh || version: 0.48                      #
+#                   - File: uninstall.sh || version: 0.49                      #
 # ============================================================================ #
 # - Purpose:    Disable the MerVLAN addon and clean up necessary files.        #
 #                                                                              #
@@ -31,16 +31,19 @@ if [ "$#" -gt 0 ]; then
 else
     ACTION="standard"
 fi
-. /usr/sbin/helper.sh
+
+if [ "$ACTION" != full ]; then . /usr/sbin/helper.sh; fi
 
 FULL_DELETE_BACKUPS=0
 FULL_UNINSTALL_ASSUME_YES=0
 FULL_DELETE_BACKUPS_REQUESTED=0
+FULL_KEEP_BACKUPS_REQUESTED=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes) FULL_UNINSTALL_ASSUME_YES=1 ;;
         --delete-backups) FULL_DELETE_BACKUPS_REQUESTED=1 ;;
+        --keep-backups) FULL_KEEP_BACKUPS_REQUESTED=1 ;;
         *)
             echo "[uninstall] ERROR: unknown option: $1" >&2
             exit 2
@@ -50,8 +53,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$ACTION" != "full" ] &&
-   { [ "$FULL_UNINSTALL_ASSUME_YES" = "1" ] || [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ]; }; then
+   { [ "$FULL_UNINSTALL_ASSUME_YES" = "1" ] || [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ] || [ "$FULL_KEEP_BACKUPS_REQUESTED" = "1" ]; }; then
     echo "[uninstall] ERROR: --yes and --delete-backups are valid only with 'full'" >&2
+    exit 2
+fi
+if [ "$FULL_DELETE_BACKUPS_REQUESTED:$FULL_KEEP_BACKUPS_REQUESTED" = "1:1" ]; then
+    echo "[uninstall] ERROR: --keep-backups and --delete-backups are mutually exclusive" >&2
     exit 2
 fi
 if [ "$FULL_DELETE_BACKUPS_REQUESTED" = "1" ] && [ "$FULL_UNINSTALL_ASSUME_YES" != "1" ]; then
@@ -80,11 +87,77 @@ confirm_full_uninstall() {
         echo "[uninstall] Full uninstall cancelled. No changes were made."
         return 1
     }
+    [ "$FULL_KEEP_BACKUPS_REQUESTED" != 1 ] || return 0
     printf 'Also permanently delete retained MerVLAN update/manual backups? [y/N]: '
     IFS= read -r _cfu_backups || _cfu_backups=""
     case "$_cfu_backups" in y|Y|yes|YES) FULL_DELETE_BACKUPS=1 ;; esac
     return 0
 }
+
+# Full branches before installed settings/support loading and ordinary
+# maintenance admission. It establishes its own M/F/Q only after NODE success.
+if [ "$ACTION" = full ]; then
+    confirm_full_uninstall || exit 0
+    _full_policy=KEEP
+    [ "$FULL_DELETE_BACKUPS" != 1 ] || _full_policy=DELETE
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset LIB_SELFTEST_CONTEXT_LOADED
+_fc_code=$MERV_BASE
+. "$_fc_code/settings/lib_selftest_context.sh" || exit 2
+_fc_base=$MERV_BASE
+if merv_selftest_context_valid; then
+    merv_selftest_context_path_allowed "${MERV_BASE:-}" || exit 2
+    _fc_base=$MERV_BASE
+else unset MERVLAN_SELFTEST_CONTEXT; fi
+exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C \
+    MERV_BASE="$_fc_base" MERVLAN_SELFTEST_CONTEXT="${MERVLAN_SELFTEST_CONTEXT:-}" \
+    /bin/sh -s -- "$_full_policy" <<'FULL_TRANSACTION'
+set -f
+umask 077
+fc_policy=$1
+fc_hash() {
+    fc_h=$(sha256sum "$1" 2>/dev/null | awk '{print $1}')
+    [ "${#fc_h}" = 64 ] || fc_h=$(openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}')
+    [ "${#fc_h}" = 64 ] || return 1
+    case "$fc_h" in *[!0-9a-f]*) return 1 ;; esac
+    printf '%s\n' "$fc_h"
+}
+# Freeze the installed helper generation before loading its functions.
+FULL_HELPER_HASH=$(fc_hash "$MERV_BASE/settings/lib_full_uninstall.sh") || exit 2
+. "$MERV_BASE/settings/lib_full_uninstall.sh" || exit 2
+[ "$(fc_hash "$MERV_BASE/settings/lib_full_uninstall.sh")" = "$FULL_HELPER_HASH" ] || exit 2
+# Bootstrap freezes the snapshot, topology, trust and complete runtime cohort.
+fc_boot=$(FULL_POLICY=$fc_policy; full_prepare) || { printf '%s\nFull uninstall incomplete: bootstrap refused.\n' "$fc_boot" >&2; exit 2; }
+printf '%s\n' "$fc_boot"
+fc_root=$(printf '%s\n' "$fc_boot" | awk '$1=="PHASE7_RUN" {n++;if(NF!=2)bad=1;r=$2} END {if(n!=1 || bad)exit 1;print r}') || exit 2
+case "$fc_root" in /tmp/.mervlan-full.*|/tmp/mervlan-*/.mervlan-full.*) ;; *) exit 2 ;; esac
+case "$fc_root" in *..*|*//*|*[!A-Za-z0-9_./-]*|*/) exit 2 ;; esac
+fc_ready=$(fc_hash "$fc_root/ready") || exit 2
+# MAIN artifacts were already verified before any NODE invocation; Phase 8
+# rechecks the same generation before each remote step and before handoff.
+full_nodes_entry "$fc_root" "$fc_ready"
+fc_rc=$?
+[ "$fc_rc" = 0 ] || { printf 'Full uninstall incomplete: NODE phase stopped; MAIN untouched.\n' >&2; exit "$fc_rc"; }
+# No remote operations or source generation changes beyond this point.
+fc_main_refuse() {
+    printf 'NODE phase complete; MAIN REFUSED: %s; MAIN untouched; Full uninstall incomplete.\n' "$1" >&2
+    exit 2
+}
+[ ! -L "$fc_root/ready" ] && [ "$(fc_hash "$fc_root/ready")" = "$fc_ready" ] || fc_main_refuse readiness-changed
+fc_manifest=$(awk '$2=="terminal.manifest" && NF==2 {n++;h=$1} END {if(n!=1)exit 1;print h}' "$fc_root/ready") || fc_main_refuse terminal-manifest-invalid
+[ ! -L "$fc_root/terminal.manifest" ] && [ "$(fc_hash "$fc_root/terminal.manifest")" = "$fc_manifest" ] || fc_main_refuse terminal-manifest-changed
+fc_terminal=$(awk '$2=="main/terminal.sh" && NF==2 {n++;h=$1} END {if(n!=1 || NR!=1)exit 1;print h}' "$fc_root/terminal.manifest") || fc_main_refuse wrapper-manifest-invalid
+[ ! -L "$fc_root/main/terminal.sh" ] && [ "$(ls -ldn "$fc_root/main/terminal.sh" | awk '{print $1 " " $3}')" = "-rw------- $(id -u)" ] &&
+[ "$(fc_hash "$fc_root/main/terminal.sh")" = "$fc_terminal" ] && /bin/sh -n "$fc_root/main/terminal.sh" || fc_main_refuse main-wrapper-changed
+fc_handoff=$(fc_hash "$fc_root/node-phase-complete") || fc_main_refuse phase8-handoff-missing
+# Same process transfers to private terminal code. Full takes no ordinary R/L
+# or delegated maintenance owner, so it cannot self-block canonical Q. A real
+# conflicting outer owner remains a blocker; it is never ignored by PID.
+exec /bin/sh "$fc_root/main/terminal.sh" --run "$fc_root" "$fc_ready" "$fc_handoff"
+FULL_TRANSACTION
+
+fi
 
 mervlan_metadata_remove_all() {
     _mmra_file="${_am_settings_path:-/jffs/addons/custom_settings.txt}"

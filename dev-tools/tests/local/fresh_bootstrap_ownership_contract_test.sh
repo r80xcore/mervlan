@@ -16,6 +16,8 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 TEST_ROOT="/tmp/mervlan_tmp/selftest.fresh-bootstrap.$$"
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 mkdir -p "$TEST_ROOT" || fail 'fixture root creation'
+. "$MERV_BASE_REPO/dev-tools/tests/local/selftest_context.sh" || fail 'self-test helper load'
+merv_test_context_enable "$MERV_BASE_REPO" "$TEST_ROOT" || fail 'private self-test context'
 
 extract_function() {
     _ef_file=$1

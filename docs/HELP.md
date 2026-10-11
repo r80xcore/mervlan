@@ -1011,15 +1011,20 @@ Use repair when the installed updater, its support libraries, node-sync helpers,
 | `sh functions/update_mervlan_repair.sh dev` | Repair update/runtime components from the supported `dev` branch. |
 | `sh functions/update_mervlan_repair.sh feature/example` | Repair from a named custom branch. Advanced CLI use only. |
 
-The Web UI's **Repair update components before update** option runs the same repair stage first and starts the selected normal update only after repair reports success. A stable-release repair always uses `main`, not the selected release tag.
+The Web UI's **Repair update components before update** option runs the repair stage first and starts the selected normal update only after the repair completes successfully. A stable-release repair always uses `main`, not the selected release tag.
 
-If the Web UI repair cannot start because the installed event handler or its lock/action support is damaged, bootstrap the standalone repair script over SSH first. For `main`:
+If the Web UI repair cannot start because the installed event handler, updater, or lock/action support is damaged, bootstrap the standalone repair script over SSH first.
+
+For `main`:
 
 ```sh
-umask 077; c="${MERV_REPAIR_BOOTSTRAP_CURL:-/usr/sbin/curl}"; t="${MERV_REPAIR_BOOTSTRAP_TMP_ROOT:-/tmp}"; case "$c" in /*) ;; *) exit 1 ;; esac; case "$c" in *..*|*//*|*[!A-Za-z0-9_./-]*) exit 1 ;; esac; case "$t" in /*) ;; *) exit 1 ;; esac; case "$t" in *..*|*//*|*[!A-Za-z0-9_./-]*) exit 1 ;; esac; [ -x "$c" ] && [ -d "$t" ] && [ ! -L "$t" ] || exit 1; d=""; n=0; while [ "$n" -lt 8 ]; do d="$t/mervlan-repair-bootstrap.$$.$n"; if [ ! -e "$d" ] && [ ! -L "$d" ] && mkdir "$d" 2>/dev/null; then break; fi; d=""; n=$((n+1)); done; [ -n "$d" ] || exit 1; "$c" -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/functions/update_mervlan_repair.sh" -o "$d/entry.sh" && [ -f "$d/entry.sh" ] && [ ! -L "$d/entry.sh" ] && sh -n "$d/entry.sh" && chmod 0755 "$d/entry.sh" && MERV_REPAIR_BOOTSTRAP_DIR="$d" /bin/sh "$d/entry.sh" main; rc=$?; if [ "$rc" -eq 0 ]; then rm -f "$d/entry.sh" 2>/dev/null && rmdir "$d" 2>/dev/null || exit 1; fi; exit "$rc"
+BRANCH="main"; AUTO_UPDATE="NO"; d="/tmp/mervlan-bootstrap.$$"; umask 077; mkdir "$d" || exit 1; /usr/sbin/curl -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh" -o "$d/entry.sh" && /bin/sh -n "$d/entry.sh" && MERV_REPAIR_BOOTSTRAP_DIR="$d" /bin/sh "$d/entry.sh" "$BRANCH"; rc=$?; rm -f "$d/entry.sh" 2>/dev/null; rmdir "$d" 2>/dev/null; [ "$rc" -eq 0 ] || exit "$rc"; if [ "$AUTO_UPDATE" = "YES" ]; then /bin/sh /jffs/addons/mervlan/functions/update_mervlan.sh "$BRANCH"; exit $?; fi; exit 0
 ```
 
-This command keeps the downloaded entrypoint and any failed-repair evidence in a private `/tmp` workspace. It does not create or replace anything under the active addon before repair admission. After archive validation, the bootstrap process hands off to the repair engine from that same validated snapshot. For `dev`, replace both the `refs/heads/main` URL segment and the final `main` argument with `dev`.
+> [!TIP]
+> For the `dev` branch, replace `BRANCH="main"` with `BRANCH="dev"`. A safe test branch name may also be used when testing development builds.
+>
+> By default, this command only repairs the update components. To automatically start the normal MerVLAN update after a successful repair, change `AUTO_UPDATE="NO"` to `AUTO_UPDATE="YES"`.
 
 #### Backup
 

@@ -44,9 +44,43 @@ fi
 # Source it here so lib_mervqt.sh validators are self-consistent even when
 # lib_mervqt.sh is loaded without a full manager environment (e.g. heal_event).
 : "${MERV_BASE:=/jffs/addons/mervlan}"
+[ -n "${LIB_SELFTEST_CONTEXT_LOADED:-}" ] ||
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
 [ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" 2>/dev/null || true
 [ -n "${LIB_OWNER_LOCK_LOADED:-}" ] || . "$MERV_BASE/settings/lib_owner_lock.sh" 2>/dev/null || true
 [ -n "${LIB_RADIO_LOADED:-}" ] || . "$MERV_BASE/settings/lib_radio.sh" 2>/dev/null || true
+
+# DHCP test roots, fake ebtables, and fault checkpoints are accepted only
+# inside the explicit private self-test context. TEST_RUN or a supplied path
+# alone never redirects production safety state.
+_merv_dhcp_test_context_ok=0
+if type merv_selftest_context_valid >/dev/null 2>&1 &&
+   merv_selftest_context_valid &&
+   [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = 1 ] &&
+   [ "${MERV_DHCP_HOLD_TEST_ROOT:-}" = "$MERV_SELFTEST_CONTEXT_ROOT" ]; then
+  _merv_dhcp_test_context_ok=1
+  for _merv_dhcp_test_path in \
+    "${MERV_DHCP_HOLD_STATE_ROOT:-}" \
+    "${MERV_DHCP_HOLD_LEGACY_MARKER:-}" \
+    "${MERV_DHCP_HOLD_PROC_ROOT:-/proc}" \
+    "${MERV_DHCP_HOLD_EBTABLES:-}"; do
+    [ -z "$_merv_dhcp_test_path" ] && continue
+    [ "$_merv_dhcp_test_path" = /proc ] && continue
+    merv_selftest_context_path_allowed "$_merv_dhcp_test_path" || {
+      _merv_dhcp_test_context_ok=0
+      break
+    }
+  done
+fi
+if [ "$_merv_dhcp_test_context_ok" != 1 ]; then
+  unset MERV_DHCP_HOLD_TEST_MODE MERV_DHCP_HOLD_TEST_ROOT
+  unset MERV_DHCP_HOLD_FAULT_POINT MERV_DHCP_HOLD_FAULT_ACTION
+  unset MERV_DHCP_STATE_LOCK_FAULT
+  unset MERV_DHCP_HOLD_EBTABLES
+  MERV_DHCP_HOLD_STATE_ROOT=/tmp/mervlan_tmp/locks/dhcp_hold
+  MERV_DHCP_HOLD_LEGACY_MARKER=/tmp/mervlan_tmp/locks/merv_dhcp_hold.active
+  MERV_DHCP_HOLD_PROC_ROOT=/proc
+fi
 
 # ============================================================================
 # Shared validators
@@ -217,6 +251,8 @@ merv_dhcp_hold_valid_id() {
 merv_dhcp_hold_test_root_valid() {
   local _mdtr_root="${MERV_DHCP_HOLD_TEST_ROOT:-}"
   [ "${MERV_DHCP_HOLD_TEST_MODE:-0}" = "1" ] || return 1
+  type merv_selftest_context_valid >/dev/null 2>&1 && merv_selftest_context_valid || return 1
+  [ "$_mdtr_root" = "$MERV_SELFTEST_CONTEXT_ROOT" ] || return 1
   case "$_mdtr_root" in
     /tmp/mervlan_tmp/selftest.*) ;;
     *) return 1 ;;
@@ -706,6 +742,7 @@ merv_dhcp_state_lock_release_or_report() {
 merv_dhcp_hold_fault_checkpoint() {
   local _mdfc_name="$1"
   merv_dhcp_hold_valid_id "$_mdfc_name" || return 1
+  merv_dhcp_hold_test_root_valid || return 0
   [ "${MERV_DHCP_HOLD_FAULT_POINT:-}" = "$_mdfc_name" ] || return 0
   _merv_dhcp_log warn "fault injection checkpoint reached: $_mdfc_name"
   case "${MERV_DHCP_HOLD_FAULT_ACTION:-return}" in
@@ -1914,13 +1951,19 @@ merv_dhcp_handoff_coalesce() {
     _mdhc_state=$(cat "$_mdhc_dir/handoff_state" 2>/dev/null || printf '')
     case "$_mdhc_state" in requested|acknowledged) _mdhc_found=0; break ;; esac
   done
-  _mdhc_tmp="$MERV_DHCP_HOLD_STATE_ROOT/.${_mdhc_parent}.pending.tmp.$$"
-  {
-    printf 'reason=%s\n' "$_mdhc_reason"
-    printf 'requested_epoch=%s\n' "$(date +%s 2>/dev/null || printf '0')"
-    [ "$_mdhc_found" -ne 0 ] || printf 'attached_handoff=%s\n' "${_mdhc_dir##*/}"
-  } > "$_mdhc_tmp" 2>/dev/null &&
-    mv "$_mdhc_tmp" "$MERV_DHCP_HOLD_STATE_ROOT/${_mdhc_parent}.pending" 2>/dev/null || :
+  # Publish a durable coalescing note only when this event is attached to an
+  # active handoff. Without that identity there is no consumer or terminal
+  # marker that could distinguish a historical note from work still needed.
+  # The live owner lock already exposes the unattached duplicate to Q.
+  if [ "$_mdhc_found" -eq 0 ]; then
+    _mdhc_tmp="$MERV_DHCP_HOLD_STATE_ROOT/.${_mdhc_parent}.pending.tmp.$$"
+    {
+      printf 'reason=%s\n' "$_mdhc_reason"
+      printf 'requested_epoch=%s\n' "$(date +%s 2>/dev/null || printf '0')"
+      printf 'attached_handoff=%s\n' "${_mdhc_dir##*/}"
+    } > "$_mdhc_tmp" 2>/dev/null &&
+      mv "$_mdhc_tmp" "$MERV_DHCP_HOLD_STATE_ROOT/${_mdhc_parent}.pending" 2>/dev/null || :
+  fi
   merv_dhcp_state_lock_release "$_mdhc_nonce" || return 2
   return "$_mdhc_found"
 }

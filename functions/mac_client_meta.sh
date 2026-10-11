@@ -49,6 +49,7 @@ fi
 [ -n "${LIB_MAC_SHIELD_SNAPSHOT_LOADED:-}" ] || . "$MERV_BASE/settings/mac_shield_snapshot.sh"
 [ -n "${LIB_SSH_LOADED:-}" ]                 || . "$MERV_BASE/settings/lib_ssh.sh" 2>/dev/null || true
 [ -n "${LIB_ACTION_LOCK_LOADED:-}" ]        || . "$MERV_BASE/settings/lib_action_lock.sh" || exit 1
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || exit 75
 [ -n "${LIB_UPDATE_STATE_LOADED:-}" ]       || . "$MERV_BASE/settings/lib_update_state.sh" 2>/dev/null || exit 75
 [ -n "${LIB_ACTION_PROGRESS_LOADED:-}" ]    || . "$MERV_BASE/settings/lib_action_progress.sh" 2>/dev/null || :
 if ! type merv_action_progress_init >/dev/null 2>&1; then
@@ -159,6 +160,12 @@ if type merv_lock_acquire >/dev/null 2>&1; then
   if merv_lock_acquire "$META_LOCK" "${MERV_CLIENT_META_LOCK_STALE_SEC:-60}" 0 "mac_client_meta"; then
     META_LOCK_ACQUIRED=1
     META_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    if ! merv_mutation_admit_r "$META_LOCK" "$$" "${MERV_LOCK_START:-}" "$META_LOCK_NONCE"; then
+      error -c cli,vlan "Client Metadata refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})"
+      merv_lock_release "$META_LOCK" "$META_LOCK_NONCE" >/dev/null 2>&1 || :
+      META_LOCK_ACQUIRED=0
+      exit 75
+    fi
     meta_release_lock() {
       _meta_exit_rc=$?
       if ! meta_abort_node_pool; then

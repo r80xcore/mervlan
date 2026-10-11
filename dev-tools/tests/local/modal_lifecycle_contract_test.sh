@@ -50,7 +50,7 @@ printf '%s\n' "$trust_revoke" | grep -Fq "MVM_triggerVerified('sshtrustrevoke_vl
 
 settings_open=$(extract_js_function showServiceSettingsModal "$UI_FILE") || fail 'Settings modal function extraction failed'
 settings_loader=$(extract_js_function loadSettings "$UI_FILE") || fail 'settings loader function extraction failed'
-printf '%s\n' "$settings_open" | grep -Fq "modal.style.display = 'block';" || fail 'Settings modal is not opened synchronously'
+printf '%s\n' "$settings_open" | grep -Fq "modal.style.display = 'flex';" || fail 'Settings modal is not opened synchronously as a scrollable flex layout'
 printf '%s\n' "$settings_open" | grep -Fq "setServiceSettingsLoadState('loading', 'Loading settings...')" || fail 'Settings loading state missing'
 printf '%s\n' "$settings_open" | grep -Fq "if (_svcSettingsLoadState === 'loading' && _svcSettingsLoadPromise) return _svcSettingsLoadPromise;" || fail 'Settings modal load is not single-flight'
 printf '%s\n' "$settings_open" | grep -Fq 'if (loadToken !== _svcSettingsLoadSequence || modal.style.display ===' || fail 'Settings stale-result guard missing'

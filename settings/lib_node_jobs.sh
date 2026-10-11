@@ -6,6 +6,8 @@
 [ -n "${VAR_SETTINGS_LOADED:-}" ] || . "$MERV_BASE/settings/var_settings.sh"
 [ -n "${LIB_IDENTITY_LOADED:-}" ] || . "$MERV_BASE/settings/lib_identity.sh" || return 1
 [ -n "${LIB_MERVQT_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mervqt.sh" || return 1
+[ -n "${LIB_SELFTEST_CONTEXT_LOADED:-}" ] ||
+  . "$MERV_BASE/settings/lib_selftest_context.sh" 2>/dev/null || :
 
 mnj_safe_token() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; return 0; }
 mnj_positive() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -gt 0 ] 2>/dev/null; }
@@ -52,9 +54,13 @@ mnj_effective_parallelism() {
 }
 
 mnj_root_valid() {
-  case "${1:-}" in "$TMPDIR/node_jobs"|"$TMPDIR/node_jobs"/*|/tmp/mervlan_tmp/selftest.*/*) ;; *) return 1;; esac
-  case "$1" in *..*|*[!A-Za-z0-9_./-]*) return 1;; esac
-  return 0
+  _mnj_root=${1:-}
+  case "$_mnj_root" in ''|*..*|*[!A-Za-z0-9_./-]*) return 1;; esac
+  case "$_mnj_root" in
+    /tmp/mervlan_tmp/node_jobs|/tmp/mervlan_tmp/node_jobs/*) return 0 ;;
+  esac
+  type merv_selftest_context_path_allowed >/dev/null 2>&1 || return 1
+  merv_selftest_context_path_allowed "$_mnj_root"
 }
 
 mnj_job_dir() {

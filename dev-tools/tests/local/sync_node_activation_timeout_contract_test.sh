@@ -20,14 +20,9 @@ fail() {
 
 mkdir -p "$TEST_ROOT"
 
-# The production function builds the remote transaction inline.  Stub only the
-# generated body and transport so this contract exercises the real timeout
-# scoping and failure classification without a device or a remote mutation.
-sync_node_boot_reconcile_body() {
-    printf ':'
-}
-
-merv_ssh_exec() {
+# Stub the guarded transport boundary so the contract exercises the real
+# timeout scoping and failure classification without a device-side mutation.
+merv_ssh_node_mutate_exec() {
     printf 'timeout=%s\n' "${MERV_SSH_TIMEOUT:-unset}" >> "$TRACE"
     printf 'STAGED_NODE_OK\n'
     return 0
@@ -37,7 +32,8 @@ eval "$(sed -n '/^activate_staged_node()/,/^activate_staged_node_settings_only()
 
 MERV_BASE=/jffs/addons/mervlan
 MERV_SSH_TIMEOUT=10
-export MERV_BASE MERV_SSH_TIMEOUT
+SYNC_RUN_ID=test-run-1
+export MERV_BASE MERV_SSH_TIMEOUT SYNC_RUN_ID
 
 activate_staged_node 1 192.0.2.1 \
     /jffs/addons/mervlan_backups/.mervlan.new.test.1 \
@@ -49,7 +45,7 @@ activate_staged_node 1 192.0.2.1 \
 
 # A transport/session failure must remain a failure and must identify the
 # remote activation transaction instead of falling through to an unknown reason.
-merv_ssh_exec() {
+merv_ssh_node_mutate_exec() {
     printf 'timeout=%s\n' "${MERV_SSH_TIMEOUT:-unset}" >> "$TRACE"
     return 5
 }

@@ -10,6 +10,8 @@ trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
+. "$ROOT/dev-tools/tests/local/selftest_context.sh" || fail 'self-test helper load'
+merv_test_context_enable "$ROOT" "$WORK" || fail 'private self-test context'
 
 COMMAND=$(sed -n '/^umask 077; c=/p' "$ROOT/docs/HELP.md")
 [ -n "$COMMAND" ] || fail 'documented bootstrap command missing'

@@ -33,6 +33,8 @@ export MERV_DHCP_HOLD_TEST_MODE=1
 export MERV_DHCP_HOLD_TEST_ROOT="$TEST_ROOT"
 export MERV_DHCP_HOLD_STATE_ROOT="$TEST_ROOT/dhcp_hold"
 export MERV_DHCP_HOLD_PROC_ROOT=/proc
+. "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
+merv_test_context_enable "$BASE_DIR" "$TEST_ROOT" || exit 1
 
 . "$BASE_DIR/settings/lib_identity.sh" || exit 1
 . "$BASE_DIR/settings/lib_owner_lock.sh" || exit 1

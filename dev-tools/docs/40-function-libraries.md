@@ -9,6 +9,7 @@ avoid sourcing the same library repeatedly.
 | `var_settings.sh` | Establishes runtime paths, settings locations, hardware context, and node identity. |
 | `log_settings.sh` | Configures log channels, files, retention, and `info`/`warn`/`error`. |
 | `lib_json.sh` | Reads validated values from JSON/settings files without sourcing data as shell; provides the shared scalar settings migration used by Update and normal Restore. |
+| `lib_boot_integrity.sh` | Read-only, data-only validation of the manager, addon, and service-event hook blocks, strict `General.BOOT_ENABLED`, and local cron agreement. |
 | `lib_identity.sh` | Canonical PID/start identity matching and current-shell nonce generation. |
 | `lib_owner_lock.sh` | Strict v2 generic owner grammar, atomic publication, bounded acquire/reclaim, quarantine, and authenticated release. |
 | `lib_action_lock.sh` | Thin action policy wrapper for self-owned and authenticated parent-owned action locks. |
@@ -43,6 +44,27 @@ avoid sourcing the same library repeatedly.
   remains specialized and fail-closed, but uses the canonical identity nonce.
 - Treat settings, marker, progress, and result files as untrusted text. Parse
   and validate them; never source them as shell code.
+- Treat `BOOT_ENABLED` as the configured preference. Use
+  `lib_boot_integrity.sh` when a lifecycle operation must prove that the
+  external manager hook and cron state match that preference; status output
+  must report the observed hook separately.
+- The hook scanner accepts current `services-start`, `services-start-addon`,
+  and `service-event` marker IDs at v1/v2. The historical compatibility
+  allowlist is tied to those same marker IDs and to the exact payloads shipped
+  by the v0.53.15 `templates/mervlan_templates.sh`: the manager's unguarded
+  shield call, 10-second delay, manager call, second delay, and cron call; and
+  the addon's five-second delay followed by the install wrapper. Those exact
+  manager blocks are marked `invalid:legacy_replaceable` and may be replaced
+  or removed. The addon and event payloads remain recognized only in their
+  exact forms. The undocumented `node-*` marker IDs and older direct-manager /
+  direct-install bodies are not accepted. Ordinary status and target
+  verification keep a recognized old manager invalid; the shared verifier
+  has a narrow main-only rollback/legacy-restore option that accepts it only
+  when the saved preference is enabled.
+  `merv_boot_verify_local` keeps the script-root fixture path as its eighth
+  argument and takes the opt-in legacy allowance as its ninth argument; normal
+  callers omit that final argument.
+  A healthy manager must retain shield, manager, and cron ordering.
 - Preserve the library's loaded-marker convention and avoid hidden duplicate
   implementations in individual entry-point scripts.
 
@@ -62,6 +84,16 @@ The pool owns worker scheduling and isolated terminal results only. Complete
 node trust preflight occurs serially before node work, and each MAIN parent
 validates and aggregates worker artifacts serially. MAC Shield applies the
 authoritative database on MAIN before propagating it through the node pool.
+
+SSH diagnostics produced by a node worker live directly under its private
+`node_N/ssh_forensics/` directory. The producer creates that directory with
+mode 700 and atomically publishes `attempt.<pid>.<sequence>.log` records with
+mode 600; each of its 28 diagnostic values is limited to 512 ASCII bytes, so a
+complete 30-line record is at most 14,811 bytes. Q accepts only those direct
+regular records. Dot temporary/list artifacts remain partial publication,
+and malformed names, nested directories, or other entries block maintenance.
+The writer's eight-record pruning is best-effort, so Q does not infer a hard
+record-count limit from it.
 
 ## Choosing the right layer
 

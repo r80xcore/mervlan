@@ -45,6 +45,10 @@ fi
   error -c cli,vlan "Unable to load the Update lifecycle state library; refusing node execution"
   exit 75
 }
+[ -n "${LIB_MUTATION_ADMISSION_LOADED:-}" ] || . "$MERV_BASE/settings/lib_mutation_admission.sh" 2>/dev/null || {
+  error -c cli,vlan "Unable to load the mutation-admission library; refusing node execution"
+  exit 75
+}
 # Optional web progress publication. The parent orchestration script owns the
 # progress token; worker processes must never publish to the shared status file.
 merv_action_progress_init() { :; }
@@ -243,6 +247,14 @@ if [ "$_exec_action_lock_rc" -eq 0 ]; then
       "$_exec_action_lock_start" "$_exec_action_lock_mode" >/dev/null 2>&1 || :
     exit 75
   fi
+  if ! merv_mutation_admit_action "$_exec_action_lock_path"; then
+    merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_exec_lock_ack_action" \
+      "${_exec_lock_ack_action}" "Preparing apply..."
+    merv_action_progress_fail "Node execution was refused by mutation admission (${MERV_MUTATION_ADMISSION_REASON:-unknown})."
+    merv_action_lock_leave "$_exec_action_lock_path" "$_exec_action_lock_nonce" \
+      "$_exec_action_lock_start" "$_exec_action_lock_mode" >/dev/null 2>&1 || :
+    exit 75
+  fi
 else
   merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "$_exec_lock_ack_action" \
     "${_exec_lock_ack_action}" "Preparing apply..."
@@ -420,6 +432,94 @@ info -c cli,vlan "Found nodes: $(echo "$NODE_IPS" | awk '{print $2}' | tr '\n' '
 echo ""
 EXEC_NODE_COUNT=$(printf '%s\n' "$NODE_IPS" | awk 'NF { count++ } END { print count + 0 }')
 
+# Execute never bootstraps an outdated NODE. Verify the exact guarded mutation,
+# runner, job, and Q support cohort before the first target mutation. Sync Nodes
+# is the only rollout path for this runtime code.
+EXEC_NODE_GUARD_FILES="
+settings/var_settings.sh
+settings/log_settings.sh
+settings/lib_json.sh
+settings/lib_selftest_context.sh
+settings/lib_identity.sh
+settings/lib_owner_lock.sh
+settings/lib_action_lock.sh
+settings/lib_update_state.sh
+settings/lib_full_fence.sh
+settings/lib_continuation.sh
+settings/lib_mutation_admission.sh
+settings/lib_maintenance_quiesce.sh
+settings/lib_mervqt.sh
+settings/lib_radio.sh
+settings/lib_settings_reconcile.sh
+settings/lib_node_jobs.sh
+settings/lib_node_reconcile.sh
+settings/lib_ssid_filter.sh
+settings/lib_stp.sh
+settings/mac_shield_snapshot.sh
+settings/lib_br0_guard.sh
+functions/mervlan_node_mutate.sh
+functions/mervlan_node_runner.sh
+functions/mervlan_manager.sh
+functions/post_apply_worker.sh
+functions/settings_reconcile.sh
+functions/collect_local_clients.sh
+functions/heal_event.sh
+functions/mervlan_trunk.sh
+functions/mervlan_wan.sh
+"
+
+execute_node_guard_cohort_check() {
+    _engc_node=$1
+    _engc_ip=$2
+    _engc_remote_base=/jffs/addons/mervlan
+    # The alternate destination is available only to the existing private
+    # self-test seam. Production always probes the canonical installed tree,
+    # regardless of inherited environment.
+    if [ -n "${MERV_NODE_GUARD_TEST_ROOT:-}" ] && \
+       type merv_selftest_context_path_allowed >/dev/null 2>&1 && \
+       merv_selftest_context_path_allowed "$MERV_NODE_GUARD_TEST_ROOT" && \
+       [ -d "$MERV_NODE_GUARD_TEST_ROOT" ] && [ ! -L "$MERV_NODE_GUARD_TEST_ROOT" ]; then
+        _engc_remote_base=$MERV_NODE_GUARD_TEST_ROOT
+    fi
+    _engc_manifest=
+    for _engc_rel in $EXEC_NODE_GUARD_FILES; do
+        _engc_file="$MERV_BASE/$_engc_rel"
+        [ -f "$_engc_file" ] && [ ! -L "$_engc_file" ] || return 1
+        _engc_digest=$(merv_ssh_digest "$_engc_file") || return 1
+        case "$_engc_digest" in *[!0-9a-f]*|'') return 1 ;; esac
+        [ "${#_engc_digest}" -eq 64 ] || return 1
+        _engc_manifest="$_engc_manifest$_engc_rel|$_engc_digest
+"
+    done
+    _engc_manifest=${_engc_manifest%?}
+    _engc_script=$(cat <<EOF
+set -f
+_base=$(merv_ssh_shell_quote_word "$_engc_remote_base")
+while IFS='|' read -r _rel _expected _extra || [ -n "\$_rel\$_expected\$_extra" ]; do
+  [ -n "\$_rel" ] && [ -n "\$_expected" ] && [ -z "\$_extra" ] || exit 1
+  case "\$_rel" in settings/*|functions/*) ;; *) exit 1 ;; esac
+  case "\$_expected" in *[!0-9a-f]*|'') exit 1 ;; esac
+  [ "\${#_expected}" -eq 64 ] || exit 1
+  _file="\$_base/\$_rel"
+  [ -f "\$_file" ] && [ ! -L "\$_file" ] || exit 1
+  if type sha256sum >/dev/null 2>&1; then
+    _actual=\$(sha256sum "\$_file" 2>/dev/null | awk '{print \$1}')
+  elif type openssl >/dev/null 2>&1; then
+    _actual=\$(openssl dgst -sha256 "\$_file" 2>/dev/null | awk '{print \$NF}')
+  else
+    exit 1
+  fi
+  [ "\$_actual" = "\$_expected" ] || exit 1
+done <<'MERV_EXPECTED'
+$_engc_manifest
+MERV_EXPECTED
+printf 'EXEC_NODE_GUARD_COHORT_OK\\n'
+EOF
+)
+    _engc_result=$(merv_ssh_exec "$_engc_node" "$_engc_ip" "$_engc_script" 2>/dev/null) || return 1
+    printf '%s\n' "$_engc_result" | tail -n 1 | tr -d '\r' | grep -qx 'EXEC_NODE_GUARD_COHORT_OK'
+}
+
 # Parent transaction boundary: validate every configured node's canonical
 # identity, endpoint, pinned host key, and client capability before any JFFS
 # check, settings copy, or manager launch can mutate a node or the main router.
@@ -462,6 +562,16 @@ rm -f "$_exec_trust_file" 2>/dev/null || {
 }
 merv_action_progress_update preflight 1 1 15 \
     "Validated settings, SSH, and $EXEC_NODE_COUNT configured node(s)..."
+
+while IFS=' ' read -r _exec_guard_id _exec_guard_ip _exec_guard_extra || [ -n "$_exec_guard_id" ]; do
+    [ -n "$_exec_guard_id" ] || continue
+    if ! execute_node_guard_cohort_check "$_exec_guard_id" "$_exec_guard_ip"; then
+        error -c cli,vlan "Execute: NODE${_exec_guard_id} requires Sync Nodes before Execute; the verified local-admission runtime cohort is missing or outdated"
+        exit 75
+    fi
+done <<EOF
+$NODE_IPS
+EOF
 
 # ============================================================================ #
 # check_remote_jffs_status                                                     #
@@ -576,7 +686,7 @@ ensure_remote_settings_dir() {
     remote_dir="$SETTINGSDIR"
 
     # Attempt to create settings directory on remote node
-    if merv_ssh_exec "$node_id" "$node_ip" "mkdir -p '$remote_dir'" >/dev/null; then
+    if merv_ssh_node_mutate_exec "$node_id" "$node_ip" execute-ensure-settings "$node_id" >/dev/null; then
         info -c cli,vlan "✓ Ensured directory $remote_dir on $node_ip"
         return 0
     else
@@ -649,7 +759,8 @@ copy_settings_conf_to_node() {
         return 1
     fi
 
-    if merv_ssh_stream_file "$node_id" "$node_ip" "$_cstn_tmp" "$remote_path"; then
+    if merv_ssh_node_mutate_stream "$node_id" "$node_ip" execute-put-settings \
+        "$node_id" < "$_cstn_tmp"; then
         execute_record_settings_expected "$_cstn_tmp" || { rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null; return 1; }
         info -c cli,vlan "✓ Copied $file_rel to $node_ip:$remote_path"
         rm -f "$_cstn_tmp" "$_cstn_hw_file" 2>/dev/null
@@ -794,42 +905,7 @@ sync_settings_conf_for_node() {
 set_node_flags_remote() {
     node_id="$1"
     node_ip="$2"
-    node_flags=""
-    node_flag_value=""
-    node_id_value=""
-    remote_cmd="
-        SETTINGS_FILE='$MERV_BASE/settings/settings.json';
-        if [ ! -f \"\$SETTINGS_FILE\" ]; then
-            echo 'settings-missing' >&2
-            exit 1
-        fi
-        if [ ! -f '$MERV_BASE/settings/lib_json.sh' ]; then
-            echo 'lib-json-missing' >&2
-            exit 1
-        fi
-        . '$MERV_BASE/settings/lib_json.sh' 2>/dev/null || {
-            echo 'lib-json-load-failed' >&2
-            exit 1
-        }
-        
-        # Read current values
-        current_is_node=\$(json_get_flag IS_NODE '' \"\$SETTINGS_FILE\" 2>/dev/null)
-        current_node_id=\$(json_get_flag NODE_ID '' \"\$SETTINGS_FILE\" 2>/dev/null)
-        
-        # Only write if values are missing or incorrect
-        if [ \"\$current_is_node\" != \"1\" ]; then
-            json_set_flag IS_NODE 1 \"\$SETTINGS_FILE\" || exit 1
-        fi
-        if [ \"\$current_node_id\" != \"$node_id\" ]; then
-            json_set_flag NODE_ID \"$node_id\" \"\$SETTINGS_FILE\" || exit 1
-        fi
-        
-        # Return final values for verification
-        json_get_flag IS_NODE 0 \"\$SETTINGS_FILE\"
-        json_get_flag NODE_ID \"none\" \"\$SETTINGS_FILE\"
-    "
-
-    node_flags=$(merv_ssh_exec "$node_id" "$node_ip" "$remote_cmd")
+    node_flags=$(merv_ssh_node_mutate_exec "$node_id" "$node_ip" execute-node-flags "$node_id")
     node_flag_value=$(echo "$node_flags" | tail -n 2 | head -n 1 | tr -d '\r\n')
     node_id_value=$(echo "$node_flags" | tail -n 1 | tr -d '\r\n')
 
@@ -881,24 +957,62 @@ verify_node_completion() {
 execute_status_valid() {
     _esv_text="$1" _esv_node="$2"
     EXEC_STATUS_STATE=""; _esv_keys=" "
-    _esv_run=""; _esv_pid=""; _esv_start=""; _esv_started=""; _esv_done=""; _esv_exit=""; _esv_reason=""
+    _esv_format=""; _esv_run=""; _esv_pid=""; _esv_start=""
+    _esv_parent=""; _esv_parent_start=""; _esv_manager=""; _esv_manager_start=""
+    _esv_started=""; _esv_done=""; _esv_exit=""; _esv_reason=""
+    _esv_count=0
     while IFS= read -r _esv_line || [ -n "$_esv_line" ]; do
         case "$_esv_line" in *=*) _esv_key=${_esv_line%%=*}; _esv_val=${_esv_line#*=} ;; *) return 1;; esac
         case "$_esv_keys" in *" $_esv_key "*) return 1;; esac
         _esv_keys="$_esv_keys$_esv_key "
+        _esv_count=$((_esv_count + 1))
         case "$_esv_key" in
-            format_version) [ "$_esv_val" = 1 ] || return 1;; run_id) _esv_run=$_esv_val;; node_id) [ "$_esv_val" = "$_esv_node" ] || return 1;;
-            state) EXEC_STATUS_STATE=$_esv_val;; pid) _esv_pid=$_esv_val;; proc_start_time) _esv_start=$_esv_val;; started_epoch) _esv_started=$_esv_val;;
+            format_version) _esv_format=$_esv_val;; run_id) _esv_run=$_esv_val;; node_id) [ "$_esv_val" = "$_esv_node" ] || return 1;;
+            state) EXEC_STATUS_STATE=$_esv_val;; pid) _esv_pid=$_esv_val;; proc_start_time) _esv_start=$_esv_val;;
+            parent_pid) _esv_parent=$_esv_val;; parent_proc_start_time) _esv_parent_start=$_esv_val;;
+            manager_pid) _esv_manager=$_esv_val;; manager_proc_start_time) _esv_manager_start=$_esv_val;;
+            started_epoch) _esv_started=$_esv_val;;
             completed_epoch) _esv_done=$_esv_val;; exit_code) _esv_exit=$_esv_val;; reason) _esv_reason=$_esv_val;; *) return 1;; esac
     done <<EOF
 $_esv_text
 EOF
-    for _esv_required in format_version run_id node_id state pid proc_start_time started_epoch completed_epoch exit_code reason; do
+    case "$_esv_format:$_esv_count" in
+      1:10)
+        _esv_required_keys=' format_version run_id node_id state pid proc_start_time started_epoch completed_epoch exit_code reason '
+        ;;
+      2:14)
+        _esv_required_keys=' format_version run_id node_id state pid proc_start_time parent_pid parent_proc_start_time manager_pid manager_proc_start_time started_epoch completed_epoch exit_code reason '
+        ;;
+      *) return 1 ;;
+    esac
+    for _esv_required in $_esv_required_keys; do
         case "$_esv_keys" in *" $_esv_required "*) ;; *) return 1;; esac
     done
     [ "$_esv_run" = "$APPLY_RUN_ID" ] || return 1
-    case "$_esv_pid:$_esv_start:$_esv_started:$_esv_done" in *[!0-9:]*|:*|*::*) return 1;; esac
+    for _esv_positive in "$_esv_pid" "$_esv_start" "$_esv_started"; do
+        case "$_esv_positive" in ''|0|0[0-9]*|*[!0-9]*) return 1;; esac
+        [ "${#_esv_positive}" -le 10 ] && [ "$_esv_positive" -le 2147483647 ] 2>/dev/null || return 1
+    done
+    case "$_esv_done" in 0) ;; ''|0[0-9]*|*[!0-9]*) return 1;; *)
+        [ "${#_esv_done}" -le 10 ] && [ "$_esv_done" -le 2147483647 ] 2>/dev/null || return 1 ;;
+    esac
     case "$_esv_reason" in ''|*[!A-Za-z0-9._-]*) return 1;; esac
+    if [ "$_esv_format" = 2 ]; then
+        for _esv_positive in "$_esv_parent" "$_esv_parent_start"; do
+            case "$_esv_positive" in ''|0|0[0-9]*|*[!0-9]*) return 1;; esac
+            [ "${#_esv_positive}" -le 10 ] && [ "$_esv_positive" -le 2147483647 ] 2>/dev/null || return 1
+        done
+        case "$_esv_manager:$_esv_manager_start" in
+          none:none) ;;
+          *:*)
+            case "$_esv_manager" in ''|0|0[0-9]*|*[!0-9]*) return 1;; esac
+            case "$_esv_manager_start" in ''|0|0[0-9]*|*[!0-9]*) return 1;; esac
+            [ "${#_esv_manager}" -le 10 ] && [ "$_esv_manager" -le 2147483647 ] 2>/dev/null || return 1
+            [ "${#_esv_manager_start}" -le 10 ] && [ "$_esv_manager_start" -le 2147483647 ] 2>/dev/null || return 1
+            ;;
+          *) return 1 ;;
+        esac
+    fi
     case "$EXEC_STATUS_STATE" in
       started) [ "$_esv_done" = 0 ] && [ -z "$_esv_exit" ];;
       complete) [ "$_esv_exit" = 0 ] && [ "$_esv_done" -ge "$_esv_started" ] 2>/dev/null;;
