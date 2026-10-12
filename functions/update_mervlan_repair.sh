@@ -83,6 +83,28 @@ REPAIR_HANDOFF_STATE="${MERV_REPAIR_HANDOFF_STATE:-}"
 
 log() { printf '%s\n' "[mervlan-repair] $*" >&2; }
 
+# Interactive CLI diagnostics are separate from the progress token protocol.
+# They are deliberately best-effort and never affect repair correctness.
+repair_cli_stage() {
+  [ -t 2 ] || return 0
+  printf '%s\n' "[mervlan-repair] $1" >&2
+}
+
+repair_cli_publication_progress() {
+  [ -t 2 ] || return 0
+  [ -f "$LEDGER_FILE" ] && [ -f "$PATHS_FILE" ] || return 0
+  _rcp_published=$(awk -F '|' '$1 == "published" { n++ } END { printf "%d", n + 0 }' \
+    "$LEDGER_FILE" 2>/dev/null) || return 0
+  _rcp_total=$(awk 'END { printf "%d", NR + 0 }' "$PATHS_FILE" 2>/dev/null) || return 0
+  case "$_rcp_published:$_rcp_total" in *[!0-9:]*|:*) return 0 ;; esac
+  [ "$_rcp_total" -gt 0 ] || return 0
+  [ "$_rcp_published" -eq "$_rcp_total" ] ||
+    [ $((_rcp_published % 5)) -eq 0 ] || return 0
+  printf '[mervlan-repair] Repair publication: %s/%s files published\n' \
+    "$_rcp_published" "$_rcp_total" >&2
+  return 0
+}
+
 json_escape() {
   printf '%s' "${1:-}" | tr -d '\000-\010\013\014\016-\037' |
     sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -97,6 +119,7 @@ token_valid() {
 # the repair admission, ledger, rollback, or terminal result.
 progress() {
   _rp_state="$1" _rp_phase="$2" _rp_percent="$3" _rp_message="$4"
+  repair_cli_stage "$_rp_message"
   token_valid "$REPAIR_PROGRESS_TOKEN" || return 0
   _rp_root="${MERV_REPAIR_PROGRESS_ROOT:-/tmp/mervlan_tmp/progress}"
   case "$_rp_root" in ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 0 ;; esac
@@ -907,6 +930,7 @@ ledger_mark_published() {
   awk -F '|' -v target="$_lmp_path" 'BEGIN{OFS="|"} {if($1=="pending" && $3==target)$1="published"; print}' \
     "$LEDGER_FILE" >"$_lmp_tmp" 2>/dev/null || { rm -f "$_lmp_tmp" 2>/dev/null || :; return 1; }
   mv -f "$_lmp_tmp" "$LEDGER_FILE" 2>/dev/null || { rm -f "$_lmp_tmp" 2>/dev/null || :; return 1; }
+  repair_cli_publication_progress || :
   return 0
 }
 
