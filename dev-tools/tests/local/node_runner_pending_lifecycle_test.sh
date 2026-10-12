@@ -12,7 +12,27 @@ chmod 700 "$TEST_ROOT" "$TEST_ROOT/locks" "$TEST_ROOT/state" \
   "$TEST_ROOT/node_runs" "$TEST_ROOT/runtime" "$TEST_ROOT/runtime/node_jobs" || exit 1
 M_TEST_LOCK="$TEST_ROOT/locks/mervlan_maintenance.lock"
 F_TEST_LOCK="$TEST_ROOT/full.lock"
-trap 'test -n "${_release_marker:-}" && : > "$_release_marker" 2>/dev/null || :; test -n "${_pending_child:-}" && kill "$_pending_child" 2>/dev/null || :; test -n "${_pending_child:-}" && wait "$_pending_child" 2>/dev/null || :; test -n "${_live_manager:-}" && kill "$_live_manager" 2>/dev/null || :; test -n "${_live_manager:-}" && wait "$_live_manager" 2>/dev/null || :; test -n "${_lifecycle_runner:-}" && kill -TERM "$_lifecycle_runner" 2>/dev/null || :; test -n "${_lifecycle_runner:-}" && wait "$_lifecycle_runner" 2>/dev/null || :; test -n "${_fence_nonce:-}" && merv_full_fence_release "$F_TEST_LOCK" "$$" "$_fence_start" "$_fence_nonce" >/dev/null 2>&1 || :; test -n "${_maintenance_nonce:-}" && merv_owner_lock_release "$M_TEST_LOCK" "$_maintenance_nonce" >/dev/null 2>&1 || :; rm -rf "$TEST_ROOT"' 0 1 2 3 15
+test_cleanup() {
+  test -n "${_release_marker:-}" && : > "$_release_marker" 2>/dev/null || :
+  test -n "${_pending_child:-}" && kill "$_pending_child" 2>/dev/null || :
+  test -n "${_pending_child:-}" && wait "$_pending_child" 2>/dev/null || :
+  test -n "${_live_manager:-}" && kill "$_live_manager" 2>/dev/null || :
+  test -n "${_live_manager:-}" && wait "$_live_manager" 2>/dev/null || :
+  if [ "${_leave_lifecycle_runner:-0}" != 1 ]; then
+    test -n "${_lifecycle_runner:-}" && kill -TERM "$_lifecycle_runner" 2>/dev/null || :
+    test -n "${_lifecycle_runner:-}" && wait "$_lifecycle_runner" 2>/dev/null || :
+  fi
+  if [ "${_leave_test_owners:-0}" != 1 ]; then
+    test -n "${_fence_nonce:-}" && merv_full_fence_release "$F_TEST_LOCK" "$$" "$_fence_start" "$_fence_nonce" >/dev/null 2>&1 || :
+    test -n "${_maintenance_nonce:-}" && merv_owner_lock_release "$M_TEST_LOCK" "$_maintenance_nonce" >/dev/null 2>&1 || :
+  fi
+  if [ "${_preserve_test_root:-0}" = 1 ]; then
+    printf 'PRESERVED_TEST_ROOT=%s\n' "$TEST_ROOT" >&2
+  else
+    rm -rf "$TEST_ROOT"
+  fi
+}
+trap 'test_cleanup' 0 1 2 3 15
 
 . "$BASE_DIR/dev-tools/tests/local/selftest_context.sh" || exit 1
 . "$BASE_DIR/settings/lib_selftest_context.sh" || exit 1
@@ -79,6 +99,171 @@ fail() {
   if [ -f "$TEST_ROOT/start.out" ]; then cat "$TEST_ROOT/start.out" >&2; fi
   printf 'FAIL: %s\n' "$1" >&2
   exit 1
+}
+observation_cleanup_diagnostics() {
+  _ocd_run_dir="$MERV_NODE_STATUS_ROOT/910007-1"
+  _ocd_status="$_ocd_run_dir/node_1.status"
+  _ocd_pending="$_ocd_run_dir/node_1.pending"
+  printf 'OBSERVATION_RUN_DIR=%s\n' "$_ocd_run_dir" >&2
+  printf '%s\n' 'OBSERVATION_RUN_DIR_LS_BEGIN' >&2
+  ls -lan "$_ocd_run_dir" >&2 2>&1 || :
+  printf '%s\n' 'OBSERVATION_RUN_DIR_FIND_BEGIN' >&2
+  find "$_ocd_run_dir" -maxdepth 2 -print >&2 2>&1 || :
+  printf '%s\n' 'OBSERVATION_RUN_DIR_STAT_BEGIN' >&2
+  find "$_ocd_run_dir" -maxdepth 2 -exec stat -c '%n mode=%a size=%s type=%F mtime=%y' {} \; >&2 2>&1 || :
+  for _ocd_file in "$_ocd_run_dir"/.node_1.status.*; do
+    [ -f "$_ocd_file" ] || continue
+    printf 'OBSERVATION_STATUS_TEMP_BEGIN path=%s\n' "$_ocd_file" >&2
+    cat "$_ocd_file" >&2 2>&1 || :
+    _ocd_file_pid=${_ocd_file##*.status.}
+    _ocd_file_pid=${_ocd_file_pid%.*}
+    _ocd_temp_pid=$(sed -n 's/^pid=//p' "$_ocd_file" 2>/dev/null)
+    _ocd_temp_start=$(sed -n 's/^proc_start_time=//p' "$_ocd_file" 2>/dev/null)
+    _ocd_temp_manager=$(sed -n 's/^manager_pid=//p' "$_ocd_file" 2>/dev/null)
+    _ocd_temp_manager_start=$(sed -n 's/^manager_proc_start_time=//p' "$_ocd_file" 2>/dev/null)
+    _ocd_snapshot_pid=$(printf '%s\n' "${_observation_status_snapshot:-}" | sed -n 's/^pid=//p')
+    _ocd_snapshot_start=$(printf '%s\n' "${_observation_status_snapshot:-}" | sed -n 's/^proc_start_time=//p')
+    _ocd_temp_matches_snapshot=NO
+    if [ "$_ocd_file_pid" = "$_ocd_temp_pid" ] &&
+       [ "$_ocd_temp_pid" = "$_ocd_snapshot_pid" ] &&
+       [ "$_ocd_temp_start" = "$_ocd_snapshot_start" ]; then
+      _ocd_temp_matches_snapshot=YES
+    fi
+    printf 'STATUS_TEMP_RUNNER_MATCHES_FILENAME_AND_PRIOR_CANONICAL_IDENTITY=%s pid=%s start=%s state=%s\n' \
+      "$_ocd_temp_matches_snapshot" "$_ocd_temp_pid" "$_ocd_temp_start" \
+      "$(merv_continuation_process_state "$_ocd_temp_pid" "$_ocd_temp_start" 2>/dev/null || printf unverified)" >&2
+    case "$_ocd_temp_pid:$_ocd_temp_start" in *[!0-9:]*|:*|*::*) ;; *) ps -p "$_ocd_temp_pid" -o pid=,ppid=,stat=,args= >&2 2>&1 || : ;; esac
+    printf 'STATUS_TEMP_MANAGER_IDENTITY pid=%s start=%s state=%s\n' \
+      "$_ocd_temp_manager" "$_ocd_temp_manager_start" \
+      "$(merv_continuation_process_state "$_ocd_temp_manager" "$_ocd_temp_manager_start" 2>/dev/null || printf unverified)" >&2
+    case "$_ocd_temp_manager:$_ocd_temp_manager_start" in *[!0-9:]*|:*|*::*) ;; *) ps -p "$_ocd_temp_manager" -o pid=,ppid=,stat=,args= >&2 2>&1 || : ;; esac
+  done
+  if [ -f "$_ocd_status" ]; then
+    printf '%s\n' 'OBSERVATION_NODE_STATUS_BEGIN' >&2
+    cat "$_ocd_status" >&2 2>&1 || :
+    _ocd_runner=$(sed -n 's/^pid=//p' "$_ocd_status" 2>/dev/null)
+    _ocd_runner_start=$(sed -n 's/^proc_start_time=//p' "$_ocd_status" 2>/dev/null)
+    _ocd_manager=$(sed -n 's/^manager_pid=//p' "$_ocd_status" 2>/dev/null)
+    _ocd_manager_start=$(sed -n 's/^manager_proc_start_time=//p' "$_ocd_status" 2>/dev/null)
+    printf 'RUNNER_IDENTITY pid=%s start=%s state=%s\n' \
+      "$_ocd_runner" "$_ocd_runner_start" \
+      "$(merv_continuation_process_state "$_ocd_runner" "$_ocd_runner_start" 2>/dev/null || printf unverified)" >&2
+    case "$_ocd_runner" in ''|*[!0-9]*) ;; *) ps -p "$_ocd_runner" -o pid=,ppid=,stat=,args= >&2 2>&1 || : ;; esac
+    printf 'MANAGER_IDENTITY pid=%s start=%s state=%s\n' \
+      "$_ocd_manager" "$_ocd_manager_start" \
+      "$(merv_continuation_process_state "$_ocd_manager" "$_ocd_manager_start" 2>/dev/null || printf unverified)" >&2
+    case "$_ocd_manager" in ''|none|*[!0-9]*) ;; *) ps -p "$_ocd_manager" -o pid=,ppid=,stat=,args= >&2 2>&1 || : ;; esac
+  else
+    printf '%s\n' 'OBSERVATION_NODE_STATUS_CURRENT=absent' \
+      'OBSERVATION_NODE_STATUS_BEFORE_CLEANUP_BEGIN' >&2
+    printf '%s\n' "${_observation_status_snapshot:-unavailable}" >&2
+    printf 'RUNNER_IDENTITY pid=%s start=%s state=%s\n' \
+      "${_observation_runner:-unavailable}" "${_observation_start:-unavailable}" \
+      "$(merv_continuation_process_state "${_observation_runner:-}" "${_observation_start:-}" 2>/dev/null || printf unverified)" >&2
+    case "${_observation_runner:-}" in ''|*[!0-9]*) ;; *) ps -p "$_observation_runner" -o pid=,ppid=,stat=,args= >&2 2>&1 || : ;; esac
+    printf 'MANAGER_IDENTITY pid=%s start=%s state=%s\n' \
+      "${_observation_manager:-unavailable}" "${_observation_manager_start:-unavailable}" \
+      "$(merv_continuation_process_state "${_observation_manager:-}" "${_observation_manager_start:-}" 2>/dev/null || printf unverified)" >&2
+    case "${_observation_manager:-}" in ''|none|*[!0-9]*) ;; *) ps -p "$_observation_manager" -o pid=,ppid=,stat=,args= >&2 2>&1 || : ;; esac
+  fi
+  if [ -e "$_ocd_pending" ] || [ -L "$_ocd_pending" ]; then
+    printf '%s\n' 'OBSERVATION_NODE_PENDING_BEGIN' >&2
+    cat "$_ocd_pending" >&2 2>&1 || :
+  else
+    printf 'OBSERVATION_NODE_PENDING=absent\n' >&2
+  fi
+  if [ -e "$MERV_QUIESCE_OBSERVATION" ] || [ -L "$MERV_QUIESCE_OBSERVATION" ]; then
+    printf '%s\n' 'OBSERVATION_STATE_TREE_BEGIN' >&2
+    find "$MERV_QUIESCE_OBSERVATION" -maxdepth 2 -print >&2 2>&1 || :
+    if [ -f "$MERV_QUIESCE_OBSERVATION/request.state" ]; then
+      cat "$MERV_QUIESCE_OBSERVATION/request.state" >&2 2>&1 || :
+    fi
+  else
+    printf 'OBSERVATION_STATE=absent\n' >&2
+  fi
+}
+node_process_diagnostics() {
+  _npd_label=${1:-process}
+  _npd_pid=${2:-}
+  _npd_start=${3:-}
+  printf '%s_PID_START=%s/%s AUTHENTICATED_STATE=%s\n' \
+    "$_npd_label" "$_npd_pid" "$_npd_start" \
+    "$(merv_continuation_process_state "$_npd_pid" "$_npd_start" 2>/dev/null || printf unobservable)" >&2
+  case "$_npd_pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -r "/proc/$_npd_pid/stat" ]; then
+    printf '%s_PROC_STAT_BEGIN\n' "$_npd_label" >&2
+    cat "/proc/$_npd_pid/stat" >&2 2>&1 || :
+    printf '%s_PROC_STATUS_BEGIN\n' "$_npd_label" >&2
+    cat "/proc/$_npd_pid/status" >&2 2>&1 || :
+    printf '%s_PROC_CMDLINE=' "$_npd_label" >&2
+    tr '\000' ' ' < "/proc/$_npd_pid/cmdline" >&2 2>/dev/null || :
+    printf '\n' >&2
+    if [ -r "/proc/$_npd_pid/wchan" ]; then
+      printf '%s_PROC_WCHAN=' "$_npd_label" >&2
+      cat "/proc/$_npd_pid/wchan" >&2 2>&1 || :
+    fi
+  fi
+  ps -p "$_npd_pid" -o pid=,ppid=,stat=,args= >&2 2>&1 || :
+}
+q_final_timeout_diagnostics() {
+  _qtd_run_dir="$MERV_NODE_STATUS_ROOT/910003-1"
+  _qtd_status="$_qtd_run_dir/node_1.status"
+  _qtd_pending="$_qtd_run_dir/node_1.pending"
+  printf 'Q_FINAL_TIMEOUT_WALL_CLOCK=' >&2
+  date '+%Y-%m-%d %H:%M:%S %z' >&2 2>&1 || :
+  printf 'Q_FINAL_TIMEOUT_ITERATION=%s TEST_ROOT=%s\n' \
+    "${MERV_TEST_ITERATION:-unspecified}" "$TEST_ROOT" >&2
+  merv_maintenance_quiesce_classify \
+    "$$" "$_maintenance_start" "$_maintenance_nonce" \
+    "$$" "$_fence_start" "$_fence_nonce" >/dev/null 2>&1 || :
+  printf 'Q_FINAL_TIMEOUT_STATUS=%s REASON=%s\n' \
+    "${MERV_QUIESCE_STATUS:-unknown}" "${MERV_QUIESCE_REASON:-unknown}" >&2
+  printf 'Q_FINAL_TIMEOUT_M_STATE=%s EXPECTED_M=%s/%s/%s AUTH=%s\n' \
+    "$(merv_owner_lock_state "$M_TEST_LOCK" 2>/dev/null || printf unknown)" \
+    "$$" "$_maintenance_start" "$_maintenance_nonce" \
+    "$(merv_owner_v2_matches "$M_TEST_LOCK/owner" "$$" "$_maintenance_start" "$_maintenance_nonce" /proc >/dev/null 2>&1 && printf PASS || printf FAIL)" >&2
+  printf 'Q_FINAL_TIMEOUT_F_STATE=%s EXPECTED_F=%s/%s/%s AUTH=%s\n' \
+    "$(merv_full_fence_classify "$F_TEST_LOCK" 2>/dev/null || printf unknown)" \
+    "$$" "$_fence_start" "$_fence_nonce" \
+    "$(merv_full_fence_owner_is "$F_TEST_LOCK" "$$" "$_fence_start" "$_fence_nonce" >/dev/null 2>&1 && printf PASS || printf FAIL)" >&2
+  printf 'Q_FINAL_TIMEOUT_ACTION_R_PATH=%s STATE=%s\n' \
+    "$MERV_ACTION_LOCK_PATH" \
+    "$(merv_owner_lock_state "$MERV_ACTION_LOCK_PATH" 2>/dev/null || printf unknown)" >&2
+  if [ -f "$MERV_ACTION_LOCK_PATH/owner" ]; then
+    cat "$MERV_ACTION_LOCK_PATH/owner" >&2 2>&1 || :
+  fi
+  printf 'Q_FINAL_TIMEOUT_OBSERVATION_TREE_BEGIN path=%s\n' "$MERV_QUIESCE_OBSERVATION" >&2
+  find "$MERV_QUIESCE_OBSERVATION" -maxdepth 4 -print >&2 2>&1 || :
+  for _qtd_file in "$MERV_QUIESCE_OBSERVATION"/*; do
+    [ -f "$_qtd_file" ] || continue
+    printf 'Q_FINAL_TIMEOUT_OBSERVATION_FILE_BEGIN path=%s\n' "$_qtd_file" >&2
+    cat "$_qtd_file" >&2 2>&1 || :
+  done
+  printf 'Q_FINAL_TIMEOUT_RUN_DIR=%s\n' "$_qtd_run_dir" >&2
+  ls -lan "$_qtd_run_dir" >&2 2>&1 || :
+  find "$_qtd_run_dir" -maxdepth 2 -print >&2 2>&1 || :
+  find "$_qtd_run_dir" -maxdepth 2 -exec stat -c '%n mode=%a size=%s type=%F mtime=%y' {} \\; >&2 2>&1 || :
+  for _qtd_file in "$_qtd_pending" "$_qtd_status" "$_qtd_run_dir"/.node_1.status.* "$_qtd_run_dir"/*.tmp; do
+    [ -f "$_qtd_file" ] || continue
+    printf 'Q_FINAL_TIMEOUT_RUN_FILE_BEGIN path=%s\n' "$_qtd_file" >&2
+    cat "$_qtd_file" >&2 2>&1 || :
+  done
+  _qtd_runner=$(sed -n 's/^pid=//p' "$_qtd_status" 2>/dev/null)
+  _qtd_runner_start=$(sed -n 's/^proc_start_time=//p' "$_qtd_status" 2>/dev/null)
+  _qtd_manager=$(sed -n 's/^manager_pid=//p' "$_qtd_status" 2>/dev/null)
+  _qtd_manager_start=$(sed -n 's/^manager_proc_start_time=//p' "$_qtd_status" 2>/dev/null)
+  node_process_diagnostics RUNNER "$_qtd_runner" "$_qtd_runner_start"
+  node_process_diagnostics MANAGER "$_qtd_manager" "$_qtd_manager_start"
+  for _qtd_log in runner.log cli.log vlan.log stdout.log; do
+    if [ -f "$_qtd_run_dir/$_qtd_log" ]; then
+      printf 'Q_FINAL_TIMEOUT_LOG_BEGIN path=%s\n' "$_qtd_run_dir/$_qtd_log" >&2
+      cat "$_qtd_run_dir/$_qtd_log" >&2 2>&1 || :
+    else
+      printf 'Q_FINAL_TIMEOUT_LOG_ABSENT path=%s\n' "$_qtd_run_dir/$_qtd_log" >&2
+    fi
+  done
+  printf 'Q_FINAL_TIMEOUT_OBSERVATION_CLEAR_EPOCH=%s\n' \
+    "${_observation_clear_epoch:-unknown}" >&2
 }
 pass() { printf 'PASS: %s\n' "$1"; }
 
@@ -190,6 +375,8 @@ chmod 700 "$MERV_NODE_RUNNER_MANAGER" || fail fake-manager-mode
 _release_marker="$MNR_TEST_MARKER.release"
 
 sh "$BASE_DIR/functions/mervlan_node_runner.sh" start 910003-1 1 > "$TEST_ROOT/start.out" 2>&1 || fail node-run-start
+_lifecycle_runner=$(sed -n 's/^pid=//p' "$MERV_NODE_STATUS_ROOT/910003-1/node_1.status" 2>/dev/null)
+_lifecycle_runner_start=$(sed -n 's/^proc_start_time=//p' "$MERV_NODE_STATUS_ROOT/910003-1/node_1.status" 2>/dev/null)
 _tries=0
 while [ ! -e "$MNR_TEST_MARKER.started" ] && [ "$_tries" -lt 15 ]; do
   sleep 1
@@ -222,6 +409,8 @@ done
 _status_file="$MERV_NODE_STATUS_ROOT/910003-1/node_1.status"
 _manager_pid=$(sed -n 's/^manager_pid=//p' "$_status_file" 2>/dev/null)
 _manager_start=$(sed -n 's/^manager_proc_start_time=//p' "$_status_file" 2>/dev/null)
+_live_manager=$_manager_pid
+_live_manager_start=$_manager_start
 _tries=0
 while [ "$(merv_continuation_process_state "$_manager_pid" "$_manager_start")" = live ] && [ "$_tries" -lt 10 ]; do
   sleep 1
@@ -237,6 +426,7 @@ if [ "$MERV_QUIESCE_STATUS" != BUSY ] || [ "$MERV_QUIESCE_REASON" != observation
   fail 'Q did not attribute busy state to the pending observation generation'
 fi
 rm -f "$MERV_QUIESCE_OBSERVATION/request.state" || fail observation-clear
+_observation_clear_epoch=$(date +%s 2>/dev/null || printf unknown)
 _tries=0
 while [ "$(merv_maintenance_quiesce_classify "$$" "$_maintenance_start" "$_maintenance_nonce" "$$" "$_fence_start" "$_fence_nonce")" != IDLE ] && [ "$_tries" -lt 15 ]; do
   sleep 1
@@ -244,9 +434,43 @@ while [ "$(merv_maintenance_quiesce_classify "$$" "$_maintenance_start" "$_maint
 done
 _q_final=$(merv_maintenance_quiesce_classify "$$" "$_maintenance_start" "$_maintenance_nonce" "$$" "$_fence_start" "$_fence_nonce")
 if [ "$_q_final" != IDLE ]; then
-  merv_maintenance_quiesce_classify >/dev/null
-  printf 'Q detail: status=%s reason=%s\n' "$MERV_QUIESCE_STATUS" "$MERV_QUIESCE_REASON" >&2
-  cat "$TEST_ROOT/node_runs/910003-1/node_1.pending" "$TEST_ROOT/node_runs/910003-1/node_1.status" 2>/dev/null >&2 || :
+  if [ -n "${MERV_TEST_STOP_FILE:-}" ]; then : > "$MERV_TEST_STOP_FILE" 2>/dev/null || :; fi
+  q_final_timeout_diagnostics
+  _q_followup_started=$(date +%s 2>/dev/null || printf 0)
+  _q_followup_terminal=NO
+  _q_followup_tries=0
+  while [ "$_q_followup_tries" -lt 120 ]; do
+    _q_followup_status=$(sh "$BASE_DIR/functions/mervlan_node_runner.sh" status 910003-1 1 2>/dev/null || printf '')
+    _q_followup_state=$(printf '%s\n' "$_q_followup_status" | sed -n 's/^state=//p')
+    _q_followup_pid=$(printf '%s\n' "$_q_followup_status" | sed -n 's/^pid=//p')
+    _q_followup_start=$(printf '%s\n' "$_q_followup_status" | sed -n 's/^proc_start_time=//p')
+    _q_followup_identity=$(merv_continuation_process_state "$_q_followup_pid" "$_q_followup_start" 2>/dev/null || printf unobservable)
+    case "$_q_followup_state:$_q_followup_identity" in
+      complete:dead|complete:reused|failed:dead|failed:reused)
+        _q_followup_terminal=YES
+        break
+        ;;
+    esac
+    sleep 1
+    _q_followup_tries=$((_q_followup_tries + 1))
+  done
+  _q_followup_finished=$(date +%s 2>/dev/null || printf 0)
+  case "$_q_followup_started:$_q_followup_finished:$_observation_clear_epoch" in
+    *[!0-9:]*|*::*) _q_followup_elapsed=unknown ;;
+    *) _q_followup_elapsed=$((_q_followup_finished - _observation_clear_epoch)) ;;
+  esac
+  merv_maintenance_quiesce_classify \
+    "$$" "$_maintenance_start" "$_maintenance_nonce" \
+    "$$" "$_fence_start" "$_fence_nonce" >/dev/null 2>&1 || :
+  printf 'Q_FINAL_TIMEOUT_FOLLOWUP terminal=%s state=%s identity=%s elapsed_clear_to_terminal_seconds=%s external_Q=%s reason=%s\n' \
+    "$_q_followup_terminal" "${_q_followup_state:-unknown}" \
+    "${_q_followup_identity:-unknown}" "$_q_followup_elapsed" \
+    "${MERV_QUIESCE_STATUS:-unknown}" "${MERV_QUIESCE_REASON:-unknown}" >&2
+  if [ "$_q_followup_terminal" != YES ]; then
+    _leave_lifecycle_runner=1
+    _leave_test_owners=1
+  fi
+  _preserve_test_root=1
   fail 'Q did not become idle after manager/R terminal'
 fi
 merv_full_fence_release "$F_TEST_LOCK" "$$" "$_fence_start" "$_fence_nonce" || fail race-fence-release
@@ -343,6 +567,7 @@ mkdir -p "$MERV_QUIESCE_OBSERVATION" || exit 1
 printf '%s\n' 'snapshot_requested_generation=2' 'snapshot_completed_generation=1' \
   'collection_requested_generation=0' 'collection_completed_generation=0' \
   > "$MERV_QUIESCE_OBSERVATION/request.state" || exit 1
+while [ ! -e "$MNR_TEST_MARKER.observation-release" ]; do sleep 1; done
 EOF
 chmod 700 "$MERV_NODE_RUNNER_MANAGER" || fail observation-manager-mode
 export MERV_NODE_RUNNER_MANAGER
@@ -351,14 +576,52 @@ sh "$BASE_DIR/functions/mervlan_node_runner.sh" start 910007-1 1 \
 _observation_status="$MERV_NODE_STATUS_ROOT/910007-1/node_1.status"
 _observation_runner=$(sed -n 's/^pid=//p' "$_observation_status" 2>/dev/null)
 _observation_start=$(sed -n 's/^proc_start_time=//p' "$_observation_status" 2>/dev/null)
+_lifecycle_runner=$_observation_runner
+observation_handoff_ready() {
+  [ -f "$MERV_QUIESCE_OBSERVATION/request.state" ] || return 1
+  merv_quiesce_idle
+  merv_quiesce_observation_state >/dev/null 2>&1 || :
+  [ "$MERV_QUIESCE_STATUS" = BUSY ] &&
+    [ "$MERV_QUIESCE_REASON" = observation-generation-pending ] || return 1
+  _observation_status_snapshot=$(sh "$BASE_DIR/functions/mervlan_node_runner.sh" status 910007-1 1 2>/dev/null) || return 1
+  _observation_status_state=$(printf '%s\n' "$_observation_status_snapshot" | sed -n 's/^state=//p')
+  _observation_status_reason=$(printf '%s\n' "$_observation_status_snapshot" | sed -n 's/^reason=//p')
+  _observation_status_runner=$(printf '%s\n' "$_observation_status_snapshot" | sed -n 's/^pid=//p')
+  _observation_status_runner_start=$(printf '%s\n' "$_observation_status_snapshot" | sed -n 's/^proc_start_time=//p')
+  _observation_manager=$(printf '%s\n' "$_observation_status_snapshot" | sed -n 's/^manager_pid=//p')
+  _observation_manager_start=$(printf '%s\n' "$_observation_status_snapshot" | sed -n 's/^manager_proc_start_time=//p')
+  case "$_observation_manager:$_observation_manager_start" in
+    *[!0-9:]*|:*|*::*) return 1 ;;
+  esac
+  _live_manager=$_observation_manager
+  _live_manager_start=$_observation_manager_start
+  [ "$_observation_status_state" = started ] &&
+    [ "$_observation_status_reason" = started ] &&
+    [ "$_observation_status_runner" = "$_observation_runner" ] &&
+    [ "$_observation_status_runner_start" = "$_observation_start" ] &&
+    [ "$(merv_continuation_process_state "$_observation_manager" "$_observation_manager_start")" = live ]
+}
 _tries=0
-while [ ! -f "$MERV_QUIESCE_OBSERVATION/request.state" ] && [ "$_tries" -lt 10 ]; do
+while [ "$_tries" -lt 30 ]; do
+  observation_handoff_ready && break
   sleep 1
   _tries=$((_tries + 1))
 done
 [ -f "$MERV_QUIESCE_OBSERVATION/request.state" ] || fail observation-request-missing
-[ "$(sed -n 's/^state=//p' "$_observation_status")" = started ] || fail 'runner became terminal while observation was pending'
+[ "$_tries" -lt 30 ] || {
+  printf 'OBSERVATION_STATUS_WHEN_WAIT_EXPIRED_BEGIN\n%s\n' "${_observation_status_snapshot:-unavailable}" >&2
+  fail observation-manager-bound-status-not-published
+}
+observation_handoff_ready || fail observation-handoff-readiness-not-stable
 case "$_observation_runner:$_observation_start" in *[!0-9:]*|:*|*::*) fail observation-runner-identity ;; esac
+printf 'OBSERVATION_HANDOFF_READY state=%s reason=%s runner=%s/%s manager=%s/%s generations=snapshot:%s/%s,collection:%s/%s\n' \
+  "$_observation_status_state" "$_observation_status_reason" \
+  "$_observation_status_runner" "$_observation_status_runner_start" \
+  "$_observation_manager" "$_observation_manager_start" \
+  "$(sed -n 's/^snapshot_requested_generation=//p' "$MERV_QUIESCE_OBSERVATION/request.state")" \
+  "$(sed -n 's/^snapshot_completed_generation=//p' "$MERV_QUIESCE_OBSERVATION/request.state")" \
+  "$(sed -n 's/^collection_requested_generation=//p' "$MERV_QUIESCE_OBSERVATION/request.state")" \
+  "$(sed -n 's/^collection_completed_generation=//p' "$MERV_QUIESCE_OBSERVATION/request.state")"
 kill -TERM "$_observation_runner" 2>/dev/null || fail observation-runner-term
 _tries=0
 while [ "$(merv_continuation_process_state "$_observation_runner" "$_observation_start")" = live ] && [ "$_tries" -lt 2 ]; do
@@ -383,12 +646,19 @@ esac
 [ "$(merv_maintenance_quiesce_classify)" != IDLE ] || fail 'Q ignored pending observation after runner termination'
 rm -f "$MERV_QUIESCE_OBSERVATION/request.state" || fail observation-request-clear
 [ "$(merv_maintenance_quiesce_classify)" = BLOCKING ] || fail 'dead started runner was treated as terminal after observation cleared'
+_observation_status_snapshot=$(cat "$_observation_status" 2>/dev/null) || fail observation-status-snapshot
+_observation_manager=$(sed -n 's/^manager_pid=//p' "$_observation_status" 2>/dev/null)
+_observation_manager_start=$(sed -n 's/^manager_proc_start_time=//p' "$_observation_status" 2>/dev/null)
 rm -f "$_observation_status" || fail observation-status-cleanup
 rm -f "$MERV_NODE_STATUS_ROOT/910007-1/runner.log" \
   "$MERV_NODE_STATUS_ROOT/910007-1/cli.log" \
   "$MERV_NODE_STATUS_ROOT/910007-1/vlan.log" \
   "$MERV_NODE_STATUS_ROOT/910007-1/stdout.log" || fail observation-run-logs-cleanup
-rmdir "$MERV_NODE_STATUS_ROOT/910007-1" || fail observation-run-dir-cleanup
+if ! rmdir "$MERV_NODE_STATUS_ROOT/910007-1"; then
+  observation_cleanup_diagnostics
+  _preserve_test_root=1
+  fail observation-run-dir-cleanup
+fi
 pass 'runner termination cannot publish terminal while observation remains pending'
 
 printf '%s\n' 'NODE_RUNNER_PENDING_LIFECYCLE_OK'
