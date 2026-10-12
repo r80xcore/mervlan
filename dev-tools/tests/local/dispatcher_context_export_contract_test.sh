@@ -95,4 +95,68 @@ _dispatch_rc=$?
 [ "$_dispatch_rc" -eq 0 ] || exit 1
 [ -e "$MARKER" ] || exit 1
 [ "$(wc -l < "$RELEASES" 2>/dev/null)" -eq 4 ] || exit 1
+
+# Exercise the real dispatcher, owner locks, mutation-admission library, and
+# continuation primitive together. The earlier cases keep their narrow stubs
+# to isolate child-context export failure; this case reaches the real bind,
+# child activation, second admission, worker exec, and parent retirement path.
+mkdir -p "$LOCKDIR" "$TEST_ROOT/state" "$TEST_ROOT/functions" || exit 1
+chmod 700 "$LOCKDIR" "$TEST_ROOT/state" "$TEST_ROOT/functions" || exit 1
+MERV_BASE=$BASE_DIR
+MERV_STATE_ROOT="$TEST_ROOT/state"
+MERV_UPDATE_JOURNAL="$MERV_STATE_ROOT/update.journal"
+MERV_UPDATE_QUIESCE_FILE="$MERV_STATE_ROOT/update.quiesce"
+MERVLAN_MAINTENANCE_LOCK_OVERRIDE="$LOCKDIR/mervlan_maintenance.lock"
+MERV_FULL_FENCE_PATH="$TEST_ROOT/full.lock"
+MERV_CONTINUATION_ROOT="$TEST_ROOT/continuations"
+MERV_OWNER_LOCK_PROC_ROOT=/proc
+MERV_ACTION_LOCK_PROC_ROOT=/proc
+MERV_ACTION_LOCK_PATH="$LOCKDIR/mervlan_action.lock"
+export MERV_BASE MERV_STATE_ROOT MERV_UPDATE_JOURNAL MERV_UPDATE_QUIESCE_FILE
+export MERVLAN_MAINTENANCE_LOCK_OVERRIDE MERV_FULL_FENCE_PATH
+export MERV_CONTINUATION_ROOT MERV_OWNER_LOCK_PROC_ROOT MERV_ACTION_LOCK_PROC_ROOT
+export MERV_ACTION_LOCK_PATH
+
+. "$BASE_DIR/settings/lib_owner_lock.sh" || exit 1
+. "$BASE_DIR/settings/lib_action_lock.sh" || exit 1
+. "$BASE_DIR/settings/lib_mutation_admission.sh" || exit 1
+merv_action_lock_clear_child_context
+
+REAL_WORKER="$TEST_ROOT/functions/mervlan_boot.sh"
+REAL_MARKER="$TEST_ROOT/real-continuation-worker"
+cat > "$REAL_WORKER" <<'EOF'
+#!/bin/sh
+set -eu
+. "$MERV_BASE/settings/lib_owner_lock.sh" || exit 91
+. "$MERV_BASE/settings/lib_continuation.sh" || exit 92
+_real_start=$(merv_identity_current_start /proc) || exit 93
+_real_lease=$(merv_continuation_path "${MERV_CONTINUATION_TOKEN:-}") || exit 94
+merv_continuation_read "$_real_lease" || exit 95
+[ "$MERV_CONTINUATION_STATE" = active ] &&
+  [ "$MERV_CONTINUATION_CHILD_PID" = "$$" ] &&
+  [ "$MERV_CONTINUATION_CHILD_START" = "$_real_start" ] || exit 96
+printf 'pid=%s\nstart=%s\n' "$$" "$_real_start" > "$MERV_DISPATCH_REAL_MARKER" || exit 97
+EOF
+chmod 700 "$REAL_WORKER" || exit 1
+export MERV_DISPATCH_REAL_MARKER="$REAL_MARKER"
+RAW=checkservice_vlanmgr
+TYPE=checkservice
+EVENT=vlanmgr
+MERV_PROGRESS_TOKEN=
+export RAW TYPE EVENT MERV_PROGRESS_TOKEN
+dispatch_if_executable "$REAL_WORKER" status
+_real_dispatch_rc=$?
+[ "$_real_dispatch_rc" -eq 0 ] || exit 1
+[ -s "$REAL_MARKER" ] || exit 1
+
+set -- "$MERV_CONTINUATION_ROOT"/*/lease
+[ -f "$1" ] || exit 1
+[ "$#" -eq 1 ] || exit 1
+merv_continuation_read "$1" || exit 1
+[ "$MERV_CONTINUATION_STATE" = terminal ] || exit 1
+_real_worker_pid=$(sed -n 's/^pid=//p' "$REAL_MARKER")
+_real_worker_start=$(sed -n 's/^start=//p' "$REAL_MARKER")
+[ "$MERV_CONTINUATION_CHILD_PID" = "$_real_worker_pid" ] || exit 1
+[ "$MERV_CONTINUATION_CHILD_START" = "$_real_worker_start" ] || exit 1
+printf 'PASS: dispatcher used the real continuation lease through worker terminal state\n'
 printf 'DISPATCHER_CONTEXT_EXPORT_CONTRACT_OK\n'

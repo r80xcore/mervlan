@@ -40,13 +40,19 @@ merv_continuation_read "$LEASE_FILE" || fail pending-parse
 if merv_continuation_retire "$LEASE_TOKEN"; then fail pending-retired; fi
 pass 'pending lease is atomically visible and blocks Q before spawn'
 
+CHILD_GATE="$TEST_ROOT/child.activate"
 sh -c '
   MERV_BASE="$1"
   . "$MERV_BASE/settings/lib_owner_lock.sh" || exit 11
   . "$MERV_BASE/settings/lib_continuation.sh" || exit 12
-  merv_continuation_activate_wait "$2" || exit 13
+  _gate_tries=0
+  while [ ! -f "$2" ]; do
+    _gate_tries=$((_gate_tries + 1))
+    [ "$_gate_tries" -lt 5000000 ] || exit 13
+  done
+  merv_continuation_activate_wait "$3" || exit 14
   exec sleep 20
-' sh "$BASE_DIR" "$LEASE_TOKEN" &
+' sh "$BASE_DIR" "$CHILD_GATE" "$LEASE_TOKEN" &
 CHILD_PID=$!
 CHILD_START=
 _wait=0
@@ -62,6 +68,7 @@ merv_continuation_bind_child "$LEASE_TOKEN" "$CHILD_PID" "$CHILD_START" || {
   wait "$CHILD_PID" 2>/dev/null || :
   fail child-bind
 }
+: > "$CHILD_GATE" || fail child-activate-gate
 _wait=0
 while [ "$_wait" -lt 5 ]; do
   if merv_continuation_read "$LEASE_FILE" 2>/dev/null &&

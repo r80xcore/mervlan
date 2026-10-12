@@ -233,19 +233,45 @@ merv_continuation_bind_child() {
   _mcbc_start=${3:-}
   _mcbc_file=$(merv_continuation_path "$_mcbc_token") || return 1
   merv_continuation_read "$_mcbc_file" || return 1
+  [ "$MERV_CONTINUATION_TOKEN" = "$_mcbc_token" ] || return 1
   [ "$MERV_CONTINUATION_STATE" = pending ] &&
     [ "$MERV_CONTINUATION_CHILD_PID" = none ] &&
     [ "$MERV_CONTINUATION_CHILD_START" = none ] || return 1
   [ "$MERV_CONTINUATION_PARENT_PID" = "$$" ] || return 1
+  _mcbc_operation=$MERV_CONTINUATION_OPERATION
+  _mcbc_run=$MERV_CONTINUATION_RUN_TOKEN
+  _mcbc_parent_type=$MERV_CONTINUATION_PARENT_TYPE
+  _mcbc_parent_path=$MERV_CONTINUATION_PARENT_PATH
+  _mcbc_parent_pid=$MERV_CONTINUATION_PARENT_PID
+  _mcbc_parent_start=$MERV_CONTINUATION_PARENT_START
+  _mcbc_parent_nonce=$MERV_CONTINUATION_PARENT_NONCE
   merv_owner_v2_matches "$MERV_CONTINUATION_PARENT_PATH" \
     "$MERV_CONTINUATION_PARENT_PID" "$MERV_CONTINUATION_PARENT_START" \
     "$MERV_CONTINUATION_PARENT_NONCE" /proc || return 1
   [ "$(merv_continuation_process_state "$_mcbc_pid" "$_mcbc_start")" = live ] || return 1
   merv_continuation_write "$_mcbc_file" pending "$_mcbc_pid" "$_mcbc_start" || return 1
   merv_continuation_read "$_mcbc_file" || return 1
-  [ "$MERV_CONTINUATION_STATE" = pending ] &&
+  # The child may advance the lease as soon as the atomic bound record is
+  # visible. Accept only the exact lease and child identity we just bound,
+  # with an unchanged parent tuple; activate() and retire() constrain these
+  # early transitions to pending -> active -> terminal for that child.
+  [ "$MERV_CONTINUATION_FORMAT" = 1 ] &&
+    [ "$MERV_CONTINUATION_TOKEN" = "$_mcbc_token" ] &&
+    [ "$MERV_CONTINUATION_OPERATION" = "$_mcbc_operation" ] &&
+    [ "$MERV_CONTINUATION_RUN_TOKEN" = "$_mcbc_run" ] &&
+    [ "$MERV_CONTINUATION_PARENT_TYPE" = "$_mcbc_parent_type" ] &&
+    [ "$MERV_CONTINUATION_PARENT_PATH" = "$_mcbc_parent_path" ] &&
+    [ "$MERV_CONTINUATION_PARENT_PID" = "$_mcbc_parent_pid" ] &&
+    [ "$MERV_CONTINUATION_PARENT_START" = "$_mcbc_parent_start" ] &&
+    [ "$MERV_CONTINUATION_PARENT_NONCE" = "$_mcbc_parent_nonce" ] &&
     [ "$MERV_CONTINUATION_CHILD_PID" = "$_mcbc_pid" ] &&
-    [ "$MERV_CONTINUATION_CHILD_START" = "$_mcbc_start" ]
+    [ "$MERV_CONTINUATION_CHILD_START" = "$_mcbc_start" ] || return 1
+  case "$MERV_CONTINUATION_STATE" in
+    pending|active|terminal) ;;
+    *) return 1 ;;
+  esac
+  merv_owner_v2_matches "$_mcbc_parent_path" "$_mcbc_parent_pid" \
+    "$_mcbc_parent_start" "$_mcbc_parent_nonce" /proc
 }
 
 # Publish pending while the exact parent owner is still live. The caller must

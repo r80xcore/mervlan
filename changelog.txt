@@ -1,5 +1,10 @@
 mervlan v0.53.29-dev
 
+Fixed: Continuation child binding under fast activation
+- Parent read-back now accepts the exact child's authenticated active or
+  terminal transition after atomic binding, while rejecting a changed lease
+  token, operation/run, owner tuple, or child identity.
+
 Fixed: VLAN duplicate advisory handling
 - Cached duplicate detection now considers only MAIN/node LAN VLAN assignment
   keys, so unrelated numeric settings cannot create false duplicate warnings.
