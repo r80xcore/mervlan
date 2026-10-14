@@ -64,6 +64,12 @@ extract_function "$BASE_DIR/functions/update_mervlan.sh" update_activation_start
   "$TEST_ROOT/extracted/update_activation.sh" || fail 'update activation-state extraction'
 extract_function "$BASE_DIR/functions/update_mervlan.sh" update_mark_recovery_required \
   "$TEST_ROOT/extracted/update_recovery.sh" || fail 'update recovery extraction'
+extract_function "$BASE_DIR/functions/update_mervlan.sh" update_uid_from_status \
+  "$TEST_ROOT/extracted/update_uid_from_status.sh" || fail 'update UID parser extraction'
+extract_function "$BASE_DIR/functions/update_mervlan.sh" update_effective_uid \
+  "$TEST_ROOT/extracted/update_effective_uid.sh" || fail 'update effective-UID extraction'
+extract_function "$BASE_DIR/functions/update_mervlan.sh" update_private_directory_valid \
+  "$TEST_ROOT/extracted/update_private_directory.sh" || fail 'update private-workspace validation extraction'
 extract_function "$BASE_DIR/functions/update_mervlan.sh" cleanup_tmp \
   "$TEST_ROOT/extracted/update_cleanup.sh" || fail 'update cleanup extraction'
 extract_function "$BASE_DIR/functions/update_mervlan.sh" handle_update_signal \
@@ -196,6 +202,9 @@ case "$CASE_KIND" in
     . "$EXTRACT_ROOT/update_abort.sh" || exit 2
     . "$EXTRACT_ROOT/update_activation.sh" || exit 2
     . "$EXTRACT_ROOT/update_recovery.sh" || exit 2
+    . "$EXTRACT_ROOT/update_uid_from_status.sh" || exit 2
+    . "$EXTRACT_ROOT/update_effective_uid.sh" || exit 2
+    . "$EXTRACT_ROOT/update_private_directory.sh" || exit 2
     . "$EXTRACT_ROOT/update_cleanup.sh" || exit 2
     . "$EXTRACT_ROOT/update_signal.sh" || exit 2
     . "$EXTRACT_ROOT/update_fail.sh" || exit 2
@@ -218,6 +227,8 @@ case "$CASE_KIND" in
     MERV_UPDATE_QUIESCE_FILE="$CASE_ROOT/update.quiesce"
     TMP_BASE="$CASE_ROOT/work"
     mkdir -p "$TMP_BASE" "$UPDATE_JFFS_STAGE" "$UPDATE_JFFS_OLD" "$UPDATE_ORIGINAL_DIR" || exit 2
+    UPDATE_TMP_BASE_CREATED=1
+    UPDATE_TMP_BASE_PRIVATE=1
     : > "$TMP_BASE/marker"
     : > "$MERV_UPDATE_JOURNAL"
     : > "$MERV_UPDATE_QUIESCE_FILE"

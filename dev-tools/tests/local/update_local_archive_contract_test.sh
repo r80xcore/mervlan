@@ -18,40 +18,70 @@ expect_reject() {
 
 # Exercise the exact production helper bodies without invoking an Update.
 HELPERS="$WORK/helpers.sh"
+sed -n '/^# PRIVATE UPDATE WORKSPACE BEGIN$/,/^# PRIVATE UPDATE WORKSPACE END$/p' "$UPDATER" |
+  sed '/^# PRIVATE UPDATE WORKSPACE /d' >"$HELPERS"
 sed -n '/^# LOCAL ARCHIVE HELPERS BEGIN$/,/^# LOCAL ARCHIVE HELPERS END$/p' "$UPDATER" |
-  sed '/^# LOCAL ARCHIVE HELPERS /d' >"$HELPERS"
+  sed '/^# LOCAL ARCHIVE HELPERS /d' >>"$HELPERS"
 sed -n '/^# CORE STAGE VALIDATOR BEGIN$/,/^# CORE STAGE VALIDATOR END$/p' "$UPDATER" |
   sed '/^# CORE STAGE VALIDATOR /d' >>"$HELPERS"
+sed -n '/^# UPDATE ARCHIVE EXTRACTION BEGIN$/,/^# UPDATE ARCHIVE EXTRACTION END$/p' "$UPDATER" |
+  sed '/^# UPDATE ARCHIVE EXTRACTION /d' >>"$HELPERS"
 sed -n '/^update_changelog_version() {/,/^}$/p' "$UPDATER" >>"$HELPERS"
 sed -n '/^update_filter_source_tree() {/,/^}$/p' "$UPDATER" >>"$HELPERS"
+sed -n '/^update_path_size_kb() {/,/^}$/p' "$UPDATER" >>"$HELPERS"
 [ -s "$HELPERS" ] || fail 'helper extraction failed'
 
-TMP_BASE="$WORK/owned"
+TMP_DIR="$WORK/runtime"
+TMP_BASE="$TMP_DIR/updates-local-test"
 ARCHIVE="$TMP_BASE/mervlan.tar.gz"
 RAW_ARCHIVE="$TMP_BASE/mervlan.tar"
-mkdir -p "$TMP_BASE"
+STAGE_DIR="$TMP_BASE/stage"
+BACKUP_DIR="$TMP_BASE/backup"
+(umask 077; mkdir "$TMP_DIR")
 info() { :; }
 warn() { :; }
 . "$HELPERS"
+update_prepare_private_workspace || fail 'private local update workspace'
 
 make_regular_archive() {
   _mla_archive="$1"
   _mla_root="$WORK/build-$2"
   rm -rf "$_mla_root"
-  mkdir -p "$_mla_root/package"
+  mkdir -p "$_mla_root/package/functions"
   printf 'payload\n' >"$_mla_root/package/file"
+  cp -p "$ROOT/functions/mervlan_full_cleanup.sh" "$_mla_root/package/functions/mervlan_full_cleanup.sh"
+  printf '\n# LOCAL_SOURCE_ID=%s\n' "$3" >>"$_mla_root/package/functions/mervlan_full_cleanup.sh"
   tar -czf "$_mla_archive" -C "$_mla_root" package
 }
 
+copy_to_owned_archive() {
+  rm -f "$ARCHIVE" "$ARCHIVE.part"
+  cp "$1" "$ARCHIVE"
+}
+expect_reject_archive() {
+  copy_to_owned_archive "$1"
+  expect_reject validate_update_archive_members "$ARCHIVE"
+}
+
 valid="$WORK/valid.tar.gz"
-make_regular_archive "$valid" valid
+replacement="$WORK/replacement.tar.gz"
+make_regular_archive "$valid" valid valid-A
+make_regular_archive "$replacement" replacement replacement-B
 before=$(cksum "$valid")
 acquire_local_update_archive "$valid" "$ARCHIVE" || fail 'valid local acquisition'
 [ "$(cksum "$valid")" = "$before" ] || fail 'local source was modified'
+cp "$replacement" "$valid"
 validate_update_archive_members "$ARCHIVE" || fail 'valid local archive rejected'
+[ ! -e "$ARCHIVE" ] && [ ! -L "$ARCHIVE" ] || fail 'admitted local pathname was not unpublished'
 [ "$UPDATE_ARCHIVE_TOPDIR" = package ] || fail 'valid archive top root was not recorded'
-[ -s "$ARCHIVE" ] && [ ! -e "$ARCHIVE.part" ] || fail 'owned archive publication is not atomic/complete'
-pass local-acquisition-and-safe-regular-archive
+cp "$replacement" "$ARCHIVE"
+update_extract_archive "$TMP_BASE" "$UPDATE_ARCHIVE_FORMAT" || fail 'stable local archive extraction'
+grep -Fq '# LOCAL_SOURCE_ID=valid-A' "$TMP_BASE/package/functions/mervlan_full_cleanup.sh" || fail 'local source replacement affected admitted bytes'
+if grep -Fq '# LOCAL_SOURCE_ID=replacement-B' "$TMP_BASE/package/functions/mervlan_full_cleanup.sh"; then fail 'recreated archive pathname redirected local extraction'; fi
+update_close_stable_archive || fail 'local archive descriptor close'
+[ ! -e "/proc/$$/fd/9" ] && [ ! -L "/proc/$$/fd/9" ] || fail 'local stable descriptor remained open'
+rm -f "$ARCHIVE"
+pass local-acquisition-original-and-published-path-replacement-isolated
 
 expect_reject acquire_local_update_archive relative.tar.gz "$ARCHIVE"
 expect_reject acquire_local_update_archive "$WORK/missing.tar.gz" "$ARCHIVE"
@@ -62,34 +92,34 @@ expect_reject acquire_local_update_archive "$WORK/source-link.tar.gz" "$ARCHIVE"
 pass local-source-path-and-file-policy
 
 printf 'not-gzip\n' >"$WORK/corrupt.tar.gz"
-expect_reject validate_update_archive_members "$WORK/corrupt.tar.gz"
+expect_reject_archive "$WORK/corrupt.tar.gz"
 printf 'not-a-tar\n' | gzip -c >"$WORK/not-tar.tar.gz"
-expect_reject validate_update_archive_members "$WORK/not-tar.tar.gz"
+expect_reject_archive "$WORK/not-tar.tar.gz"
 pass corrupt-and-invalid-tar-rejected
 
 absroot="$WORK/absolute-root"
 mkdir -p "$absroot/root"
 printf x >"$absroot/root/file"
 tar -czPf "$WORK/absolute.tar.gz" "$absroot/root" 2>/dev/null || fail 'absolute fixture creation'
-expect_reject validate_update_archive_members "$WORK/absolute.tar.gz"
+expect_reject_archive "$WORK/absolute.tar.gz"
 
 mkdir -p "$WORK/traversal/root"
 printf x >"$WORK/traversal/root/file"
 tar -czf "$WORK/traversal.tar.gz" --transform='s|^root|../escape|' -C "$WORK/traversal" root
-expect_reject validate_update_archive_members "$WORK/traversal.tar.gz"
+expect_reject_archive "$WORK/traversal.tar.gz"
 tar -czf "$WORK/nested-traversal.tar.gz" --transform='s|^root/file|root/../file|' -C "$WORK/traversal" root
-expect_reject validate_update_archive_members "$WORK/nested-traversal.tar.gz"
+expect_reject_archive "$WORK/nested-traversal.tar.gz"
 pass absolute-and-traversal-members-rejected
 
 mkdir -p "$WORK/links/root"
 printf x >"$WORK/links/root/regular"
 ln -s regular "$WORK/links/root/symlink"
 tar -czf "$WORK/symlink-member.tar.gz" -C "$WORK/links" root
-expect_reject validate_update_archive_members "$WORK/symlink-member.tar.gz"
+expect_reject_archive "$WORK/symlink-member.tar.gz"
 rm -f "$WORK/links/root/symlink"
 ln "$WORK/links/root/regular" "$WORK/links/root/hardlink"
 tar -czf "$WORK/hardlink-member.tar.gz" -C "$WORK/links" root
-expect_reject validate_update_archive_members "$WORK/hardlink-member.tar.gz"
+expect_reject_archive "$WORK/hardlink-member.tar.gz"
 pass link-members-rejected
 
 # Other tar entry types and repeated names are rejected before extraction.  A
@@ -99,17 +129,17 @@ mkdir -p "$WORK/special/root"
 printf x >"$WORK/special/root/regular"
 if mkfifo "$WORK/special/root/fifo" 2>/dev/null; then
   tar -czf "$WORK/fifo-member.tar.gz" -C "$WORK/special" root
-  expect_reject validate_update_archive_members "$WORK/fifo-member.tar.gz"
+  expect_reject_archive "$WORK/fifo-member.tar.gz"
 else
   pass fifo-fixture-skipped
 fi
 tar -cf "$WORK/duplicate.raw" -C "$WORK/special" root
 tar -rf "$WORK/duplicate.raw" -C "$WORK/special" root/regular
 gzip -c "$WORK/duplicate.raw" >"$WORK/duplicate-member.tar.gz"
-expect_reject validate_update_archive_members "$WORK/duplicate-member.tar.gz"
+expect_reject_archive "$WORK/duplicate-member.tar.gz"
 if command -v mknod >/dev/null 2>&1 && mknod "$WORK/special/root/device" c 1 7 2>/dev/null; then
   tar -czf "$WORK/device-member.tar.gz" -C "$WORK/special" root
-  expect_reject validate_update_archive_members "$WORK/device-member.tar.gz"
+  expect_reject_archive "$WORK/device-member.tar.gz"
 else
   pass device-fixture-skipped
 fi
@@ -132,14 +162,15 @@ tar() {
     *) return 1 ;;
   esac
 }
-expect_reject validate_update_archive_members "$WORK/asus-busybox-links.tar.gz"
+printf 'fixture\n' >"$WORK/asus-busybox-links.tar.gz"
+expect_reject_archive "$WORK/asus-busybox-links.tar.gz"
 unset -f tar
 pass asus-busybox-link-representation-rejected
 
 mkdir -p "$WORK/roots/root-a" "$WORK/roots/root-b"
 printf a >"$WORK/roots/root-a/file"; printf b >"$WORK/roots/root-b/file"
 tar -czf "$WORK/multiple-roots.tar.gz" -C "$WORK/roots" root-a root-b
-expect_reject validate_update_archive_members "$WORK/multiple-roots.tar.gz"
+expect_reject_archive "$WORK/multiple-roots.tar.gz"
 pass multiple-roots-rejected
 
 CORE_STAGE_FILES=$(awk '

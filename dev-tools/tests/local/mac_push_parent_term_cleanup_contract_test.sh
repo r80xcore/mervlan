@@ -74,6 +74,9 @@ make_driver() {
     update)
       extract_function "$BASE_DIR/functions/update_mervlan.sh" update_pool_state_unresolved "$_md_case_root/update_state.sh" || return 1
       extract_function "$BASE_DIR/functions/update_mervlan.sh" update_abort_node_pool "$_md_case_root/update_abort.sh" || return 1
+      extract_function "$BASE_DIR/functions/update_mervlan.sh" update_uid_from_status "$_md_case_root/update_uid_from_status.sh" || return 1
+      extract_function "$BASE_DIR/functions/update_mervlan.sh" update_effective_uid "$_md_case_root/update_effective_uid.sh" || return 1
+      extract_function "$BASE_DIR/functions/update_mervlan.sh" update_private_directory_valid "$_md_case_root/update_private_directory.sh" || return 1
       extract_function "$BASE_DIR/functions/update_mervlan.sh" handle_update_signal "$_md_case_root/update_signal.sh" || return 1
       extract_function "$BASE_DIR/functions/update_mervlan.sh" cleanup_tmp "$_md_case_root/update_cleanup.sh" || return 1
       ;;
@@ -212,6 +215,9 @@ case "$CASE_NAME" in
   update)
     . "$CASE_ROOT/update_state.sh" || exit 2
     . "$CASE_ROOT/update_abort.sh" || exit 2
+    . "$CASE_ROOT/update_uid_from_status.sh" || exit 2
+    . "$CASE_ROOT/update_effective_uid.sh" || exit 2
+    . "$CASE_ROOT/update_private_directory.sh" || exit 2
     . "$CASE_ROOT/update_signal.sh" || exit 2
     . "$CASE_ROOT/update_cleanup.sh" || exit 2
     UPDATE_MAINTENANCE_LOCK="$CASE_ROOT/maintenance.lock"
@@ -227,6 +233,8 @@ case "$CASE_NAME" in
     UPDATE_JFFS_OLD=""
     TMP_BASE="$CASE_ROOT/update-temp"
     mkdir -p "$TMP_BASE"
+    UPDATE_TMP_BASE_CREATED=1
+    UPDATE_TMP_BASE_PRIVATE=1
     : > "$TMP_BASE/marker"
     trap 'handle_update_signal 143' TERM
     _caller_cleanup=cleanup_tmp

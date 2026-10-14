@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.74"                   #
+#                - File: update_mervlan.sh || version="0.76"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -531,6 +531,8 @@ readonly BACKUP_DIR="$TMP_BASE/backup"
 readonly UPDATE_ORIGINAL_DIR="$TMP_BASE/original"
 readonly UPDATE_BACKUP_SOURCE_DIR="$TMP_BASE/preupdate-source"
 readonly SYNC_SCRIPT="$FUNCDIR/sync_nodes.sh"
+UPDATE_TMP_BASE_CREATED="0"
+UPDATE_TMP_BASE_PRIVATE="0"
 
 # Staging directory for node MAC shield db files during node updates (RAM)
 readonly NODE_DB_STAGE="$TMP_DIR/node_db_stage"
@@ -548,6 +550,114 @@ MERV_MAINTENANCE_RECOVERY_MARKER="$MERVLAN_BACKUP_DIR/.mervlan.recovery"
 }
 readonly UPDATE_UNDO_ROOT="${MERVLAN_UNDO_DIR_OVERRIDE:-$TMP_DIR/undo}"
 readonly UPDATE_UNDO_MARKER="$UPDATE_UNDO_ROOT/update.meta"
+
+# The shared runtime root remains governed by its existing owner/permission
+# contract. Each Update gets a fresh, private child so ordinary processes
+# cannot replace archive, extraction, or normalization entries during the
+# transaction. MerVLAN maintenance ownership excludes concurrent workers;
+# hostile root processes and same-UID processes with preexisting descriptors
+# are outside this boundary.
+# PRIVATE UPDATE WORKSPACE BEGIN
+update_uid_from_status() {
+	_update_uid_status_path="$1"
+	[ -r "$_update_uid_status_path" ] || return 1
+	awk '
+		/^Uid:/ {
+			count++
+			if (count != 1 || NF != 5 || $1 != "Uid:" ||
+				$2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ ||
+				$4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/) {
+				invalid = 1
+				next
+			}
+			effective = $3
+		}
+		END {
+			if (count != 1 || invalid || effective !~ /^[0-9]+$/) exit 1
+			print effective
+		}
+	' "$_update_uid_status_path" 2>/dev/null
+}
+
+update_effective_uid() {
+	_update_effective_uid=$(update_uid_from_status "/proc/$$/status") || return 1
+	case "$_update_effective_uid" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$_update_effective_uid"
+}
+
+update_private_directory_valid() {
+	_update_private_path="$1"
+	[ ! -L "$_update_private_path" ] && [ -d "$_update_private_path" ] || return 1
+	_update_private_meta=$(LC_ALL=C ls -ldn "$_update_private_path" 2>/dev/null | awk 'NR == 1 { print $1 "|" $3 }')
+	_update_private_mode=${_update_private_meta%%|*}
+	_update_private_owner=${_update_private_meta#*|}
+	_update_private_uid=$(update_effective_uid) || {
+		warn -c cli,vlan "Unable to determine updater effective UID from /proc; refusing private workspace"
+		return 1
+	}
+	[ "$_update_private_mode" = drwx------ ] &&
+		[ "$_update_private_owner" = "$_update_private_uid" ]
+}
+
+update_private_parent_safe() {
+	_update_parent_path="$1"
+	[ ! -L "$_update_parent_path" ] && [ -d "$_update_parent_path" ] || return 1
+	_update_parent_meta=$(LC_ALL=C ls -ldn "$_update_parent_path" 2>/dev/null | awk 'NR == 1 { print $1 "|" $3 }')
+	_update_parent_mode=${_update_parent_meta%%|*}
+	_update_parent_owner=${_update_parent_meta#*|}
+	_update_parent_uid=$(update_effective_uid) || {
+		warn -c cli,vlan "Unable to determine updater effective UID from /proc; refusing private workspace"
+		return 1
+	}
+	[ -n "$_update_parent_mode" ] &&
+		[ "$_update_parent_owner" = "$_update_parent_uid" ] || return 1
+	# A sticky shared root protects entries owned by this updater from ordinary
+	# users. Otherwise group/other write permission would let them rename the
+	# transaction directory after it has been checked.
+	awk -v m="$_update_parent_mode" 'BEGIN {
+		w = (substr(m,6,1) == "w" || substr(m,9,1) == "w")
+		s = (substr(m,10,1) == "t" || substr(m,10,1) == "T")
+		exit (w && !s) ? 1 : 0
+	}'
+}
+
+update_prepare_private_workspace() {
+	UPDATE_TMP_BASE_CREATED="0"
+	UPDATE_TMP_BASE_PRIVATE="0"
+	# Preserve historical creation of the shared root, but never change its
+	# permissions. Its owner and write boundary are checked before use.
+	if [ ! -d "$TMP_DIR" ] && [ ! -L "$TMP_DIR" ]; then
+		(umask 022; mkdir -p "$TMP_DIR") 2>/dev/null || {
+			warn -c cli,vlan "Could not create the shared temporary root for Update"
+			return 1
+		}
+	fi
+	update_private_parent_safe "$TMP_DIR" || {
+		warn -c cli,vlan "Shared temporary root is unsafe for a private Update workspace"
+		return 1
+	}
+	(umask 077; mkdir "$TMP_BASE") 2>/dev/null || {
+		warn -c cli,vlan "Could not create a fresh private Update workspace"
+		return 1
+	}
+	UPDATE_TMP_BASE_CREATED="1"
+	update_private_directory_valid "$TMP_BASE" || {
+		warn -c cli,vlan "Update workspace is not a private updater-owned 0700 directory"
+		return 1
+	}
+	(umask 077; mkdir "$STAGE_DIR" "$BACKUP_DIR") 2>/dev/null || {
+		warn -c cli,vlan "Could not create private Update staging and backup directories"
+		return 1
+	}
+	update_private_directory_valid "$STAGE_DIR" &&
+		update_private_directory_valid "$BACKUP_DIR" || {
+			warn -c cli,vlan "Update staging or backup directory is not private"
+			return 1
+		}
+	UPDATE_TMP_BASE_PRIVATE="1"
+	return 0
+}
+# PRIVATE UPDATE WORKSPACE END
 
 update_remove_jffs_stage() {
 	_update_stage_path="$1"
@@ -700,7 +810,10 @@ update_tree_valid() {
 update_stage_core_valid() {
 	_update_stage_root="$1"
 	_update_stage_missing=0
-	[ ! -L "$_update_stage_root" ] && [ -d "$_update_stage_root" ] || return 1
+	if [ -L "$_update_stage_root" ] || [ ! -d "$_update_stage_root" ]; then
+		warn -c cli,vlan "Core validation failed: stage root is not a regular directory"
+		return 1
+	fi
 	for _update_stage_required in $CORE_STAGE_FILES; do
 		if [ -L "$_update_stage_root/$_update_stage_required" ] || [ ! -f "$_update_stage_root/$_update_stage_required" ]; then
 			warn -c cli,vlan "Missing core file in stage: $_update_stage_required"
@@ -714,12 +827,30 @@ update_stage_core_valid() {
 		fi
 	done
 	[ "$_update_stage_missing" -eq 0 ] || return 1
-	[ -f "$_update_stage_root/settings/lib_full_uninstall.sh" ] && [ ! -L "$_update_stage_root/settings/lib_full_uninstall.sh" ] &&
-		/bin/sh -n "$_update_stage_root/settings/lib_full_uninstall.sh" &&
-		grep -Fx '# Full helper protocol: full-uninstall-v1' "$_update_stage_root/settings/lib_full_uninstall.sh" >/dev/null &&
-	[ "$(LC_ALL=C ls -ldn "$_update_stage_root/functions/mervlan_full_cleanup.sh" | awk '{print $1}')" = -rwxr-xr-x ] &&
-		/bin/sh -n "$_update_stage_root/functions/mervlan_full_cleanup.sh" &&
-		grep -q '^# Cleaner protocol: phase6-v1$' "$_update_stage_root/functions/mervlan_full_cleanup.sh"
+	# Required-path checks above also reject symlinks. Report each remaining
+	# hard predicate explicitly rather than describing every failure as missing.
+	if ! /bin/sh -n "$_update_stage_root/settings/lib_full_uninstall.sh" 2>/dev/null; then
+		warn -c cli,vlan "Core validation failed: settings/lib_full_uninstall.sh failed shell syntax validation"
+		return 1
+	fi
+	if ! grep -Fx '# Full helper protocol: full-uninstall-v1' "$_update_stage_root/settings/lib_full_uninstall.sh" >/dev/null; then
+		warn -c cli,vlan "Core validation failed: settings/lib_full_uninstall.sh Full helper protocol marker missing (expected full-uninstall-v1)"
+		return 1
+	fi
+	_update_cleaner_mode=$(LC_ALL=C ls -ldn "$_update_stage_root/functions/mervlan_full_cleanup.sh" 2>/dev/null | awk '{print $1}')
+	if [ "$_update_cleaner_mode" != -rwxr-xr-x ]; then
+		warn -c cli,vlan "Core validation failed: functions/mervlan_full_cleanup.sh mode is ${_update_cleaner_mode:-unobservable}; expected -rwxr-xr-x (0755)"
+		return 1
+	fi
+	if ! /bin/sh -n "$_update_stage_root/functions/mervlan_full_cleanup.sh" 2>/dev/null; then
+		warn -c cli,vlan "Core validation failed: functions/mervlan_full_cleanup.sh failed shell syntax validation"
+		return 1
+	fi
+	if ! grep -q '^# Cleaner protocol: phase6-v1$' "$_update_stage_root/functions/mervlan_full_cleanup.sh"; then
+		warn -c cli,vlan "Core validation failed: functions/mervlan_full_cleanup.sh cleaner protocol marker missing (expected phase6-v1)"
+		return 1
+	fi
+	return 0
 }
 # CORE STAGE VALIDATOR END
 
@@ -1252,6 +1383,10 @@ update_abort_node_pool() {
 cleanup_tmp() {
 	_update_cleanup_rc=$?
 	_update_cleanup_failed=0
+	# Do not pass the frozen archive descriptor into rollback or worker cleanup.
+	if type update_close_stable_archive >/dev/null 2>&1; then
+		update_close_stable_archive || _update_cleanup_failed=1
+	fi
 	_update_pool_cleanup_ready="1"
 	# A signal-path abort failure means rollback was intentionally skipped.
 	# EXIT cleanup must preserve that decision rather than retrying into a
@@ -1282,8 +1417,13 @@ cleanup_tmp() {
 		if [ "$UPDATE_PRESERVE_JFFS" != "1" ] && [ "$UPDATE_ACTIVATION_STARTED" != "1" ]; then
 			update_remove_jffs_stage "$UPDATE_JFFS_OLD" || _update_cleanup_failed=1
 		fi
-		if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ -n "$TMP_BASE" ] && [ -d "$TMP_BASE" ]; then
+		if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ "$UPDATE_TMP_BASE_PRIVATE" = "1" ] &&
+		   update_private_directory_valid "$TMP_BASE"; then
 			rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
+		elif [ "$UPDATE_TMP_BASE_CREATED" = "1" ]; then
+			UPDATE_PRESERVE_TMP="1"
+			_update_cleanup_failed=1
+			warn -c cli,vlan "Preserving Update workspace because its private ownership could not be reauthenticated"
 		fi
 		if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ] &&
 		   [ "${UPDATE_SUCCESS_FINALIZING:-0}" != "1" ] &&
@@ -1638,7 +1778,242 @@ download_update_archive() {
 	return 1
 }
 
+# UPDATE ARCHIVE EXTRACTION BEGIN
+update_file_mode_string() {
+	LC_ALL=C ls -ldn "$1" 2>/dev/null | awk 'NR == 1 { print $1 }'
+}
+
+update_normalize_archive_cleaner() {
+	_update_norm_base="$1"
+	_update_norm_tree="$2"
+	_update_norm_source_mode="$3"
+	_update_norm_functions="$_update_norm_tree/functions"
+	_update_norm_cleaner="$_update_norm_functions/mervlan_full_cleanup.sh"
+	_update_norm_quarantine="$_update_norm_base/.cleaner-normalize"
+	_update_norm_input="$_update_norm_quarantine/archive-cleaner"
+	_update_norm_canonical="$_update_norm_quarantine/canonical-cleaner"
+	if [ -L "$_update_norm_base" ] || [ ! -d "$_update_norm_base" ] ||
+	   [ -L "$_update_norm_tree" ] || [ ! -d "$_update_norm_tree" ] ||
+	   [ -L "$_update_norm_functions" ] || [ ! -d "$_update_norm_functions" ]; then
+		warn -c cli,vlan "Cleaner quarantine path unsafe: extraction parents are not regular directories"
+		return 1
+	fi
+	if [ ! -e "$_update_norm_cleaner" ] && [ ! -L "$_update_norm_cleaner" ]; then
+		warn -c cli,vlan "Cleaner quarantine path unsafe: extracted cleaner entry is missing"
+		return 1
+	fi
+	if [ -e "$_update_norm_quarantine" ] || [ -L "$_update_norm_quarantine" ]; then
+		warn -c cli,vlan "Cleaner quarantine path unsafe: normalization directory already exists"
+		return 1
+	fi
+	(umask 077; mkdir "$_update_norm_quarantine") 2>/dev/null || {
+		warn -c cli,vlan "Cleaner quarantine path unsafe: could not create normalization directory"
+		return 1
+	}
+	update_private_directory_valid "$_update_norm_quarantine" || {
+		warn -c cli,vlan "Cleaner quarantine path unsafe: normalization directory is not private"
+		return 1
+	}
+	# rename moves a leaf symlink itself into the private quarantine. No chmod
+	# is ever issued against an archive-derived path.
+	mv "$_update_norm_cleaner" "$_update_norm_input" 2>/dev/null || {
+		warn -c cli,vlan "Cleaner quarantine path unsafe: could not move cleaner entry into quarantine"
+		return 1
+	}
+	if [ -e "$_update_norm_cleaner" ] || [ -L "$_update_norm_cleaner" ]; then
+		warn -c cli,vlan "Cleaner quarantine path unsafe: an unexpected entry appeared during quarantine"
+		return 1
+	fi
+	if [ -L "$_update_norm_input" ] || [ ! -f "$_update_norm_input" ]; then
+		warn -c cli,vlan "Cleaner quarantine object is not a regular non-symlink file"
+		return 1
+	fi
+	_update_norm_mode=$(update_file_mode_string "$_update_norm_input")
+	case "$UPDATE_ARCHIVE_CLEANER_MODE:$_update_norm_source_mode:$_update_norm_mode" in
+		0755:0755:-rwxr-xr-x|0775:0775:-rwxr-xr-x|0775:0775:-rwxrwxr-x) : ;;
+		*)
+			warn -c cli,vlan "Cleaner quarantine object mode $_update_norm_mode is invalid for admitted archive mode $UPDATE_ARCHIVE_CLEANER_MODE"
+			return 1 ;;
+	esac
+	if [ -e "$_update_norm_canonical" ] || [ -L "$_update_norm_canonical" ]; then
+		warn -c cli,vlan "Could not create canonical cleaner: destination already exists"
+		return 1
+	fi
+	(umask 077; set -C; cat "$_update_norm_input" >"$_update_norm_canonical") 2>/dev/null || {
+		warn -c cli,vlan "Could not create canonical cleaner"
+		return 1
+	}
+	if [ -L "$_update_norm_canonical" ] || [ ! -f "$_update_norm_canonical" ]; then
+		warn -c cli,vlan "Could not create canonical cleaner: result is not a regular file"
+		return 1
+	fi
+	chmod 0755 "$_update_norm_canonical" 2>/dev/null || {
+		warn -c cli,vlan "Canonical cleaner mode verification failed: could not set updater-created file to 0755"
+		return 1
+	}
+	if [ "$(update_file_mode_string "$_update_norm_canonical")" != -rwxr-xr-x ] ||
+	   ! cmp -s "$_update_norm_input" "$_update_norm_canonical"; then
+		warn -c cli,vlan "Canonical cleaner mode verification failed: mode or copied bytes differ"
+		return 1
+	fi
+	if ! /bin/sh -n "$_update_norm_canonical" 2>/dev/null; then
+		warn -c cli,vlan "Canonical cleaner failed shell syntax validation"
+		return 1
+	fi
+	if ! grep -q '^# Cleaner protocol: phase6-v1$' "$_update_norm_canonical"; then
+		warn -c cli,vlan "Canonical cleaner protocol marker missing (expected phase6-v1)"
+		return 1
+	fi
+	if [ -L "$_update_norm_base" ] || [ ! -d "$_update_norm_base" ] ||
+	   [ -L "$_update_norm_tree" ] || [ ! -d "$_update_norm_tree" ] ||
+	   [ -L "$_update_norm_functions" ] || [ ! -d "$_update_norm_functions" ] ||
+	   [ -e "$_update_norm_cleaner" ] || [ -L "$_update_norm_cleaner" ]; then
+		warn -c cli,vlan "Cleaner quarantine path unsafe before atomic publication"
+		return 1
+	fi
+	mv "$_update_norm_canonical" "$_update_norm_cleaner" 2>/dev/null || {
+		warn -c cli,vlan "Could not atomically publish canonical cleaner"
+		return 1
+	}
+	if [ -L "$_update_norm_cleaner" ] || [ ! -f "$_update_norm_cleaner" ] ||
+	   [ "$(update_file_mode_string "$_update_norm_cleaner")" != -rwxr-xr-x ] ||
+	   ! cmp -s "$_update_norm_input" "$_update_norm_cleaner"; then
+		warn -c cli,vlan "Canonical cleaner publication verification failed"
+		return 1
+	fi
+	return 0
+}
+
+update_extract_archive() (
+	# Archive authority is the validated open object in this updater process,
+	# never the original path, which was unlinked before admission.
+	if [ "$$" != "$_update_archive_validated_pid" ] ||
+	   [ "$1" != "$_update_archive_validated_base" ] ||
+	   [ "$2" != "$_update_archive_validated_format" ] ||
+	   [ "$UPDATE_ARCHIVE_TOPDIR" != "$_update_archive_validated_root" ]; then
+		warn -c cli,vlan "Archive extraction identity no longer matches successful admission"
+		return 1
+	fi
+	if [ "${UPDATE_ARCHIVE_FD:-}" != 9 ] ||
+	   [ "$UPDATE_ARCHIVE_FD_PATH" != "/proc/$$/fd/9" ] ||
+	   [ "$UPDATE_ARCHIVE_FD_PID" != "$$" ] ||
+	   [ ! -f "$UPDATE_ARCHIVE_FD_PATH" ]; then
+		warn -c cli,vlan "Archive stable object became unavailable"
+		return 1
+	fi
+	update_private_directory_valid "$1" || {
+		warn -c cli,vlan "Archive extraction identity no longer matches admission: transaction workspace is not private"
+		return 1
+	}
+	case "$UPDATE_ARCHIVE_CLEANER_MODE" in 0755|0775) ;; *)
+		warn -c cli,vlan "Archive extraction refused: cleaner archive mode is unverified"
+		return 1 ;;
+	esac
+	[ -d "/proc/$$/fd" ] || {
+		warn -c cli,vlan "Archive extraction identity unavailable: /proc file descriptors are required"
+		return 1
+	}
+	_update_archive_tree_candidate="$1/$UPDATE_ARCHIVE_TOPDIR"
+	if [ -e "$_update_archive_tree_candidate" ] || [ -L "$_update_archive_tree_candidate" ]; then
+		warn -c cli,vlan "Archive extraction refused: destination root already exists in private workspace"
+		return 1
+	fi
+	case "$2" in
+		raw) (umask 022; tar -xf "$UPDATE_ARCHIVE_FD_PATH" -C "$1") || return 1 ;;
+		gzip) (umask 022; tar -xzf "$UPDATE_ARCHIVE_FD_PATH" -C "$1") || return 1 ;;
+		*) return 1 ;;
+	esac
+	# This function runs in a subshell. Close its inherited descriptor copy
+	# before normalization helpers spawn utilities; the parent closes its copy
+	# immediately after this function returns.
+	update_close_stable_archive || return 1
+	_update_archive_tree="$1/$UPDATE_ARCHIVE_TOPDIR"
+	update_normalize_archive_cleaner "$1" "$_update_archive_tree" "$UPDATE_ARCHIVE_CLEANER_MODE" || return 1
+)
+# UPDATE ARCHIVE EXTRACTION END
+
 # LOCAL ARCHIVE HELPERS BEGIN
+# Internal admission records cannot originate in an inherited environment.
+UPDATE_ARCHIVE_CLEANER_MODE=""
+UPDATE_ARCHIVE_FD=""
+UPDATE_ARCHIVE_FD_PID=""
+UPDATE_ARCHIVE_FD_PATH=""
+UPDATE_ARCHIVE_FORMAT=""
+UPDATE_ARCHIVE_RAW_READY="0"
+UPDATE_RAW_ARCHIVE_KB=""
+_update_archive_validated_base=""
+_update_archive_validated_format=""
+_update_archive_validated_root=""
+_update_archive_validated_pid=""
+# Retained as an empty compatibility marker only; path equality grants no
+# authority to the stable descriptor and this value is never consumed.
+_update_archive_validated_input=""
+
+update_close_stable_archive() {
+	case "${UPDATE_ARCHIVE_FD:-}" in
+		"") return 0 ;;
+		9) exec 9<&- ;;
+		*) warn -c cli,vlan "Could not close stable archive object: unexpected descriptor identity"; return 1 ;;
+	esac
+	UPDATE_ARCHIVE_FD=""
+	UPDATE_ARCHIVE_FD_PID=""
+	UPDATE_ARCHIVE_FD_PATH=""
+	return 0
+}
+
+update_freeze_archive_object() {
+	_update_freeze_input="$1"
+	[ "$_update_freeze_input" = "$ARCHIVE" ] ||
+		[ "$_update_freeze_input" = "$RAW_ARCHIVE" ] || {
+			warn -c cli,vlan "Could not freeze archive into private transaction object: unexpected path"
+			return 1
+		}
+	update_private_directory_valid "$TMP_BASE" || {
+		warn -c cli,vlan "Could not freeze archive into private transaction object: workspace is unsafe"
+		return 1
+	}
+	[ -d "/proc/$$/fd" ] || {
+		warn -c cli,vlan "Could not open stable archive object: /proc file descriptors are unavailable"
+		return 1
+	}
+	if [ -e "/proc/$$/fd/9" ] || [ -L "/proc/$$/fd/9" ]; then
+		warn -c cli,vlan "Could not open stable archive object: reserved descriptor 9 is already in use"
+		return 1
+	fi
+	if [ -L "$_update_freeze_input" ] || [ ! -f "$_update_freeze_input" ] || [ ! -s "$_update_freeze_input" ]; then
+		warn -c cli,vlan "Could not freeze archive into private transaction object: source is not a nonempty regular file"
+		return 1
+	fi
+	exec 9<"$_update_freeze_input" || {
+		warn -c cli,vlan "Could not open stable archive object"
+		return 1
+	}
+	UPDATE_ARCHIVE_FD="9"
+	UPDATE_ARCHIVE_FD_PID="$$"
+	UPDATE_ARCHIVE_FD_PATH="/proc/$$/fd/9"
+	[ -f "$UPDATE_ARCHIVE_FD_PATH" ] || {
+		update_close_stable_archive || :
+		warn -c cli,vlan "Stable archive object is not a regular file"
+		return 1
+	}
+	rm -f "$_update_freeze_input" 2>/dev/null || {
+		update_close_stable_archive || :
+		warn -c cli,vlan "Could not unpublish frozen archive pathname"
+		return 1
+	}
+	if [ -e "$_update_freeze_input" ] || [ -L "$_update_freeze_input" ]; then
+		update_close_stable_archive || :
+		warn -c cli,vlan "Archive stable object became unavailable: original pathname remains published"
+		return 1
+	fi
+	[ -f "$UPDATE_ARCHIVE_FD_PATH" ] || {
+		update_close_stable_archive || :
+		warn -c cli,vlan "Archive stable object became unavailable after pathname removal"
+		return 1
+	}
+	return 0
+}
+
 acquire_local_update_archive() {
 	_update_local_source="$1"
 	_update_local_dest="$2"
@@ -1646,72 +2021,184 @@ acquire_local_update_archive() {
 	case "$_update_local_source" in /*) ;; *) return 1 ;; esac
 	[ -L "$_update_local_source" ] && return 1
 	[ -f "$_update_local_source" ] && [ -s "$_update_local_source" ] || return 1
-	rm -f "$_update_local_dest" "$_update_local_part" 2>/dev/null || return 1
-	cp -p "$_update_local_source" "$_update_local_part" 2>/dev/null || {
+	update_private_directory_valid "$TMP_BASE" || return 1
+	[ ! -e "$_update_local_dest" ] && [ ! -L "$_update_local_dest" ] &&
+		[ ! -e "$_update_local_part" ] && [ ! -L "$_update_local_part" ] || return 1
+	(umask 077; cp "$_update_local_source" "$_update_local_part") 2>/dev/null || {
 		rm -f "$_update_local_part" 2>/dev/null || :
 		return 1
 	}
-	[ -s "$_update_local_part" ] && mv -f "$_update_local_part" "$_update_local_dest" 2>/dev/null || {
+	[ -L "$_update_local_part" ] && return 1
+	[ -f "$_update_local_part" ] && [ -s "$_update_local_part" ] || return 1
+	mv "$_update_local_part" "$_update_local_dest" 2>/dev/null || {
 		rm -f "$_update_local_part" 2>/dev/null || :
 		return 1
 	}
 	return 0
 }
 
-# Validate the archive member list before extraction. BusyBox tar renders a
-# hardlink as a normal-file listing with " -> target", while symlinks start
-# with `l`; reject both formats rather than resolving link targets.
-validate_update_archive_members() {
-	_update_archive="$1"
-	_update_members="$TMP_BASE/archive.members.$$"
-	_update_verbose="$TMP_BASE/archive.verbose.$$"
-	_update_seen="$TMP_BASE/archive.seen.$$"
-	UPDATE_ARCHIVE_TOPDIR=""
-	UPDATE_ARCHIVE_RAW_READY="0"
-	rm -f "$_update_members" "$_update_verbose" "$_update_seen" "$RAW_ARCHIVE" 2>/dev/null || return 1
-
-	if tar -tzf "$_update_archive" >"$_update_members" 2>/dev/null &&
-	   tar -tvzf "$_update_archive" >"$_update_verbose" 2>/dev/null; then
-		:
-	else
-		gzip -dc "$_update_archive" >"$RAW_ARCHIVE" 2>/dev/null || return 1
-		tar -tf "$RAW_ARCHIVE" >"$_update_members" 2>/dev/null &&
-			tar -tvf "$RAW_ARCHIVE" >"$_update_verbose" 2>/dev/null || return 1
-		UPDATE_ARCHIVE_RAW_READY="1"
+update_archive_listing_from_fd() {
+	_update_members="$TMP_BASE/.archive.members"
+	_update_verbose="$TMP_BASE/.archive.verbose"
+	[ ! -e "$_update_members" ] && [ ! -L "$_update_members" ] &&
+		[ ! -e "$_update_verbose" ] && [ ! -L "$_update_verbose" ] || {
+			warn -c cli,vlan "Archive stable object listing workspace contains unexpected files"
+			return 1
+		}
+	(umask 077; : >"$_update_members" && : >"$_update_verbose") || return 1
+	if tar -tzf "$UPDATE_ARCHIVE_FD_PATH" >"$_update_members" 2>/dev/null &&
+	   tar -tvzf "$UPDATE_ARCHIVE_FD_PATH" >"$_update_verbose" 2>/dev/null; then
+		UPDATE_ARCHIVE_FORMAT="gzip"
+		UPDATE_ARCHIVE_RAW_READY="0"
+		return 0
 	fi
+	if [ -e "$RAW_ARCHIVE" ] || [ -L "$RAW_ARCHIVE" ]; then
+		warn -c cli,vlan "Could not prepare private raw archive fallback: destination already exists"
+		return 1
+	fi
+	gzip -dc "$UPDATE_ARCHIVE_FD_PATH" >"$RAW_ARCHIVE" 2>/dev/null || {
+		warn -c cli,vlan "Could not decompress stable archive object for raw fallback"
+		return 1
+	}
+	UPDATE_RAW_ARCHIVE_KB=$(update_path_size_kb "$RAW_ARCHIVE")
+	case "$UPDATE_RAW_ARCHIVE_KB" in ''|0|*[!0-9]*)
+		warn -c cli,vlan "Could not measure private raw archive fallback"
+		return 1 ;;
+	esac
+	update_close_stable_archive || return 1
+	update_freeze_archive_object "$RAW_ARCHIVE" || return 1
+	: >"$_update_members" || return 1
+	: >"$_update_verbose" || return 1
+	tar -tf "$UPDATE_ARCHIVE_FD_PATH" >"$_update_members" 2>/dev/null &&
+		tar -tvf "$UPDATE_ARCHIVE_FD_PATH" >"$_update_verbose" 2>/dev/null || return 1
+	UPDATE_ARCHIVE_FORMAT="raw"
+	UPDATE_ARCHIVE_RAW_READY="1"
+	return 0
+}
 
+update_validate_archive_listing() {
+	_update_members="$1"
+	_update_verbose="${_update_members%.members}.verbose"
+	_update_seen="$TMP_BASE/.archive.seen"
 	[ -s "$_update_members" ] || return 1
-	: >"$_update_seen" || return 1
+	[ ! -e "$_update_seen" ] && [ ! -L "$_update_seen" ] || return 1
+	(umask 077; : >"$_update_seen") || return 1
 	_update_member_count=0
-	while IFS= read -r _update_member || [ -n "$_update_member" ]; do
-		_update_member_normalized="$_update_member"
-		case "$_update_member_normalized" in */) _update_member_normalized=${_update_member_normalized%/} ;; esac
-		case "$_update_member_normalized" in
-			''|/*|*'\\'*|*//*|*' '*|*'	'*|*..*|.|./*|*/.|*/./*|..|../*|*/..|*/../*|*[!A-Za-z0-9._/-]*) return 1 ;;
-		esac
-		_update_member_root="${_update_member_normalized%%/*}"
-		case "$_update_member_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
-		if [ -z "$UPDATE_ARCHIVE_TOPDIR" ]; then
-			UPDATE_ARCHIVE_TOPDIR="$_update_member_root"
-		elif [ "$UPDATE_ARCHIVE_TOPDIR" != "$_update_member_root" ]; then
+	_update_cleaner_count=0
+	_update_cleaner_source_mode=""
+	UPDATE_ARCHIVE_TOPDIR=""
+	# Both tar listings preserve archive order. Pair by row and exact member
+	# name, reading only the leading permission token; metadata columns vary
+	# between BusyBox and GNU tar and are intentionally not interpreted.
+	{
+		while IFS= read -r _update_member || [ -n "$_update_member" ]; do
+			_update_verbose_line=""
+			IFS= read -r _update_verbose_line <&3 || [ -n "$_update_verbose_line" ] || return 1
+			_update_member_normalized="$_update_member"
+			case "$_update_member_normalized" in */) _update_member_normalized=${_update_member_normalized%/} ;; esac
+			case "$_update_member_normalized" in
+				''|/*|*'\\'*|*//*|*' '*|*'	'*|*..*|.|./*|*/.|*/./*|..|../*|*/..|*/../*|*[!A-Za-z0-9._/-]*) return 1 ;;
+			esac
+			_update_member_root="${_update_member_normalized%%/*}"
+			case "$_update_member_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+			if [ -z "$UPDATE_ARCHIVE_TOPDIR" ]; then
+				UPDATE_ARCHIVE_TOPDIR="$_update_member_root"
+			elif [ "$UPDATE_ARCHIVE_TOPDIR" != "$_update_member_root" ]; then
+				return 1
+			fi
+			case "$_update_member_normalized" in
+				"$UPDATE_ARCHIVE_TOPDIR"|"$UPDATE_ARCHIVE_TOPDIR"/*) : ;;
+				*) return 1 ;;
+			esac
+			grep -Fqx "$_update_member_normalized" "$_update_seen" 2>/dev/null && return 1
+			printf '%s\n' "$_update_member_normalized" >>"$_update_seen" || return 1
+			_update_member_count=$((_update_member_count + 1))
+			[ "$_update_member_count" -le 4096 ] || return 1
+			_update_verbose_mode="${_update_verbose_line%%[ 	]*}"
+			case "$_update_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
+			_update_verbose_name="${_update_verbose_line##*[ 	]}"
+			[ "$_update_verbose_name" = "$_update_member" ] || return 1
+			case "$_update_verbose_mode" in -*) ;; d*) ;; *) return 1 ;; esac
+			if [ "$_update_member" = "$UPDATE_ARCHIVE_TOPDIR/functions/mervlan_full_cleanup.sh" ]; then
+				_update_cleaner_count=$((_update_cleaner_count + 1))
+				case "$_update_verbose_mode" in
+					-rwxr-xr-x) _update_cleaner_source_mode=0755 ;;
+					-rwxrwxr-x) _update_cleaner_source_mode=0775 ;;
+					*)
+						_update_bad_mode=$(printf '%s\n' "$_update_verbose_mode" | awk '
+							length($0) != 10 { print "unrecognized"; next }
+							{ n=0; for (i=2;i<=10;i++) {
+								c=substr($0,i,1); n=n*2+(c != "-" && c != "S" && c != "T");
+								if (c=="s" || c=="S") n_special += (i==4 ? 2048 : 1024);
+								if (c=="t" || c=="T") n_special += 512;
+							} printf "%04o\n",n+n_special }
+						')
+						warn -c cli,vlan "Archive cleaner mode invalid: $_update_bad_mode; expected 0755 or known codeload 0775"
+						return 1 ;;
+				esac
+			fi
+		done
+		_update_verbose_line=""
+		if IFS= read -r _update_verbose_line <&3 || [ -n "$_update_verbose_line" ]; then
 			return 1
 		fi
-		case "$_update_member_normalized" in
-			"$UPDATE_ARCHIVE_TOPDIR"|"$UPDATE_ARCHIVE_TOPDIR"/*) : ;;
-			*) return 1 ;;
-		esac
-		grep -Fqx "$_update_member_normalized" "$_update_seen" 2>/dev/null && return 1
-		printf '%s\n' "$_update_member_normalized" >>"$_update_seen" || return 1
-		_update_member_count=$((_update_member_count + 1))
-		[ "$_update_member_count" -le 4096 ] || return 1
-	done <"$_update_members"
+	} 3<"$_update_verbose" <"$_update_members"
 	[ -n "$UPDATE_ARCHIVE_TOPDIR" ] || return 1
+	if [ "$_update_cleaner_count" -ne 1 ]; then
+		warn -c cli,vlan "Archive cleaner member missing; expected exactly one functions/mervlan_full_cleanup.sh"
+		return 1
+	fi
+	UPDATE_ARCHIVE_CLEANER_MODE="$_update_cleaner_source_mode"
+	return 0
+}
 
-	while IFS= read -r _update_verbose_line || [ -n "$_update_verbose_line" ]; do
-		_update_verbose_type=$(printf '%s' "$_update_verbose_line" | cut -c1)
-		case "$_update_verbose_type" in -|d) ;; *) return 1 ;; esac
-		case "$_update_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
-	done <"$_update_verbose"
+# Validate before extraction. The archive path is opened and then unlinked;
+# every listing and extraction operation addresses the held object through the
+# updater's proc descriptor. Recreating the old name cannot change these bytes.
+validate_update_archive_members() {
+	_update_archive="$1"
+	update_close_stable_archive || return 1
+	UPDATE_ARCHIVE_CLEANER_MODE=""
+	UPDATE_ARCHIVE_TOPDIR=""
+	UPDATE_ARCHIVE_FORMAT=""
+	UPDATE_ARCHIVE_RAW_READY="0"
+	UPDATE_RAW_ARCHIVE_KB=""
+	_update_archive_validated_base=""
+	_update_archive_validated_format=""
+	_update_archive_validated_root=""
+	_update_archive_validated_pid=""
+	_update_archive_validated_input=""
+	[ "$_update_archive" = "$ARCHIVE" ] || return 1
+	_update_members="$TMP_BASE/.archive.members"
+	_update_verbose="$TMP_BASE/.archive.verbose"
+	_update_seen="$TMP_BASE/.archive.seen"
+	[ ! -e "$_update_members" ] && [ ! -L "$_update_members" ] &&
+		[ ! -e "$_update_verbose" ] && [ ! -L "$_update_verbose" ] &&
+		[ ! -e "$_update_seen" ] && [ ! -L "$_update_seen" ] || return 1
+	update_freeze_archive_object "$_update_archive" || return 1
+	if ! update_archive_listing_from_fd; then
+		update_close_stable_archive || :
+		rm -f "$_update_members" "$_update_verbose" "$_update_seen" 2>/dev/null || :
+		return 1
+	fi
+	if ! update_validate_archive_listing "$_update_members"; then
+		update_close_stable_archive || :
+		rm -f "$_update_members" "$_update_verbose" "$_update_seen" 2>/dev/null || :
+		UPDATE_ARCHIVE_CLEANER_MODE=""
+		UPDATE_ARCHIVE_TOPDIR=""
+		UPDATE_ARCHIVE_FORMAT=""
+		UPDATE_ARCHIVE_RAW_READY="0"
+		return 1
+	fi
+	rm -f "$_update_members" "$_update_verbose" "$_update_seen" 2>/dev/null || {
+		update_close_stable_archive || :
+		UPDATE_ARCHIVE_CLEANER_MODE=""
+		return 1
+	}
+	_update_archive_validated_base="$TMP_BASE"
+	_update_archive_validated_format="$UPDATE_ARCHIVE_FORMAT"
+	_update_archive_validated_root="$UPDATE_ARCHIVE_TOPDIR"
+	_update_archive_validated_pid="$$"
 	return 0
 }
 # LOCAL ARCHIVE HELPERS END
@@ -1750,8 +2237,8 @@ fi
 
 update_check_jffs_health || fail_update jffs_health "JFFS health/read-write check failed; Update was stopped before mutation"
 
-mkdir -p "$TMP_BASE" "$STAGE_DIR" "$BACKUP_DIR" 2>/dev/null || \
-	fail_update workspace "Failed to prepare temporary workspace at $TMP_BASE"
+update_prepare_private_workspace || \
+	fail_update workspace "Failed to prepare a private temporary Update workspace"
 
 # Updates temporarily hold the download, extracted source, stage, and updated
 # tree in RAM. Reserve enough temporary space for several copies of the current
@@ -1978,32 +2465,33 @@ else
 		fail_update downloading "Download failed after 5 attempts"
 fi
 
-# Never extract a locally supplied (or remotely acquired) archive until its
-# complete member list, single root, and BusyBox link representation are safe.
-if ! validate_update_archive_members "$ARCHIVE"; then
-	fail_update extracting "Archive failed pre-extraction path or link validation"
-fi
-
-# The archive is the first large RAM allocation. The original check above is
-# only a conservative baseline; refresh it with the actual compressed size and
-# reserve room for the current tree plus the expanded/staged copy before tar
-# starts writing into /tmp.
+# Save the downloaded/copy size before its pathname is unpublished. It is a
+# space estimate only; archive admission and extraction use the held object.
 UPDATE_ARCHIVE_KB=$(update_path_size_kb "$ARCHIVE")
 case "$UPDATE_ARCHIVE_KB" in ''|0) fail_update downloading "Downloaded archive size could not be measured" ;; esac
+
+# Never extract a locally supplied (or remotely acquired) archive until its
+# complete member list, single root, link representation, and cleaner mode are
+# validated through the same open object later consumed by tar.
+if ! validate_update_archive_members "$ARCHIVE"; then
+	fail_update extracting "Archive failed pre-extraction member or cleaner mode validation"
+fi
+
+# The archive is the first large RAM allocation. Reserve room for the current
+# tree plus the expanded/staged copy before tar starts writing into /tmp.
 update_require_space_kb "$TMP_DIR" "$((UPDATE_CURRENT_KB * 2))" "archive and extraction workspace"
 
 info -c cli,vlan "Extracting archive into staging area"
 update_record_phase extracting || fail_update journal "Could not persist the extracting Update journal"
 if [ "${UPDATE_ARCHIVE_RAW_READY:-0}" = "1" ]; then
 	info -c cli,vlan "tar gzip support unavailable; using checked gzip-to-RAM fallback"
-	UPDATE_RAW_ARCHIVE_KB=$(update_path_size_kb "$RAW_ARCHIVE")
 	case "$UPDATE_RAW_ARCHIVE_KB" in ''|0) fail_update extracting "Decompressed archive size could not be measured" ;; esac
 	update_require_space_kb "$TMP_DIR" "$((UPDATE_CURRENT_KB * 2))" "checked gzip extraction workspace"
-	tar -xf "$RAW_ARCHIVE" -C "$TMP_BASE" || fail_update extracting "Failed to extract decompressed archive"
-	update_cleanup_files "$RAW_ARCHIVE" || fail_update extracting "Could not remove the checked gzip fallback archive"
+	update_extract_archive "$TMP_BASE" raw || fail_update extracting "Failed to extract decompressed archive"
 else
-	tar -xzf "$ARCHIVE" -C "$TMP_BASE" || fail_update extracting "Failed to extract archive"
+	update_extract_archive "$TMP_BASE" gzip || fail_update extracting "Failed to extract archive"
 fi
+update_close_stable_archive || fail_update extracting "Could not close stable archive object after extraction"
 
 topdir="$TMP_BASE/$UPDATE_ARCHIVE_TOPDIR"
 [ -d "$topdir" ] || fail_update extracting "Archive root did not extract as one directory"
@@ -2041,7 +2529,7 @@ update_require_space_kb "$TMP_DIR" "$UPDATE_CURRENT_KB" "validated stage and rol
 
 info -c cli,vlan "Validating staged files"
 update_stage_core_valid "$STAGE_DIR" || \
-	fail_update validating "Validation failed; downloaded archive is missing core MerVLAN files. Include validation and file warnings when reporting this issue."
+	fail_update validating "Validation failed; downloaded archive failed core MerVLAN validation. Include preceding validation warnings when reporting this issue."
 
 for optional in $OPTIONAL_STAGE_FILES; do
 	if [ ! -f "$STAGE_DIR/$optional" ]; then

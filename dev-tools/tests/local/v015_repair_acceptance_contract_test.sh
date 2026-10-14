@@ -241,8 +241,16 @@ pass 'exact v0.53.15 protected-state repair and control-plane recovery'
 # check available on a host: archive validation plus complete core-stage
 # qualification, followed by shell syntax checks above.
 HELPERS="$CASE/updater-helpers.sh"
+extract_function "$OLD/functions/update_mervlan.sh" update_private_directory_valid \
+    "$CASE/update-private-directory-valid.sh" || fail 'updater private-workspace helper extraction failed'
+extract_function "$OLD/functions/update_mervlan.sh" update_uid_from_status \
+    "$CASE/update-uid-from-status.sh" || fail 'updater UID parser extraction failed'
+extract_function "$OLD/functions/update_mervlan.sh" update_effective_uid \
+    "$CASE/update-effective-uid.sh" || fail 'updater effective-UID extraction failed'
+cat "$CASE/update-uid-from-status.sh" "$CASE/update-effective-uid.sh" \
+    "$CASE/update-private-directory-valid.sh" >"$HELPERS"
 sed -n '/^# LOCAL ARCHIVE HELPERS BEGIN$/,/^# LOCAL ARCHIVE HELPERS END$/p' \
-    "$OLD/functions/update_mervlan.sh" | sed '/^# LOCAL ARCHIVE HELPERS /d' >"$HELPERS"
+    "$OLD/functions/update_mervlan.sh" | sed '/^# LOCAL ARCHIVE HELPERS /d' >>"$HELPERS"
 sed -n '/^# CORE STAGE VALIDATOR BEGIN$/,/^# CORE STAGE VALIDATOR END$/p' \
     "$OLD/functions/update_mervlan.sh" | sed '/^# CORE STAGE VALIDATOR /d' >>"$HELPERS"
 sed -n '/^CORE_STAGE_FILES="/,/www\/vlan_index_style.css"/p' "$OLD/functions/update_mervlan.sh" >>"$HELPERS"
@@ -250,6 +258,7 @@ sed -n '/^CORE_STAGE_DIRS=/p' "$OLD/functions/update_mervlan.sh" >>"$HELPERS"
 RUN_DIR="$CASE/updater-eligibility"
 TMP_BASE="$RUN_DIR"
 RAW_ARCHIVE="$RUN_DIR/raw.tar"
+umask 077
 mkdir -p "$RUN_DIR"
 info() { :; }
 warn() { :; }
