@@ -107,15 +107,45 @@ merv_backup_state_context_end() {
 merv_backup_state_validate_trust_file() {
   _mbs_trust_file="$1"
   _mbs_trust_workspace="$2"
-  [ ! -L "$_mbs_trust_file" ] && [ -f "$_mbs_trust_file" ] || return 1
-  type merv_ssh_trust_validate_file >/dev/null 2>&1 || return 1
-  merv_backup_state_context_begin "$_mbs_trust_workspace" "$_mbs_trust_file" || return 1
-  merv_ssh_trust_validate_file "$MERV_SSH_TRUST_FILE"
+  MERV_BACKUP_STATE_LAST_ERROR=""
+  MERV_BACKUP_STATE_CLEANUP_ERROR=0
+  [ ! -L "$_mbs_trust_file" ] && [ -f "$_mbs_trust_file" ] || {
+    MERV_BACKUP_STATE_LAST_ERROR=trust-file-invalid
+    return 1
+  }
+  type merv_ssh_trust_validate_file >/dev/null 2>&1 || {
+    MERV_BACKUP_STATE_LAST_ERROR=trust-validation-failed
+    return 1
+  }
+  if merv_backup_state_context_begin "$_mbs_trust_workspace" "$_mbs_trust_file"; then
+    :
+  else
+    _mbs_trust_rc=$?
+    MERV_BACKUP_STATE_LAST_ERROR=private-workspace-conflict
+    return "$_mbs_trust_rc"
+  fi
+  merv_ssh_trust_validate_file "$MERV_SSH_TRUST_FILE" >/dev/null 2>&1
   _mbs_trust_rc=$?
-  merv_backup_state_context_end "$_mbs_trust_rc"
-  _mbs_context_rc=$?
-  [ "$_mbs_context_rc" -eq 0 ] || return 1
-  return "$_mbs_trust_rc"
+  if merv_backup_state_context_end 0; then
+    _mbs_context_rc=0
+  else
+    _mbs_context_rc=$?
+  fi
+  if [ "$_mbs_trust_rc" -ne 0 ]; then
+    MERV_BACKUP_STATE_LAST_ERROR=trust-validation-failed
+    if [ "$_mbs_context_rc" -ne 0 ]; then
+      MERV_BACKUP_STATE_CLEANUP_ERROR="$_mbs_context_rc"
+    fi
+    return "$_mbs_trust_rc"
+  fi
+  if [ "$_mbs_context_rc" -ne 0 ]; then
+    MERV_BACKUP_STATE_LAST_ERROR=private-workspace-cleanup-failed
+    MERV_BACKUP_STATE_CLEANUP_ERROR="$_mbs_context_rc"
+    return "$_mbs_context_rc"
+  fi
+  MERV_BACKUP_STATE_LAST_ERROR=""
+  MERV_BACKUP_STATE_CLEANUP_ERROR=0
+  return 0
 }
 
 # Run the canonical node preflight against a private trust snapshot.  The
@@ -238,41 +268,77 @@ merv_backup_state_configured_nodes() {
 merv_backup_state_inject_tree() {
   _mbs_inject_tree="$1"
   _mbs_inject_settings="$2"
-  _mbs_inject_trust="${3:-}"
+  _mbs_inject_trust=""
+  if [ "$#" -ge 3 ]; then _mbs_inject_trust="$3"; fi
   _mbs_inject_workspace="$4"
-  [ ! -L "$_mbs_inject_tree" ] && [ -d "$_mbs_inject_tree" ] || return 1
-  [ -f "$_mbs_inject_settings" ] || return 1
-  merv_backup_state_path_present "$_mbs_inject_tree/$MERV_BACKUP_STATE_DIR_NAME" && return 1
-  [ -n "$_mbs_inject_workspace" ] || return 1
+  MERV_BACKUP_STATE_LAST_ERROR=backup-state-payload-failed
+  MERV_BACKUP_STATE_CLEANUP_ERROR=0
+  [ ! -L "$_mbs_inject_tree" ] && [ -d "$_mbs_inject_tree" ] || {
+    MERV_BACKUP_STATE_LAST_ERROR=private-workspace-conflict
+    return 1
+  }
+  [ -f "$_mbs_inject_settings" ] || {
+    MERV_BACKUP_STATE_LAST_ERROR=configured-nodes-invalid
+    return 1
+  }
+  merv_backup_state_path_present "$_mbs_inject_tree/$MERV_BACKUP_STATE_DIR_NAME" && {
+    MERV_BACKUP_STATE_LAST_ERROR=private-workspace-conflict
+    return 1
+  }
+  [ -n "$_mbs_inject_workspace" ] || {
+    MERV_BACKUP_STATE_LAST_ERROR=private-workspace-conflict
+    return 1
+  }
 
-  _mbs_inject_nodes=$(merv_backup_state_configured_nodes "$_mbs_inject_settings" 2>/dev/null) || return 1
+  if _mbs_inject_nodes=$(merv_backup_state_configured_nodes "$_mbs_inject_settings" 2>/dev/null); then
+    :
+  else
+    _mbs_inject_rc=$?
+    MERV_BACKUP_STATE_LAST_ERROR=configured-nodes-invalid
+    return "$_mbs_inject_rc"
+  fi
   _mbs_inject_trust_present=0
   if [ -n "$_mbs_inject_trust" ]; then
-    [ ! -L "$_mbs_inject_trust" ] || return 1
+    [ ! -L "$_mbs_inject_trust" ] || {
+      MERV_BACKUP_STATE_LAST_ERROR=trust-file-invalid
+      return 1
+    }
     if [ -f "$_mbs_inject_trust" ]; then
-      merv_backup_state_validate_trust_file "$_mbs_inject_trust" "$_mbs_inject_workspace" || return 1
-      _mbs_inject_trust_present=1
+      if merv_backup_state_validate_trust_file "$_mbs_inject_trust" "$_mbs_inject_workspace" >/dev/null 2>&1; then
+        _mbs_inject_trust_present=1
+        MERV_BACKUP_STATE_LAST_ERROR=backup-state-payload-failed
+      else
+        _mbs_inject_rc=$?
+        [ -n "$MERV_BACKUP_STATE_LAST_ERROR" ] || MERV_BACKUP_STATE_LAST_ERROR=trust-validation-failed
+        return "$_mbs_inject_rc"
+      fi
     elif merv_backup_state_path_present "$_mbs_inject_trust"; then
+      MERV_BACKUP_STATE_LAST_ERROR=trust-file-invalid
       return 1
     fi
   fi
-  [ -n "$_mbs_inject_nodes" ] && [ "$_mbs_inject_trust_present" -eq 0 ] && return 1
+  [ -n "$_mbs_inject_nodes" ] && [ "$_mbs_inject_trust_present" -eq 0 ] && {
+    MERV_BACKUP_STATE_LAST_ERROR=trust-file-invalid
+    return 1
+  }
 
   _mbs_inject_state="$_mbs_inject_tree/$MERV_BACKUP_STATE_DIR_NAME"
   _mbs_inject_trust_dir="$_mbs_inject_state/$MERV_BACKUP_STATE_TRUST_DIR_NAME"
-  mkdir -p "$_mbs_inject_state" 2>/dev/null || return 1
-  chmod 700 "$_mbs_inject_state" 2>/dev/null || return 1
+  mkdir -p "$_mbs_inject_state" 2>/dev/null || return $?
+  chmod 700 "$_mbs_inject_state" 2>/dev/null || return $?
   ( umask 077
     printf 'format=1\ntrust=%s\n' "$( [ "$_mbs_inject_trust_present" -eq 1 ] && printf present || printf absent )" \
       > "$_mbs_inject_state/$MERV_BACKUP_STATE_FORMAT_FILE_NAME"
-  ) 2>/dev/null || return 1
-  chmod 600 "$_mbs_inject_state/$MERV_BACKUP_STATE_FORMAT_FILE_NAME" 2>/dev/null || return 1
+  ) 2>/dev/null || return $?
+  chmod 600 "$_mbs_inject_state/$MERV_BACKUP_STATE_FORMAT_FILE_NAME" 2>/dev/null || return $?
   if [ "$_mbs_inject_trust_present" -eq 1 ]; then
-    mkdir "$_mbs_inject_trust_dir" 2>/dev/null || return 1
-    chmod 700 "$_mbs_inject_trust_dir" 2>/dev/null || return 1
-    cp -p "$_mbs_inject_trust" "$_mbs_inject_trust_dir/$MERV_BACKUP_STATE_TRUST_FILE_NAME" 2>/dev/null || return 1
-    chmod 600 "$_mbs_inject_trust_dir/$MERV_BACKUP_STATE_TRUST_FILE_NAME" 2>/dev/null || return 1
+    mkdir "$_mbs_inject_trust_dir" 2>/dev/null || return $?
+    chmod 700 "$_mbs_inject_trust_dir" 2>/dev/null || return $?
+    cp -p "$_mbs_inject_trust" "$_mbs_inject_trust_dir/$MERV_BACKUP_STATE_TRUST_FILE_NAME" 2>/dev/null || return $?
+    chmod 600 "$_mbs_inject_trust_dir/$MERV_BACKUP_STATE_TRUST_FILE_NAME" 2>/dev/null || return $?
   fi
+  MERV_BACKUP_STATE_LAST_ERROR=""
+  MERV_BACKUP_STATE_CLEANUP_ERROR=0
   return 0
 }
 
@@ -280,18 +346,38 @@ merv_backup_state_prepare_tree() {
   _mbs_prepare_source="$1"
   _mbs_prepare_stage="$2"
   _mbs_prepare_settings="$3"
-  _mbs_prepare_trust="${4:-}"
+  _mbs_prepare_trust=""
+  if [ "$#" -ge 4 ]; then _mbs_prepare_trust="$4"; fi
   _mbs_prepare_workspace="$5"
+  MERV_BACKUP_STATE_LAST_ERROR=source-invalid
+  MERV_BACKUP_STATE_CLEANUP_ERROR=0
   [ ! -L "$_mbs_prepare_source" ] && [ -d "$_mbs_prepare_source" ] || return 1
   merv_backup_state_path_present "$_mbs_prepare_source/$MERV_BACKUP_STATE_DIR_NAME" && return 1
-  [ ! -e "$_mbs_prepare_stage" ] && [ ! -L "$_mbs_prepare_stage" ] || return 1
-  cp -pR "$_mbs_prepare_source" "$_mbs_prepare_stage" 2>/dev/null || return 1
-  if ! merv_backup_state_inject_tree "$_mbs_prepare_stage" \
-      "$_mbs_prepare_stage/${_mbs_prepare_settings#$_mbs_prepare_source/}" \
-      "$_mbs_prepare_trust" "$_mbs_prepare_workspace"; then
-    rm -rf "$_mbs_prepare_stage" 2>/dev/null || :
+  [ ! -e "$_mbs_prepare_stage" ] && [ ! -L "$_mbs_prepare_stage" ] || {
+    MERV_BACKUP_STATE_LAST_ERROR=private-workspace-conflict
     return 1
+  }
+  if cp -pR "$_mbs_prepare_source" "$_mbs_prepare_stage" 2>/dev/null; then
+    :
+  else
+    _mbs_prepare_rc=$?
+    MERV_BACKUP_STATE_LAST_ERROR=source-copy-failed
+    return "$_mbs_prepare_rc"
   fi
+  _mbs_prepare_settings_relative="${_mbs_prepare_settings#$_mbs_prepare_source/}"
+  if merv_backup_state_inject_tree "$_mbs_prepare_stage" \
+      "$_mbs_prepare_stage/$_mbs_prepare_settings_relative" \
+      "$_mbs_prepare_trust" "$_mbs_prepare_workspace"; then
+    :
+  else
+    _mbs_prepare_rc=$?
+    _mbs_prepare_cleanup_error="${MERV_BACKUP_STATE_CLEANUP_ERROR:-0}"
+    rm -rf "$_mbs_prepare_stage" 2>/dev/null || :
+    MERV_BACKUP_STATE_CLEANUP_ERROR="$_mbs_prepare_cleanup_error"
+    return "$_mbs_prepare_rc"
+  fi
+  MERV_BACKUP_STATE_LAST_ERROR=""
+  MERV_BACKUP_STATE_CLEANUP_ERROR=0
   return 0
 }
 

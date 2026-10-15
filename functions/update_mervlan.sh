@@ -990,8 +990,9 @@ update_check_jffs_health() {
 }
 
 update_checksum_value() {
-	type md5sum >/dev/null 2>&1 || return 1
-	md5sum "$1" 2>/dev/null | awk 'NR == 1 { print $1 }'
+	type md5sum >/dev/null 2>&1 || return $?
+	_update_checksum_line=$(md5sum "$1" 2>/dev/null) || return $?
+	printf '%s\n' "$_update_checksum_line" | awk 'NR == 1 { print $1 }'
 }
 
 update_prepare_archive_metadata() {
@@ -999,28 +1000,108 @@ update_prepare_archive_metadata() {
 	_update_meta_id="$2"
 	_update_meta_output="$3"
 	case "$_update_meta_id" in mervlan.backup.*.tar.gz) ;; *) return 1 ;; esac
-	_update_meta_checksum=$(update_checksum_value "$_update_meta_archive") || return 1
+	if _update_meta_checksum=$(update_checksum_value "$_update_meta_archive"); then
+		:
+	else
+		_update_meta_rc=$?
+		return "$_update_meta_rc"
+	fi
 	case "$_update_meta_checksum" in ''|*[!0123456789abcdefABCDEF]*) return 1 ;; esac
 	[ "${#_update_meta_checksum}" -eq 32 ] || return 1
-	{
+	if {
 		printf 'format=1\n'
 		printf 'archive=%s\n' "$_update_meta_id"
 		printf 'algorithm=md5\n'
 		printf 'checksum=%s\n' "$_update_meta_checksum"
 		printf 'created=%s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
-	} > "$_update_meta_output" 2>/dev/null || return 1
-	chmod 600 "$_update_meta_output" 2>/dev/null || return 1
+	} > "$_update_meta_output" 2>/dev/null; then
+		:
+	else
+		_update_meta_rc=$?
+		return "$_update_meta_rc"
+	fi
+	if chmod 600 "$_update_meta_output" 2>/dev/null; then
+		:
+	else
+		_update_meta_rc=$?
+		return "$_update_meta_rc"
+	fi
+	return 0
+}
+update_backup_file_size_bytes() {
+	_ubfs_size=$(wc -c 2>/dev/null < "$1" | tr -d '[:space:]')
+	case "$_ubfs_size" in
+		''|*[!0-9]*) printf 'unknown' ;;
+		*) printf '%s' "$_ubfs_size" ;;
+	esac
+}
+
+update_backup_diagnostic() {
+	_ubd_id="$1"
+	_ubd_rc="$2"
+	_ubd_size=""
+	_ubd_reason=""
+	_ubd_cleanup_rc=""
+	if [ "$#" -ge 3 ]; then _ubd_size="$3"; fi
+	if [ "$#" -ge 4 ]; then _ubd_reason="$4"; fi
+	if [ "$#" -ge 5 ]; then _ubd_cleanup_rc="$5"; fi
+	case "$_ubd_id" in
+		backup-source-invalid|backup-timestamp-create|backup-root-prepare|backup-root-mode|\
+		backup-partial-cleanup|backup-stage-cleanup|backup-name-collision|\
+		backup-stage-create|backup-state-prepare|backup-archive-create|\
+		backup-stage-final-cleanup|backup-archive-integrity|backup-metadata-create|\
+		backup-metadata-publish|backup-archive-publish|backup-recovery-check-missing|\
+		backup-recovery-check-failed) ;;
+		*) _ubd_id=backup-internal ;;
+	esac
+	case "$_ubd_rc" in ''|*[!0-9]*) _ubd_rc=1 ;; esac
+	_ubd_message="Durable pre-update backup diagnostic=$_ubd_id rc=$_ubd_rc"
+	case "$_ubd_size" in
+		'' ) ;;
+		*[!0-9]* ) _ubd_message="$_ubd_message partial_bytes=unknown" ;;
+		* ) _ubd_message="$_ubd_message partial_bytes=$_ubd_size" ;;
+	esac
+	case "$_ubd_reason" in
+		source-invalid|source-copy-failed|configured-nodes-invalid|trust-file-invalid|\
+		trust-validation-failed|backup-state-payload-failed|private-workspace-conflict|\
+		private-workspace-cleanup-failed|unknown)
+			_ubd_message="$_ubd_message reason=$_ubd_reason" ;;
+		'' ) ;;
+		* ) _ubd_message="$_ubd_message reason=unknown" ;;
+	esac
+	case "$_ubd_cleanup_rc" in
+		''|0) ;;
+		*[!0-9]*) _ubd_message="$_ubd_message cleanup_rc=unknown" ;;
+		*) _ubd_message="$_ubd_message cleanup_rc=$_ubd_cleanup_rc" ;;
+	esac
+	error -c cli,vlan "$_ubd_message" || :
+	return 0
 }
 
 create_durable_preupdate_backup() {
-	_update_backup_source="${1:-$MERV_BASE}"
+	_update_backup_source="$MERV_BASE"
+	if [ "$#" -gt 0 ] && [ -n "$1" ]; then
+		_update_backup_source="$1"
+	fi
 	case "$_update_backup_source" in
 		"$MERV_BASE"|"$TMP_BASE"/*) ;;
-		*) return 1 ;;
+		*) update_backup_diagnostic backup-source-invalid 1 "" source-invalid; return 1 ;;
 	esac
-	[ -d "$_update_backup_source" ] || return 1
-	timestamp="$(date +%Y%m%d-%H%M%S 2>/dev/null | tr -d '\n')"
-	[ -n "$timestamp" ] || return 1
+	[ -d "$_update_backup_source" ] || {
+		update_backup_diagnostic backup-source-invalid 1 "" source-invalid
+		return 1
+	}
+	if _update_backup_date_output=$(date +%Y%m%d-%H%M%S 2>/dev/null); then
+		timestamp=$(printf '%s' "$_update_backup_date_output" | tr -d '\n')
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-timestamp-create "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
+	[ -n "$timestamp" ] || {
+		update_backup_diagnostic backup-timestamp-create 1
+		return 1
+	}
 	CURRENT_BACKUP_NAME="mervlan.backup.$timestamp"
 	UPDATE_BACKUP_ID="$CURRENT_BACKUP_NAME.tar.gz"
 	UPDATE_BACKUP_FINAL="$MERVLAN_BACKUP_DIR/$UPDATE_BACKUP_ID"
@@ -1029,57 +1110,190 @@ create_durable_preupdate_backup() {
 	UPDATE_BACKUP_META_PARTIAL="$UPDATE_BACKUP_META_FINAL.partial.$$"
 	_update_backup_archive_parent="$TMP_BASE/preupdate-archive-source"
 	_update_backup_archive_source="$_update_backup_archive_parent/${_update_backup_source##*/}"
-	merv_maintenance_recovery_root_prepare || return 1
-	chmod 700 "$MERVLAN_BACKUP_DIR" 2>/dev/null || return 1
-	update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || return 1
-	update_cleanup_tree "$_update_backup_archive_parent" || return 1
-	update_path_absent_authoritative "$UPDATE_BACKUP_FINAL" || return 1
-	mkdir "$_update_backup_archive_parent" 2>/dev/null || return 1
+	if merv_maintenance_recovery_root_prepare; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-root-prepare "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
+	if chmod 700 "$MERVLAN_BACKUP_DIR" 2>/dev/null; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-root-mode "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
+	if update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL"; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-partial-cleanup "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
+	if update_cleanup_tree "$_update_backup_archive_parent"; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-stage-cleanup "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
+	if update_path_absent_authoritative "$UPDATE_BACKUP_FINAL"; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-name-collision "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
+	if mkdir "$_update_backup_archive_parent" 2>/dev/null; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-stage-create "$_update_backup_rc"
+		return "$_update_backup_rc"
+	fi
 	info -c cli,vlan "Creating durable pre-update backup $UPDATE_BACKUP_ID"
-	if ! merv_backup_state_prepare_tree "$_update_backup_source" \
+	_update_backup_rc=0
+	if merv_backup_state_prepare_tree "$_update_backup_source" \
 		"$_update_backup_archive_source" \
-		"$_update_backup_source/settings/settings.json" "$MERV_SSH_TRUST_FILE" "$TMP_BASE" || \
-		! tar -czf "$UPDATE_BACKUP_PARTIAL" -C "$_update_backup_archive_parent" \
-		"${_update_backup_archive_source##*/}" 2>/dev/null; then
-		update_cleanup_tree "$_update_backup_archive_parent" || UPDATE_PRESERVE_TMP="1"
-		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
-		return 1
+		"$_update_backup_source/settings/settings.json" "$MERV_SSH_TRUST_FILE" "$TMP_BASE"; then
+		:
+	else
+		_update_backup_rc=$?
+		_update_backup_reason="${MERV_BACKUP_STATE_LAST_ERROR:-unknown}"
+		_update_backup_cleanup_rc="${MERV_BACKUP_STATE_CLEANUP_ERROR:-0}"
+		update_backup_diagnostic backup-state-prepare "$_update_backup_rc" "" \
+			"$_update_backup_reason" "$_update_backup_cleanup_rc"
 	fi
-	if ! update_cleanup_tree "$_update_backup_archive_parent"; then
+	if [ "$_update_backup_rc" -eq 0 ]; then
+		if tar -czf "$UPDATE_BACKUP_PARTIAL" -C "$_update_backup_archive_parent" \
+			"${_update_backup_archive_source##*/}" 2>/dev/null; then
+			:
+		else
+			_update_backup_rc=$?
+			_update_backup_size=$(update_backup_file_size_bytes "$UPDATE_BACKUP_PARTIAL")
+			update_backup_diagnostic backup-archive-create "$_update_backup_rc" "$_update_backup_size"
+		fi
+	fi
+	if [ "$_update_backup_rc" -ne 0 ]; then
+		if update_cleanup_tree "$_update_backup_archive_parent"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-stage-cleanup "$_update_backup_cleanup_rc"
+		fi
+		if update_cleanup_files "$UPDATE_BACKUP_PARTIAL"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+		fi
+		return "$_update_backup_rc"
+	fi
+	if update_cleanup_tree "$_update_backup_archive_parent"; then
+		:
+	else
+		_update_backup_rc=$?
 		UPDATE_PRESERVE_TMP="1"
-		return 1
+		update_backup_diagnostic backup-stage-final-cleanup "$_update_backup_rc"
+		return "$_update_backup_rc"
 	fi
-	if ! tar -tzf "$UPDATE_BACKUP_PARTIAL" >/dev/null 2>&1; then
-		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" || UPDATE_PRESERVE_TMP="1"
-		return 1
+	if tar -tzf "$UPDATE_BACKUP_PARTIAL" >/dev/null 2>&1; then
+		:
+	else
+		_update_backup_rc=$?
+		_update_backup_size=$(update_backup_file_size_bytes "$UPDATE_BACKUP_PARTIAL")
+		update_backup_diagnostic backup-archive-integrity "$_update_backup_rc" "$_update_backup_size"
+		if update_cleanup_files "$UPDATE_BACKUP_PARTIAL"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+		fi
+		return "$_update_backup_rc"
 	fi
-	if ! update_prepare_archive_metadata "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_ID" "$UPDATE_BACKUP_META_PARTIAL"; then
-		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || UPDATE_PRESERVE_TMP="1"
-		return 1
+	if update_prepare_archive_metadata "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_ID" "$UPDATE_BACKUP_META_PARTIAL"; then
+		:
+	else
+		_update_backup_rc=$?
+		_update_backup_size=$(update_backup_file_size_bytes "$UPDATE_BACKUP_PARTIAL")
+		update_backup_diagnostic backup-metadata-create "$_update_backup_rc" "$_update_backup_size"
+		if update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+		fi
+		return "$_update_backup_rc"
 	fi
-	if ! mv -f "$UPDATE_BACKUP_META_PARTIAL" "$UPDATE_BACKUP_META_FINAL" 2>/dev/null; then
-		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL" || UPDATE_PRESERVE_TMP="1"
-		return 1
+	if mv -f "$UPDATE_BACKUP_META_PARTIAL" "$UPDATE_BACKUP_META_FINAL" 2>/dev/null; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-metadata-publish "$_update_backup_rc"
+		if update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_PARTIAL"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+		fi
+		return "$_update_backup_rc"
 	fi
-	if ! mv -f "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_FINAL" 2>/dev/null; then
-		update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_FINAL" || UPDATE_PRESERVE_TMP="1"
-		return 1
+	if mv -f "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_FINAL" 2>/dev/null; then
+		:
+	else
+		_update_backup_rc=$?
+		update_backup_diagnostic backup-archive-publish "$_update_backup_rc"
+		if update_cleanup_files "$UPDATE_BACKUP_PARTIAL" "$UPDATE_BACKUP_META_FINAL"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+		fi
+		return "$_update_backup_rc"
 	fi
 	if [ -x "$MERV_BASE/functions/mervlan_recover.sh" ]; then
+		# Outside the validated self-test context, Recovery pins its scratch
+		# parent to /tmp/mervlan_recovery and creates restore.<pid> with mkdir,
+		# chmod 700, and EXIT cleanup. The parent is checked for path safety,
+		# not owner/mode; the Update override below is test-fixture isolation
+		# only. Keep checker output private and report only a stable ID/status.
 		MERVLAN_RECOVERY_BACKUP_ROOT="$MERVLAN_BACKUP_DIR" \
 		MERVLAN_RECOVERY_TMP_ROOT="$TMP_BASE/recovery-check" \
-			sh "$MERV_BASE/functions/mervlan_recover.sh" check "$UPDATE_BACKUP_ID" >/dev/null 2>&1 || {
-				update_cleanup_files "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL" || UPDATE_PRESERVE_TMP="1"
-				return 1
-			}
+			sh "$MERV_BASE/functions/mervlan_recover.sh" check "$UPDATE_BACKUP_ID" >/dev/null 2>&1
+		_update_backup_rc=$?
+		if [ "$_update_backup_rc" -ne 0 ]; then
+			_update_backup_size=$(update_backup_file_size_bytes "$UPDATE_BACKUP_FINAL")
+			update_backup_diagnostic backup-recovery-check-failed "$_update_backup_rc" "$_update_backup_size"
+			if update_cleanup_files "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL"; then
+				:
+			else
+				_update_backup_cleanup_rc=$?
+				UPDATE_PRESERVE_TMP="1"
+				update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+			fi
+			return "$_update_backup_rc"
+		fi
 	else
-		update_cleanup_files "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL" || UPDATE_PRESERVE_TMP="1"
+		update_backup_diagnostic backup-recovery-check-missing 1
+		if update_cleanup_files "$UPDATE_BACKUP_FINAL" "$UPDATE_BACKUP_META_FINAL"; then
+			:
+		else
+			_update_backup_cleanup_rc=$?
+			UPDATE_PRESERVE_TMP="1"
+			update_backup_diagnostic backup-partial-cleanup "$_update_backup_cleanup_rc"
+		fi
 		return 1
 	fi
 	UPDATE_BACKUP_ARCHIVE_OK=1
 	return 0
 }
-
 write_update_undo_marker() {
 	_update_archive_id="$1"
 	_update_from="$2"
