@@ -67,9 +67,13 @@ run_repair() {
   MERV_BASE="$ADDON" MERV_REPAIR_CURL="$CASE/fake-curl" \
   MERV_REPAIR_SNAPSHOT_BASE='https://repair.test/snapshot' \
   MERV_REPAIR_FIXTURE_ARCHIVE="$REMOTE_ARCHIVE" \
+  MERV_REPAIR_TEST_FAIL_PATH="${MERV_REPAIR_TEST_FAIL_PATH:-}" \
+  MERV_REPAIR_TEST_SIGNAL="${MERV_REPAIR_TEST_SIGNAL:-0}" \
+  MERV_REPAIR_TEST_SIGNAL_MARKER="${MERV_REPAIR_TEST_SIGNAL_MARKER:-}" \
   MERV_REPAIR_MAINTENANCE_LOCK="$CASE/locks/mervlan_maintenance.lock" \
   MERV_REPAIR_LEGACY_LOCK_ROOT="$CASE/locks" \
   MERV_REPAIR_PROC_ROOT="${MERV_REPAIR_PROC_ROOT:-$CASE/proc}" \
+  MERV_FULL_FENCE_PATH="${MERV_FULL_FENCE_PATH:-}" \
   MERV_REPAIR_TMP_ROOT="$CASE/work" \
   MERV_REPAIR_PROGRESS_ROOT="$CASE/progress" \
   MERV_PROGRESS_TOKEN="${MERV_PROGRESS_TOKEN:-}" \
@@ -203,6 +207,27 @@ old=$(cksum "$ADDON/functions/update_mervlan.sh")
 MERV_REPAIR_TEST_FAIL_DOWNLOAD=1 run_repair main && fail 'forced download failure succeeded'
 assert_eq "$(cksum "$ADDON/functions/update_mervlan.sh")" "$old" 'download failure published files'
 
+# The shell-native presence probe must continue to see a dangling symlink as
+# present, so repair refuses to replace an obstructed destination.
+setup_case dangling-destination main
+rm -f "$ADDON/functions/update_mervlan.sh"
+ln -s "$CASE/missing-updater" "$ADDON/functions/update_mervlan.sh"
+run_repair main && fail 'dangling destination symlink was treated as absent'
+[ -L "$ADDON/functions/update_mervlan.sh" ] || fail 'repair replaced the obstructing destination symlink'
+printf '%s\n' 'PASS: optimized path presence preserves dangling-symlink classification'
+
+# A live Full-Uninstall fence blocks repair before maintenance acquisition or
+# publication and remains untouched.
+setup_case full-uninstall-fence main
+printf 'full-uninstall-active\n' >"$CASE/full-uninstall.lock"
+old=$(cksum "$ADDON/functions/update_mervlan.sh")
+MERV_FULL_FENCE_PATH="$CASE/full-uninstall.lock" run_repair main && \
+  fail 'Full-Uninstall fence did not block repair'
+assert_eq "$(cksum "$ADDON/functions/update_mervlan.sh")" "$old" 'Full-Uninstall fence changed active files'
+[ -f "$CASE/full-uninstall.lock" ] || fail 'repair removed the Full-Uninstall fence'
+[ ! -d "$CASE/locks/mervlan_maintenance.lock" ] || fail 'fenced repair acquired maintenance ownership'
+printf '%s\n' 'PASS: Full-Uninstall fence remains authoritative for repair'
+
 # Legacy .15 direct CLI mutators are identified from exact NUL-delimited
 # /proc/<pid>/cmdline arguments.  A matching live process blocks; a command
 # that merely mentions the path as data does not.
@@ -262,6 +287,29 @@ assert_eq "$(cksum "$ADDON/functions/update_mervlan.sh")" "$old" 'unverifiable c
 setup_case legacy-relative-decoy main
 make_proc_entry "$CASE/proc" "$$" 'unrelated.sh' "$ADDON"
 MERV_REPAIR_PROC_ROOT="$CASE/proc" run_repair main || fail 'unrelated relative argv was treated as a mutator'
+
+# Exact absolute argv matches are classified before any relative candidate.
+# A relative argument with an unreadable cwd must not shadow a later exact hit.
+setup_case legacy-exact-after-relative-candidate main
+mkdir -p "$CASE/proc/$$"
+printf 'sh\000functions/update_mervlan.sh\000%s\000' "$ADDON/functions/update_mervlan.sh" >"$CASE/proc/$$/cmdline"
+cat "/proc/$$/stat" >"$CASE/proc/$$/stat"
+if MERV_REPAIR_PROC_ROOT="$CASE/proc" run_repair main >"$CASE/exact-order.log" 2>&1; then
+  fail 'exact live mutator argv was not blocked'
+fi
+if ! grep -Fq 'A legacy MerVLAN mutator is live; repair is blocked.' "$CASE/exact-order.log"; then
+  fail 'scanner changed exact-match versus ambiguity classification order'
+fi
+
+setup_case legacy-relative-cwd-unknown main
+mkdir -p "$CASE/proc/$$"
+printf 'sh\000%s\000' 'functions/update_mervlan.sh' >"$CASE/proc/$$/cmdline"
+if MERV_REPAIR_PROC_ROOT="$CASE/proc" run_repair main >"$CASE/ambiguous-process.log" 2>&1; then
+  fail 'unobservable candidate process did not block repair'
+fi
+if ! grep -Fq 'Legacy MerVLAN lock state is unknown; repair is blocked.' "$CASE/ambiguous-process.log"; then
+  fail 'unobservable process classification stopped failing closed'
+fi
 
 setup_case legacy-event-lock main
 make_proc_entry "$CASE/proc" "$$" "$ADDON/functions/unrelated.sh"
@@ -340,6 +388,19 @@ old=$(cksum "$ADDON/functions/update_mervlan.sh")
 run_repair main && fail 'invalid shell payload succeeded'
 assert_eq "$(cksum "$ADDON/functions/update_mervlan.sh")" "$old" 'invalid shell payload published files'
 
+# Duplicate archive members remain rejected by the batch duplicate scan.
+setup_case duplicate-archive main
+(
+  cd "$REMOTE_BRANCH_DIR"
+  tar -cf "$CASE/duplicate.tar" "$REMOTE_ROOT_NAME" || exit 1
+  tar -rf "$CASE/duplicate.tar" "$REMOTE_ROOT_NAME/functions/update_mervlan.sh" || exit 1
+  gzip -c "$CASE/duplicate.tar" >"$REMOTE_ARCHIVE"
+) || fail 'could not construct duplicate-member archive fixture'
+old=$(cksum "$ADDON/functions/update_mervlan.sh")
+run_repair main && fail 'duplicate archive member was accepted'
+assert_eq "$(cksum "$ADDON/functions/update_mervlan.sh")" "$old" 'duplicate archive member published files'
+printf '%s\n' 'PASS: batched archive duplicate detection retains fail-closed validation'
+
 setup_case rollback main
 old=$(cksum "$ADDON/functions/update_mervlan.sh")
 old_installer=$(cksum "$ADDON/install.sh")
@@ -351,6 +412,41 @@ for evidence in "$CASE"/work/mervlan_repair.*; do
   ls -ld "$evidence" >/dev/null 2>&1 || continue
   rm -rf "$evidence"
 done
+
+# A signal after a destination rename follows the interrupt rollback path,
+# releases only the repair owner, and retains the transaction evidence.
+setup_case interrupted-publication main
+mkdir -p "$CASE/bin"
+cat >"$CASE/bin/mv" <<'EOF'
+#!/bin/sh
+if [ "${MERV_REPAIR_TEST_SIGNAL:-0}" = 1 ] &&
+   [ "$#" -ge 3 ] && [ "$1" = -f ] &&
+   [ "$3" = "$MERV_BASE/functions/update_mervlan.sh" ] &&
+   [ ! -e "$MERV_REPAIR_TEST_SIGNAL_MARKER" ]; then
+  /bin/mv "$@" || exit $?
+  : >"$MERV_REPAIR_TEST_SIGNAL_MARKER"
+  kill -TERM "$PPID"
+  exit $?
+fi
+exec /bin/mv "$@"
+EOF
+chmod 755 "$CASE/bin/mv"
+old=$(cksum "$ADDON/functions/update_mervlan.sh")
+if PATH="$CASE/bin:$PATH" MERV_REPAIR_TEST_SIGNAL=1 \
+   MERV_REPAIR_TEST_SIGNAL_MARKER="$CASE/signal-marker" run_repair main; then
+  fail 'interrupted publication returned success'
+else
+  signal_rc=$?
+fi
+[ "$signal_rc" -eq 143 ] || fail "interrupted repair returned $signal_rc instead of 143"
+assert_eq "$(cksum "$ADDON/functions/update_mervlan.sh")" "$old" 'interrupt rollback did not restore the published updater'
+[ ! -d "$CASE/locks/mervlan_maintenance.lock" ] || fail 'interrupted repair did not release its owner'
+interrupted_evidence=0
+for evidence in "$CASE"/work/mervlan_repair.*; do
+  if [ -d "$evidence" ]; then interrupted_evidence=1; break; fi
+done
+[ "$interrupted_evidence" -eq 1 ] || fail 'interrupted repair evidence was not retained'
+printf '%s\n' 'PASS: interrupted publication rolls back and retains evidence'
 
 # Replace the canonical owner during the publication syscall. The repair must
 # detect the successor at post-publication finalization, avoid rolling back

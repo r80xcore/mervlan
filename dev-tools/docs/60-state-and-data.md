@@ -146,3 +146,19 @@ This boundary is ownership-specific, not a search for every pathname
 containing `mervlan`: external ASUS SSH authorization, unrelated administrator
 state, retained recovery/repair evidence, and test/diagnostic files are not
 MerVLAN production cleanup targets.
+
+## Emergency repair bootstrap and update handoff
+
+The standalone HELP.md bootstrap creates a private, exclusive directory and
+downloads only the source-selected repair entrypoint. That source validates
+its branch and `AUTO_UPDATE` argument, downloads and validates one immutable
+snapshot, then execs the repair engine from that same snapshot with both
+values as arguments. The repair owns successful bootstrap cleanup; a failed
+download, syntax check, repair, or requested Update leaves its private
+diagnostics in place.
+
+Standalone repair defaults to `AUTO_UPDATE=NO`. `YES` may start the normal
+updater only after publication verification, maintenance-owner release, and
+repair terminal publication. The WebUI dispatcher continues to call repair
+with its existing single branch argument, so inherited `AUTO_UPDATE` values
+cannot start a second Update; WebUI update sequencing remains dispatcher-owned.

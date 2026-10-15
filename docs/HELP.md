@@ -1003,7 +1003,7 @@ modifies the original.
 
 #### Emergency Update Repair
 
-Use repair when the installed updater, its support libraries, node-sync helpers, or related update/runtime files are missing, damaged, or have incorrect permissions. Repair restores branch-owned program and static components only; it preserves settings, SSH keys, databases, and backups. It does not start an update, synchronize nodes, apply VLANs, restart services, or reboot. Run the normal update after repair when ready.
+Use repair when the installed updater, its support libraries, node-sync helpers, or related update/runtime files are missing, damaged, or have incorrect permissions. Repair restores branch-owned program and static components only; it preserves settings, SSH keys, databases, and backups. The standalone bootstrap defaults to repair only. Its optional `AUTO_UPDATE="YES"` setting starts the normal updater only after repair has completed successfully and released maintenance ownership. WebUI repair leaves update orchestration to the dispatcher. Repair does not synchronize nodes, apply VLANs, restart services, or reboot by itself.
 
 | Command | What it does |
 | --- | --- |
@@ -1018,86 +1018,13 @@ If the Web UI repair cannot start because the installed event handler, updater, 
 For `main`:
 
 ```sh
-BRANCH="main"
-AUTO_UPDATE="NO"
-d="/tmp/mervlan-bootstrap.$$"
-
-bootstrap_stage() {
-    [ -t 2 ] || return 0
-    printf '[mervlan-bootstrap] %s\n' "$1" >&2
-}
-
-bootstrap_cleanup() {
-    rm -f "$d/entry.sh" 2>/dev/null
-    rmdir "$d" 2>/dev/null
-}
-
-bootstrap_finish() {
-    bootstrap_status="$1"
-    bootstrap_cleanup
-    bootstrap_stage "Finished with exit status $bootstrap_status"
-    exit "$bootstrap_status"
-}
-
-bootstrap_stage "Starting emergency repair bootstrap"
-umask 077
-mkdir "$d" || {
-    bootstrap_stage "Could not create the private bootstrap workspace"
-    bootstrap_stage "Finished with exit status 1"
-    exit 1
-}
-
-/usr/sbin/curl -fsL --retry 3 --connect-timeout 15 \
-    "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh" \
-    -o "$d/entry.sh"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-    bootstrap_stage "Bootstrap download failed (exit status $rc)"
-    bootstrap_finish "$rc"
-fi
-[ -f "$d/entry.sh" ] && [ ! -L "$d/entry.sh" ] || {
-    bootstrap_stage "Bootstrap download did not produce a regular script"
-    bootstrap_finish 1
-}
-bootstrap_stage "Bootstrap download succeeded"
-
-/bin/sh -n "$d/entry.sh"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-    bootstrap_stage "Syntax verification failed (exit status $rc)"
-    bootstrap_finish "$rc"
-fi
-bootstrap_stage "Syntax verification succeeded"
-
-bootstrap_stage "Starting emergency repair"
-MERV_REPAIR_BOOTSTRAP_DIR="$d" /bin/sh "$d/entry.sh" "$BRANCH"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-    bootstrap_stage "Emergency repair failed (exit status $rc)"
-    bootstrap_finish "$rc"
-fi
-bootstrap_stage "Emergency repair completed"
-bootstrap_cleanup
-
-if [ "$AUTO_UPDATE" = "YES" ]; then
-    bootstrap_stage "Starting normal update"
-    /bin/sh /jffs/addons/mervlan/functions/update_mervlan.sh update "$BRANCH"
-    rc=$?
-    if [ "$rc" -eq 0 ]; then
-        bootstrap_stage "Normal update completed"
-    else
-        bootstrap_stage "Normal update failed (exit status $rc)"
-    fi
-    bootstrap_finish "$rc"
-fi
-
-bootstrap_stage "Normal update not requested"
-bootstrap_finish 0
+BRANCH="main"; AUTO_UPDATE="NO"; d="/tmp/mervlan-bootstrap.$$"; (umask 077; case "$BRANCH" in ''|/*|*/|*..*|*//*|*.lock|*[!A-Za-z0-9._/-]*|[!A-Za-z0-9]*|*[!A-Za-z0-9]) echo "Invalid branch" >&2; exit 2;; esac; mkdir "$d" && printf 'mervlan-repair-bootstrap-v1\n' > "$d/.owner" && /usr/sbin/curl -fsSL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh" -o "$d/entry.sh" && [ -s "$d/entry.sh" ] && [ -f "$d/entry.sh" ] && [ ! -L "$d/entry.sh" ] && /bin/sh -n "$d/entry.sh" && MERV_REPAIR_BOOTSTRAP_DIR="$d" /bin/sh "$d/entry.sh" "$BRANCH" "$AUTO_UPDATE")
 ```
 
-In an interactive SSH session, the bootstrap and repair print concise stage
-messages to stderr. Repair publication progress is derived from its existing
-transaction ledger; it is diagnostic only and does not control repair success.
+The bootstrap downloads and syntax-checks the standalone repair entrypoint.
+Repair owns its final status, successful cleanup, publication progress, and
+optional updater launch. Failed bootstrap or repair evidence stays in the
+private workspace for inspection.
 
 > [!TIP]
 > For the `dev` branch, replace `BRANCH="main"` with `BRANCH="dev"`. A safe test branch name may also be used when testing development builds.

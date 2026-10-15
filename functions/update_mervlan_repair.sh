@@ -70,10 +70,13 @@ REPAIR_LOCK_START=""
 REPAIR_LOCK_CREATED=""
 REPAIR_LEDGER_SEQ=0
 REPAIR_PROGRESS_SEQ=0
+REPAIR_PUBLICATION_TOTAL=0
+REPAIR_PUBLISHED_COUNT=0
 REPAIR_PROGRESS_TOKEN="${MERV_PROGRESS_TOKEN:-}"
 REPAIR_PROGRESS_ACTION=""
 REPAIR_PROGRESS_STARTED=""
-REPAIR_SUCCESS=0
+REPAIR_FINAL_SUCCESS=0
+REPAIR_AUTO_UPDATE=NO
 REPAIR_ROLLBACK_FAILED=0
 REPAIR_INTERRUPTED=0
 REPAIR_OWNER_LOST=0
@@ -92,10 +95,8 @@ repair_cli_stage() {
 
 repair_cli_publication_progress() {
   [ -t 2 ] || return 0
-  [ -f "$LEDGER_FILE" ] && [ -f "$PATHS_FILE" ] || return 0
-  _rcp_published=$(awk -F '|' '$1 == "published" { n++ } END { printf "%d", n + 0 }' \
-    "$LEDGER_FILE" 2>/dev/null) || return 0
-  _rcp_total=$(awk 'END { printf "%d", NR + 0 }' "$PATHS_FILE" 2>/dev/null) || return 0
+  _rcp_published=$REPAIR_PUBLISHED_COUNT
+  _rcp_total=$REPAIR_PUBLICATION_TOTAL
   case "$_rcp_published:$_rcp_total" in *[!0-9:]*|:*) return 0 ;; esac
   [ "$_rcp_total" -gt 0 ] || return 0
   [ "$_rcp_published" -eq "$_rcp_total" ] ||
@@ -156,7 +157,7 @@ valid_ref() {
 }
 
 path_present() {
-  ls -ld "$1" >/dev/null 2>&1
+  [ -e "$1" ] || [ -L "$1" ]
 }
 
 path_regular() {
@@ -275,14 +276,13 @@ archive_members_valid() {
     case "$_amv_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
     if [ -z "$SNAPSHOT_ROOT" ]; then SNAPSHOT_ROOT="$_amv_root"; fi
     [ "$SNAPSHOT_ROOT" = "$_amv_root" ] || return 1
-    grep -Fqx "$_amv_normalized" "$RUN_DIR/archive.seen" 2>/dev/null && return 1
     printf '%s\n' "$_amv_normalized" >>"$RUN_DIR/archive.seen" || return 1
     _amv_count=$((_amv_count + 1))
     [ "$_amv_count" -le 4096 ] || return 1
   done <"$_amv_members"
+  awk 'seen[$0]++ { exit 1 }' "$RUN_DIR/archive.seen" >/dev/null 2>&1 || return 1
   while IFS= read -r _amv_verbose_line || [ -n "$_amv_verbose_line" ]; do
-    _amv_type=$(printf '%s' "$_amv_verbose_line" | cut -c1)
-    case "$_amv_type" in -|d) ;; *) return 1 ;; esac
+    case "$_amv_verbose_line" in -*|d*) ;; *) return 1 ;; esac
     case "$_amv_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
   done <"$_amv_verbose"
   [ -n "$SNAPSHOT_ROOT" ] || return 1
@@ -355,6 +355,7 @@ parse_manifest() {
   grep -Fqx '0755 functions/mervlan_full_cleanup.sh' "$PATHS_FILE" || return 1
   grep -Fqx '0755 functions/mervlan_wan.sh' "$PATHS_FILE" || return 1
   grep -Fqx '0644 functions/update_mervlan_repair.manifest' "$PATHS_FILE" || return 1
+  REPAIR_PUBLICATION_TOTAL=$_pm_entries
   return 0
 }
 
@@ -643,26 +644,18 @@ repair_legacy_process_scan() {
     _rlps_cmdline_text=$(LC_ALL=C tr '\000' '\n' <"$_rlps_cmdline" 2>/dev/null) || return 2
     [ -n "$_rlps_cmdline_text" ] || continue
     _rlps_match=0
-    for _rlps_arg in \
-      "$MERV_BASE/functions/update_mervlan.sh" \
-      "$MERV_BASE/install.sh" \
-      "$MERV_BASE/uninstall.sh" \
-      "$MERV_BASE/functions/mervlan_manager.sh" \
-      "$MERV_BASE/functions/sync_nodes.sh" \
-      "$MERV_BASE/functions/execute_nodes.sh" \
-      "$MERV_BASE/functions/service-event-handler.sh" \
-      "$MERV_BASE/functions/mervlan_boot.sh" \
-      "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
-      "$MERV_BASE/functions/heal_event.sh" \
-      "$MERV_BASE/functions/save_settings.sh" \
-      "$MERV_BASE/functions/hw_probe.sh" \
-      "$MERV_BASE/functions/dropbear_sshkey_gen.sh"
-    do
-      printf '%s\n' "$_rlps_cmdline_text" | grep -Fqx "$_rlps_arg" 2>/dev/null && {
+    # Preserve the original classification order: any exact absolute argv
+    # match wins before relative-path resolution can classify an earlier
+    # candidate as ambiguous. Shell comparisons avoid 13 grep processes per
+    # process on every publication boundary.
+    while IFS= read -r _rlps_arg || [ -n "$_rlps_arg" ]; do
+      if repair_legacy_process_target "$_rlps_arg"; then
         _rlps_match=1
         break
-      }
-    done
+      fi
+    done <<EOF
+$_rlps_cmdline_text
+EOF
     if [ "$_rlps_match" = 0 ]; then
       while IFS= read -r _rlps_cmd_arg || [ -n "$_rlps_cmd_arg" ]; do
         repair_legacy_relative_target "$_rlps_pid" "$_rlps_cmd_arg"
@@ -930,6 +923,7 @@ ledger_mark_published() {
   awk -F '|' -v target="$_lmp_path" 'BEGIN{OFS="|"} {if($1=="pending" && $3==target)$1="published"; print}' \
     "$LEDGER_FILE" >"$_lmp_tmp" 2>/dev/null || { rm -f "$_lmp_tmp" 2>/dev/null || :; return 1; }
   mv -f "$_lmp_tmp" "$LEDGER_FILE" 2>/dev/null || { rm -f "$_lmp_tmp" 2>/dev/null || :; return 1; }
+  REPAIR_PUBLISHED_COUNT=$((REPAIR_PUBLISHED_COUNT + 1))
   repair_cli_publication_progress || :
   return 0
 }
@@ -1000,12 +994,12 @@ repair_publish_temp_cleanup() {
 publish() {
   REPAIR_PUBLISH_TMP=""
   REPAIR_PUBLISH_SOURCE=""
+  REPAIR_PUBLISHED_COUNT=0
   : >"$LEDGER_FILE" || return 1
   while IFS=' ' read -r _pub_mode _pub_rel; do
     _pub_source="$STAGE_DIR/$_pub_rel"
     _pub_dest="$MERV_BASE/$_pub_rel"
     _pub_parent=${_pub_dest%/*}
-    path_chain_safe "$_pub_parent" || return 1
     mkdir_chain_safe "$_pub_parent" || return 1
     _pub_kind=new _pub_backup=none
     if path_present "$_pub_dest"; then
@@ -1151,7 +1145,7 @@ repair_handoff_exec() {
     MERV_REPAIR_HANDOFF_SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
     MERV_REPAIR_HANDOFF_ARCHIVE="$SNAPSHOT_ARCHIVE" \
     MERV_REPAIR_HANDOFF_PROTECTED_DIR="$PROTECTED_DIR" \
-    exec /bin/sh "$_rhe_engine" "$REF"
+    exec /bin/sh "$_rhe_engine" "$REF" "$REPAIR_AUTO_UPDATE"
     return $?
 }
 
@@ -1221,13 +1215,32 @@ stage_snapshot_payload() {
   return 0
 }
 
+repair_bootstrap_cleanup() {
+  _rbc_dir="${MERV_REPAIR_BOOTSTRAP_DIR:-}"
+  [ -n "$_rbc_dir" ] || return 0
+  case "$_rbc_dir" in */mervlan-bootstrap.*) ;; *) return 0 ;; esac
+  path_chain_safe "$_rbc_dir" || return 1
+  [ ! -L "$_rbc_dir" ] && [ -d "$_rbc_dir" ] || return 1
+  path_regular "$_rbc_dir/.owner" || return 1
+  grep -Fqx 'mervlan-repair-bootstrap-v1' "$_rbc_dir/.owner" 2>/dev/null || return 1
+  _rbc_entry="$_rbc_dir/entry.sh"
+  if path_present "$_rbc_entry"; then
+    path_regular "$_rbc_entry" || return 1
+    rm -f "$_rbc_entry" 2>/dev/null || return 1
+  fi
+  rm -f "$_rbc_dir/.owner" 2>/dev/null || return 1
+  rmdir "$_rbc_dir" 2>/dev/null || return 1
+  return 0
+}
+
 repair_exit_handler() {
   _reh_status=$?
   trap - EXIT HUP INT TERM
-  if [ "$REPAIR_SUCCESS" = 1 ] && [ "$REPAIR_ROLLBACK_FAILED" = 0 ] && [ "$REPAIR_LOCK_OWNED" = 0 ]; then
+  if [ "$REPAIR_FINAL_SUCCESS" = 1 ] && [ "$REPAIR_ROLLBACK_FAILED" = 0 ] && [ "$REPAIR_LOCK_OWNED" = 0 ]; then
     case "${RUN_DIR:-}" in
       "${MERV_REPAIR_BOOTSTRAP_DIR:-$MERV_REPAIR_TMP_ROOT}"/mervlan_repair.*) rm -rf "$RUN_DIR" 2>/dev/null || : ;;
     esac
+    repair_bootstrap_cleanup || log 'Owned bootstrap cleanup was incomplete; remaining files were preserved.'
   elif [ -n "${RUN_DIR:-}" ]; then
     log "Repair evidence retained at $RUN_DIR"
   fi
@@ -1237,6 +1250,7 @@ repair_exit_handler() {
 repair_signal_handler() {
   _rsh_status="$1"
   REPAIR_INTERRUPTED=1
+  REPAIR_FINAL_SUCCESS=0
   trap - HUP INT TERM
   if [ "$REPAIR_LOCK_OWNED" = 1 ] && [ -f "$LEDGER_FILE" ]; then
     rollback_transaction || :
@@ -1247,6 +1261,12 @@ repair_signal_handler() {
 
 main() {
   valid_ref "${1:-main}" || { log 'Invalid branch; use main, dev, or a safe custom branch name.'; return 2; }
+  [ "$#" -le 2 ] || { log 'Too many standalone repair arguments.'; return 2; }
+  if [ "$#" -ge 2 ]; then REPAIR_AUTO_UPDATE="$2"; else REPAIR_AUTO_UPDATE=NO; fi
+  case "$REPAIR_AUTO_UPDATE" in
+    YES|NO) : ;;
+    *) log 'Invalid AUTO_UPDATE value; use YES or NO.'; return 2 ;;
+  esac
   case "$MERV_BASE" in ''|/|/tmp|/jffs|/jffs/addons|*..*|*//*|*[!A-Za-z0-9_./-]*) log 'Unsafe MERV_BASE refused.'; return 2 ;; esac
   path_chain_safe "$MERV_BASE" && [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || { log 'MERV_BASE is missing or unsafe.'; return 2; }
   if [ "${MERV_REPAIR_HANDOFF_STATE:-}" != v2 ]; then
@@ -1303,7 +1323,6 @@ main() {
     progress failed failed 0 'Maintenance owner release failed; evidence was retained'
     return 1
   fi
-  REPAIR_SUCCESS=1
   if repair_webui_terminal_deferred; then
     progress running dispatcher-finalize 99 'Repair completed; finalizing WebUI action ownership'
     log 'Repair completed; dispatcher will finalize WebUI action ownership.'
@@ -1311,6 +1330,19 @@ main() {
     progress complete complete 100 'Emergency repair completed'
   fi
   log "MerVLAN update components repaired successfully from branch: $REF"
+  if [ "$REPAIR_AUTO_UPDATE" = YES ]; then
+    log "Starting normal update from branch: $REF"
+    if /bin/sh "$MERV_BASE/functions/update_mervlan.sh" update "$REF"; then
+      REPAIR_FINAL_SUCCESS=1
+      log 'Normal update completed successfully.'
+      return 0
+    else
+      _rmu_status=$?
+      log "Normal update failed (exit status $_rmu_status)."
+      return "$_rmu_status"
+    fi
+  fi
+  REPAIR_FINAL_SUCCESS=1
   log 'No update was started.'
   return 0
 }
