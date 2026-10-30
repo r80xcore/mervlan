@@ -1063,10 +1063,21 @@ case "$ACTION" in
       fi
 
       # Install the configured-node baseline from the currently active target
-      # templates.  BOOT_ENABLED remains owned by the later enable/disable
-      # action; nodeenable only establishes service-event and addon mounting.
+      # templates.
       inject_template "$TEMPLATE_SERVICE_EVENT" "$SERVICE_EVENT_WRAPPER" || { error -c vlan,cli "Failed to install node service-event"; exit 1; }
       inject_template "$TEMPLATE_SERVICES_ADDON" "$SERVICES_START" || { error -c vlan,cli "Failed to install node addon boot entry"; exit 1; }
+
+      # When boot service is enabled, also install the manager/shield/cron boot service
+      # so the node AP can boot autonomously with full L2 boot shield and VLAN enforcement.
+      if [ "$(json_get_flag "BOOT_ENABLED" "0" "$SETTINGS_FILE" 2>/dev/null)" = "1" ]; then
+        inject_template "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Failed to install node services-start"; exit 1; }
+        marker_present "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Node services-start injection verification failed"; exit 1; }
+        info -c vlan,cli "Installed node services-start (BOOT_ENABLED=1)"
+      elif [ -f "$SERVICES_START" ] && marker_present "$TEMPLATE_SERVICES" "$SERVICES_START"; then
+        remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" 2>/dev/null || \
+          warn -c vlan,cli "Failed to remove inactive services-start block on node"
+      fi
+
       chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || \
         warn -c vlan,cli "Could not chmod 755 $SERVICE_EVENT_WRAPPER"
       if [ -n "$BOOT_SCRIPT" ]; then
