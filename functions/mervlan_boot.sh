@@ -1074,8 +1074,11 @@ case "$ACTION" in
         marker_present "$TEMPLATE_SERVICES" "$SERVICES_START" || { error -c vlan,cli "Node services-start injection verification failed"; exit 1; }
         info -c vlan,cli "Installed node services-start (BOOT_ENABLED=1)"
       elif [ -f "$SERVICES_START" ] && marker_present "$TEMPLATE_SERVICES" "$SERVICES_START"; then
-        remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" 2>/dev/null || \
-          warn -c vlan,cli "Failed to remove inactive services-start block on node"
+        if ! remove_template_block "$TEMPLATE_SERVICES" "$SERVICES_START" || marker_present "$TEMPLATE_SERVICES" "$SERVICES_START"; then
+          error -c vlan,cli "Failed to remove inactive services-start block on node"
+          exit 1
+        fi
+        info -c vlan,cli "Removed inactive node services-start (BOOT_ENABLED=0)"
       fi
 
       chmod 755 "$SERVICE_EVENT_WRAPPER" 2>/dev/null || \
