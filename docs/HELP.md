@@ -1003,23 +1003,46 @@ modifies the original.
 
 #### Emergency Update Repair
 
-Use repair when the installed updater, its support libraries, node-sync helpers, or related update/runtime files are missing, damaged, or have incorrect permissions. Repair restores branch-owned program and static components only; it preserves settings, SSH keys, databases, and backups. It does not start an update, synchronize nodes, apply VLANs, restart services, or reboot. Run the normal update after repair when ready.
+Emergency Repair restores the selected branch's manifest-listed MerVLAN program and static files when the installed updater or support files are damaged or missing. The engine runs independently of the installed MerVLAN libraries. Repair preserves personal settings, SSH keys, databases, runtime state, and backups. It does not run Update, Apply, Sync, Uninstall, restart services, or reboot.
 
-| Command | What it does |
+A previous repair with a non-empty transaction ledger blocks automatic rerun. Preserve its workspace and investigate recovery; do not remove its ledger, temporary files, or maintenance lock to retry. Select the intended branch carefully: repair from another branch can replace branch-owned files.
+
+| Command | Action |
 | --- | --- |
-| `sh functions/update_mervlan_repair.sh main` | Repair update/runtime components from the supported `main` branch. |
-| `sh functions/update_mervlan_repair.sh dev` | Repair update/runtime components from the supported `dev` branch. |
-| `sh functions/update_mervlan_repair.sh feature/example` | Repair from a named custom branch. Advanced CLI use only. |
+| `sh functions/update_mervlan_repair.sh main` | Repair from the supported `main` branch. |
+| `sh functions/update_mervlan_repair.sh dev` | Repair from the supported `dev` branch. |
+| `sh functions/update_mervlan_repair.sh feature/example` | Repair from a named branch using a known-working installed engine. |
 
-The Web UI's **Repair update components before update** option runs the same repair stage first and starts the selected normal update only after repair reports success. A stable-release repair always uses `main`, not the selected release tag.
-
-If the Web UI repair cannot start because the installed event handler or its lock/action support is damaged, bootstrap the standalone repair script over SSH first. For `main`:
+The Web UI's **Repair update components before update** option runs its normal Update stage only after Repair succeeds; a stable-release repair uses `main`, not the selected release tag. The SSH bootstrap below is Repair-only: it has no automatic Update step and does not require an `AUTO_UPDATE` setting. Use it when the installed engine cannot be started. For this test branch, run the following over SSH from the router shell. Change the first `BRANCH=` value to select another bootstrap branch.
 
 ```sh
-umask 077; c="${MERV_REPAIR_BOOTSTRAP_CURL:-/usr/sbin/curl}"; t="${MERV_REPAIR_BOOTSTRAP_TMP_ROOT:-/tmp}"; case "$c" in /*) ;; *) exit 1 ;; esac; case "$c" in *..*|*//*|*[!A-Za-z0-9_./-]*) exit 1 ;; esac; case "$t" in /*) ;; *) exit 1 ;; esac; case "$t" in *..*|*//*|*[!A-Za-z0-9_./-]*) exit 1 ;; esac; [ -x "$c" ] && [ -d "$t" ] && [ ! -L "$t" ] || exit 1; d=""; n=0; while [ "$n" -lt 8 ]; do d="$t/mervlan-repair-bootstrap.$$.$n"; if [ ! -e "$d" ] && [ ! -L "$d" ] && mkdir "$d" 2>/dev/null; then break; fi; d=""; n=$((n+1)); done; [ -n "$d" ] || exit 1; "$c" -fsL --retry 3 --connect-timeout 15 "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/main/functions/update_mervlan_repair.sh" -o "$d/entry.sh" && [ -f "$d/entry.sh" ] && [ ! -L "$d/entry.sh" ] && sh -n "$d/entry.sh" && chmod 0755 "$d/entry.sh" && MERV_REPAIR_BOOTSTRAP_DIR="$d" /bin/sh "$d/entry.sh" main; rc=$?; if [ "$rc" -eq 0 ]; then rm -f "$d/entry.sh" 2>/dev/null && rmdir "$d" 2>/dev/null || exit 1; fi; exit "$rc"
+BRANCH="pre_v0.53.29-RC3-repair-test"
+(
+  case "$BRANCH" in
+    ''|*[!A-Za-z0-9._-]*|*..*|*.lock|[!A-Za-z0-9]*|*[!A-Za-z0-9])
+      printf '%s\n' 'Invalid repair branch name' >&2; exit 2 ;;
+  esac
+  [ "${#BRANCH}" -le 96 ] || { printf '%s\n' 'Branch name too long' >&2; exit 2; }
+  umask 077
+  D=$(mktemp -d /tmp/mervlan-bootstrap.XXXXXXXX) || exit 1
+  trap 'rc=$?; trap - EXIT; if [ "$rc" -eq 0 ]; then case "$D" in /tmp/mervlan-bootstrap.*) rm -rf "$D" ;; esac; else printf "Bootstrap failed (%s); retained evidence: %s\n" "$rc" "$D" >&2; fi' EXIT
+  curl -fsSL --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 90 --retry 2 \
+    -o "$D/repair.sh" \
+    "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh" &&
+  [ -s "$D/repair.sh" ] && [ ! -L "$D/repair.sh" ] &&
+  /bin/sh -n "$D/repair.sh" &&
+  /bin/sh "$D/repair.sh" "$BRANCH"
+)
 ```
 
-This command keeps the downloaded entrypoint and any failed-repair evidence in a private `/tmp` workspace. It does not create or replace anything under the active addon before repair admission. After archive validation, the bootstrap process hands off to the repair engine from that same validated snapshot. For `dev`, replace both the `refs/heads/main` URL segment and the final `main` argument with `dev`.
+The bootstrap validates a bounded branch name before downloading; it permits ASCII letters, digits, dots, underscores, and dashes, requires an alphanumeric first and last character, and rejects `..` and a `.lock` suffix. Slash-separated names are deliberately not accepted by this compact bootstrap. The selected branch appears in both the download URL and the engine argument.
+
+Both the bootstrap download and the engine's complete source-snapshot download require HTTPS for the initial URL and redirects. The bootstrap uses a private `/tmp` workspace with restrictive permissions. It checks the downloaded file and shell syntax before execution. On success it removes that workspace; on failure after workspace creation it keeps the evidence and prints its path. Invalid branch input exits with status 2; exit status 0 means Repair completed successfully, and download, validation, repair, or cleanup failures return a nonzero status. This bootstrap requires curl with `--proto` and `--proto-redir` support (introduced in curl 7.21.0 or newer); unsupported options fail closed, with no unrestricted fallback.
+
+The downloaded standalone engine obtains and validates one complete source snapshot, then hands control to the Repair engine inside that exact snapshot before admission or publication. Thus the repair operation and its manifest/payload come from one validated archive. The raw bootstrap and archive are separate branch requests, so a branch that moves between requests can yield a newer snapshot; use a trusted, stable branch when that matters. HTTPS protects transport but does not pin branch contents to a commit.
+
+The prior interrupted MAIN repair is separate recovery work. Do not run another Repair, Update, reboot, lock deletion, or workspace cleanup on MAIN without separate authorization and recovery verification.
 
 #### Backup
 

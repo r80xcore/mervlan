@@ -93,8 +93,9 @@ valid_ref() {
   case "$REF" in *[A-Za-z0-9]) return 0 ;; *) return 1 ;; esac
 }
 
+# Builtin predicates preserve detection of dangling links without forking ls.
 path_present() {
-  ls -ld "$1" >/dev/null 2>&1
+  [ -e "$1" ] || [ -L "$1" ]
 }
 
 path_regular() {
@@ -173,7 +174,7 @@ find_curl() {
 fetch_snapshot() {
   _fs_dest="$1" _fs_part="${1}.part" _fs_url="$MERV_REPAIR_SNAPSHOT_BASE/$REF"
   rm -f "$_fs_part" 2>/dev/null || return 1
-  "$CURL_BIN" -f -sS -L --retry 3 --retry-delay 1 \
+  "$CURL_BIN" -f -sS -L --proto '=https' --proto-redir '=https' --retry 3 --retry-delay 1 \
     --connect-timeout "$MERV_REPAIR_CONNECT_TIMEOUT" \
     --max-time "$MERV_REPAIR_MAX_TIME" -o "$_fs_part" "$_fs_url" || {
       rm -f "$_fs_part" 2>/dev/null || :
@@ -213,14 +214,14 @@ archive_members_valid() {
     case "$_amv_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
     if [ -z "$SNAPSHOT_ROOT" ]; then SNAPSHOT_ROOT="$_amv_root"; fi
     [ "$SNAPSHOT_ROOT" = "$_amv_root" ] || return 1
-    grep -Fqx "$_amv_normalized" "$RUN_DIR/archive.seen" 2>/dev/null && return 1
     printf '%s\n' "$_amv_normalized" >>"$RUN_DIR/archive.seen" || return 1
     _amv_count=$((_amv_count + 1))
     [ "$_amv_count" -le 4096 ] || return 1
   done <"$_amv_members"
+  # A single bounded pass detects duplicate normalized member names.
+  awk 'seen[$0]++ { exit 1 }' "$RUN_DIR/archive.seen" >/dev/null 2>&1 || return 1
   while IFS= read -r _amv_verbose_line || [ -n "$_amv_verbose_line" ]; do
-    _amv_type=$(printf '%s' "$_amv_verbose_line" | cut -c1)
-    case "$_amv_type" in -|d) ;; *) return 1 ;; esac
+    case "$_amv_verbose_line" in -*|d*) ;; *) return 1 ;; esac
     case "$_amv_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
   done <"$_amv_verbose"
   [ -n "$SNAPSHOT_ROOT" ] || return 1
@@ -273,11 +274,12 @@ parse_manifest() {
     safe_rel_path "$_pm_path" || return 1
     repair_path_allowed "$_pm_path" || return 1
     path_protected "$_pm_path" && return 1
-    grep -Fqx "$_pm_path" "$PATHS_FILE" 2>/dev/null && return 1
     printf '%s %s\n' "$_pm_mode" "$_pm_path" >>"$PATHS_FILE" || return 1
     _pm_entries=$((_pm_entries + 1))
     [ "$_pm_entries" -le 256 ] || return 1
   done <"$_pm_manifest"
+  # Check duplicate paths in one invocation, after the bounded strict parse.
+  awk 'seen[$2]++ { exit 1 }' "$PATHS_FILE" >/dev/null 2>&1 || return 1
   [ "$_pm_format" -eq 1 ] && [ "$_pm_cohort" -eq 1 ] && [ "$_pm_entries" -gt 0 ] || return 1
   for _pm_required in install.sh uninstall.sh functions/update_mervlan.sh \
     functions/update_mervlan_repair.sh functions/update_mervlan_repair.manifest \
@@ -293,7 +295,8 @@ parse_manifest() {
 
 mode_matches() {
   _mm_mode="$1" _mm_file="$2"
-  _mm_actual=$(ls -l "$_mm_file" 2>/dev/null | awk '{print $1}')
+  _mm_listing=$(LC_ALL=C ls -ld "$_mm_file" 2>/dev/null) || return 1
+  _mm_actual=${_mm_listing%% *}
   case "$_mm_mode:$_mm_actual" in
     0755:-rwxr-xr-x|0644:-rw-r--r--) return 0 ;;
     *) return 1 ;;
@@ -325,7 +328,8 @@ repair_proc_start() {
   _rps_pid="$1" _rps_root="${2:-/proc}"
   repair_owner_positive_uint "$_rps_pid" || return 1
   [ -r "$_rps_root/$_rps_pid/stat" ] || return 1
-  _rps_stat=$(cat "$_rps_root/$_rps_pid/stat" 2>/dev/null) || return 1
+  _rps_stat=''
+  IFS= read -r _rps_stat <"$_rps_root/$_rps_pid/stat" || [ -n "$_rps_stat" ] || return 1
   _rps_after=${_rps_stat#*)}
   [ "$_rps_after" != "$_rps_stat" ] || return 1
   set -- $_rps_after
@@ -574,26 +578,16 @@ repair_legacy_process_scan() {
     _rlps_cmdline_text=$(LC_ALL=C tr '\000' '\n' <"$_rlps_cmdline" 2>/dev/null) || return 2
     [ -n "$_rlps_cmdline_text" ] || continue
     _rlps_match=0
-    for _rlps_arg in \
-      "$MERV_BASE/functions/update_mervlan.sh" \
-      "$MERV_BASE/install.sh" \
-      "$MERV_BASE/uninstall.sh" \
-      "$MERV_BASE/functions/mervlan_manager.sh" \
-      "$MERV_BASE/functions/sync_nodes.sh" \
-      "$MERV_BASE/functions/execute_nodes.sh" \
-      "$MERV_BASE/functions/service-event-handler.sh" \
-      "$MERV_BASE/functions/mervlan_boot.sh" \
-      "$MERV_BASE/functions/mervlan_boot_wrap.sh" \
-      "$MERV_BASE/functions/heal_event.sh" \
-      "$MERV_BASE/functions/save_settings.sh" \
-      "$MERV_BASE/functions/hw_probe.sh" \
-      "$MERV_BASE/functions/dropbear_sshkey_gen.sh"
-    do
-      printf '%s\n' "$_rlps_cmdline_text" | grep -Fqx "$_rlps_arg" 2>/dev/null && {
+    # Preserve absolute argv priority over relative ambiguity. Do not
+    # perform candidate-dependent cwd lookups before checking every exact arg.
+    while IFS= read -r _rlps_arg || [ -n "$_rlps_arg" ]; do
+      if repair_legacy_process_target "$_rlps_arg"; then
         _rlps_match=1
         break
-      }
-    done
+      fi
+    done <<EOF
+$_rlps_cmdline_text
+EOF
     if [ "$_rlps_match" = 0 ]; then
       while IFS= read -r _rlps_cmd_arg || [ -n "$_rlps_cmd_arg" ]; do
         repair_legacy_relative_target "$_rlps_pid" "$_rlps_cmd_arg"
