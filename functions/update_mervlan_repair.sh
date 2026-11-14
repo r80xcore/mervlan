@@ -29,6 +29,16 @@ REPAIR_LOCK_OWNED=0
 REPAIR_LOCK_NONCE=""
 REPAIR_LOCK_START=""
 REPAIR_LOCK_CREATED=""
+REPAIR_ADMISSION_PHASE="initial"
+REPAIR_BLOCK_CATEGORY=""
+REPAIR_BLOCK_REASON=""
+REPAIR_BLOCK_PID=""
+REPAIR_BLOCK_OPERATION=""
+REPAIR_BLOCK_START=""
+REPAIR_BLOCK_STATE=""
+REPAIR_BLOCK_LOCK=""
+REPAIR_BLOCK_SOURCE=""
+REPAIR_BLOCK_IDENTITY=""
 REPAIR_LEDGER_SEQ=0
 REPAIR_PROGRESS_SEQ=0
 REPAIR_PROGRESS_TOKEN="${MERV_PROGRESS_TOKEN:-}"
@@ -338,6 +348,115 @@ repair_proc_start() {
   printf '%s\n' "$_rps_start"
 }
 
+# Admission diagnostics are deliberately state-only: they never carry a path,
+# command line, owner nonce, environment value, or settings content. Reset at
+# each exclusion boundary so an earlier observation cannot leak into a later
+# refusal message.
+repair_admission_diag_begin() {
+  REPAIR_ADMISSION_PHASE="$1"
+  REPAIR_BLOCK_CATEGORY="" REPAIR_BLOCK_REASON="" REPAIR_BLOCK_PID=""
+  REPAIR_BLOCK_OPERATION="" REPAIR_BLOCK_START="" REPAIR_BLOCK_STATE=""
+  REPAIR_BLOCK_LOCK="" REPAIR_BLOCK_SOURCE="" REPAIR_BLOCK_IDENTITY=""
+}
+
+repair_admission_diag_block() {
+  REPAIR_BLOCK_CATEGORY="$1"
+  REPAIR_BLOCK_REASON="${2:-}"
+  REPAIR_BLOCK_LOCK="${3:-}"
+  REPAIR_BLOCK_PID="${4:-}"
+  REPAIR_BLOCK_START="${5:-}"
+  REPAIR_BLOCK_STATE="${6:-}"
+  REPAIR_BLOCK_IDENTITY="${7:-}"
+  REPAIR_BLOCK_OPERATION="${8:-}"
+  REPAIR_BLOCK_SOURCE="${9:-}"
+  repair_admission_diag_log
+}
+
+repair_admission_diag_log() {
+  _radl_phase=unknown _radl_category=unknown_unverifiable_ownership
+  _radl_reason='' _radl_lock='' _radl_pid='' _radl_start=''
+  _radl_state='' _radl_identity='' _radl_operation='' _radl_blocker=''
+  case "$REPAIR_ADMISSION_PHASE" in
+    initial|post_acquisition|publication|post_publish_verify) _radl_phase=$REPAIR_ADMISSION_PHASE ;;
+  esac
+  case "$REPAIR_BLOCK_CATEGORY" in
+    recognized_legacy_mutator|legacy_lock_live_pid|canonical_maintenance_owner|\
+    unknown_unverifiable_ownership|unsafe_malformed_lock|maintenance_lock_claim_failed)
+      _radl_category=$REPAIR_BLOCK_CATEGORY ;;
+  esac
+  case "$REPAIR_BLOCK_REASON" in
+    process_scan_unverifiable|proc_root_unavailable|proc_root_unsafe|proc_entry_unverifiable|\
+    process_cmdline_unreadable|process_identity_unreadable|legacy_lock_root_unsafe|\
+    legacy_lock_directory_unsafe|legacy_pid_file_unsafe|legacy_pid_invalid|\
+    legacy_pid_identity_unreadable|action_lock_owner_unverifiable|\
+    canonical_lock_path_unsafe|canonical_lock_directory_unsafe|\
+    canonical_owner_malformed_or_unreadable|canonical_owner_identity_unverifiable|\
+    canonical_owner_replaced_during_check|canonical_stale_quarantine_collision|\
+    canonical_stale_quarantine_failed|maintenance_parent_unavailable|\
+    maintenance_lock_claim_raced|repair_owner_creation_failed)
+      _radl_reason=$REPAIR_BLOCK_REASON ;;
+  esac
+  case "$REPAIR_BLOCK_LOCK" in
+    ''|*/*|*[!A-Za-z0-9_.-]*) : ;;
+    *) [ "${#REPAIR_BLOCK_LOCK}" -le 80 ] && _radl_lock=$REPAIR_BLOCK_LOCK ;;
+  esac
+  repair_owner_positive_uint "$REPAIR_BLOCK_PID" && _radl_pid=$REPAIR_BLOCK_PID
+  repair_owner_positive_uint "$REPAIR_BLOCK_START" && _radl_start=$REPAIR_BLOCK_START
+  case "$REPAIR_BLOCK_STATE" in R|S|D|Z|T|t|X|x|K|W|P|I) _radl_state=$REPAIR_BLOCK_STATE ;; esac
+  case "$REPAIR_BLOCK_IDENTITY" in
+    observed_generation|pid_only_unverified|owner_verified_at_check|unverifiable)
+      _radl_identity=$REPAIR_BLOCK_IDENTITY ;;
+  esac
+  case "$REPAIR_BLOCK_OPERATION" in
+    update_mervlan.sh|install.sh|uninstall.sh|mervlan_manager.sh|sync_nodes.sh|\
+    execute_nodes.sh|service-event-handler.sh|mervlan_boot.sh|\
+    mervlan_boot_wrap.sh|heal_event.sh|save_settings.sh|hw_probe.sh|\
+    dropbear_sshkey_gen.sh)
+      _radl_operation=$REPAIR_BLOCK_OPERATION ;;
+  esac
+  case "$REPAIR_BLOCK_SOURCE" in recognized_legacy_mutator|legacy_lock_live_pid) _radl_blocker=$REPAIR_BLOCK_SOURCE ;; esac
+  if [ "$_radl_phase" = post_acquisition ]; then
+    case "$_radl_category" in
+      recognized_legacy_mutator|legacy_lock_live_pid)
+        _radl_blocker=$_radl_category
+        _radl_category=post_acquisition_competing_mutator
+        ;;
+    esac
+  fi
+  _radl_message="Admission refused: category=$_radl_category phase=$_radl_phase"
+  [ -n "$_radl_blocker" ] && _radl_message="$_radl_message blocker=$_radl_blocker"
+  [ -n "$_radl_reason" ] && _radl_message="$_radl_message reason=$_radl_reason"
+  [ -n "$_radl_lock" ] && _radl_message="$_radl_message lock=$_radl_lock"
+  [ -n "$_radl_pid" ] && _radl_message="$_radl_message pid=$_radl_pid"
+  [ -n "$_radl_operation" ] && _radl_message="$_radl_message operation=$_radl_operation"
+  [ -n "$_radl_start" ] && _radl_message="$_radl_message proc_start=$_radl_start"
+  [ -n "$_radl_state" ] && _radl_message="$_radl_message proc_state=$_radl_state"
+  [ -n "$_radl_identity" ] && _radl_message="$_radl_message identity=$_radl_identity"
+  log "$_radl_message"
+  return 0
+}
+
+# Read a state only when a blocker has already been found. A second read can
+# improve the message but can never change the exclusion decision. Require the
+# observed generation to match the generation that caused the refusal.
+repair_admission_diag_process_state() {
+  REPAIR_BLOCK_STATE=""
+  _radps_pid="$1" _radps_expected="$2" _radps_root="${3:-$MERV_REPAIR_PROC_ROOT}"
+  repair_owner_positive_uint "$_radps_pid" || return 0
+  repair_owner_positive_uint "$_radps_expected" || return 0
+  [ -r "$_radps_root/$_radps_pid/stat" ] || return 0
+  _radps_stat=''
+  IFS= read -r _radps_stat <"$_radps_root/$_radps_pid/stat" || [ -n "$_radps_stat" ] || return 0
+  _radps_after=${_radps_stat#*)}
+  [ "$_radps_after" != "$_radps_stat" ] || return 0
+  set -- $_radps_after
+  _radps_state=${1:-}
+  _radps_start=${20:-}
+  [ "$_radps_start" = "$_radps_expected" ] || return 0
+  case "$_radps_state" in R|S|D|Z|T|t|X|x|K|W|P|I) REPAIR_BLOCK_STATE=$_radps_state ;; esac
+  return 0
+}
+
 # Classify an existing canonical-owner PID without conflating an unreadable
 # process identity with a dead one.  Rescue may reclaim only an authoritatively
 # absent PID or a readable, mismatched start identity; a present-but-unreadable
@@ -565,24 +684,43 @@ repair_legacy_relative_target() {
 
 repair_legacy_process_scan() {
   _rlps_root="$MERV_REPAIR_PROC_ROOT"
-  path_chain_safe "$_rlps_root" || return 2
+  path_chain_safe "$_rlps_root" || {
+    repair_admission_diag_block unknown_unverifiable_ownership proc_root_unsafe
+    return 2
+  }
   [ -d "$_rlps_root" ] && [ ! -L "$_rlps_root" ] &&
-    [ -r "$_rlps_root" ] && [ -x "$_rlps_root" ] || return 2
+    [ -r "$_rlps_root" ] && [ -x "$_rlps_root" ] || {
+      repair_admission_diag_block unknown_unverifiable_ownership proc_root_unavailable
+      return 2
+    }
   for _rlps_pid_dir in "$_rlps_root"/[0-9]*; do
     path_present "$_rlps_pid_dir" || continue
-    [ ! -L "$_rlps_pid_dir" ] && [ -d "$_rlps_pid_dir" ] || return 2
+    [ ! -L "$_rlps_pid_dir" ] && [ -d "$_rlps_pid_dir" ] || {
+      repair_admission_diag_block unknown_unverifiable_ownership proc_entry_unverifiable
+      return 2
+    }
     _rlps_pid=${_rlps_pid_dir##*/}
-    repair_owner_positive_uint "$_rlps_pid" || return 2
+    repair_owner_positive_uint "$_rlps_pid" || {
+      repair_admission_diag_block unknown_unverifiable_ownership proc_entry_unverifiable
+      return 2
+    }
     _rlps_cmdline="$_rlps_pid_dir/cmdline"
-    path_regular "$_rlps_cmdline" && [ -r "$_rlps_cmdline" ] || return 2
-    _rlps_cmdline_text=$(LC_ALL=C tr '\000' '\n' <"$_rlps_cmdline" 2>/dev/null) || return 2
+    path_regular "$_rlps_cmdline" && [ -r "$_rlps_cmdline" ] || {
+      repair_admission_diag_block unknown_unverifiable_ownership process_cmdline_unreadable '' "$_rlps_pid"
+      return 2
+    }
+    _rlps_cmdline_text=$(LC_ALL=C tr '\000' '\n' <"$_rlps_cmdline" 2>/dev/null) || {
+      repair_admission_diag_block unknown_unverifiable_ownership process_cmdline_unreadable '' "$_rlps_pid"
+      return 2
+    }
     [ -n "$_rlps_cmdline_text" ] || continue
-    _rlps_match=0
+    _rlps_match=0 _rlps_operation=""
     # Preserve absolute argv priority over relative ambiguity. Do not
     # perform candidate-dependent cwd lookups before checking every exact arg.
     while IFS= read -r _rlps_arg || [ -n "$_rlps_arg" ]; do
       if repair_legacy_process_target "$_rlps_arg"; then
         _rlps_match=1
+        _rlps_operation=${_rlps_arg##*/}
         break
       fi
     done <<EOF
@@ -593,9 +731,12 @@ EOF
         repair_legacy_relative_target "$_rlps_pid" "$_rlps_cmd_arg"
         _rlps_relative_rc=$?
         case "$_rlps_relative_rc" in
-          0) _rlps_match=1; break ;;
+          0) _rlps_match=1; _rlps_operation=${_rlps_cmd_arg##*/}; break ;;
           1) : ;;
-          *) return 2 ;;
+          *)
+            repair_admission_diag_block unknown_unverifiable_ownership process_identity_unreadable '' "$_rlps_pid"
+            return 2
+            ;;
         esac
       done <<EOF
 $_rlps_cmdline_text
@@ -606,21 +747,43 @@ EOF
     # identity-verifiable process record and still be alive; otherwise rescue
     # cannot distinguish a live mutator from a reused/unobservable PID.
     _rlps_start=$(repair_proc_start "$_rlps_pid" "$_rlps_root" 2>/dev/null || printf '')
-    [ -n "$_rlps_start" ] || return 2
+    [ -n "$_rlps_start" ] || {
+      repair_admission_diag_block unknown_unverifiable_ownership process_identity_unreadable '' "$_rlps_pid" '' '' '' "$_rlps_operation"
+      return 2
+    }
     kill -0 "$_rlps_pid" 2>/dev/null || continue
+    REPAIR_BLOCK_PID=$_rlps_pid
+    REPAIR_BLOCK_OPERATION=$_rlps_operation
+    REPAIR_BLOCK_START=$_rlps_start
+    REPAIR_BLOCK_IDENTITY=observed_generation
+    repair_admission_diag_process_state "$_rlps_pid" "$_rlps_start" "$_rlps_root"
+    REPAIR_BLOCK_CATEGORY=recognized_legacy_mutator
     return 1
   done
   return 0
 }
 
 repair_legacy_exclusion_check() {
+  _rle_phase="${1:-initial}"
+  repair_admission_diag_begin "$_rle_phase"
   _rle_root="$MERV_REPAIR_LEGACY_LOCK_ROOT"
-  path_chain_safe "$_rle_root" || return 2
+  path_chain_safe "$_rle_root" || {
+    repair_admission_diag_block unsafe_malformed_lock legacy_lock_root_unsafe
+    return 2
+  }
   path_present "$MERV_REPAIR_PROC_ROOT" && [ -d "$MERV_REPAIR_PROC_ROOT" ] &&
-    [ -r "$MERV_REPAIR_PROC_ROOT" ] || return 2
+    [ -r "$MERV_REPAIR_PROC_ROOT" ] || {
+      repair_admission_diag_block unknown_unverifiable_ownership proc_root_unavailable
+      return 2
+    }
   repair_legacy_process_scan || {
     _rle_process_rc=$?
-    [ "$_rle_process_rc" -eq 1 ] && return 1
+    if [ "$_rle_process_rc" -eq 1 ]; then
+      REPAIR_BLOCK_CATEGORY=recognized_legacy_mutator
+      repair_admission_diag_log
+      return 1
+    fi
+    [ -n "$REPAIR_BLOCK_CATEGORY" ] || repair_admission_diag_block unknown_unverifiable_ownership process_scan_unverifiable
     return 2
   }
   for _rle_lock in "$_rle_root"/*.lock; do
@@ -629,20 +792,43 @@ repair_legacy_exclusion_check() {
     _rle_base=${_rle_lock##*/}
     case "$_rle_base" in
       mervlan_action.lock)
-        repair_action_parent_valid || return 2
+        repair_action_parent_valid || {
+          repair_admission_diag_block unknown_unverifiable_ownership action_lock_owner_unverifiable "$_rle_base"
+          return 2
+        }
         continue
         ;;
       *.lock) : ;;
       *) return 2 ;;
     esac
-    [ ! -L "$_rle_lock" ] && [ -d "$_rle_lock" ] || return 2
-    path_regular "$_rle_lock/pid" || return 2
+    [ ! -L "$_rle_lock" ] && [ -d "$_rle_lock" ] || {
+      repair_admission_diag_block unsafe_malformed_lock legacy_lock_directory_unsafe "$_rle_base"
+      return 2
+    }
+    path_regular "$_rle_lock/pid" || {
+      repair_admission_diag_block unsafe_malformed_lock legacy_pid_file_unsafe "$_rle_base"
+      return 2
+    }
     _rle_pid=$(sed -n '1p' "$_rle_lock/pid" 2>/dev/null)
-    repair_owner_positive_uint "$_rle_pid" || return 2
+    repair_owner_positive_uint "$_rle_pid" || {
+      repair_admission_diag_block unsafe_malformed_lock legacy_pid_invalid "$_rle_base"
+      return 2
+    }
     if path_present "$MERV_REPAIR_PROC_ROOT/$_rle_pid"; then
       _rle_start=$(repair_proc_start "$_rle_pid" "$MERV_REPAIR_PROC_ROOT" 2>/dev/null || printf '')
-      [ -n "$_rle_start" ] || return 2
-      kill -0 "$_rle_pid" 2>/dev/null && return 1
+      [ -n "$_rle_start" ] || {
+        repair_admission_diag_block unknown_unverifiable_ownership legacy_pid_identity_unreadable "$_rle_base" "$_rle_pid"
+        return 2
+      }
+      if kill -0 "$_rle_pid" 2>/dev/null; then
+        REPAIR_BLOCK_PID=$_rle_pid
+        REPAIR_BLOCK_START=$_rle_start
+        REPAIR_BLOCK_IDENTITY=pid_only_unverified
+        repair_admission_diag_process_state "$_rle_pid" "$_rle_start" "$MERV_REPAIR_PROC_ROOT"
+        repair_admission_diag_block legacy_lock_live_pid '' "$_rle_base" "$_rle_pid" "$_rle_start" \
+          "${REPAIR_BLOCK_STATE:-}" pid_only_unverified
+        return 1
+      fi
     fi
     # A missing /proc/<pid> proves that this legacy process is gone; the lock
     # remains untouched and is left for the old runtime's own cleanup. An
@@ -713,25 +899,33 @@ repair_lock_release() {
 }
 
 repair_admit() {
-  repair_lock_path_valid || { log 'Maintenance lock path is unsafe or unverifiable.'; return 1; }
-  repair_legacy_exclusion_check || {
-    _rac_rc=$?
-    [ "$_rac_rc" -eq 1 ] && log 'A legacy MerVLAN mutator is live; repair is blocked.'
-    [ "$_rac_rc" -ne 1 ] && log 'Legacy MerVLAN lock state is unknown; repair is blocked.'
+  repair_admission_diag_begin initial
+  repair_lock_path_valid || {
+    repair_admission_diag_block unsafe_malformed_lock canonical_lock_path_unsafe mervlan_maintenance.lock
     return 1
   }
+  repair_legacy_exclusion_check initial || return 1
   if path_present "$MERV_REPAIR_MAINTENANCE_LOCK"; then
-    [ ! -L "$MERV_REPAIR_MAINTENANCE_LOCK" ] && [ -d "$MERV_REPAIR_MAINTENANCE_LOCK" ] || return 1
-    repair_owner_read "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || return 1
+    [ ! -L "$MERV_REPAIR_MAINTENANCE_LOCK" ] && [ -d "$MERV_REPAIR_MAINTENANCE_LOCK" ] || {
+      repair_admission_diag_block unsafe_malformed_lock canonical_lock_directory_unsafe mervlan_maintenance.lock
+      return 1
+    }
+    repair_owner_read "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || {
+      repair_admission_diag_block unsafe_malformed_lock canonical_owner_malformed_or_unreadable mervlan_maintenance.lock
+      return 1
+    }
     _rac_owner_state=$(repair_owner_identity_state "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" 2>/dev/null || printf 'unknown')
     case "$_rac_owner_state" in
       live)
-        log 'Another authenticated maintenance owner is live; repair is blocked.'
+        repair_admission_diag_process_state "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" "$MERV_REPAIR_PROC_ROOT"
+        repair_admission_diag_block canonical_maintenance_owner '' mervlan_maintenance.lock \
+          "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" "${REPAIR_BLOCK_STATE:-}" owner_verified_at_check
         return 1
         ;;
       absent|reused) : ;;
       *)
-        log 'Canonical maintenance owner identity is unobservable; repair is blocked.'
+        repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_identity_unverifiable \
+          mervlan_maintenance.lock "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" '' unverifiable
         return 1
         ;;
     esac
@@ -743,19 +937,40 @@ repair_admit() {
     # A dead/reused owner is retained for inspection and moved only after the
     # complete record is re-read.  Never unlink a foreign stale lock in rescue.
     _rac_quarantine="${MERV_REPAIR_MAINTENANCE_LOCK}.repair-stale.$$.$REPAIR_LEDGER_SEQ"
-    path_present "$_rac_quarantine" && return 1
-    path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || return 1
-    repair_owner_read "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || return 1
+    path_present "$_rac_quarantine" && {
+      repair_admission_diag_block unsafe_malformed_lock canonical_stale_quarantine_collision mervlan_maintenance.lock
+      return 1
+    }
+    path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || {
+      repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_replaced_during_check mervlan_maintenance.lock
+      return 1
+    }
+    repair_owner_read "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || {
+      repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_replaced_during_check mervlan_maintenance.lock
+      return 1
+    }
     [ "$REPAIR_OWNER_PID" = "$_rac_old_pid" ] &&
       [ "$REPAIR_OWNER_START" = "$_rac_old_start" ] &&
       [ "$REPAIR_OWNER_NONCE" = "$_rac_old_nonce" ] &&
       [ "$REPAIR_OWNER_CREATED" = "$_rac_old_created" ] &&
-      [ "$REPAIR_OWNER_HEARTBEAT" = "$_rac_old_heartbeat" ] || return 1
-    mv "${MERV_REPAIR_MAINTENANCE_LOCK}" "$_rac_quarantine" 2>/dev/null || return 1
+      [ "$REPAIR_OWNER_HEARTBEAT" = "$_rac_old_heartbeat" ] || {
+        repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_replaced_during_check mervlan_maintenance.lock
+        return 1
+      }
+    mv "${MERV_REPAIR_MAINTENANCE_LOCK}" "$_rac_quarantine" 2>/dev/null || {
+      repair_admission_diag_block unknown_unverifiable_ownership canonical_stale_quarantine_failed mervlan_maintenance.lock
+      return 1
+    }
   fi
   _rac_parent=${MERV_REPAIR_MAINTENANCE_LOCK%/*}
-  mkdir_chain_safe "$_rac_parent" || return 1
-  if ! mkdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null; then return 1; fi
+  mkdir_chain_safe "$_rac_parent" || {
+    repair_admission_diag_block unsafe_malformed_lock maintenance_parent_unavailable mervlan_maintenance.lock
+    return 1
+  }
+  if ! mkdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null; then
+    repair_admission_diag_block maintenance_lock_claim_failed maintenance_lock_claim_raced mervlan_maintenance.lock
+    return 1
+  fi
   REPAIR_LOCK_START=$(repair_proc_start "$$" 2>/dev/null || printf '')
   if ! repair_owner_positive_uint "$REPAIR_LOCK_START"; then
     if path_present "$MERV_REPAIR_MAINTENANCE_LOCK" &&
@@ -764,6 +979,7 @@ repair_admit() {
        ! path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner"; then
       rmdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null || :
     fi
+    repair_admission_diag_block unknown_unverifiable_ownership repair_owner_creation_failed mervlan_maintenance.lock
     return 1
   fi
   REPAIR_LOCK_NONCE="repair.$$.${REPAIR_LEDGER_SEQ}"
@@ -777,10 +993,14 @@ repair_admit() {
        ! path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner"; then
       rmdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null || :
     fi
+    repair_admission_diag_block unknown_unverifiable_ownership repair_owner_creation_failed mervlan_maintenance.lock
     return 1
   fi
   REPAIR_LOCK_OWNED=1
-  repair_legacy_exclusion_check || { repair_lock_release || :; return 1; }
+  if ! repair_legacy_exclusion_check post_acquisition; then
+    repair_lock_release || :
+    return 1
+  fi
   return 0
 }
 
@@ -935,7 +1155,7 @@ publish() {
       REPAIR_OWNER_LOST=1
       return 1
     fi
-    repair_legacy_exclusion_check || return 1
+    repair_legacy_exclusion_check publication || return 1
     [ "${MERV_REPAIR_TEST_FAIL_PATH:-}" != "$_pub_rel" ] || return 1
     mv -f "$_pub_tmp" "$_pub_dest" 2>/dev/null || return 1
     REPAIR_PUBLISH_TMP=""
@@ -951,7 +1171,7 @@ post_publish_verify() {
     REPAIR_OWNER_LOST=1
     return 1
   fi
-  repair_legacy_exclusion_check || return 1
+  repair_legacy_exclusion_check post_publish_verify || return 1
   while IFS=' ' read -r _ppv_mode _ppv_rel; do
     _ppv_dest="$MERV_BASE/$_ppv_rel" _ppv_source="$STAGE_DIR/$_ppv_rel"
     path_regular "$_ppv_dest" && cmp -s "$_ppv_source" "$_ppv_dest" || return 1

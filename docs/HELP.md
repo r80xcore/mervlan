@@ -1024,8 +1024,36 @@ BRANCH="pre_v0.53.29-RC3-repair-test"
   esac
   [ "${#BRANCH}" -le 96 ] || { printf '%s\n' 'Branch name too long' >&2; exit 2; }
   umask 077
-  D=$(mktemp -d /tmp/mervlan-bootstrap.XXXXXXXX) || exit 1
-  trap 'rc=$?; trap - EXIT; if [ "$rc" -eq 0 ]; then case "$D" in /tmp/mervlan-bootstrap.*) rm -rf "$D" ;; esac; else printf "Bootstrap failed (%s); retained evidence: %s\n" "$rc" "$D" >&2; fi' EXIT
+  D=""
+  bootstrap_exit() {
+    rc=$?
+    trap - 0
+    [ -n "$D" ] || exit "$rc"
+    case "$D" in
+      /tmp/mervlan-bootstrap.*) ;;
+      *) printf 'Bootstrap workspace path rejected; retained evidence: %s\n' "$D" >&2; exit 1 ;;
+    esac
+    if [ "$rc" -eq 0 ]; then
+      if rm -rf "$D"; then
+        exit 0
+      fi
+      printf 'Bootstrap cleanup failed; retained evidence: %s\n' "$D" >&2
+      exit 1
+    fi
+    printf 'Bootstrap failed (%s); retained evidence: %s\n' "$rc" "$D" >&2
+    exit "$rc"
+  }
+  trap 'bootstrap_exit' 0
+  n=0
+  while [ "$n" -lt 8 ]; do
+    D="/tmp/mervlan-bootstrap.$$.${n}"
+    if ( umask 077; mkdir "$D" ) 2>/dev/null; then
+      break
+    fi
+    D=""
+    n=$((n + 1))
+  done
+  [ -n "$D" ] || { printf '%s\n' 'Unable to allocate private bootstrap workspace after 8 attempts' >&2; exit 1; }
   curl -fsSL --proto '=https' --proto-redir '=https' \
     --connect-timeout 15 --max-time 90 --retry 2 \
     -o "$D/repair.sh" \
@@ -1038,7 +1066,7 @@ BRANCH="pre_v0.53.29-RC3-repair-test"
 
 The bootstrap validates a bounded branch name before downloading; it permits ASCII letters, digits, dots, underscores, and dashes, requires an alphanumeric first and last character, and rejects `..` and a `.lock` suffix. Slash-separated names are deliberately not accepted by this compact bootstrap. The selected branch appears in both the download URL and the engine argument.
 
-Both the bootstrap download and the engine's complete source-snapshot download require HTTPS for the initial URL and redirects. The bootstrap uses a private `/tmp` workspace with restrictive permissions. It checks the downloaded file and shell syntax before execution. On success it removes that workspace; on failure after workspace creation it keeps the evidence and prints its path. Invalid branch input exits with status 2; exit status 0 means Repair completed successfully, and download, validation, repair, or cleanup failures return a nonzero status. This bootstrap requires curl with `--proto` and `--proto-redir` support (introduced in curl 7.21.0 or newer); unsupported options fail closed, with no unrestricted fallback.
+Both the bootstrap download and the engine's complete source-snapshot download require HTTPS for the initial URL and redirects. The bootstrap uses a private `/tmp` workspace with mode `0700`, allocated by up to eight exclusive `mkdir` attempts using the process ID and attempt number. An existing name is never reused or removed; allocation failure is reported before any download. It checks the downloaded file and shell syntax before execution. On success it removes only the workspace it created; on failure after workspace creation it retains the evidence and prints its path. Invalid branch input exits with status 2; exit status 0 means Repair completed successfully, and download, validation, repair, or cleanup failures return a nonzero status. This avoids a `mktemp` dependency and uses the portable `0` exit trap. This bootstrap requires curl with `--proto` and `--proto-redir` support (introduced in curl 7.21.0 or newer); unsupported options fail closed, with no unrestricted fallback.
 
 The downloaded standalone engine obtains and validates one complete source snapshot, then hands control to the Repair engine inside that exact snapshot before admission or publication. Thus the repair operation and its manifest/payload come from one validated archive. The raw bootstrap and archive are separate branch requests, so a branch that moves between requests can yield a newer snapshot; use a trusted, stable branch when that matters. HTTPS protects transport but does not pin branch contents to a commit.
 
