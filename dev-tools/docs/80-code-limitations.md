@@ -12,6 +12,11 @@ development impact.
 - Do not use `$$` alone for concurrent temporary names.
 - Avoid background processes near command substitution unless all descriptors
   are explicitly redirected.
+- Historical per-device command availability and qualified behavior are
+  recorded in [Router platform capabilities](85-router-platform-capabilities.md).
+  Treat that profile as evidence for its named historical device/build only;
+  it does not qualify RC3, MAIN, or another firmware build. A host BusyBox
+  `ash` check does not qualify router shell behavior.
 
 ## Safety and ownership
 

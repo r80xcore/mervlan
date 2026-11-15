@@ -21,9 +21,24 @@ root:
 sh dev-tools/tests/local/run_all.sh
 ```
 
+The maintained runner discovers `*_test.sh` files and invokes them with `sh`,
+then discovers `*_test.mjs` files and invokes them with `node`. Every nonzero
+test exit, including a conventional skip/unavailable code such as 77, counts as
+a failure. If Node.js is unavailable, the runner records a failure for the
+complete gate. It prints shell/Node counts and a failure total, and exits
+nonzero if any failure occurred. These details were checked against
+`dev-tools/tests/local/run_all.sh`; the script is authoritative if it changes.
+
 Run both after changing action tokens, polling, terminal state, button locks,
 or loading text. If a harness needs production paths, set an explicit
 `MERV_BASE`; do not rely on the current directory.
+
+For standalone Repair scanner changes, run
+`sh dev-tools/tests/local/repair_sequential_scan_contract_test.sh [engine-path]`.
+The fixture starts a later synthetic mutator while an earlier PID is being
+read. Initial admission, post-acquisition admission and publication must all
+refuse. Keep the per-PID read and inspection in order. A batch grep shortlist
+can pre-read the later PID and miss this transition.
 
 ## 2. Static shell checks
 
@@ -158,12 +173,22 @@ stop normal testing and follow recovery; do not simply re-arm it.
 
 ## 7. Evidence lifecycle
 
+Keep read-only inventories distinct from behavioral tests. An inventory
+records observed state without invoking the behavior under investigation;
+behavioral tests execute a scoped operation and need their own private scratch
+scope, authorization, and cleanup decision. Do not describe an inventory as a
+behavioral qualification or promote a historical device result to a current
+build requirement.
+
 On each device use a unique run ID and collect to:
 
 ```text
 /tmp/mervlan_tmp/evidence/<run-id>/<device>/<stage>/
 ```
 
-Download to `dev-tools/evidence/<run-id>/`, verify transfer and hashes, write a
-sanitized summary, then remove the exact remote run directory. Do not leave
-raw evidence on the router or AP; flash space is limited.
+Download to `dev-tools/evidence/<run-id>/` when collection is authorized,
+verify transfer and hashes, and write a sanitized summary. Retain evidence
+needed for an investigation; do not automatically delete retained evidence.
+Remove an exact remote run directory only when cleanup is authorized and the
+verified local copy is sufficient. Do not leave temporary behavioral-test
+state indefinitely when the approved test plan requires cleanup.

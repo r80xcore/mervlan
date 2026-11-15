@@ -51,6 +51,13 @@ Run the host gate with:
 sh dev-tools/tests/local/run_all.sh
 ```
 
+Host observation (2026-11-13): this Ubuntu 26.04.1 host has BusyBox 1.37.0,
+and `busybox ash -c 'printf "BUSYBOX_ASH_OK\n"'` succeeded. This confirms
+the local BusyBox ash entrypoint is available for host syntax checks; it does
+not establish ASUSWRT applet availability or qualify router `ash` behavior.
+See [the historical router capability profile](85-router-platform-capabilities.md)
+for its deliberately narrower device/build evidence.
+
 The gate runs maintained local shell tests and checked-in Node.js behavior
 tests sequentially. Historical `deep_audit_*.sh` fixtures are excluded.
 

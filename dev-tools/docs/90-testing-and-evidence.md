@@ -80,9 +80,11 @@ Record target, command/action, expected result, actual result, duration,
 PASS/FAIL/PARTIAL, before/during/after state, logs, and fixes/retests. Store
 temporary router/AP evidence below
 `/tmp/mervlan_tmp/evidence/<test-run-id>/`, download it to
-`dev-tools/evidence/<test-run-id>/`, verify the local copy, and delete the
-remote directory only afterward. Raw evidence is ignored by Git and is never
-deployed.
+`dev-tools/evidence/<test-run-id>/` when collection is authorized, and verify
+the local copy. Retain evidence needed for an investigation; do not
+automatically delete it. Remove an exact remote directory only when cleanup is
+authorized and the verified local copy is sufficient. Raw evidence is ignored
+by Git and is never deployed.
 
 For the command-by-command procedure and test selection guide, read
 `92-test-workflows.md`. This file defines policy and evidence handling; the

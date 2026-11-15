@@ -1055,18 +1055,33 @@ BRANCH="pre_v0.53.29-RC3-repair-test"
   done
   [ -n "$D" ] || { printf '%s\n' 'Unable to allocate private bootstrap workspace after 8 attempts' >&2; exit 1; }
   curl -fsSL --proto '=https' --proto-redir '=https' \
-    --connect-timeout 15 --max-time 90 --retry 2 \
+    --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 --max-filesize 262144 \
     -o "$D/repair.sh" \
-    "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh" &&
-  [ -s "$D/repair.sh" ] && [ ! -L "$D/repair.sh" ] &&
-  /bin/sh -n "$D/repair.sh" &&
+    "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh"
+  curl_rc=$?
+  [ "$curl_rc" -eq 0 ] || exit "$curl_rc"
+  [ -s "$D/repair.sh" ] && [ ! -L "$D/repair.sh" ] || {
+    printf '%s\n' 'Repair bootstrap entrypoint is missing or unsafe' >&2
+    exit 1
+  }
+  bootstrap_size=$(wc -c < "$D/repair.sh" 2>/dev/null | awk 'NR == 1 { print $1 }')
+  case "$bootstrap_size" in
+    ''|*[!0-9]*) printf '%s\n' 'Could not validate Repair bootstrap entrypoint size' >&2; exit 1 ;;
+  esac
+  [ "$bootstrap_size" -le 262144 ] || {
+    printf '%s\n' 'Repair bootstrap entrypoint exceeds 256 KiB' >&2
+    exit 1
+  }
+  /bin/sh -n "$D/repair.sh"
+  syntax_rc=$?
+  [ "$syntax_rc" -eq 0 ] || exit "$syntax_rc"
   /bin/sh "$D/repair.sh" "$BRANCH"
 )
 ```
 
 The bootstrap validates a bounded branch name before downloading; it permits ASCII letters, digits, dots, underscores, and dashes, requires an alphanumeric first and last character, and rejects `..` and a `.lock` suffix. Slash-separated names are deliberately not accepted by this compact bootstrap. The selected branch appears in both the download URL and the engine argument.
 
-Both the bootstrap download and the engine's complete source-snapshot download require HTTPS for the initial URL and redirects. The bootstrap uses a private `/tmp` workspace with mode `0700`, allocated by up to eight exclusive `mkdir` attempts using the process ID and attempt number. An existing name is never reused or removed; allocation failure is reported before any download. It checks the downloaded file and shell syntax before execution. On success it removes only the workspace it created; on failure after workspace creation it retains the evidence and prints its path. Invalid branch input exits with status 2; exit status 0 means Repair completed successfully, and download, validation, repair, or cleanup failures return a nonzero status. This avoids a `mktemp` dependency and uses the portable `0` exit trap. This bootstrap requires curl with `--proto` and `--proto-redir` support (introduced in curl 7.21.0 or newer); unsupported options fail closed, with no unrestricted fallback.
+Both the bootstrap download and the engine's complete source-snapshot download require HTTPS for the initial URL and redirects. The bootstrap asks curl to reject entrypoints larger than 256 KiB and checks the downloaded byte count before execution. Each transfer has a 30-second limit and the bootstrap retries once after a one-second delay (at most about 61 seconds across both attempts). On curl versions before 8.4, `--max-filesize` cannot stop an unknown-length response after transfer begins; the post-download check still prevents such an entrypoint from running, while the transfer remains bounded by its timeout. The bootstrap uses a private `/tmp` workspace with mode `0700`, allocated by up to eight exclusive `mkdir` attempts using the process ID and attempt number. An existing name is never reused or removed; allocation failure is reported before any download. It checks the downloaded file and shell syntax before execution. On success it removes only the workspace it created; on failure after workspace creation it retains the evidence and prints its path. Invalid branch input exits with status 2; exit status 0 means Repair completed successfully, and download, validation, repair, or cleanup failures return a nonzero status. This avoids a `mktemp` dependency and uses the portable `0` exit trap. This bootstrap requires curl with `--proto` and `--proto-redir` support (introduced in curl 7.21.0 or newer); unsupported options fail closed, with no unrestricted fallback.
 
 The downloaded standalone engine obtains and validates one complete source snapshot, then hands control to the Repair engine inside that exact snapshot before admission or publication. Thus the repair operation and its manifest/payload come from one validated archive. The raw bootstrap and archive are separate branch requests, so a branch that moves between requests can yield a newer snapshot; use a trusted, stable branch when that matters. HTTPS protects transport but does not pin branch contents to a commit.
 

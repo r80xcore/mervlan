@@ -42,8 +42,12 @@ fi
 # =========================================== End of MerVLAN environment setup #
 . /usr/sbin/helper.sh
 
-if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
-  info -c vlan "Heal deferred: Update maintenance is active"
+if ! type merv_update_mutation_blocked >/dev/null 2>&1; then
+  error -c vlan "Heal refused: maintenance classifier unavailable"
+  exit 75
+fi
+if merv_update_mutation_blocked; then
+  info -c vlan "Heal deferred: Update/Repair maintenance is active"
   exit 0
 fi
 
@@ -234,6 +238,7 @@ HEAL_LOCK_STALE_SEC="${HEAL_LOCK_STALE_SEC:-${MERV_HEAL_LOCK_STALE_SEC:-180}}"
 HEAL_DHCP_TOKEN=""
 HEAL_EXIT_REASON="process-exit"
 HEAL_IFACE_VID_CACHE_ENABLED=0
+# BEGIN MERVLAN_HEAL_EXIT_CLEANUP_CONTRACT
 heal_cleanup_on_exit() {
   _heal_cleanup_rc=$?
   _heal_cleanup_failed=0
@@ -269,6 +274,8 @@ heal_cleanup_on_exit() {
   fi
   return "$_heal_cleanup_rc"
 }
+# END MERVLAN_HEAL_EXIT_CLEANUP_CONTRACT
+# BEGIN MERVLAN_HEAL_LOCK_ADMISSION_CONTRACT
 if type merv_owner_lock_acquire >/dev/null 2>&1; then
   if merv_owner_lock_acquire "$LOCK" "$HEAL_LOCK_STALE_SEC" 0 "vlan_event"; then
     HEAL_LOCK_ACQUIRED=1
@@ -286,6 +293,15 @@ else
   error -c vlan "Heal: owner-aware lock support is unavailable; refusing to run"
   exit 1
 fi
+
+# Recheck after owning vlan_event.lock to close the admission/lock race.
+# heal_cleanup_on_exit releases this runtime lock on refusal.
+if ! type merv_update_mutation_blocked >/dev/null 2>&1 ||
+   merv_update_mutation_blocked; then
+  info -c vlan "Heal deferred after runtime-lock admission: maintenance active or unverifiable"
+  exit 75
+fi
+# END MERVLAN_HEAL_LOCK_ADMISSION_CONTRACT
 
 if type merv_observation_wait_idle >/dev/null 2>&1 &&
    ! merv_observation_wait_idle "${MERV_OBSERVATION_WAIT_SEC:-120}"; then

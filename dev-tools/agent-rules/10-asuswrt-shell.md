@@ -8,6 +8,12 @@ Use when editing or reviewing runtime shell files.
   host provides the tools. A native Ubuntu check is the default local
   validation path; a Windows/Git Bash pass alone does not prove BusyBox
   compatibility.
+- A host's installed BusyBox or successful `busybox ash` invocation proves
+  only that host-side check is available. It does not establish ASUSWRT
+  applet availability or qualify that device's complete `ash` behavior. The
+  historical one-device evidence and its untested limits are in
+  `dev-tools/docs/85-router-platform-capabilities.md`; it is not an RC3, MAIN,
+  or other-build qualification.
 - On Windows, if a native POSIX shell is unavailable, use the registered
   Ubuntu/WSL2 workflow in `dev-tools/docs/platform-windows-wsl.md`. If WSL2 is
   unavailable, use another equivalent POSIX/BusyBox environment and record

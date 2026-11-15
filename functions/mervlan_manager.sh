@@ -83,9 +83,10 @@ done
 merv_action_progress_init "${MERV_PROGRESS_TOKEN:-}" "apply_vlanmgr" "Apply VLAN" \
   "Preparing VLAN apply..."
 
-if type merv_update_mutation_blocked >/dev/null 2>&1 && merv_update_mutation_blocked; then
-  info -c cli,vlan "Manager refused: Update maintenance is active"
-  merv_action_progress_fail "Apply refused while Update maintenance is active"
+if ! type merv_update_mutation_blocked >/dev/null 2>&1 ||
+   merv_update_mutation_blocked; then
+  info -c cli,vlan "Manager refused: maintenance active or classifier unavailable"
+  merv_action_progress_fail "Apply refused: maintenance unavailable or active"
   exit 75
 fi
 
@@ -487,6 +488,7 @@ MANAGER_RUN_ID=""
 MANAGER_EXIT_REASON="process-exit"
 MANAGER_RUNTIME_OWNED=0
 
+# BEGIN MERVLAN_MANAGER_LOCK_ADMISSION_CONTRACT
 acquire_script_lock() {
   # Prevent concurrent runs from stomping on bridges/interfaces. The owner-aware
   # identity/nonce primitive lives in lib_owner_lock.sh so heal, MAC Shield refresh,
@@ -528,6 +530,13 @@ acquire_script_lock() {
   if merv_owner_lock_acquire "$LOCK_PATH" "$stale" 30 "mervlan_manager"; then
     LOCK_ACQUIRED=1
     MANAGER_LOCK_NONCE="${MERV_LOCK_NONCE:-}"
+    # Recheck after obtaining mervlan_manager.lock, before bridge/VLAN mutation.
+    # cleanup_on_exit releases the existing runtime lock on refusal.
+    if ! type merv_update_mutation_blocked >/dev/null 2>&1 ||
+       merv_update_mutation_blocked; then
+      error -c cli,vlan "Manager refused after runtime-lock admission: maintenance active or unverifiable"
+      exit 75
+    fi
     if [ "${MERV_ACTION_RUNTIME_OWNER:-0}" != "1" ] &&
        type merv_action_runtime_start >/dev/null 2>&1 &&
        merv_action_runtime_start "apply_vlanmgr" "Apply VLAN" \
@@ -563,6 +572,7 @@ release_script_lock() {
   fi
   [ "$_rsl_failed" -eq 0 ]
 }
+# END MERVLAN_MANAGER_LOCK_ADMISSION_CONTRACT
 
 # MAIN Apply advisory and memory evidence are intentionally best-effort. They
 # must never change a verified VLAN mutation result: the browser advisory
@@ -633,6 +643,7 @@ merv_main_apply_advisory_record() {
   return 0
 }
 
+# BEGIN MERVLAN_MANAGER_EXIT_CLEANUP_CONTRACT
 cleanup_on_exit() {
     _cleanup_rc=$?
     _cleanup_failed=0
@@ -665,6 +676,7 @@ cleanup_on_exit() {
     fi
     return "$_cleanup_rc"
 }
+# END MERVLAN_MANAGER_EXIT_CLEANUP_CONTRACT
 trap 'MANAGER_EXIT_REASON=signal-int; exit 130' INT
 trap 'MANAGER_EXIT_REASON=signal-term; exit 143' TERM
 trap cleanup_on_exit EXIT

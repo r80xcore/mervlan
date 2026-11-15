@@ -77,19 +77,25 @@ chmod 755 "$BIN/mktemp"
 
 cat >"$BIN/curl" <<'EOF'
 #!/bin/sh
-out= proto= proto_redir= url=
+out= proto= proto_redir= url= connect= max_time= retry= retry_delay= max_filesize=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o) out=${2:-}; shift 2 ;;
         --proto) proto=${2:-}; shift 2 ;;
         --proto-redir) proto_redir=${2:-}; shift 2 ;;
+        --connect-timeout) connect=${2:-}; shift 2 ;;
+        --max-time) max_time=${2:-}; shift 2 ;;
+        --retry) retry=${2:-}; shift 2 ;;
+        --retry-delay) retry_delay=${2:-}; shift 2 ;;
+        --max-filesize) max_filesize=${2:-}; shift 2 ;;
         https://*|http://*) url=$1; shift ;;
         *) shift ;;
     esac
 done
 [ -n "$out" ] && [ -n "$url" ] || exit 91
-printf 'proto=%s proto_redir=%s url=%s out=%s\n' \
-    "$proto" "$proto_redir" "$url" "$out" >>"$MERV_CURL_LOG"
+printf 'proto=%s proto_redir=%s url=%s out=%s connect=%s max_time=%s retry=%s retry_delay=%s max_filesize=%s\n' \
+    "$proto" "$proto_redir" "$url" "$out" "$connect" "$max_time" \
+    "$retry" "$retry_delay" "$max_filesize" >>"$MERV_CURL_LOG"
 [ "$proto" = '=https' ] && [ "$proto_redir" = '=https' ] || exit 92
 case "$url" in https://*) : ;; *) exit 93 ;; esac
 
@@ -104,6 +110,9 @@ case "$out" in
         case "$MERV_CURL_MODE" in
             simple_success|simple_engine_failure)
                 cp "$MERV_SIMPLE_ENGINE" "$out" || exit 97
+                ;;
+            simple_oversized)
+                dd if=/dev/zero of="$out" bs=262145 count=1 2>/dev/null || exit 97
                 ;;
             simple_download_failure) exit 22 ;;
             simple_bad_syntax)
@@ -189,9 +198,14 @@ assert_transport_log() {
     if ! awk '
       {
         if ($1 != "proto==https" || $2 != "proto_redir==https" || $3 !~ /^url=https:\/\//) exit 1
+        if ($4 ~ /\/repair\.sh$/) {
+          if ($5 != "connect=10" || $6 != "max_time=30" || $7 != "retry=1" ||
+              $8 != "retry_delay=1" || $9 != "max_filesize=262144") exit 1
+          bootstrap++
+        }
         count++
       }
-      END { if (count == 0) exit 1 }
+      END { if (count == 0 || bootstrap == 0) exit 1 }
     ' "$CASE/curl.log"; then fail 'a download did not require HTTPS for initial and redirected URLs'; fi
 }
 assert_retained_evidence() {
@@ -236,6 +250,20 @@ _success_ws=$(cat "$CASE/workspace.capture")
 [ "$(mkdir_count)" -eq 1 ] || fail 'uncontended workspace allocation was not a single mkdir'
 assert_no_mktemp
 pass 'private workspace, HTTPS transport, handoff, syntax path, cleanup, and no-mktemp behavior pass'
+
+# A server response that bypasses curl's pre-transfer size check must still be
+# rejected by the explicit byte-count check before any downloaded code runs.
+reset_logs
+CURL_MODE=simple_oversized MKDIR_MODE=pass ENGINE_RC=0 EXPECTED_BRANCH=$VALID_BRANCH
+run_bootstrap "$CASE/oversized-entrypoint.log"
+[ "$RUN_RC" -ne 0 ] || fail 'oversized bootstrap entrypoint was accepted'
+assert_private_workspace
+assert_retained_evidence "$CASE/oversized-entrypoint.log" "$RUN_RC" yes
+grep -Fq 'exceeds 256 KiB' "$CASE/oversized-entrypoint.log" || fail 'oversized entrypoint diagnostic missing'
+[ ! -e "$CASE/simple-engine.marker" ] || fail 'oversized downloaded entrypoint was executed'
+assert_transport_log
+assert_no_mktemp
+pass 'oversized entrypoint is retained for inspection and rejected before execution'
 
 # Force one exclusive-name collision. The first directory is foreign to the
 # bootstrap and must remain untouched while the next candidate succeeds.

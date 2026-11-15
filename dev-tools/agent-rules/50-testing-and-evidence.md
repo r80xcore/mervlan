@@ -15,7 +15,12 @@ Use for tests, debugging, guarded recovery, or live validation.
   child processes and test state are clean, and use focused affected cases for
   a reliable pass/fail result.
 - Runtime state: `/tmp/mervlan_tmp/{logs,locks,results,client_collection}`. Self-test state: `/tmp/mervlan_tmp/selftest.<run-id>`.
-- Put router/AP evidence under `/tmp/mervlan_tmp/evidence/<run-id>/<device>/<stage>/`, download it to `dev-tools/evidence/<run-id>/`, verify it, and delete the remote directory only after successful verification.
+- Put router/AP evidence under
+  `/tmp/mervlan_tmp/evidence/<run-id>/<device>/<stage>/`, download it to
+  `dev-tools/evidence/<run-id>/` when collection is authorized, and verify it.
+  Retain evidence needed for an investigation; do not automatically delete it.
+  Remove an exact remote directory only when cleanup is authorized and the
+  verified local copy is sufficient.
 - Raw PC evidence under `dev-tools/evidence/` is ignored; never stage or deploy
   it. Keep only the workflow README in that directory. If a sanitized summary
   is intentionally retained, place it in an appropriate non-evidence document

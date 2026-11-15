@@ -39,6 +39,7 @@ safety check.
 | `70-node-sync-and-ssh.md` | Router/node roles, sync, SSH, and staged transfer. |
 | `75-backup-state-manifest.md` | Backup members, normal Restore state overlay, and rollback boundary. |
 | `80-code-limitations.md` | Product and platform constraints. |
+| `85-router-platform-capabilities.md` | Historical, build-scoped NODE1 capability evidence and qualification limits. |
 | `90-testing-and-evidence.md` | Local, router, node, and human validation. |
 | `92-test-workflows.md` | Exact commands and when/why to use each test layer. |
 | `95-deployment-checklist.md` | Safe staged deployment and rollout. |
@@ -68,6 +69,7 @@ and specifications remain on the development computer.
 | Shell, manager, worker, library | `40-function-libraries.md`, `80-code-limitations.md` |
 | Apply, clients, MAC Shield | `20-runtime-flows.md`, `60-state-and-data.md`, `80-code-limitations.md` |
 | Sync Nodes, SSH, deployment | `70-node-sync-and-ssh.md`, `95-deployment-checklist.md` |
+| Device utility or shell capability | `85-router-platform-capabilities.md`, `80-code-limitations.md` |
 | Test or evidence | `90-testing-and-evidence.md`, `92-test-workflows.md` |
 | Unknown/cross-cutting | `00-project-overview.md`, `10-architecture.md`, `developing_notes.md` |
 

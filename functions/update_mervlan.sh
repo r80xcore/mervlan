@@ -814,6 +814,35 @@ update_path_size_kb() {
 	printf '%s' "$_update_size"
 }
 
+# BEGIN MERVLAN_UPDATE_PRIOR_WORKSPACE_CONTRACT
+UPDATE_PRIOR_TMP_PATH=""
+UPDATE_PRIOR_TMP_SIZE="unknown"
+update_prior_tmp_workspaces_clear() {
+	if [ ! -e "$TMP_DIR" ] && [ ! -L "$TMP_DIR" ]; then
+		return 0
+	fi
+	if [ ! -d "$TMP_DIR" ] || [ -L "$TMP_DIR" ]; then
+		UPDATE_PRIOR_TMP_PATH="$TMP_DIR"
+		UPDATE_PRIOR_TMP_SIZE="unknown"
+		UPDATE_PRESERVE_TMP="1"
+		return 1
+	fi
+	for _update_prior_tmp in "$TMP_DIR"/updates.*; do
+		[ -e "$_update_prior_tmp" ] || [ -L "$_update_prior_tmp" ] || continue
+		UPDATE_PRIOR_TMP_PATH="$_update_prior_tmp"
+		if [ -d "$_update_prior_tmp" ] && [ ! -L "$_update_prior_tmp" ]; then
+			UPDATE_PRIOR_TMP_SIZE=$(update_path_size_kb "$_update_prior_tmp")
+			case "$UPDATE_PRIOR_TMP_SIZE" in ''|*[!0-9]*|0) UPDATE_PRIOR_TMP_SIZE="unknown" ;; esac
+		else
+			UPDATE_PRIOR_TMP_SIZE="unknown"
+		fi
+		UPDATE_PRESERVE_TMP="1"
+		return 1
+	done
+	return 0
+}
+# END MERVLAN_UPDATE_PRIOR_WORKSPACE_CONTRACT
+
 update_fs_stats_kb() {
 	_update_path="$1"
 	while [ ! -e "$_update_path" ] && [ "$_update_path" != "/" ]; do
@@ -1255,7 +1284,9 @@ update_abort_node_pool() {
 }
 
 cleanup_tmp() {
-	_update_cleanup_rc=$?
+	# EXIT-trap callers pass the real status; return status alone does not
+	# alter the shell's process result under Dash or BusyBox ash.
+	_update_cleanup_rc=${1:-$?}
 	_update_cleanup_failed=0
 	_update_pool_cleanup_ready="1"
 	# A signal-path abort failure means rollback was intentionally skipped.
@@ -1308,9 +1339,32 @@ cleanup_tmp() {
 			error -c cli,vlan "Update cleanup preserved recovery data and maintenance owner lock because active node workers remain unresolved"
 		fi
 	fi
+	if [ -n "${TMP_BASE:-}" ] && [ -d "$TMP_BASE" ] && \
+	   { [ "$UPDATE_PRESERVE_TMP" = "1" ] || [ "$_update_cleanup_failed" -ne 0 ]; }; then
+		_update_retained_kb=$(update_path_size_kb "$TMP_BASE")
+		case "$_update_retained_kb" in ''|*[!0-9]*|0) _update_retained_size=unknown ;;
+			*) _update_retained_size="${_update_retained_kb}KB" ;;
+		esac
+		error -c cli,vlan "Update temporary data retained at $TMP_BASE (${_update_retained_size}); inspect before removal"
+	fi
 	[ "$_update_cleanup_failed" -eq 0 ] || _update_cleanup_rc=1
 	return "$_update_cleanup_rc"
 }
+
+# BEGIN MERVLAN_UPDATE_CLEANUP_EXIT_CONTRACT
+update_cleanup_on_exit() {
+	_update_exit_prior_rc=$?
+	trap - EXIT
+	cleanup_tmp "$_update_exit_prior_rc" || :
+	# cleanup_tmp sets this flag independently of the original action status.
+	# Preserve an existing failure/signal code; turn prior success into failure
+	# when cleanup could not remove scratch data or release owned state.
+	if [ "${_update_cleanup_failed:-1}" -ne 0 ] && [ "$_update_exit_prior_rc" -eq 0 ]; then
+		_update_exit_prior_rc=1
+	fi
+	exit "$_update_exit_prior_rc"
+}
+# END MERVLAN_UPDATE_CLEANUP_EXIT_CONTRACT
 
 handle_update_signal() {
 	_update_signal_status="$1"
@@ -1335,7 +1389,7 @@ handle_update_signal() {
 	exit "$_update_signal_status"
 }
 
-trap cleanup_tmp EXIT
+trap update_cleanup_on_exit EXIT
 trap 'handle_update_signal 130' INT
 trap 'handle_update_signal 143' TERM
 
@@ -1743,14 +1797,23 @@ fi
 
 update_check_jffs_health || fail_update jffs_health "JFFS health/read-write check failed; Update was stopped before mutation"
 
-mkdir -p "$TMP_BASE" "$STAGE_DIR" "$BACKUP_DIR" 2>/dev/null || \
-	fail_update workspace "Failed to prepare temporary workspace at $TMP_BASE"
+if ! update_prior_tmp_workspaces_clear; then
+	fail_update recovery "Prior Update temporary workspace at $UPDATE_PRIOR_TMP_PATH (size_kb=$UPDATE_PRIOR_TMP_SIZE) remains; inspect it before retrying"
+fi
 
 # Updates temporarily hold the download, extracted source, stage, and updated
-# tree in RAM. Reserve enough temporary space for several copies of the current
-# installation before downloading anything.
+# tree in RAM. Check temporary filesystem headroom before creating this run's
+# workspace or downloading anything.
 UPDATE_CURRENT_KB=$(update_path_size_kb "$MERV_BASE")
 update_require_space_kb "$TMP_DIR" "$((UPDATE_CURRENT_KB * 3))" "temporary update workspace"
+mkdir -p "$TMP_DIR" 2>/dev/null || \
+	fail_update workspace "Failed to prepare temporary Update root at $TMP_DIR"
+if ! ( umask 077; mkdir "$TMP_BASE" ) 2>/dev/null; then
+	UPDATE_PRESERVE_TMP="1"
+	fail_update workspace "Could not exclusively allocate Update workspace at $TMP_BASE; any existing path was preserved"
+fi
+mkdir "$STAGE_DIR" "$BACKUP_DIR" 2>/dev/null || \
+	fail_update workspace "Failed to prepare stage and backup directories under $TMP_BASE"
 update_record_phase workspace || fail_update journal "Could not persist the workspace Update journal"
 
 # Freeze new MerVLAN mutations before the long download/extraction window. The
