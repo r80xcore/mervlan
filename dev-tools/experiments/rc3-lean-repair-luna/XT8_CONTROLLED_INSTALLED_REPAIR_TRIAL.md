@@ -24,10 +24,16 @@ Update coordinator SHA-256:
 499f939262acd166dac456d3c7445b5439d2dd4a6cad69fec996cacd121df1d2  update_mervlan.sh
 ```
 
-Both files are uncommitted host candidates at the time this procedure was
-prepared. Before any trial, use the exact reviewed files from an approved,
-immutable commit and recheck both hashes. Set `SOURCE_COMMIT` to that full
-40-character commit SHA. Do not use a moving branch or tag.
+Both exact files are included in the reviewed RC3 checkpoint on
+`pre_v0.53.29-RC3-repair-test`:
+
+```text
+ee97753bb54bea36bb2e73dd94e2ec86f25321d6
+```
+
+Set `SOURCE_COMMIT` to this full 40-character SHA. Before any trial, use the
+exact reviewed files from this immutable commit and recheck both file hashes.
+Do not use a moving branch or tag.
 
 ## 1. Read-only MAIN preflight
 

@@ -63,10 +63,11 @@ The independent RC3-dev source archive used to build the three REFERENCE patches
   helper validation, quiesce marker, and runtime-idle check. It publishes 57
   entries and verifies all 58 while preserving the installed production
   `functions/update_mervlan_repair.sh` byte-for-byte.
-- It is not installed or committed. Its publication path is available only
-  through the authenticated Update child context. The accepted production
-  Repair entrypoint remains unchanged. Do not run the trial until a separate
-  maintainer authorization and an immutable source commit are available.
+- It is committed to `pre_v0.53.29-RC3-repair-test` but is not installed on
+  MAIN or NODE. Its publication path is available only through the
+  authenticated Update child context. The accepted production Repair
+  entrypoint remains unchanged. Do not run the trial until separate
+  maintainer authorization is given.
 - Host evidence: 67/67 Repair cases under Dash and BusyBox ash, plus focused
   Update-child success, rollback, and SIGKILL persistent-restore fixtures. See
   `XT8_CONTROLLED_INSTALLED_REPAIR_TRIAL.md` for the prepared, unexecuted
