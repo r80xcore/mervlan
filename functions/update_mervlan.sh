@@ -12,7 +12,7 @@
 #  |__/     |__/ \_______/|__/          \_/    |________/|__/  |__/|__/  \__/  #
 #                                                                              #
 # ============================================================================ #
-#                - File: update_mervlan.sh || version="0.74"                   #
+#                - File: update_mervlan.sh || version="0.75"                   #
 # ============================================================================ #
 # - Purpose:    Update the MerVLAN addon in-place while preserving user data.  #
 #                                                                              #
@@ -176,6 +176,14 @@ UPDATE_RECOVERY_REQUIRED="0"
 UPDATE_RUN_ID="update-$(date +%s 2>/dev/null || echo 0)-$$"
 UPDATE_QUIESCE_ACTIVE="0"
 UPDATE_SUCCESS_FINALIZING="0"
+UPDATE_RC3_REPAIR_MODE="0"
+UPDATE_RC3_REPAIR_ENGINE=""
+UPDATE_RC3_REPAIR_REF=""
+UPDATE_RC3_REPAIR_BACKUP_PATH=""
+UPDATE_RC3_REPAIR_RESULT_FILE=""
+UPDATE_RC3_REPAIR_CHILD_ACTIVE="0"
+UPDATE_RC3_REPAIR_INPUT=""
+UPDATE_RC3_REPAIR_SHA256="587c002f36d1191bbcde4959a0c6d5256494abac522d82af2b8d85d0746856a1"
 UPDATE_JFFS_RESERVE_KB="${MERV_UPDATE_JFFS_RESERVE_KB:-5120}"
 case "$UPDATE_JFFS_RESERVE_KB" in
 	''|*[!0-9]*|0) UPDATE_JFFS_RESERVE_KB="5120" ;;
@@ -183,13 +191,14 @@ esac
 
 update_record_phase() {
 	_update_phase="$1"
+	_update_journal_archive="${UPDATE_RC3_REPAIR_BACKUP_PATH:-$ARCHIVE}"
 	[ -n "${UPDATE_RUN_ID:-}" ] || return 0
 	if ! merv_update_journal_write \
 		"$UPDATE_RUN_ID" "$_update_phase" "${GITHUB_REF:-${CHANNEL:-unknown}}" \
 		"${PRE_BOOT_ENABLED:-0}" "${BACKUP_READY:-0}" \
 		"${UPDATE_QUIESCE_ACTIVE:-0}" "${UPDATE_ACTIVATION_STARTED:-0}" \
 		"${UPDATE_NODES_TOUCHED:-0}" "${2:-none}" \
-		"${TMP_BASE:-none}" "${ARCHIVE:-none}" "${STAGE_DIR:-none}" \
+		"${TMP_BASE:-none}" "${_update_journal_archive:-none}" "${STAGE_DIR:-none}" \
 		"${UPDATE_ORIGINAL_DIR:-none}" "${UPDATE_JFFS_STAGE:-none}" \
 		"${UPDATE_JFFS_OLD:-none}" "${OLD_VERSION:-unknown}" "${NEW_VERSION:-unknown}"; then
 		error -c cli,vlan "Update journal write failed at phase $_update_phase"
@@ -993,6 +1002,307 @@ create_durable_preupdate_backup() {
 	return 0
 }
 
+update_rc3_uint() {
+	case "$1" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+	[ "${#1}" -le 2 ]
+}
+
+update_rc3_candidate_sha256() {
+	_update_rc3_sha_file="$1"
+	if type sha256sum >/dev/null 2>&1; then
+		sha256sum "$_update_rc3_sha_file" 2>/dev/null | awk 'NR == 1 { print $1 }'
+	elif type openssl >/dev/null 2>&1; then
+		openssl dgst -sha256 "$_update_rc3_sha_file" 2>/dev/null | awk '{ print $NF }'
+	else
+		return 1
+	fi
+}
+
+update_rc3_candidate_path_valid() {
+	_update_rc3_path="$1"
+	case "$_update_rc3_path" in
+		/tmp/mervlan_rc3_trial.*/update_mervlan_repair_RC3_coordinated.sh) ;;
+		*) return 1 ;;
+	esac
+	case "$_update_rc3_path" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+	_update_rc3_dir=${_update_rc3_path%/*}
+	_update_rc3_token=${_update_rc3_dir#/tmp/mervlan_rc3_trial.}
+	case "$_update_rc3_token" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+	[ ! -L /tmp ] && [ -d /tmp ] && [ ! -L "$_update_rc3_dir" ] && [ -d "$_update_rc3_dir" ] || return 1
+	[ ! -L "$_update_rc3_path" ] && [ -f "$_update_rc3_path" ] && [ -x "$_update_rc3_path" ] || return 1
+	_update_rc3_dir_mode=$(LC_ALL=C ls -ld "$_update_rc3_dir" 2>/dev/null) || return 1
+	[ "${_update_rc3_dir_mode%% *}" = drwx------ ] || return 1
+	_update_rc3_file_mode=$(LC_ALL=C ls -ld "$_update_rc3_path" 2>/dev/null) || return 1
+	[ "${_update_rc3_file_mode%% *}" = -rwx------ ] || return 1
+	_update_rc3_actual=$(update_rc3_candidate_sha256 "$_update_rc3_path") || return 1
+	case "$_update_rc3_actual" in
+		????????????????????????????????????????????????????????????????) : ;;
+		*) return 1 ;;
+	esac
+	case "$_update_rc3_actual" in *[!0123456789abcdefABCDEF]*) return 1 ;; esac
+	[ "$_update_rc3_actual" = "$UPDATE_RC3_REPAIR_SHA256" ]
+}
+
+update_rc3_input_path_shape_valid() {
+	_update_rc3_path="$1"
+	case "$_update_rc3_path" in
+		/tmp/mervlan_rc3_trial.*/update_mervlan_repair_RC3_coordinated.sh) ;;
+		*) return 1 ;;
+	esac
+	case "$_update_rc3_path" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+	_update_rc3_dir=${_update_rc3_path%/*}
+	_update_rc3_token=${_update_rc3_dir#/tmp/mervlan_rc3_trial.}
+	case "$_update_rc3_token" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+}
+
+update_rc3_context_valid() {
+	if [ "${MERV_UPDATE_RC3_TEST_ONLY:-0}" = 1 ]; then
+		case "$MERV_BASE" in /tmp/mervlan_lean_fixture.*/addon) : ;; *) return 1 ;; esac
+		_update_rc3_fixture_root=${MERV_BASE%/addon}
+		case "$TMP_DIR" in "$_update_rc3_fixture_root"/*) : ;; *) return 1 ;; esac
+		case "$MERV_STATE_ROOT" in "$_update_rc3_fixture_root"/*) : ;; *) return 1 ;; esac
+		case "$UPDATE_MAINTENANCE_LOCK" in "$_update_rc3_fixture_root"/*) : ;; *) return 1 ;; esac
+		case "$MERVLAN_BACKUP_DIR" in "$_update_rc3_fixture_root"/*) : ;; *) return 1 ;; esac
+	else
+		[ "$MERV_BASE" = /jffs/addons/mervlan ] || return 1
+		[ "$TMP_DIR" = /tmp/mervlan_tmp ] || return 1
+		[ "$MERV_STATE_ROOT" = /jffs/addons/mervlan_state ] || return 1
+		[ "$UPDATE_MAINTENANCE_LOCK" = /tmp/mervlan_tmp/locks/mervlan_maintenance.lock ] || return 1
+		[ "$MERVLAN_BACKUP_DIR" = /jffs/addons/mervlan_backups ] || return 1
+	fi
+	return 0
+}
+
+update_rc3_recovery_helpers_ready() {
+	_update_rc3_backup_root="$MERVLAN_BACKUP_DIR"
+	_update_rc3_helper="$MERV_BASE/functions/mervlan_recover.sh"
+	_update_rc3_state="$MERV_BASE/settings/lib_maintenance_recovery.sh"
+	_update_rc3_update_state="$MERV_BASE/settings/lib_update_state.sh"
+	_update_rc3_installed_helper="$_update_rc3_backup_root/recover.sh"
+	_update_rc3_installed_state="$_update_rc3_backup_root/recovery_state.sh"
+	_update_rc3_installed_update_state="$_update_rc3_backup_root/update_state.sh"
+	run_update_step "RC3 recovery-helper refresh" sh "$MERV_BASE/functions/mervlan_backup.sh" inventory "rc3repair-$$" || return 1
+	for _update_rc3_file in "$_update_rc3_helper" "$_update_rc3_state" "$_update_rc3_update_state" \
+		"$_update_rc3_installed_helper" "$_update_rc3_installed_state" "$_update_rc3_installed_update_state"; do
+		[ ! -L "$_update_rc3_file" ] && [ -f "$_update_rc3_file" ] || return 1
+	done
+	cmp -s "$_update_rc3_helper" "$_update_rc3_installed_helper" || return 1
+	cmp -s "$_update_rc3_state" "$_update_rc3_installed_state" || return 1
+	cmp -s "$_update_rc3_update_state" "$_update_rc3_installed_update_state" || return 1
+	_update_rc3_mode=$(LC_ALL=C ls -ld "$_update_rc3_installed_helper" 2>/dev/null) || return 1
+	[ "${_update_rc3_mode%% *}" = -rwx------ ] || return 1
+	_update_rc3_mode=$(LC_ALL=C ls -ld "$_update_rc3_installed_state" 2>/dev/null) || return 1
+	[ "${_update_rc3_mode%% *}" = -rw------- ] || return 1
+	_update_rc3_mode=$(LC_ALL=C ls -ld "$_update_rc3_installed_update_state" 2>/dev/null) || return 1
+	[ "${_update_rc3_mode%% *}" = -rw------- ] || return 1
+	MERVLAN_RECOVERY_BACKUP_ROOT="$_update_rc3_backup_root" \
+	MERVLAN_RECOVERY_ACTIVE_ROOT="$MERV_BASE" \
+	MERVLAN_RECOVERY_TMP_ROOT="$TMP_BASE" \
+	MERVLAN_RECOVERY_STATE_ROOT="$MERV_STATE_ROOT" \
+		"$_update_rc3_installed_helper" check "$UPDATE_BACKUP_ID" >/dev/null 2>&1
+}
+
+update_rc3_read_result() {
+	_update_rc3_result_file="$UPDATE_RC3_REPAIR_RESULT_FILE"
+	[ ! -L "$_update_rc3_result_file" ] && [ -f "$_update_rc3_result_file" ] || return 1
+	[ "$(LC_ALL=C ls -ld "$_update_rc3_result_file" 2>/dev/null | awk '{print $1}')" = -rw------- ] || return 1
+	[ "$(wc -l < "$_update_rc3_result_file" 2>/dev/null | tr -d '[:space:]')" = 6 ] || return 1
+	exec 3<"$_update_rc3_result_file" || return 1
+	IFS= read -r _update_rc3_line <&3 || { exec 3<&-; return 1; }
+	[ "$_update_rc3_line" = format=1 ] || { exec 3<&-; return 1; }
+	IFS= read -r _update_rc3_line <&3 || { exec 3<&-; return 1; }
+	case "$_update_rc3_line" in result=*) UPDATE_RC3_RESULT=${_update_rc3_line#result=} ;; *) exec 3<&-; return 1 ;; esac
+	IFS= read -r _update_rc3_line <&3 || { exec 3<&-; return 1; }
+	case "$_update_rc3_line" in verified=*) UPDATE_RC3_VERIFIED=${_update_rc3_line#verified=} ;; *) exec 3<&-; return 1 ;; esac
+	IFS= read -r _update_rc3_line <&3 || { exec 3<&-; return 1; }
+	case "$_update_rc3_line" in eligible=*) UPDATE_RC3_ELIGIBLE=${_update_rc3_line#eligible=} ;; *) exec 3<&-; return 1 ;; esac
+	IFS= read -r _update_rc3_line <&3 || { exec 3<&-; return 1; }
+	case "$_update_rc3_line" in published=*) UPDATE_RC3_PUBLISHED=${_update_rc3_line#published=} ;; *) exec 3<&-; return 1 ;; esac
+	IFS= read -r _update_rc3_line <&3 || { exec 3<&-; return 1; }
+	case "$_update_rc3_line" in rescue=*) UPDATE_RC3_RESCUE=${_update_rc3_line#rescue=} ;; *) exec 3<&-; return 1 ;; esac
+	exec 3<&-
+	update_rc3_uint "$UPDATE_RC3_VERIFIED" && update_rc3_uint "$UPDATE_RC3_ELIGIBLE" && \
+		update_rc3_uint "$UPDATE_RC3_PUBLISHED" || return 1
+	[ "$UPDATE_RC3_ELIGIBLE" = 57 ] || return 1
+	case "$UPDATE_RC3_RESULT:$UPDATE_RC3_RESCUE" in
+		published-verified:unchanged|rollback-verified:unchanged|prepublication-failed:unchanged|recovery-required:unchanged|recovery-required:unverified) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+update_run_rc3_repair_candidate() {
+	UPDATE_RC3_REPAIR_CHILD_ACTIVE=0
+	update_rc3_context_valid || fail_update rc3_context "RC3 candidate is restricted to the canonical installation and Update paths"
+	update_rc3_candidate_path_valid "$UPDATE_RC3_REPAIR_INPUT" || fail_update rc3_candidate "Candidate path, permissions, or pinned SHA-256 do not match"
+	[ -n "$UPDATE_RC3_REPAIR_REF" ] || fail_update rc3_candidate "A pinned source commit or ref is required"
+	case "$UPDATE_RC3_REPAIR_REF" in ''|*[!A-Za-z0-9._/-]*|*..*|*//*|/*|*/) fail_update rc3_candidate "Candidate source ref is malformed" ;; esac
+	[ "${#UPDATE_RC3_REPAIR_REF}" -le 96 ] || fail_update rc3_candidate "Candidate source ref is too long"
+	update_cleanup_tree "$UPDATE_BACKUP_SOURCE_DIR" || fail_update rc3_backup "Could not prepare the temporary pre-publication backup source"
+	cp -pR "$MERV_BASE" "$UPDATE_BACKUP_SOURCE_DIR" 2>/dev/null && \
+		update_filter_source_tree "$UPDATE_BACKUP_SOURCE_DIR" || {
+			UPDATE_PRESERVE_TMP=1
+			fail_update rc3_backup "Could not prepare the filtered durable recovery source"
+		}
+	UPDATE_BACKUP_SOURCE_KB=$(update_path_size_kb "$UPDATE_BACKUP_SOURCE_DIR")
+	case "$UPDATE_BACKUP_SOURCE_KB" in ''|*[!0-9]*|0) fail_update rc3_backup "Pre-publication backup size could not be measured" ;; esac
+	update_require_space_kb "$MERVLAN_BACKUP_DIR" "$UPDATE_BACKUP_SOURCE_KB" "persistent backup" "$UPDATE_JFFS_RESERVE_KB"
+	UPDATE_BACKUP_ARCHIVE_OK=0
+	create_durable_preupdate_backup "$UPDATE_BACKUP_SOURCE_DIR" || fail_update rc3_backup "Durable recovery archive creation or validation failed"
+	UPDATE_RC3_REPAIR_BACKUP_PATH="$UPDATE_BACKUP_FINAL"
+	BACKUP_READY=1
+	UPDATE_ACTIVATION_STARTED=0
+	update_record_phase durable-backup rc3_repair_prepublication_backup || fail_update journal "Could not persist the RC3 durable-backup journal"
+	update_rc3_recovery_helpers_ready || fail_update rc3_recovery "Persistent recovery helper validation failed"
+	UPDATE_RC3_REPAIR_RESULT_FILE="$TMP_BASE/rc3-repair.result"
+	UPDATE_RC3_REPAIR_ENGINE="$TMP_BASE/rc3-repair-engine.sh"
+	update_path_absent_authoritative "$UPDATE_RC3_REPAIR_ENGINE" || fail_update rc3_candidate "Private candidate copy path is obstructed"
+	cp "$UPDATE_RC3_REPAIR_INPUT" "$UPDATE_RC3_REPAIR_ENGINE" && chmod 700 "$UPDATE_RC3_REPAIR_ENGINE" || fail_update rc3_candidate "Could not prepare private candidate copy"
+	_update_rc3_copied_sha=$(update_rc3_candidate_sha256 "$UPDATE_RC3_REPAIR_ENGINE") || fail_update rc3_candidate "Could not hash the private candidate copy"
+	[ "$_update_rc3_copied_sha" = "$UPDATE_RC3_REPAIR_SHA256" ] || fail_update rc3_candidate "Private candidate copy hash changed"
+	info -c cli,vlan "Starting RC3 Repair candidate as a child of the authenticated Update owner"
+	UPDATE_RC3_REPAIR_CHILD_ACTIVE=1
+	if [ "${MERV_UPDATE_RC3_TEST_ONLY:-0}" = 1 ]; then
+		MERV_BASE="$MERV_BASE" MERV_REPAIR_TMP_ROOT="${MERV_UPDATE_RC3_TEST_REPAIR_TMP_ROOT:-/tmp}" \
+		MERV_REPAIR_PROC_ROOT="${MERV_REPAIR_TEST_PROC_ROOT:-/proc}" \
+		MERV_REPAIR_MEMINFO="${MERV_REPAIR_TEST_MEMINFO:-/proc/meminfo}" \
+		MERV_REPAIR_LOCK="$UPDATE_MAINTENANCE_LOCK" \
+		MERV_REPAIR_LEGACY_LOCK_ROOT="${UPDATE_MAINTENANCE_LOCK%/*}" \
+		MERV_STATE_ROOT="$MERV_STATE_ROOT" MERV_UPDATE_JOURNAL="$MERV_UPDATE_JOURNAL" \
+		MERV_UPDATE_QUIESCE_FILE="$MERV_UPDATE_QUIESCE_FILE" \
+		MERVLAN_MAINTENANCE_LOCK_OVERRIDE="$UPDATE_MAINTENANCE_LOCK" \
+		MERV_REPAIR_UPDATE_CHILD=1 MERV_REPAIR_UPDATE_TEST_MODE=1 \
+		MERV_REPAIR_TEST_ONLY=1 MERV_REPAIR_UPDATE_RUN_ID="$UPDATE_RUN_ID" \
+		MERV_REPAIR_UPDATE_BACKUP_ID="$UPDATE_BACKUP_ID" \
+		MERV_REPAIR_UPDATE_BACKUP_ROOT="$MERVLAN_BACKUP_DIR" \
+		MERV_REPAIR_UPDATE_TMP_BASE="$TMP_BASE" \
+		MERV_REPAIR_RESULT_FILE="$UPDATE_RC3_REPAIR_RESULT_FILE" \
+		MERV_REPAIR_FAIL_AT="${MERV_UPDATE_RC3_TEST_FAIL_AT:-}" \
+		MERV_REPAIR_TEST_FAIL_AT="${MERV_UPDATE_RC3_TEST_FAIL_AT:-}" \
+		MERV_REPAIR_TEST_PAUSE_AT="${MERV_UPDATE_RC3_TEST_PAUSE_AT:-}" \
+		TEST_ARCHIVE="${MERV_UPDATE_RC3_TEST_ARCHIVE:-}" \
+		MERV_REPAIR_CURL="${MERV_UPDATE_RC3_TEST_CURL:-curl}" \
+		"$UPDATE_RC3_REPAIR_ENGINE" "$UPDATE_RC3_REPAIR_REF"
+	else
+		MERV_BASE="$MERV_BASE" MERV_REPAIR_TMP_ROOT=/tmp \
+		MERV_REPAIR_PROC_ROOT=/proc MERV_REPAIR_MEMINFO=/proc/meminfo \
+		MERV_REPAIR_LOCK="$UPDATE_MAINTENANCE_LOCK" \
+		MERV_REPAIR_LEGACY_LOCK_ROOT="$LOCKDIR" \
+		MERV_STATE_ROOT="$MERV_STATE_ROOT" MERV_UPDATE_JOURNAL="$MERV_UPDATE_JOURNAL" \
+		MERV_UPDATE_QUIESCE_FILE="$MERV_UPDATE_QUIESCE_FILE" \
+		MERVLAN_MAINTENANCE_LOCK_OVERRIDE="$UPDATE_MAINTENANCE_LOCK" \
+		MERV_REPAIR_UPDATE_CHILD=1 MERV_REPAIR_UPDATE_TEST_MODE=0 \
+		MERV_REPAIR_TEST_ONLY=0 MERV_REPAIR_UPDATE_RUN_ID="$UPDATE_RUN_ID" \
+		MERV_REPAIR_UPDATE_BACKUP_ID="$UPDATE_BACKUP_ID" \
+		MERV_REPAIR_UPDATE_BACKUP_ROOT="$MERVLAN_BACKUP_DIR" \
+		MERV_REPAIR_UPDATE_TMP_BASE="$TMP_BASE" \
+		MERV_REPAIR_RESULT_FILE="$UPDATE_RC3_REPAIR_RESULT_FILE" \
+		MERV_REPAIR_TEST_FAIL_AT= MERV_REPAIR_TEST_PAUSE_AT= \
+		"$UPDATE_RC3_REPAIR_ENGINE" "$UPDATE_RC3_REPAIR_REF"
+	fi
+	UPDATE_RC3_CHILD_RC=$?
+	UPDATE_RC3_REPAIR_CHILD_ACTIVE=0
+	UPDATE_RC3_RESULT= UPDATE_RC3_VERIFIED= UPDATE_RC3_ELIGIBLE= UPDATE_RC3_PUBLISHED= UPDATE_RC3_RESCUE=
+	if ! update_rc3_read_result; then
+		if [ "$UPDATE_RC3_CHILD_RC" -ne 0 ] && \
+		   [ "$(merv_update_journal_get activation_started 0)" = 0 ]; then
+			UPDATE_RC3_RESULT=prepublication-failed
+			UPDATE_RC3_VERIFIED=0 UPDATE_RC3_ELIGIBLE=57 UPDATE_RC3_PUBLISHED=0 UPDATE_RC3_RESCUE=unchanged
+		else
+			update_mark_recovery_required
+			update_record_phase finalization-failed rc3_result_unverifiable || :
+			error -c cli,vlan "RC3 Repair result is missing or malformed; keep maintenance quiesced and run $MERVLAN_BACKUP_DIR/recover.sh check $UPDATE_BACKUP_ID before explicit restore"
+			return 1
+		fi
+	fi
+	case "$UPDATE_RC3_RESULT" in
+		published-verified)
+			[ "$UPDATE_RC3_CHILD_RC" -eq 0 ] && [ "$UPDATE_RC3_VERIFIED" = 58 ] && \
+				[ "$UPDATE_RC3_PUBLISHED" = 57 ] && [ "$UPDATE_RC3_RESCUE" = unchanged ] || {
+					update_mark_recovery_required
+					update_record_phase finalization-failed rc3_publish_result_mismatch || :
+					return 1
+				}
+			UPDATE_RC3_TERMINAL=published
+			;;
+		rollback-verified)
+			[ "$UPDATE_RC3_CHILD_RC" -ne 0 ] && [ "$UPDATE_RC3_VERIFIED" = 58 ] && \
+				[ "$UPDATE_RC3_PUBLISHED" -le 57 ] && [ "$UPDATE_RC3_RESCUE" = unchanged ] || {
+					update_mark_recovery_required
+					update_record_phase finalization-failed rc3_rollback_result_mismatch || :
+					return 1
+				}
+			UPDATE_RC3_TERMINAL=rollback
+			;;
+		prepublication-failed)
+			[ "$UPDATE_RC3_CHILD_RC" -ne 0 ] && [ "$(merv_update_journal_get activation_started 0)" = 0 ] && \
+				[ "$UPDATE_RC3_VERIFIED" = 0 ] && [ "$UPDATE_RC3_PUBLISHED" = 0 ] || {
+					update_mark_recovery_required
+					update_record_phase finalization-failed rc3_prepublication_result_mismatch || :
+					return 1
+				}
+			UPDATE_RC3_TERMINAL=prepublication
+			;;
+		recovery-required)
+			update_mark_recovery_required
+			update_record_phase finalization-failed rc3_child_recovery_required || :
+			error -c cli,vlan "RC3 Repair requires recovery; preserve $TMP_BASE and $UPDATE_BACKUP_FINAL, then use the standalone recovery helper only under an approved recovery plan"
+			return 1
+			;;
+		*)
+			update_mark_recovery_required
+			update_record_phase finalization-failed rc3_unknown_result || :
+			return 1
+			;;
+	esac
+	UPDATE_ACTIVATION_STARTED=0
+	UPDATE_RECOVERY_REQUIRED=0
+	UPDATE_PRESERVE_TMP=0
+	UPDATE_PRESERVE_JFFS=0
+	UPDATE_SUCCESS_FINALIZING=1
+	if ! cleanup_tmp 0; then
+		update_mark_recovery_required
+		update_record_phase finalization-failed rc3_workspace_cleanup_failed || :
+		UPDATE_SUCCESS_FINALIZING=0
+		return 1
+	fi
+	if ! merv_update_quiesce_clear; then
+		update_mark_recovery_required
+		update_record_phase finalization-failed rc3_quiesce_clear_failed || :
+		UPDATE_SUCCESS_FINALIZING=0
+		return 1
+	fi
+	UPDATE_QUIESCE_ACTIVE=0
+	_update_rc3_detail="rc3_repair_${UPDATE_RC3_TERMINAL}_verified"
+	update_record_phase completed "$_update_rc3_detail" || {
+		update_mark_recovery_required
+		UPDATE_SUCCESS_FINALIZING=0
+		return 1
+	}
+	merv_update_journal_clear || {
+		update_mark_recovery_required
+		UPDATE_SUCCESS_FINALIZING=0
+		return 1
+	}
+	UPDATE_SUCCESS_FINALIZING=0
+	if ! merv_owner_lock_release "$UPDATE_MAINTENANCE_LOCK" "$UPDATE_MAINTENANCE_LOCK_NONCE"; then
+		UPDATE_MAINTENANCE_LOCK_OWNED=1
+		update_mark_recovery_required
+		return 1
+	fi
+	UPDATE_MAINTENANCE_LOCK_OWNED=0
+	trap - EXIT INT TERM
+	if [ "$UPDATE_RC3_TERMINAL" = published ]; then
+		info -c cli,vlan "RC3 Repair published 57 files; all 58 entries verified and the production Repair entrypoint remained unchanged; durable backup retained at $UPDATE_BACKUP_FINAL"
+		return 0
+	fi
+	if [ "$UPDATE_RC3_TERMINAL" = rollback ]; then
+		error -c cli,vlan "RC3 Repair publication failed; complete 58-entry rollback verified; transaction evidence and durable backup retained"
+	else
+		error -c cli,vlan "RC3 Repair stopped before publication; durable backup retained"
+	fi
+	return 1
+}
+
 write_update_undo_marker() {
 	_update_archive_id="$1"
 	_update_from="$2"
@@ -1355,6 +1665,9 @@ cleanup_tmp() {
 update_cleanup_on_exit() {
 	_update_exit_prior_rc=$?
 	trap - EXIT
+	if [ "${UPDATE_RC3_REPAIR_CHILD_ACTIVE:-0}" = "1" ]; then
+		update_mark_recovery_required
+	fi
 	cleanup_tmp "$_update_exit_prior_rc" || :
 	# cleanup_tmp sets this flag independently of the original action status.
 	# Preserve an existing failure/signal code; turn prior success into failure
@@ -1372,6 +1685,12 @@ handle_update_signal() {
 	UPDATE_SIGNAL_HANDLING="1"
 	trap - INT TERM
 	warn -c cli,vlan "Update interrupted; stopping safely"
+	if [ "${UPDATE_RC3_REPAIR_CHILD_ACTIVE:-0}" = "1" ]; then
+		update_mark_recovery_required
+		update_record_phase finalization-failed rc3_candidate_interrupted || :
+		error -c cli,vlan "RC3 Repair child was interrupted; installed-file state is uncertain. Keep the maintenance owner and quiesce marker; validate and restore the durable backup through the standalone recovery helper under an approved recovery plan."
+		exit "$_update_signal_status"
+	fi
 	_update_signal_pool_ready="1"
 	if ! update_abort_node_pool; then
 		_update_signal_pool_ready="0"
@@ -1474,6 +1793,20 @@ case "$1" in
 			fail_update cli "Local update archive must be a nonempty regular file"
 		[ "$#" -le 3 ] || fail_update cli "Local update accepts only an archive path and optional --logs policy"
 		set_update_log_policy "${3:-}"
+		;;
+	rc3-repair-candidate)
+		MODE="rc3-repair-candidate"
+		UPDATE_SOURCE="remote"
+		UPDATE_LOG_POLICY="keep"
+		UPDATE_RC3_REPAIR_MODE="1"
+		UPDATE_RC3_REPAIR_INPUT="${2:-}"
+		UPDATE_RC3_REPAIR_REF="${3:-}"
+		[ "$#" -eq 3 ] || fail_update cli "RC3 candidate mode requires a private candidate path and one pinned source ref"
+		update_rc3_input_path_shape_valid "$UPDATE_RC3_REPAIR_INPUT" || fail_update cli "RC3 candidate path is outside the private trial directory"
+		update_rc3_context_valid || fail_update cli "RC3 candidate mode is restricted to the canonical installation and Update paths"
+		[ -n "$UPDATE_RC3_REPAIR_REF" ] || fail_update cli "RC3 candidate mode requires a pinned source commit or ref"
+		case "$UPDATE_RC3_REPAIR_REF" in ''|*[!A-Za-z0-9._/-]*|*..*|*//*|/*|*/) fail_update cli "RC3 source ref is malformed" ;; esac
+		[ "${#UPDATE_RC3_REPAIR_REF}" -le 96 ] || fail_update cli "RC3 source ref is too long"
 		;;
 	*)
 		echo "Usage: $0 [local /absolute/path/archive.tar.gz [--logs=keep|--logs=clear]|update [branch] [--logs=keep|--logs=clear]|backup|restore|main|dev|refs/<ref>]" >&2
@@ -1763,7 +2096,11 @@ validate_update_archive_members() {
 }
 # LOCAL ARCHIVE HELPERS END
 
-if [ "$UPDATE_SOURCE" = "remote" ]; then
+if [ "$UPDATE_RC3_REPAIR_MODE" = "1" ]; then
+	GITHUB_REF="$UPDATE_RC3_REPAIR_REF"
+	GITHUB_URL=""
+	info -c cli,vlan "Using pinned Repair candidate source ref: $GITHUB_REF"
+elif [ "$UPDATE_SOURCE" = "remote" ]; then
 	# Resolve curl only for remote source acquisition. Local archive mode must
 	# remain usable on router images with no curl binary at all.
 	CURL_BIN="$(find_curl)" || \
@@ -1829,6 +2166,11 @@ if ! update_wait_for_runtime_idle; then
 	fail_update quiescing "Active MerVLAN runtime work did not reach a safe idle state"
 fi
 update_record_phase quiesced || fail_update journal "Could not persist the quiesced Update journal"
+
+if [ "$UPDATE_RC3_REPAIR_MODE" = "1" ]; then
+	update_run_rc3_repair_candidate
+	exit $?
+fi
 
 # ========================================================================== #
 # CAPTURE CURRENT VERSION (BEFORE UPDATE)                                    #

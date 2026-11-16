@@ -1,7 +1,8 @@
 # MerVLAN RC3 — Lean Repair / Luna integration handoff
 
-**Status: HOST-SIDE REVIEW PACKAGE ONLY. Isolated XT8 fixture qualification
-passed on MAIN on 2026-11-15; do not run installed-file Repair on MAIN/NODE.**
+**Status: HOST-SIDE REVIEW PACKAGE. Isolated XT8 fixture qualification passed
+on MAIN on 2026-11-15. The coordinated installed-file candidate below has only
+host qualification; no installed-file trial has run.**
 
 This package is intentionally rooted at `dev-tools/experiments/rc3-lean-repair-luna/`.
 **Unpack the ZIP at the ROOT of your checkout of `pre_v0.53.29-RC3-repair-test`.**
@@ -50,6 +51,29 @@ The independent RC3-dev source archive used to build the three REFERENCE patches
   python3 dev-tools/experiments/rc3-lean-repair-luna/tests/test_lean_repair.py --shell busybox
   ```
 
+## Update-coordinated installed-file candidate
+
+- `candidates/update_mervlan_repair_RC3_coordinated.sh` is a separate,
+  host-qualified candidate. SHA-256:
+  `587c002f36d1191bbcde4959a0c6d5256494abac522d82af2b8d85d0746856a1`.
+- The matching hidden `rc3-repair-candidate` mode is in the working-tree
+  `functions/update_mervlan.sh` (SHA-256
+  `499f939262acd166dac456d3c7445b5439d2dd4a6cad69fec996cacd121df1d2`). It
+  uses the canonical Update owner, recovery gate, durable backup, recovery
+  helper validation, quiesce marker, and runtime-idle check. It publishes 57
+  entries and verifies all 58 while preserving the installed production
+  `functions/update_mervlan_repair.sh` byte-for-byte.
+- It is not installed or committed. Its publication path is available only
+  through the authenticated Update child context. The accepted production
+  Repair entrypoint remains unchanged. Do not run the trial until a separate
+  maintainer authorization and an immutable source commit are available.
+- Host evidence: 67/67 Repair cases under Dash and BusyBox ash, plus focused
+  Update-child success, rollback, and SIGKILL persistent-restore fixtures. See
+  `XT8_CONTROLLED_INSTALLED_REPAIR_TRIAL.md` for the prepared, unexecuted
+  procedure.
+- From the repository root, verify the coordinated integration inventory with
+  `sha256sum -c dev-tools/experiments/rc3-lean-repair-luna/audit/RC3_COORDINATED_INTEGRATION_SHA256SUMS`.
+
 ## First commands (in your repository root; host only)
 
 ```sh
@@ -65,7 +89,7 @@ sha256sum dev-tools/experiments/rc3-lean-repair-luna/candidates/*.sh
 
 ## Gate for any router trial
 
-Luna may commit/push only after a complete local PASS and a diff review, and only to the named test branch. Committing/pushing is not authorization to execute scripts on MAIN/NODE. The current candidate still has a deliberate real-router publication block. No one should remove it based on a marker string, boolean flag, or file-presence check. Refer to `audit/INTEGRATION_AND_TEST_GATES.md`.
+Any commit or push requires maintainer review of the exact changed-file list and diff and is limited to `pre_v0.53.29-RC3-repair-test`. Commit/push authorization does not authorize an installed-file trial. The coordinated candidate can publish only as the authenticated child of the canonical Update path; retain that gate and the existing production Repair entrypoint. Refer to `audit/INTEGRATION_AND_TEST_GATES.md` and the controlled trial procedure.
 
 ## RAM rule
 
