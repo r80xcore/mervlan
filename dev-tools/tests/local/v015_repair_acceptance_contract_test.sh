@@ -8,7 +8,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 REPAIR="$ROOT/functions/update_mervlan_repair.sh"
 MANIFEST="$ROOT/functions/update_mervlan_repair.manifest"
 V015_COMMIT=9d45c72d59d5fa2ce3cbe9b1265d4b4e33e9e3ab
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/mervlan-v015-acceptance.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mervlan_standalone_fixture.v015.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -17,10 +17,12 @@ pass() { printf 'PASS: %s\n' "$*"; }
 git cat-file -e "$V015_COMMIT^{commit}" 2>/dev/null || fail 'v0.53.15 tag commit is unavailable'
 
 CASE="$WORK/case"
-OLD="$CASE/old"
+OLD="$CASE/jffs/addons/mervlan"
+BACKUP_ROOT="$CASE/jffs/addons/mervlan_backups"
 REMOTE="$CASE/remote"
 PROC="$CASE/proc"
-mkdir -p "$OLD" "$REMOTE" "$PROC" "$CASE/work" "$CASE/locks" "$CASE/progress" "$CASE/backups"
+mkdir -p "$OLD" "$BACKUP_ROOT" "$REMOTE" "$PROC" "$CASE/work" "$CASE/locks" "$CASE/progress" "$CASE/backups"
+printf 'MemAvailable: 400000 kB\n' >"$CASE/meminfo"
 git archive --format=tar "$V015_COMMIT" | tar -xf - -C "$OLD" || fail 'could not materialize exact v0.53.15 tree'
 
 # Seed realistic protected user state on top of the immutable tag tree. These
@@ -196,15 +198,20 @@ before_profiles=$(cksum "$OLD/www/settings/hardware_profiles.json")
 before_backup=$(cksum "$CASE/backups/v0.53.15.tar.gz")
 
 MERV_BASE="$OLD" \
+MERV_REPAIR_TEST_ONLY=1 \
 MERV_REPAIR_CURL="$CASE/curl" \
 MERV_REPAIR_FIXTURE_ARCHIVE="$ARCHIVE" \
 MERV_REPAIR_SNAPSHOT_BASE='https://repair.test/snapshot' \
-MERV_REPAIR_MAINTENANCE_LOCK="$CASE/locks/mervlan_maintenance.lock" \
+MERV_REPAIR_BACKUP_ROOT="$BACKUP_ROOT" \
+MERV_REPAIR_MEMINFO="$CASE/meminfo" \
+MERV_REPAIR_LOCK="$CASE/locks/mervlan_maintenance.lock" \
+MERV_REPAIR_ACTION_LOCK="$CASE/locks/mervlan_action.lock" \
+MERV_REPAIR_MANAGER_LOCK="$CASE/locks/mervlan_manager.lock" \
 MERV_REPAIR_LEGACY_LOCK_ROOT="$CASE/locks" \
 MERV_REPAIR_PROC_ROOT="$PROC" \
 MERV_REPAIR_TMP_ROOT="$CASE/work" \
 MERV_REPAIR_PROGRESS_ROOT="$CASE/progress" \
-sh "$REPAIR" main || fail 'repair rejected exact v0.53.15 installation'
+sh "$REPAIR" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || fail 'repair rejected exact v0.53.15 installation'
 
 [ "$(cksum "$OLD/settings/settings.json")" = "$before_settings" ] || fail 'v0.53.15 settings changed'
 [ "$(cksum "$OLD/.ssh/vlan_manager")" = "$before_key" ] || fail 'v0.53.15 private SSH key changed'
@@ -214,7 +221,7 @@ sh "$REPAIR" main || fail 'repair rejected exact v0.53.15 installation'
 [ "$(cksum "$OLD/www/settings/hardware_profiles.json")" = "$before_profiles" ] || fail 'v0.53.15 hardware profile changed'
 [ "$(cksum "$CASE/backups/v0.53.15.tar.gz")" = "$before_backup" ] || fail 'backup outside active tree changed'
 
-grep -Fq 'Standalone emergency repair' "$OLD/functions/update_mervlan_repair.sh" || fail 'repair engine was not published'
+grep -Fq 'Standalone MerVLAN Emergency Repair' "$OLD/functions/update_mervlan_repair.sh" || fail 'repair engine was not published'
 for required in install.sh uninstall.sh functions/update_mervlan.sh functions/update_mervlan_repair.sh \
     functions/mervlan_boot.sh functions/mervlan_wan.sh settings/lib_owner_lock.sh \
     settings/lib_update_state.sh settings/lib_maintenance_recovery.sh; do

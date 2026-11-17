@@ -1,1448 +1,1351 @@
 #!/bin/sh
-# Standalone emergency repair.  This file is deliberately source-free: it is
-# the rescue ABI used when the installed updater, settings libraries, or lock
-# libraries are missing or too old to load safely.
+# Standalone MerVLAN Emergency Repair.
+# This source-free engine can be run from a separately verified copy; it never
+# sources files from the installed addon.
 set -u
-
+LC_ALL=C; export LC_ALL
 : "${MERV_BASE:=/jffs/addons/mervlan}"
 : "${MERV_REPAIR_TMP_ROOT:=/tmp}"
-: "${MERV_REPAIR_SNAPSHOT_BASE:=https://codeload.github.com/r80xcore/mervlan/tar.gz}"
-: "${MERV_REPAIR_CONNECT_TIMEOUT:=15}"
-: "${MERV_REPAIR_MAX_TIME:=120}"
-: "${MERV_REPAIR_MAINTENANCE_LOCK:=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock}"
-: "${MERV_REPAIR_LEGACY_LOCK_ROOT:=/tmp/mervlan_tmp/locks}"
 : "${MERV_REPAIR_PROC_ROOT:=/proc}"
-
-RUN_DIR=""
-EXTRACT_DIR=""
-STAGE_DIR=""
-BACKUP_DIR=""
-PATHS_FILE=""
-LEDGER_FILE=""
-PROTECTED_DIR=""
-SNAPSHOT_ARCHIVE=""
-SNAPSHOT_RAW=""
-SNAPSHOT_ROOT=""
-CURL_BIN="${MERV_REPAIR_CURL:-}"
-REF=""
-REPAIR_LOCK_OWNED=0
-REPAIR_LOCK_NONCE=""
-REPAIR_LOCK_START=""
-REPAIR_LOCK_CREATED=""
-REPAIR_ADMISSION_PHASE="initial"
-REPAIR_BLOCK_CATEGORY=""
-REPAIR_BLOCK_REASON=""
-REPAIR_BLOCK_PID=""
-REPAIR_BLOCK_OPERATION=""
-REPAIR_BLOCK_START=""
-REPAIR_BLOCK_STATE=""
-REPAIR_BLOCK_LOCK=""
-REPAIR_BLOCK_SOURCE=""
-REPAIR_BLOCK_IDENTITY=""
-REPAIR_LEDGER_SEQ=0
-REPAIR_PROGRESS_SEQ=0
-REPAIR_PROGRESS_TOKEN="${MERV_PROGRESS_TOKEN:-}"
-REPAIR_PROGRESS_ACTION=""
-REPAIR_PROGRESS_STARTED=""
-REPAIR_SUCCESS=0
-REPAIR_ROLLBACK_FAILED=0
-REPAIR_INTERRUPTED=0
-REPAIR_OWNER_LOST=0
-REPAIR_PUBLISH_TMP=""
-REPAIR_PUBLISH_SOURCE=""
-REPAIR_HANDOFF_STATE="${MERV_REPAIR_HANDOFF_STATE:-}"
-
-log() { printf '%s\n' "[mervlan-repair] $*" >&2; }
-
-json_escape() {
-  printf '%s' "${1:-}" | tr -d '\000-\010\013\014\016-\037' |
-    sed 's/\\/\\\\/g; s/"/\\"/g'
+: "${MERV_REPAIR_OWNER_PROC_ROOT:=/proc}"
+: "${MERV_REPAIR_LOCK:=/tmp/mervlan_tmp/locks/mervlan_maintenance.lock}"
+: "${MERV_REPAIR_LEGACY_LOCK_ROOT:=/tmp/mervlan_tmp/locks}"
+: "${MERV_REPAIR_ACTION_LOCK:=/tmp/mervlan_tmp/locks/mervlan_action.lock}"
+: "${MERV_REPAIR_MANAGER_LOCK:=/tmp/mervlan_tmp/locks/mervlan_manager.lock}"
+: "${MERV_REPAIR_BACKUP_ROOT:=/jffs/addons/mervlan_backups}"
+: "${MERV_REPAIR_SNAPSHOT_BASE:=https://codeload.github.com/r80xcore/mervlan/tar.gz}"
+: "${MERV_REPAIR_MEMINFO:=/proc/meminfo}"
+: "${MERV_REPAIR_CURL:=curl}"
+# Minimum resources that must remain available at BOTH preflight checkpoints.
+# KiB: 32768 = 32 MiB, 65536 = 64 MiB, 8192 = 8 MiB.
+REPAIR_MIN_AVAILABLE_KIB=32768
+REPAIR_MIN_TMP_FREE_KIB=65536
+REPAIR_MIN_DEST_FREE_KIB=8192
+WORK= ACTION_LOCKED=0 MAINTENANCE_LOCKED=0 MANAGER_LOCKED=0
+TX=0 COMMITTED=0 ROLLBACK_OK=0 PUBLISHED=0 VERIFIED=0
+ACTION_PARENT=0 ACTION_PARENT_PID= ACTION_PARENT_START= ACTION_PARENT_NONCE=
+LOCK_START= LOCK_CREATED= ACTION_NONCE= MAINTENANCE_NONCE= MANAGER_NONCE=
+LOCK_SEQ=0 JOURNAL_SEQ=0 BACKUP_ESTIMATE=0 TXN_ID= HANDOFF_START=
+RUN_START=$(date +%s 2>/dev/null || printf '0')
+START_ID= REF= ROOT= COHORT= MANIFEST= STAGE= BACKUP= LEDGER= ARCHIVE=
+BACKUP_ROOT= TXN_DIR= READY_FILE= INDEX_FILE= RECOVERY_HELPER= SOURCE_ROOT=
+status() {
+  now=$(date +%s 2>/dev/null || printf '%s' "$RUN_START")
+  printf '[mervlan-lean] %s elapsed=%ss %s\n' "$1" "$((now-RUN_START))" "${2:-}" >&2
 }
-
-token_valid() {
-  case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  [ "${#1}" -le 96 ]
+stop() { status ERROR "$*"; exit 1; }
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+path_present() { exists "$1"; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+path_regular() { regular "$1"; }
+# No symlinked ancestor or malformed filesystem path is trusted.
+safe_chain() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  rest=${1#/}; part=/
+  while [ -n "$rest" ]; do
+    case "$rest" in */*) component=${rest%%/*}; rest=${rest#*/} ;; *) component=$rest; rest= ;; esac
+    [ -n "$component" ] || return 1
+    part="$part$component"
+    if exists "$part"; then
+      [ ! -L "$part" ] && [ -d "$part" ] || return 1
+    fi
+    part="$part/"
+  done
 }
-
-# Progress is diagnostic only.  A failed progress publication never changes
-# the repair admission, ledger, rollback, or terminal result.
-progress() {
-  _rp_state="$1" _rp_phase="$2" _rp_percent="$3" _rp_message="$4"
-  token_valid "$REPAIR_PROGRESS_TOKEN" || return 0
-  _rp_root="${MERV_REPAIR_PROGRESS_ROOT:-/tmp/mervlan_tmp/progress}"
-  case "$_rp_root" in ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 0 ;; esac
-  [ -d "$_rp_root" ] || mkdir -p "$_rp_root" 2>/dev/null || return 0
-  REPAIR_PROGRESS_SEQ=$((REPAIR_PROGRESS_SEQ + 1))
-  _rp_tmp="$_rp_root/$REPAIR_PROGRESS_TOKEN.json.tmp.$$.$REPAIR_PROGRESS_SEQ"
-  _rp_path="$_rp_root/$REPAIR_PROGRESS_TOKEN.json"
-  _rp_now=$(date +%s 2>/dev/null || printf '0')
-  case "$_rp_now" in ''|*[!0-9]*) _rp_now=0 ;; esac
-  [ -n "$REPAIR_PROGRESS_STARTED" ] || REPAIR_PROGRESS_STARTED="$_rp_now"
-  _rp_error=null
-  [ "$_rp_state" = failed ] && _rp_error="\"$(json_escape "$_rp_message")\""
-  {
-    printf '{"format_version":2,"token":"%s","action":"%s","label":"Emergency MerVLAN Repair"' \
-      "$(json_escape "$REPAIR_PROGRESS_TOKEN")" "$(json_escape "$REPAIR_PROGRESS_ACTION")"
-    printf ',"state":"%s","mode":"phase","phase":"%s","current":0,"total":0,"percent":%s' \
-      "$_rp_state" "$(json_escape "$_rp_phase")" "$_rp_percent"
-    printf ',"message":"%s","error":%s,"started_at":%s,"owner_pid":%s,"owner_start":%s,"owner_nonce":"%s","terminal_state":"%s","updated_at":%s}\n' \
-      "$(json_escape "$_rp_message")" "$_rp_error" "$REPAIR_PROGRESS_STARTED" "$$" \
-      "${REPAIR_LOCK_START:-0}" "$(json_escape "${REPAIR_LOCK_NONCE:-repair}")" \
-      "$_rp_state" "$_rp_now"
-  } >"$_rp_tmp" 2>/dev/null || { rm -f "$_rp_tmp" 2>/dev/null || :; return 0; }
-  chmod 644 "$_rp_tmp" 2>/dev/null || :
-  mv -f "$_rp_tmp" "$_rp_path" 2>/dev/null || rm -f "$_rp_tmp" 2>/dev/null || :
-  return 0
+# Parents for the allowlisted cohort can be created, but never via symlinks.
+ensure_dir() {
+  safe_chain "$1" || return 1
+  rest=${1#/}; part=/
+  while [ -n "$rest" ]; do
+    case "$rest" in */*) component=${rest%%/*}; rest=${rest#*/} ;; *) component=$rest; rest= ;; esac
+    part="$part$component"
+    if ! exists "$part"; then mkdir "$part" || return 1; fi
+    [ -d "$part" ] && [ ! -L "$part" ] || return 1
+    part="$part/"
+  done
 }
-
+valid_rel() {
+  case "$1" in ''|/*|*..*|*//*|*' '*|*'\t'*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  case "$1" in .|./*|*/.|*/./*|*/..) return 1 ;; esac
+}
 valid_ref() {
-  REF="${1:-main}"
-  case "$REF" in main|dev) return 0 ;; esac
-  case "$REF" in ''|/*|*/|*..*|*//*|*.lock|*[!A-Za-z0-9._/-]*) return 1 ;; esac
-  case "$REF" in [A-Za-z0-9]*) ;; *) return 1 ;; esac
-  case "$REF" in *[A-Za-z0-9]) return 0 ;; *) return 1 ;; esac
+  REF="${1:-}"
+  [ "${#REF}" -eq 40 ] || return 1
+  case "$REF" in *[!0123456789abcdef]*) return 1 ;; esac
+  return 0
 }
-
-# Builtin predicates preserve detection of dangling links without forking ls.
-path_present() {
-  [ -e "$1" ] || [ -L "$1" ]
+# The allowlist is compiled into the trusted standalone engine, not loaded
+# from potentially broken installed files or an untrusted source manifest.
+write_contract() {
+  cat >"$WORK/expected.manifest" <<'CONTRACT'
+format=2
+cohort=control-plane
+0644 changelog.txt
+0644 mervlan.asp
+0644 www/index.html
+0755 functions/collect_clients.sh
+0755 functions/collect_local_clients.sh
+0755 functions/device_support_mapper.sh
+0755 functions/dropbear_sshkey_gen.sh
+0755 functions/execute_nodes.sh
+0755 functions/heal_event.sh
+0755 functions/hw_probe.sh
+0755 functions/mac_client_meta.sh
+0755 functions/mac_refresh.sh
+0755 functions/mervlan_backup.sh
+0755 functions/mervlan_boot.sh
+0755 functions/mervlan_boot_wrap.sh
+0755 functions/mervlan_manager.sh
+0755 functions/mervlan_node_runner.sh
+0755 functions/mervlan_recover.sh
+0755 functions/mervlan_trunk.sh
+0755 functions/mervlan_wan.sh
+0755 functions/post_apply_worker.sh
+0755 functions/save_settings.sh
+0755 functions/settings_reconcile.sh
+0755 functions/service-event-handler.sh
+0755 functions/ssh_hostkey_probe.sh
+0755 functions/ssh_trust_action.sh
+0755 functions/sync_nodes.sh
+0755 functions/update_mervlan.sh
+0644 functions/update_mervlan_repair.manifest
+0755 functions/update_mervlan_repair.sh
+0755 install.sh
+0644 settings/lib_action_ack.sh
+0644 settings/lib_action_lock.sh
+0644 settings/lib_action_progress.sh
+0644 settings/lib_action_runtime.sh
+0644 settings/lib_br0_guard.sh
+0644 settings/lib_debug.sh
+0644 settings/lib_identity.sh
+0644 settings/lib_json.sh
+0644 settings/lib_maintenance_recovery.sh
+0644 settings/lib_backup_state.sh
+0644 settings/lib_mervqt.sh
+0644 settings/lib_node_jobs.sh
+0644 settings/lib_node_reconcile.sh
+0644 settings/lib_settings_reconcile.sh
+0644 settings/lib_owner_lock.sh
+0644 settings/lib_progress.sh
+0644 settings/lib_radio.sh
+0644 settings/lib_ssh.sh
+0644 settings/lib_ssh_trust.sh
+0644 settings/lib_ssid_filter.sh
+0644 settings/lib_stp.sh
+0644 settings/lib_update_state.sh
+0644 settings/log_settings.sh
+0644 settings/mac_shield_snapshot.sh
+0644 settings/var_settings.sh
+0644 templates/mervlan_templates.sh
+0755 uninstall.sh
+CONTRACT
+  sed '1,2d' "$WORK/expected.manifest" >"$COHORT"
 }
-
-path_regular() {
-  path_present "$1" && [ ! -L "$1" ] && [ -f "$1" ]
-}
-
-# Check every existing component without following a symlink.  The rescue
-# path only accepts absolute, normalized paths and never makes a destination
-# parent through a symlink.
-path_chain_safe() {
-  _pcs_path="$1"
-  case "$_pcs_path" in /*) ;; *) return 1 ;; esac
-  case "$_pcs_path" in *..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-  _pcs_current=/
-  _pcs_rest=${_pcs_path#/}
-  while [ -n "$_pcs_rest" ]; do
-    case "$_pcs_rest" in
-      */*) _pcs_component=${_pcs_rest%%/*}; _pcs_rest=${_pcs_rest#*/} ;;
-      *) _pcs_component=$_pcs_rest; _pcs_rest="" ;;
+proc_start() (
+  pid=$1; proc_root=${2:-/proc}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -r "$proc_root/$pid/stat" ] || return 1
+  line=; IFS= read -r line <"$proc_root/$pid/stat" || [ -n "$line" ] || return 1
+  case "$line" in *')'*) after=${line##*)} ;; *) return 1 ;; esac
+  IFS=$(printf ' \t')
+  set -- $after
+  tick=${20:-}
+  case "$tick" in ''|*[!0-9]*) return 1 ;; esac
+  case "$tick" in *[1-9]*) : ;; *) return 1 ;; esac
+  printf '%s\n' "$tick"
+)
+owner_fields_read() {
+  _ofr_file="$1"; OWNER_PID= OWNER_START= OWNER_NONCE= OWNER_CREATED= OWNER_HEARTBEAT=
+  [ ! -L "$_ofr_file" ] && [ -f "$_ofr_file" ] && [ -r "$_ofr_file" ] || return 1
+  _ofr_size=$(wc -c <"$_ofr_file" 2>/dev/null | tr -d ' ') || return 1
+  case "$_ofr_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_ofr_size" -gt 0 ] && [ "$_ofr_size" -le 512 ] || return 1
+  LC_ALL=C grep -q '[^ -~]' "$_ofr_file" 2>/dev/null && return 1
+  _ofr_n=0
+  while IFS= read -r _ofr_line || [ -n "$_ofr_line" ]; do
+    _ofr_n=$((_ofr_n + 1)); [ "$_ofr_n" -le 5 ] || return 1
+    case "$_ofr_line" in
+      pid=*) [ -z "$OWNER_PID" ] || return 1; OWNER_PID=${_ofr_line#pid=} ;;
+      proc_start_time=*) [ -z "$OWNER_START" ] || return 1; OWNER_START=${_ofr_line#proc_start_time=} ;;
+      owner_nonce=*) [ -z "$OWNER_NONCE" ] || return 1; OWNER_NONCE=${_ofr_line#owner_nonce=} ;;
+      created=*) [ -z "$OWNER_CREATED" ] || return 1; OWNER_CREATED=${_ofr_line#created=} ;;
+      heartbeat=*) [ -z "$OWNER_HEARTBEAT" ] || return 1; OWNER_HEARTBEAT=${_ofr_line#heartbeat=} ;;
+      *) return 1 ;;
     esac
-    [ -n "$_pcs_component" ] || return 1
-    _pcs_current="$_pcs_current$_pcs_component"
-    if path_present "$_pcs_current"; then
-      [ ! -L "$_pcs_current" ] && [ -d "$_pcs_current" ] || return 1
-    fi
-    _pcs_current="$_pcs_current/"
+  done <"$_ofr_file"
+  [ "$_ofr_n" -eq 5 ] || return 1
+  case "$OWNER_PID:$OWNER_START:$OWNER_CREATED:$OWNER_HEARTBEAT" in *[!0-9:]*) return 1 ;; esac
+  case "$OWNER_PID:$OWNER_START:$OWNER_CREATED:$OWNER_HEARTBEAT" in *::*|:*|*:) return 1 ;; esac
+  for _ofr_num in "$OWNER_PID" "$OWNER_START" "$OWNER_CREATED" "$OWNER_HEARTBEAT"; do
+    case "$_ofr_num" in *[1-9]*) : ;; *) return 1 ;; esac
+  done
+  case "$OWNER_NONCE" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ "${#OWNER_NONCE}" -le 160 ] || return 1
+  return 0
+}
+owner_tuple_matches() {
+  _otm_lock="$1" _otm_pid="$2" _otm_start="$3" _otm_nonce="$4"
+  [ ! -L "$_otm_lock" ] && [ -d "$_otm_lock" ] || return 1
+  owner_fields_read "$_otm_lock/owner" || return 1
+  [ "$OWNER_PID" = "$_otm_pid" ] && [ "$OWNER_START" = "$_otm_start" ] &&
+    [ "$OWNER_NONCE" = "$_otm_nonce" ] || return 1
+  [ "$(proc_start "$OWNER_PID" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$OWNER_START" ] &&
+    kill -0 "$OWNER_PID" 2>/dev/null
+}
+owner_sidecars_match() {
+  _osm_dir="$1"
+  for _osm_field in pid proc_start_time owner_nonce created heartbeat; do
+    case "$_osm_field" in
+      pid) _osm_expected=$OWNER_PID ;;
+      proc_start_time) _osm_expected=$OWNER_START ;;
+      owner_nonce) _osm_expected=$OWNER_NONCE ;;
+      created) _osm_expected=$OWNER_CREATED ;;
+      heartbeat) _osm_expected=$OWNER_HEARTBEAT ;;
+    esac
+    _osm_file="$_osm_dir/$_osm_field"
+    [ ! -L "$_osm_file" ] && [ -f "$_osm_file" ] && [ -r "$_osm_file" ] || return 1
+    _osm_size=$(wc -c <"$_osm_file" 2>/dev/null | tr -d ' ') || return 1
+    [ "$_osm_size" -eq $((${#_osm_expected} + 1)) ] || return 1
+    [ "$(cat "$_osm_file" 2>/dev/null)" = "$_osm_expected" ] || return 1
   done
   return 0
 }
-
-mkdir_chain_safe() {
-  _mcs_path="$1"
-  path_chain_safe "$_mcs_path" || return 1
-  _mcs_current=/
-  _mcs_rest=${_mcs_path#/}
-  while [ -n "$_mcs_rest" ]; do
-    case "$_mcs_rest" in
-      */*) _mcs_component=${_mcs_rest%%/*}; _mcs_rest=${_mcs_rest#*/} ;;
-      *) _mcs_component=$_mcs_rest; _mcs_rest="" ;;
-    esac
-    _mcs_current="$_mcs_current$_mcs_component"
-    if ! path_present "$_mcs_current"; then
-      mkdir "$_mcs_current" 2>/dev/null || return 1
-    fi
-    [ ! -L "$_mcs_current" ] && [ -d "$_mcs_current" ] || return 1
-    _mcs_current="$_mcs_current/"
-  done
-  return 0
-}
-
-safe_rel_path() {
-  _srp_path="$1"
-  case "$_srp_path" in
-    ''|/*|*..*|*//*|*' '*|*'	'*|*'\\'*|*[!A-Za-z0-9._/-]*) return 1 ;;
-  esac
-  case "$_srp_path" in
-    .|./*|*/.|*/./*|*/..|../*) return 1 ;;
-  esac
-  return 0
-}
-
-find_curl() {
-  [ -n "$CURL_BIN" ] && [ -x "$CURL_BIN" ] && return 0
-  CURL_BIN=""
-  _fc_oldIFS="$IFS"
-  IFS=:
-  for _fc_dir in ${PATH:-}; do
-    [ -n "$_fc_dir" ] || _fc_dir=.
-    if [ -x "$_fc_dir/curl" ]; then CURL_BIN="$_fc_dir/curl"; break; fi
-  done
-  IFS="$_fc_oldIFS"
-  [ -n "$CURL_BIN" ] || { [ -x /usr/sbin/curl ] && CURL_BIN=/usr/sbin/curl; }
-  [ -x "$CURL_BIN" ]
-}
-
-fetch_snapshot() {
-  _fs_dest="$1" _fs_part="${1}.part" _fs_url="$MERV_REPAIR_SNAPSHOT_BASE/$REF"
-  rm -f "$_fs_part" 2>/dev/null || return 1
-  "$CURL_BIN" -f -sS -L --proto '=https' --proto-redir '=https' --retry 3 --retry-delay 1 \
-    --connect-timeout "$MERV_REPAIR_CONNECT_TIMEOUT" \
-    --max-time "$MERV_REPAIR_MAX_TIME" -o "$_fs_part" "$_fs_url" || {
-      rm -f "$_fs_part" 2>/dev/null || :
-      return 1
-    }
-  [ -s "$_fs_part" ] || { rm -f "$_fs_part" 2>/dev/null || :; return 1; }
-  mv -f "$_fs_part" "$_fs_dest" 2>/dev/null || {
-    rm -f "$_fs_part" 2>/dev/null || :
-    return 1
-  }
-  return 0
-}
-
-archive_members_valid() {
-  _amv_archive="$1"
-  _amv_members="$RUN_DIR/archive.members"
-  _amv_verbose="$RUN_DIR/archive.verbose"
-  SNAPSHOT_ROOT=""
-  rm -f "$_amv_members" "$_amv_verbose" "$SNAPSHOT_RAW" 2>/dev/null || return 1
-  if tar -tzf "$_amv_archive" >"$_amv_members" 2>/dev/null &&
-     tar -tvzf "$_amv_archive" >"$_amv_verbose" 2>/dev/null; then
-    SNAPSHOT_RAW=""
-  else
-    SNAPSHOT_RAW="$RUN_DIR/snapshot.tar"
-    gzip -dc "$_amv_archive" >"$SNAPSHOT_RAW" 2>/dev/null || return 1
-    tar -tf "$SNAPSHOT_RAW" >"$_amv_members" 2>/dev/null || return 1
-    tar -tvf "$SNAPSHOT_RAW" >"$_amv_verbose" 2>/dev/null || return 1
-  fi
-  [ -s "$_amv_members" ] || return 1
-  : >"$RUN_DIR/archive.seen" || return 1
-  _amv_count=0
-  while IFS= read -r _amv_member || [ -n "$_amv_member" ]; do
-    _amv_normalized="$_amv_member"
-    case "$_amv_normalized" in */) _amv_normalized=${_amv_normalized%/} ;; esac
-    safe_rel_path "$_amv_normalized" || return 1
-    _amv_root=${_amv_normalized%%/*}
-    case "$_amv_root" in ''|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
-    if [ -z "$SNAPSHOT_ROOT" ]; then SNAPSHOT_ROOT="$_amv_root"; fi
-    [ "$SNAPSHOT_ROOT" = "$_amv_root" ] || return 1
-    printf '%s\n' "$_amv_normalized" >>"$RUN_DIR/archive.seen" || return 1
-    _amv_count=$((_amv_count + 1))
-    [ "$_amv_count" -le 4096 ] || return 1
-  done <"$_amv_members"
-  # A single bounded pass detects duplicate normalized member names.
-  awk 'seen[$0]++ { exit 1 }' "$RUN_DIR/archive.seen" >/dev/null 2>&1 || return 1
-  while IFS= read -r _amv_verbose_line || [ -n "$_amv_verbose_line" ]; do
-    case "$_amv_verbose_line" in -*|d*) ;; *) return 1 ;; esac
-    case "$_amv_verbose_line" in *' -> '*|*' link to '*) return 1 ;; esac
-  done <"$_amv_verbose"
-  [ -n "$SNAPSHOT_ROOT" ] || return 1
-  case "$SNAPSHOT_ROOT" in mervlan-[A-Za-z0-9._-]*) return 0 ;; *) return 1 ;; esac
-}
-
-repair_path_allowed() {
-  case "$1" in
-    install.sh|uninstall.sh|changelog.txt|mervlan.asp) return 0 ;;
-    www/index.html|www/vlan_index_style.css|www/vlan_form_style.css|www/help.html|www/view_logs.html|www/settings/loading_actions.json) return 0 ;;
-    functions/mervlan_boot.sh|functions/mervlan_boot_wrap.sh|functions/mervlan_wan.sh|functions/hw_probe.sh|functions/settings_reconcile.sh|functions/ssh_trust_action.sh) return 0 ;;
-    functions/device_support_mapper.sh|functions/heal_event.sh|functions/mervlan_trunk.sh|functions/mervlan_node_runner.sh) return 0 ;;
-    functions/update_mervlan.sh|functions/update_mervlan_repair.sh|functions/update_mervlan_repair.manifest|functions/mervlan_backup.sh|functions/mervlan_recover.sh|functions/sync_nodes.sh) return 0 ;;
-    functions/service-event-handler.sh|functions/mervlan_manager.sh|functions/execute_nodes.sh|functions/post_apply_worker.sh|functions/collect_clients.sh|functions/collect_local_clients.sh) return 0 ;;
-    functions/save_settings.sh|functions/mac_refresh.sh|functions/mac_client_meta.sh|functions/dropbear_sshkey_gen.sh|functions/ssh_hostkey_probe.sh) return 0 ;;
-    settings/var_settings.sh|settings/log_settings.sh|settings/lib_identity.sh|settings/lib_owner_lock.sh|settings/lib_action_lock.sh) return 0 ;;
-    settings/lib_action_ack.sh|settings/lib_action_progress.sh|settings/lib_action_runtime.sh|settings/lib_maintenance_recovery.sh) return 0 ;;
-    settings/lib_br0_guard.sh|settings/lib_debug.sh|settings/lib_radio.sh|settings/lib_ssid_filter.sh|settings/lib_stp.sh) return 0 ;;
-    settings/lib_update_state.sh|settings/lib_json.sh|settings/lib_ssh.sh|settings/lib_ssh_trust.sh|settings/lib_backup_state.sh|settings/lib_mervqt.sh) return 0 ;;
-    settings/lib_node_jobs.sh|settings/lib_node_reconcile.sh|settings/lib_settings_reconcile.sh|settings/lib_progress.sh) return 0 ;;
-    settings/log_settings.sh|settings/mac_shield_snapshot.sh|settings/var_settings.sh) return 0 ;;
-    templates/mervlan_templates.sh) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-path_protected() {
-  case "$1" in
-    settings/settings.json|.ssh|.ssh/*|tmp|tmp/*|flags|flags/*|www/.ssh|www/.ssh/*|www/tmp|www/tmp/*|www/settings/hardware_profiles.json) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-parse_manifest() {
-  _pm_manifest="$1"
-  : >"$PATHS_FILE" || return 1
-  _pm_format=0 _pm_cohort=0 _pm_entries=0
-  while IFS= read -r _pm_line || [ -n "$_pm_line" ]; do
-    [ -n "$_pm_line" ] || continue
-    case "$_pm_line" in
-      \#*) continue ;;
-      format=2) [ "$_pm_format" -eq 0 ] || return 1; _pm_format=1; continue ;;
-      cohort=control-plane) [ "$_pm_cohort" -eq 0 ] || return 1; _pm_cohort=1; continue ;;
-    esac
-    [ "$_pm_format" -eq 1 ] && [ "$_pm_cohort" -eq 1 ] || return 1
-    _pm_mode=${_pm_line%% *}; _pm_path=${_pm_line#* }
-    [ "$_pm_mode" != "$_pm_line" ] && [ -n "$_pm_path" ] || return 1
-    case "$_pm_path" in *' '*|*'	'*) return 1 ;; esac
-    case "$_pm_mode" in 0644|0755) ;; *) return 1 ;; esac
-    safe_rel_path "$_pm_path" || return 1
-    repair_path_allowed "$_pm_path" || return 1
-    path_protected "$_pm_path" && return 1
-    printf '%s %s\n' "$_pm_mode" "$_pm_path" >>"$PATHS_FILE" || return 1
-    _pm_entries=$((_pm_entries + 1))
-    [ "$_pm_entries" -le 256 ] || return 1
-  done <"$_pm_manifest"
-  # Check duplicate paths in one invocation, after the bounded strict parse.
-  awk 'seen[$2]++ { exit 1 }' "$PATHS_FILE" >/dev/null 2>&1 || return 1
-  [ "$_pm_format" -eq 1 ] && [ "$_pm_cohort" -eq 1 ] && [ "$_pm_entries" -gt 0 ] || return 1
-  for _pm_required in install.sh uninstall.sh functions/update_mervlan.sh \
-    functions/update_mervlan_repair.sh functions/update_mervlan_repair.manifest \
-    functions/mervlan_boot.sh functions/mervlan_wan.sh settings/lib_owner_lock.sh \
-    settings/lib_update_state.sh settings/lib_maintenance_recovery.sh settings/lib_backup_state.sh
-  do
-    grep -Fq " $_pm_required" "$PATHS_FILE" || return 1
-  done
-  grep -Fqx '0755 functions/mervlan_wan.sh' "$PATHS_FILE" || return 1
-  grep -Fqx '0644 functions/update_mervlan_repair.manifest' "$PATHS_FILE" || return 1
-  return 0
-}
-
-mode_matches() {
-  _mm_mode="$1" _mm_file="$2"
-  _mm_listing=$(LC_ALL=C ls -ld "$_mm_file" 2>/dev/null) || return 1
-  _mm_actual=${_mm_listing%% *}
-  case "$_mm_mode:$_mm_actual" in
-    0755:-rwxr-xr-x|0644:-rw-r--r--) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-validate_stage() {
-  while IFS=' ' read -r _vs_mode _vs_path; do
-    _vs_file="$STAGE_DIR/$_vs_path"
-    path_regular "$_vs_file" && [ -s "$_vs_file" ] || return 1
-    mode_matches "$_vs_mode" "$_vs_file" || return 1
-    case "$_vs_path" in *.sh) sh -n "$_vs_file" >/dev/null 2>&1 || return 1 ;; esac
-  done <"$PATHS_FILE"
-  [ -x "$STAGE_DIR/functions/mervlan_wan.sh" ] || return 1
-  return 0
-}
-
-repair_owner_positive_uint() {
-  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
-  case "$1" in *[1-9]*) return 0 ;; *) return 1 ;; esac
-}
-
-repair_owner_nonce_valid() {
-  case "${1:-}" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
-  [ "${#1}" -le 160 ]
-}
-
-repair_proc_start() {
-  _rps_pid="$1" _rps_root="${2:-/proc}"
-  repair_owner_positive_uint "$_rps_pid" || return 1
-  [ -r "$_rps_root/$_rps_pid/stat" ] || return 1
-  _rps_stat=''
-  IFS= read -r _rps_stat <"$_rps_root/$_rps_pid/stat" || [ -n "$_rps_stat" ] || return 1
-  _rps_after=${_rps_stat#*)}
-  [ "$_rps_after" != "$_rps_stat" ] || return 1
-  set -- $_rps_after
-  _rps_start=${20:-}
-  repair_owner_positive_uint "$_rps_start" || return 1
-  printf '%s\n' "$_rps_start"
-}
-
-# Admission diagnostics are deliberately state-only: they never carry a path,
-# command line, owner nonce, environment value, or settings content. Reset at
-# each exclusion boundary so an earlier observation cannot leak into a later
-# refusal message.
-repair_admission_diag_begin() {
-  REPAIR_ADMISSION_PHASE="$1"
-  REPAIR_BLOCK_CATEGORY="" REPAIR_BLOCK_REASON="" REPAIR_BLOCK_PID=""
-  REPAIR_BLOCK_OPERATION="" REPAIR_BLOCK_START="" REPAIR_BLOCK_STATE=""
-  REPAIR_BLOCK_LOCK="" REPAIR_BLOCK_SOURCE="" REPAIR_BLOCK_IDENTITY=""
-}
-
-repair_admission_diag_block() {
-  REPAIR_BLOCK_CATEGORY="$1"
-  REPAIR_BLOCK_REASON="${2:-}"
-  REPAIR_BLOCK_LOCK="${3:-}"
-  REPAIR_BLOCK_PID="${4:-}"
-  REPAIR_BLOCK_START="${5:-}"
-  REPAIR_BLOCK_STATE="${6:-}"
-  REPAIR_BLOCK_IDENTITY="${7:-}"
-  REPAIR_BLOCK_OPERATION="${8:-}"
-  REPAIR_BLOCK_SOURCE="${9:-}"
-  repair_admission_diag_log
-}
-
-repair_admission_diag_log() {
-  _radl_phase=unknown _radl_category=unknown_unverifiable_ownership
-  _radl_reason='' _radl_lock='' _radl_pid='' _radl_start=''
-  _radl_state='' _radl_identity='' _radl_operation='' _radl_blocker=''
-  case "$REPAIR_ADMISSION_PHASE" in
-    initial|post_acquisition|publication|post_publish_verify) _radl_phase=$REPAIR_ADMISSION_PHASE ;;
-  esac
-  case "$REPAIR_BLOCK_CATEGORY" in
-    recognized_legacy_mutator|legacy_lock_live_pid|canonical_maintenance_owner|\
-    unknown_unverifiable_ownership|unsafe_malformed_lock|maintenance_lock_claim_failed)
-      _radl_category=$REPAIR_BLOCK_CATEGORY ;;
-  esac
-  case "$REPAIR_BLOCK_REASON" in
-    process_scan_unverifiable|proc_root_unavailable|proc_root_unsafe|proc_entry_unverifiable|\
-    process_cmdline_unreadable|process_identity_unreadable|legacy_lock_root_unsafe|\
-    legacy_lock_directory_unsafe|legacy_pid_file_unsafe|legacy_pid_invalid|\
-    legacy_pid_identity_unreadable|action_lock_owner_unverifiable|\
-    canonical_lock_path_unsafe|canonical_lock_directory_unsafe|\
-    canonical_owner_malformed_or_unreadable|canonical_owner_identity_unverifiable|\
-    canonical_owner_replaced_during_check|canonical_stale_quarantine_collision|\
-    canonical_stale_quarantine_failed|maintenance_parent_unavailable|\
-    maintenance_lock_claim_raced|repair_owner_creation_failed)
-      _radl_reason=$REPAIR_BLOCK_REASON ;;
-  esac
-  case "$REPAIR_BLOCK_LOCK" in
-    ''|*/*|*[!A-Za-z0-9_.-]*) : ;;
-    *) [ "${#REPAIR_BLOCK_LOCK}" -le 80 ] && _radl_lock=$REPAIR_BLOCK_LOCK ;;
-  esac
-  repair_owner_positive_uint "$REPAIR_BLOCK_PID" && _radl_pid=$REPAIR_BLOCK_PID
-  repair_owner_positive_uint "$REPAIR_BLOCK_START" && _radl_start=$REPAIR_BLOCK_START
-  case "$REPAIR_BLOCK_STATE" in R|S|D|Z|T|t|X|x|K|W|P|I) _radl_state=$REPAIR_BLOCK_STATE ;; esac
-  case "$REPAIR_BLOCK_IDENTITY" in
-    observed_generation|pid_only_unverified|owner_verified_at_check|unverifiable)
-      _radl_identity=$REPAIR_BLOCK_IDENTITY ;;
-  esac
-  case "$REPAIR_BLOCK_OPERATION" in
-    update_mervlan.sh|install.sh|uninstall.sh|mervlan_manager.sh|sync_nodes.sh|\
-    execute_nodes.sh|service-event-handler.sh|mervlan_boot.sh|\
-    mervlan_boot_wrap.sh|heal_event.sh|save_settings.sh|hw_probe.sh|\
-    dropbear_sshkey_gen.sh)
-      _radl_operation=$REPAIR_BLOCK_OPERATION ;;
-  esac
-  case "$REPAIR_BLOCK_SOURCE" in recognized_legacy_mutator|legacy_lock_live_pid) _radl_blocker=$REPAIR_BLOCK_SOURCE ;; esac
-  if [ "$_radl_phase" = post_acquisition ]; then
-    case "$_radl_category" in
-      recognized_legacy_mutator|legacy_lock_live_pid)
-        _radl_blocker=$_radl_category
-        _radl_category=post_acquisition_competing_mutator
-        ;;
-    esac
-  fi
-  _radl_message="Admission refused: category=$_radl_category phase=$_radl_phase"
-  [ -n "$_radl_blocker" ] && _radl_message="$_radl_message blocker=$_radl_blocker"
-  [ -n "$_radl_reason" ] && _radl_message="$_radl_message reason=$_radl_reason"
-  [ -n "$_radl_lock" ] && _radl_message="$_radl_message lock=$_radl_lock"
-  [ -n "$_radl_pid" ] && _radl_message="$_radl_message pid=$_radl_pid"
-  [ -n "$_radl_operation" ] && _radl_message="$_radl_message operation=$_radl_operation"
-  [ -n "$_radl_start" ] && _radl_message="$_radl_message proc_start=$_radl_start"
-  [ -n "$_radl_state" ] && _radl_message="$_radl_message proc_state=$_radl_state"
-  [ -n "$_radl_identity" ] && _radl_message="$_radl_message identity=$_radl_identity"
-  log "$_radl_message"
-  return 0
-}
-
-# Read a state only when a blocker has already been found. A second read can
-# improve the message but can never change the exclusion decision. Require the
-# observed generation to match the generation that caused the refusal.
-repair_admission_diag_process_state() {
-  REPAIR_BLOCK_STATE=""
-  _radps_pid="$1" _radps_expected="$2" _radps_root="${3:-$MERV_REPAIR_PROC_ROOT}"
-  repair_owner_positive_uint "$_radps_pid" || return 0
-  repair_owner_positive_uint "$_radps_expected" || return 0
-  [ -r "$_radps_root/$_radps_pid/stat" ] || return 0
-  _radps_stat=''
-  IFS= read -r _radps_stat <"$_radps_root/$_radps_pid/stat" || [ -n "$_radps_stat" ] || return 0
-  _radps_after=${_radps_stat#*)}
-  [ "$_radps_after" != "$_radps_stat" ] || return 0
-  set -- $_radps_after
-  _radps_state=${1:-}
-  _radps_start=${20:-}
-  [ "$_radps_start" = "$_radps_expected" ] || return 0
-  case "$_radps_state" in R|S|D|Z|T|t|X|x|K|W|P|I) REPAIR_BLOCK_STATE=$_radps_state ;; esac
-  return 0
-}
-
-# Classify an existing canonical-owner PID without conflating an unreadable
-# process identity with a dead one.  Rescue may reclaim only an authoritatively
-# absent PID or a readable, mismatched start identity; a present-but-unreadable
-# process is an active ambiguity and remains blocking.
-repair_owner_identity_state() {
-  _rois_pid="$1" _rois_expected="$2" _rois_root="$MERV_REPAIR_PROC_ROOT"
-  repair_owner_positive_uint "$_rois_pid" || return 1
-  repair_owner_positive_uint "$_rois_expected" || return 1
-  path_chain_safe "$_rois_root" || { printf 'unknown\n'; return 1; }
-  [ -d "$_rois_root" ] && [ ! -L "$_rois_root" ] || { printf 'unknown\n'; return 1; }
-  if ! path_present "$_rois_root/$_rois_pid"; then
-    # Do not treat a failed proc lookup as absence while the kernel still
-    # reports that PID alive.  That combination is unobservable, not stale.
-    kill -0 "$_rois_pid" 2>/dev/null && { printf 'unknown\n'; return 1; }
-    printf 'absent\n'
+lock_owner_state() {
+  _los_lock="$1"
+  [ ! -L "$_los_lock" ] && [ -d "$_los_lock" ] || return 1
+  owner_fields_read "$_los_lock/owner" && owner_sidecars_match "$_los_lock" || return 1
+  _los_pid=$OWNER_PID _los_start=$OWNER_START
+  _los_actual=$(proc_start "$_los_pid" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)
+  if [ -n "$_los_actual" ]; then
+    [ "$_los_actual" = "$_los_start" ] || { LOCK_OWNER_STATE=reused; return 0; }
+    kill -0 "$_los_pid" 2>/dev/null && LOCK_OWNER_STATE=live || LOCK_OWNER_STATE=unknown
     return 0
   fi
-  [ ! -L "$_rois_root/$_rois_pid" ] && [ -d "$_rois_root/$_rois_pid" ] || {
-    printf 'unknown\n'
-    return 1
-  }
-  kill -0 "$_rois_pid" 2>/dev/null || { printf 'unknown\n'; return 1; }
-  _rois_actual=$(repair_proc_start "$_rois_pid" "$_rois_root" 2>/dev/null || printf '')
-  repair_owner_positive_uint "$_rois_actual" || { printf 'unknown\n'; return 1; }
-  if [ "$_rois_actual" = "$_rois_expected" ]; then
-    printf 'live\n'
+  if exists "$MERV_REPAIR_OWNER_PROC_ROOT/$_los_pid/stat" || kill -0 "$_los_pid" 2>/dev/null; then
+    LOCK_OWNER_STATE=unknown
   else
-    printf 'reused\n'
+    LOCK_OWNER_STATE=dead
   fi
   return 0
 }
-
-repair_owner_read() {
-  _ror_file="$1"
-  REPAIR_OWNER_PID="" REPAIR_OWNER_START="" REPAIR_OWNER_NONCE="" REPAIR_OWNER_CREATED="" REPAIR_OWNER_HEARTBEAT=""
-  path_regular "$_ror_file" || return 1
-  _ror_size=$(wc -c <"$_ror_file" 2>/dev/null | awk '{print $1}') || return 1
-  case "$_ror_size" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$_ror_size" -gt 0 ] && [ "$_ror_size" -le 512 ] || return 1
-  LC_ALL=C grep -q '[^ -~]' "$_ror_file" 2>/dev/null && return 1
-  _ror_lines=0 _ror_seen=""
-  while IFS= read -r _ror_line || [ -n "$_ror_line" ]; do
-    _ror_lines=$((_ror_lines + 1))
-    case " $_ror_seen " in *" ${_ror_line%%=*} "*) return 1 ;; esac
-    case "$_ror_line" in
-      pid=*) REPAIR_OWNER_PID=${_ror_line#pid=} ;;
-      proc_start_time=*) REPAIR_OWNER_START=${_ror_line#proc_start_time=} ;;
-      owner_nonce=*) REPAIR_OWNER_NONCE=${_ror_line#owner_nonce=} ;;
-      created=*) REPAIR_OWNER_CREATED=${_ror_line#created=} ;;
-      heartbeat=*) REPAIR_OWNER_HEARTBEAT=${_ror_line#heartbeat=} ;;
-      *) return 1 ;;
-    esac
-    _ror_seen="$_ror_seen ${_ror_line%%=*}"
-  done <"$_ror_file"
-  [ "$_ror_lines" -eq 5 ] || return 1
-  repair_owner_positive_uint "$REPAIR_OWNER_PID" &&
-    repair_owner_positive_uint "$REPAIR_OWNER_START" &&
-    repair_owner_nonce_valid "$REPAIR_OWNER_NONCE" &&
-    repair_owner_positive_uint "$REPAIR_OWNER_CREATED" &&
-    repair_owner_positive_uint "$REPAIR_OWNER_HEARTBEAT"
-}
-
-repair_owner_write() {
-  _row_dir="$1" _row_pid="$2" _row_start="$3" _row_nonce="$4" _row_now="$5"
-  repair_owner_positive_uint "$_row_pid" && repair_owner_positive_uint "$_row_start" &&
-    repair_owner_nonce_valid "$_row_nonce" && repair_owner_positive_uint "$_row_now" || return 1
-  _row_tmp="$_row_dir/.owner.tmp.$$.$REPAIR_LEDGER_SEQ.$_row_nonce"
-  while path_present "$_row_tmp"; do REPAIR_LEDGER_SEQ=$((REPAIR_LEDGER_SEQ + 1)); _row_tmp="$_row_dir/.owner.tmp.$$.$REPAIR_LEDGER_SEQ.$_row_nonce"; done
-  ( umask 077
-    printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=%s\nheartbeat=%s\n' \
-      "$_row_pid" "$_row_start" "$_row_nonce" "$_row_now" "$_row_now" >"$_row_tmp"
-  ) 2>/dev/null || { rm -f "$_row_tmp" 2>/dev/null || :; return 1; }
-  chmod 600 "$_row_tmp" 2>/dev/null || { rm -f "$_row_tmp" 2>/dev/null || :; return 1; }
-  repair_owner_read "$_row_tmp" || { rm -f "$_row_tmp" 2>/dev/null || :; return 1; }
-  mv -f "$_row_tmp" "$_row_dir/owner" 2>/dev/null || { rm -f "$_row_tmp" 2>/dev/null || :; return 1; }
-  return 0
-}
-
-repair_owner_matches_tuple() {
-  _rom_lock="$1" _rom_pid="$2" _rom_start="$3" _rom_nonce="$4"
-  repair_owner_read "$_rom_lock/owner" || return 1
-  [ "$REPAIR_OWNER_PID" = "$_rom_pid" ] &&
-    [ "$REPAIR_OWNER_START" = "$_rom_start" ] &&
-    [ "$REPAIR_OWNER_NONCE" = "$_rom_nonce" ] || return 1
-  _rom_actual=$(repair_proc_start "$_rom_pid" 2>/dev/null || printf '')
-  [ "$_rom_actual" = "$_rom_start" ] && kill -0 "$_rom_pid" 2>/dev/null
-}
-
-# Re-authenticate the owner immediately before every externally visible repair
-# publication.  This is intentionally independent of the legacy-process scan:
-# a replaced/successor canonical owner must stop repair even when no legacy
-# lock is present.
-repair_owner_owned_and_current() {
-  [ "$REPAIR_LOCK_OWNED" = 1 ] || return 1
-  repair_lock_path_valid || return 1
-  _rooc_lock="$MERV_REPAIR_MAINTENANCE_LOCK"
-  path_present "$_rooc_lock" || return 1
-  [ ! -L "$_rooc_lock" ] && [ -d "$_rooc_lock" ] || return 1
-  repair_owner_read "$_rooc_lock/owner" || return 1
-  [ "$REPAIR_OWNER_PID" = "$$" ] &&
-    [ "$REPAIR_OWNER_START" = "$REPAIR_LOCK_START" ] &&
-    [ "$REPAIR_OWNER_NONCE" = "$REPAIR_LOCK_NONCE" ] &&
-    [ "$REPAIR_OWNER_CREATED" = "$REPAIR_LOCK_CREATED" ] &&
-    [ "$REPAIR_OWNER_HEARTBEAT" = "$REPAIR_LOCK_CREATED" ] || return 1
-  _rooc_actual=$(repair_proc_start "$$" 2>/dev/null || printf '')
-  [ "$_rooc_actual" = "$REPAIR_LOCK_START" ] || return 1
-  kill -0 "$$" 2>/dev/null
-}
-
-repair_action_parent_valid() {
-  [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" = 1 ] || return 1
-  repair_owner_positive_uint "${MERV_ACTION_LOCK_PARENT_PID:-}" || return 1
-  repair_owner_positive_uint "${MERV_ACTION_LOCK_PARENT_START:-}" || return 1
-  repair_owner_nonce_valid "${MERV_ACTION_LOCK_PARENT_NONCE:-}" || return 1
-  _rap_lock="${MERV_ACTION_LOCK_PATH:-${MERV_REPAIR_LEGACY_LOCK_ROOT%/}/mervlan_action.lock}"
-  path_chain_safe "$_rap_lock" || return 1
-  repair_owner_matches_tuple "$_rap_lock" "$MERV_ACTION_LOCK_PARENT_PID" \
-    "$MERV_ACTION_LOCK_PARENT_START" "$MERV_ACTION_LOCK_PARENT_NONCE"
-}
-
-# WebUI repair terminal success is normally published by this standalone
-# worker.  A supervising dispatcher may take that final publication over, but
-# only with an explicit capability and its still-authenticated global owner.
-# The parent-held marker alone is deliberately insufficient: older dispatchers
-# do not know to complete a deferred progress record after releasing locks.
-repair_webui_terminal_deferred() {
-  [ "${MERV_REPAIR_DEFER_WEBUI_TERMINAL:-}" = v1 ] || return 1
-  token_valid "$REPAIR_PROGRESS_TOKEN" || return 1
-  repair_action_parent_valid
-}
-
-# The old .15 dispatcher used per-event `.lock` directories with pid/created
-# metadata and no canonical maintenance owner.  Repair never deletes those
-# objects.  Repair also scans only the exact historical mutator entrypoints
-# whose command lines can race repair publication; this closes the direct-SSH
-# updater/installer gap without turning rescue into a broad process search.
-#
-# Bounded v0.53.15 direct-mutator review:
-# - save_settings.sh and hw_probe.sh rewrite protected settings/settings.json;
-# - dropbear_sshkey_gen.sh regenerates protected .ssh key material; and
-# - mervlan_boot_wrap.sh can launch install.sh or mervlan_manager.sh.
-# They are therefore included.  Other executables were not added merely for
-# being executable: this list is limited to directly invokable lifecycle,
-# runtime, repair-destination, or protected-data writers.
-repair_legacy_process_target() {
-  case "$1" in
-    "$MERV_BASE/functions/update_mervlan.sh"|\
-    "$MERV_BASE/install.sh"|\
-    "$MERV_BASE/uninstall.sh"|\
-    "$MERV_BASE/functions/mervlan_manager.sh"|\
-    "$MERV_BASE/functions/sync_nodes.sh"|\
-    "$MERV_BASE/functions/execute_nodes.sh"|\
-    "$MERV_BASE/functions/service-event-handler.sh"|\
-    "$MERV_BASE/functions/mervlan_boot.sh"|\
-    "$MERV_BASE/functions/mervlan_boot_wrap.sh"|\
-    "$MERV_BASE/functions/heal_event.sh"|\
-    "$MERV_BASE/functions/save_settings.sh"|\
-    "$MERV_BASE/functions/hw_probe.sh"|\
-    "$MERV_BASE/functions/dropbear_sshkey_gen.sh") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-repair_legacy_relative_script_candidate() {
-  _rlrsc_arg="${1:-}"
-  case "$_rlrsc_arg" in ''|/*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-  _rlrsc_base=${_rlrsc_arg##*/}
-  case "$_rlrsc_base" in
-    update_mervlan.sh|install.sh|uninstall.sh|mervlan_manager.sh|sync_nodes.sh|\
-    execute_nodes.sh|service-event-handler.sh|mervlan_boot.sh|\
-    mervlan_boot_wrap.sh|heal_event.sh|save_settings.sh|hw_probe.sh|\
-    dropbear_sshkey_gen.sh) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-repair_relative_script_normalize() {
-  _rrsn_rest="${1:-}" _rrsn_out="" _rrsn_component=""
-  case "$_rrsn_rest" in ''|/*|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
-  while [ -n "$_rrsn_rest" ]; do
-    case "$_rrsn_rest" in
-      */*) _rrsn_component=${_rrsn_rest%%/*}; _rrsn_rest=${_rrsn_rest#*/} ;;
-      *) _rrsn_component=$_rrsn_rest; _rrsn_rest='' ;;
-    esac
-    case "$_rrsn_component" in
-      ''|.) : ;;
-      ..) return 1 ;;
-      *[!A-Za-z0-9_.-]*) return 1 ;;
-      *)
-        if [ -n "$_rrsn_out" ]; then
-          _rrsn_out="$_rrsn_out/$_rrsn_component"
-        else
-          _rrsn_out=$_rrsn_component
-        fi
-        ;;
-    esac
-  done
-  [ -n "$_rrsn_out" ] || return 1
-  printf '%s\n' "$_rrsn_out"
-}
-
-repair_proc_cwd() {
-  _rpc_pid="$1" _rpc_root="$MERV_REPAIR_PROC_ROOT" _rpc_cwd=""
-  repair_owner_positive_uint "$_rpc_pid" || return 1
-  [ -L "$_rpc_root/$_rpc_pid/cwd" ] || return 1
-  type readlink >/dev/null 2>&1 || return 1
-  _rpc_cwd=$(readlink "$_rpc_root/$_rpc_pid/cwd" 2>/dev/null || printf '')
-  case "$_rpc_cwd" in ''|/*) : ;; *) return 1 ;; esac
-  _rpc_cwd=${_rpc_cwd%/}
-  [ -n "$_rpc_cwd" ] || _rpc_cwd=/
-  path_chain_safe "$_rpc_cwd" && [ -d "$_rpc_cwd" ] && [ ! -L "$_rpc_cwd" ] || return 1
-  printf '%s\n' "$_rpc_cwd"
-}
-
-repair_legacy_relative_target() {
-  _rlrt_pid="$1" _rlrt_arg="$2"
-  repair_legacy_relative_script_candidate "$_rlrt_arg" || return 1
-  _rlrt_cwd=$(repair_proc_cwd "$_rlrt_pid" 2>/dev/null || printf '')
-  [ -n "$_rlrt_cwd" ] || return 2
-  _rlrt_rel=$(repair_relative_script_normalize "$_rlrt_arg" 2>/dev/null || printf '')
-  [ -n "$_rlrt_rel" ] || return 2
-  _rlrt_target="$_rlrt_cwd/$_rlrt_rel"
-  repair_legacy_process_target "$_rlrt_target"
-}
-
-repair_legacy_process_scan() {
-  _rlps_root="$MERV_REPAIR_PROC_ROOT"
-  path_chain_safe "$_rlps_root" || {
-    repair_admission_diag_block unknown_unverifiable_ownership proc_root_unsafe
-    return 2
-  }
-  [ -d "$_rlps_root" ] && [ ! -L "$_rlps_root" ] &&
-    [ -r "$_rlps_root" ] && [ -x "$_rlps_root" ] || {
-      repair_admission_diag_block unknown_unverifiable_ownership proc_root_unavailable
-      return 2
-    }
-  for _rlps_pid_dir in "$_rlps_root"/[0-9]*; do
-    path_present "$_rlps_pid_dir" || continue
-    [ ! -L "$_rlps_pid_dir" ] && [ -d "$_rlps_pid_dir" ] || {
-      repair_admission_diag_block unknown_unverifiable_ownership proc_entry_unverifiable
-      return 2
-    }
-    _rlps_pid=${_rlps_pid_dir##*/}
-    repair_owner_positive_uint "$_rlps_pid" || {
-      repair_admission_diag_block unknown_unverifiable_ownership proc_entry_unverifiable
-      return 2
-    }
-    _rlps_cmdline="$_rlps_pid_dir/cmdline"
-    path_regular "$_rlps_cmdline" && [ -r "$_rlps_cmdline" ] || {
-      repair_admission_diag_block unknown_unverifiable_ownership process_cmdline_unreadable '' "$_rlps_pid"
-      return 2
-    }
-    _rlps_cmdline_text=$(LC_ALL=C tr '\000' '\n' <"$_rlps_cmdline" 2>/dev/null) || {
-      repair_admission_diag_block unknown_unverifiable_ownership process_cmdline_unreadable '' "$_rlps_pid"
-      return 2
-    }
-    [ -n "$_rlps_cmdline_text" ] || continue
-    _rlps_match=0 _rlps_operation=""
-    # Preserve absolute argv priority over relative ambiguity. Do not
-    # perform candidate-dependent cwd lookups before checking every exact arg.
-    while IFS= read -r _rlps_arg || [ -n "$_rlps_arg" ]; do
-      if repair_legacy_process_target "$_rlps_arg"; then
-        _rlps_match=1
-        _rlps_operation=${_rlps_arg##*/}
-        break
-      fi
-    done <<EOF
-$_rlps_cmdline_text
-EOF
-    if [ "$_rlps_match" = 0 ]; then
-      while IFS= read -r _rlps_cmd_arg || [ -n "$_rlps_cmd_arg" ]; do
-        repair_legacy_relative_target "$_rlps_pid" "$_rlps_cmd_arg"
-        _rlps_relative_rc=$?
-        case "$_rlps_relative_rc" in
-          0) _rlps_match=1; _rlps_operation=${_rlps_cmd_arg##*/}; break ;;
-          1) : ;;
-          *)
-            repair_admission_diag_block unknown_unverifiable_ownership process_identity_unreadable '' "$_rlps_pid"
-            return 2
-            ;;
-        esac
-      done <<EOF
-$_rlps_cmdline_text
-EOF
-    fi
-    [ "$_rlps_match" = 1 ] || continue
-    # A matching command line is a candidate.  It must have a readable,
-    # identity-verifiable process record and still be alive; otherwise rescue
-    # cannot distinguish a live mutator from a reused/unobservable PID.
-    _rlps_start=$(repair_proc_start "$_rlps_pid" "$_rlps_root" 2>/dev/null || printf '')
-    [ -n "$_rlps_start" ] || {
-      repair_admission_diag_block unknown_unverifiable_ownership process_identity_unreadable '' "$_rlps_pid" '' '' '' "$_rlps_operation"
-      return 2
-    }
-    kill -0 "$_rlps_pid" 2>/dev/null || continue
-    REPAIR_BLOCK_PID=$_rlps_pid
-    REPAIR_BLOCK_OPERATION=$_rlps_operation
-    REPAIR_BLOCK_START=$_rlps_start
-    REPAIR_BLOCK_IDENTITY=observed_generation
-    repair_admission_diag_process_state "$_rlps_pid" "$_rlps_start" "$_rlps_root"
-    REPAIR_BLOCK_CATEGORY=recognized_legacy_mutator
-    return 1
-  done
-  return 0
-}
-
-repair_legacy_exclusion_check() {
-  _rle_phase="${1:-initial}"
-  repair_admission_diag_begin "$_rle_phase"
-  _rle_root="$MERV_REPAIR_LEGACY_LOCK_ROOT"
-  path_chain_safe "$_rle_root" || {
-    repair_admission_diag_block unsafe_malformed_lock legacy_lock_root_unsafe
-    return 2
-  }
-  path_present "$MERV_REPAIR_PROC_ROOT" && [ -d "$MERV_REPAIR_PROC_ROOT" ] &&
-    [ -r "$MERV_REPAIR_PROC_ROOT" ] || {
-      repair_admission_diag_block unknown_unverifiable_ownership proc_root_unavailable
-      return 2
-    }
-  repair_legacy_process_scan || {
-    _rle_process_rc=$?
-    if [ "$_rle_process_rc" -eq 1 ]; then
-      REPAIR_BLOCK_CATEGORY=recognized_legacy_mutator
-      repair_admission_diag_log
-      return 1
-    fi
-    [ -n "$REPAIR_BLOCK_CATEGORY" ] || repair_admission_diag_block unknown_unverifiable_ownership process_scan_unverifiable
-    return 2
-  }
-  for _rle_lock in "$_rle_root"/*.lock; do
-    path_present "$_rle_lock" || continue
-    [ "$_rle_lock" != "$MERV_REPAIR_MAINTENANCE_LOCK" ] || continue
-    _rle_base=${_rle_lock##*/}
-    case "$_rle_base" in
-      mervlan_action.lock)
-        repair_action_parent_valid || {
-          repair_admission_diag_block unknown_unverifiable_ownership action_lock_owner_unverifiable "$_rle_base"
-          return 2
-        }
-        continue
-        ;;
-      *.lock) : ;;
-      *) return 2 ;;
-    esac
-    [ ! -L "$_rle_lock" ] && [ -d "$_rle_lock" ] || {
-      repair_admission_diag_block unsafe_malformed_lock legacy_lock_directory_unsafe "$_rle_base"
-      return 2
-    }
-    path_regular "$_rle_lock/pid" || {
-      repair_admission_diag_block unsafe_malformed_lock legacy_pid_file_unsafe "$_rle_base"
-      return 2
-    }
-    _rle_pid=$(sed -n '1p' "$_rle_lock/pid" 2>/dev/null)
-    repair_owner_positive_uint "$_rle_pid" || {
-      repair_admission_diag_block unsafe_malformed_lock legacy_pid_invalid "$_rle_base"
-      return 2
-    }
-    if path_present "$MERV_REPAIR_PROC_ROOT/$_rle_pid"; then
-      _rle_start=$(repair_proc_start "$_rle_pid" "$MERV_REPAIR_PROC_ROOT" 2>/dev/null || printf '')
-      [ -n "$_rle_start" ] || {
-        repair_admission_diag_block unknown_unverifiable_ownership legacy_pid_identity_unreadable "$_rle_base" "$_rle_pid"
-        return 2
-      }
-      if kill -0 "$_rle_pid" 2>/dev/null; then
-        REPAIR_BLOCK_PID=$_rle_pid
-        REPAIR_BLOCK_START=$_rle_start
-        REPAIR_BLOCK_IDENTITY=pid_only_unverified
-        repair_admission_diag_process_state "$_rle_pid" "$_rle_start" "$MERV_REPAIR_PROC_ROOT"
-        repair_admission_diag_block legacy_lock_live_pid '' "$_rle_base" "$_rle_pid" "$_rle_start" \
-          "${REPAIR_BLOCK_STATE:-}" pid_only_unverified
-        return 1
-      fi
-    fi
-    # A missing /proc/<pid> proves that this legacy process is gone; the lock
-    # remains untouched and is left for the old runtime's own cleanup. An
-    # existing but unreadable process record is unverifiable and blocks.
-  done
-  return 0
-}
-
-repair_lock_path_valid() {
-  case "$MERV_REPAIR_MAINTENANCE_LOCK" in
-    ''|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;;
-    /*) : ;;
-    *) return 1 ;;
-  esac
-  path_chain_safe "${MERV_REPAIR_MAINTENANCE_LOCK%/*}"
-}
-
-repair_lock_release() {
-  [ "$REPAIR_LOCK_OWNED" = 1 ] || return 0
-  _rlr_lock="$MERV_REPAIR_MAINTENANCE_LOCK"
-  # Once this process has claimed the lock, disappearance is a replacement
-  # race or external tampering, not an already-successful release.
-  path_present "$_rlr_lock" || return 1
-  [ ! -L "$_rlr_lock" ] && [ -d "$_rlr_lock" ] || return 1
-  repair_owner_read "$_rlr_lock/owner" || return 1
-  [ "$REPAIR_OWNER_PID" = "$$" ] &&
-    [ "$REPAIR_OWNER_START" = "$REPAIR_LOCK_START" ] &&
-    [ "$REPAIR_OWNER_NONCE" = "$REPAIR_LOCK_NONCE" ] || return 1
-  [ "$REPAIR_OWNER_CREATED" = "$REPAIR_LOCK_CREATED" ] || return 1
-  [ "$REPAIR_OWNER_HEARTBEAT" = "$REPAIR_LOCK_CREATED" ] || return 1
-  _rlr_restore="${_rlr_lock}.owner.restore.$$.$REPAIR_LEDGER_SEQ"
-  cp -p "$_rlr_lock/owner" "$_rlr_restore" 2>/dev/null || return 1
-  repair_owner_read "$_rlr_restore" || { rm -f "$_rlr_restore" 2>/dev/null || :; return 1; }
-  # Re-read the authoritative record immediately before unlinking it.  A
-  # successor may have replaced the owner between the initial check and this
-  # point; in that case preserve the successor and its evidence.
-  path_present "$_rlr_lock/owner" || { rm -f "$_rlr_restore" 2>/dev/null || :; return 1; }
-  repair_owner_read "$_rlr_lock/owner" || { rm -f "$_rlr_restore" 2>/dev/null || :; return 1; }
-  [ "$REPAIR_OWNER_PID" = "$$" ] &&
-    [ "$REPAIR_OWNER_START" = "$REPAIR_LOCK_START" ] &&
-    [ "$REPAIR_OWNER_NONCE" = "$REPAIR_LOCK_NONCE" ] &&
-    [ "$REPAIR_OWNER_CREATED" = "$REPAIR_LOCK_CREATED" ] &&
-    [ "$REPAIR_OWNER_HEARTBEAT" = "$REPAIR_LOCK_CREATED" ] || {
-      rm -f "$_rlr_restore" 2>/dev/null || :
-      return 1
-    }
-  for _rlr_sidecar in heartbeat state; do
-    if path_present "$_rlr_lock/$_rlr_sidecar"; then
-      [ ! -L "$_rlr_lock/$_rlr_sidecar" ] && [ -f "$_rlr_lock/$_rlr_sidecar" ] || {
-        rm -f "$_rlr_restore" 2>/dev/null || :
-        return 1
-      }
-    fi
-  done
-  rm -f "$_rlr_lock/owner" 2>/dev/null || { rm -f "$_rlr_restore" 2>/dev/null || :; return 1; }
-  if ! rmdir "$_rlr_lock" 2>/dev/null; then
-    if path_present "$_rlr_lock" && [ ! -L "$_rlr_lock" ] && [ -d "$_rlr_lock" ] &&
-       ! path_present "$_rlr_lock/owner"; then
-      mv -f "$_rlr_restore" "$_rlr_lock/owner" 2>/dev/null || return 1
-    else
-      return 1
-    fi
-    return 1
+lock_quarantine_dead() {
+  _lqd_lock="$1"
+  lock_owner_state "$_lqd_lock" || return 1
+  case "$LOCK_OWNER_STATE" in dead|reused) ;; *) return 1 ;; esac
+  _lqd_state=$LOCK_OWNER_STATE _lqd_pid=$OWNER_PID _lqd_start=$OWNER_START
+  _lqd_nonce=$OWNER_NONCE _lqd_created=$OWNER_CREATED _lqd_heartbeat=$OWNER_HEARTBEAT
+  _lqd_parent=${_lqd_lock%/*} _lqd_base=${_lqd_lock##*/}
+  LOCK_SEQ=$((LOCK_SEQ + 1))
+  _lqd_quarantine="$_lqd_parent/.$_lqd_base.repair-stale.$$.$LOCK_SEQ"
+  safe_chain "$_lqd_quarantine" && ! exists "$_lqd_quarantine" || return 1
+  # The sibling rename preserves stale evidence. Recheck the exact owner and
+  # process generation before and after moving it; ambiguity remains a refusal.
+  lock_owner_state "$_lqd_lock" || return 1
+  [ "$LOCK_OWNER_STATE" = "$_lqd_state" ] && [ "$OWNER_PID" = "$_lqd_pid" ] &&
+    [ "$OWNER_START" = "$_lqd_start" ] && [ "$OWNER_NONCE" = "$_lqd_nonce" ] &&
+    [ "$OWNER_CREATED" = "$_lqd_created" ] && [ "$OWNER_HEARTBEAT" = "$_lqd_heartbeat" ] || return 1
+  mv "$_lqd_lock" "$_lqd_quarantine" 2>/dev/null || return 1
+  if lock_owner_state "$_lqd_quarantine" &&
+     { [ "$LOCK_OWNER_STATE" = dead ] || [ "$LOCK_OWNER_STATE" = reused ]; } &&
+     [ "$OWNER_PID" = "$_lqd_pid" ] && [ "$OWNER_START" = "$_lqd_start" ] &&
+     [ "$OWNER_NONCE" = "$_lqd_nonce" ] && [ "$OWNER_CREATED" = "$_lqd_created" ] &&
+     [ "$OWNER_HEARTBEAT" = "$_lqd_heartbeat" ]; then
+    return 0
   fi
-  rm -f "$_rlr_restore" 2>/dev/null || :
-  REPAIR_LOCK_OWNED=0
-  return 0
-}
-
-repair_admit() {
-  repair_admission_diag_begin initial
-  repair_lock_path_valid || {
-    repair_admission_diag_block unsafe_malformed_lock canonical_lock_path_unsafe mervlan_maintenance.lock
-    return 1
-  }
-  repair_legacy_exclusion_check initial || return 1
-  if path_present "$MERV_REPAIR_MAINTENANCE_LOCK"; then
-    [ ! -L "$MERV_REPAIR_MAINTENANCE_LOCK" ] && [ -d "$MERV_REPAIR_MAINTENANCE_LOCK" ] || {
-      repair_admission_diag_block unsafe_malformed_lock canonical_lock_directory_unsafe mervlan_maintenance.lock
-      return 1
-    }
-    repair_owner_read "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || {
-      repair_admission_diag_block unsafe_malformed_lock canonical_owner_malformed_or_unreadable mervlan_maintenance.lock
-      return 1
-    }
-    _rac_owner_state=$(repair_owner_identity_state "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" 2>/dev/null || printf 'unknown')
-    case "$_rac_owner_state" in
-      live)
-        repair_admission_diag_process_state "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" "$MERV_REPAIR_PROC_ROOT"
-        repair_admission_diag_block canonical_maintenance_owner '' mervlan_maintenance.lock \
-          "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" "${REPAIR_BLOCK_STATE:-}" owner_verified_at_check
-        return 1
-        ;;
-      absent|reused) : ;;
-      *)
-        repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_identity_unverifiable \
-          mervlan_maintenance.lock "$REPAIR_OWNER_PID" "$REPAIR_OWNER_START" '' unverifiable
-        return 1
-        ;;
-    esac
-    _rac_old_pid="$REPAIR_OWNER_PID"
-    _rac_old_start="$REPAIR_OWNER_START"
-    _rac_old_nonce="$REPAIR_OWNER_NONCE"
-    _rac_old_created="$REPAIR_OWNER_CREATED"
-    _rac_old_heartbeat="$REPAIR_OWNER_HEARTBEAT"
-    # A dead/reused owner is retained for inspection and moved only after the
-    # complete record is re-read.  Never unlink a foreign stale lock in rescue.
-    _rac_quarantine="${MERV_REPAIR_MAINTENANCE_LOCK}.repair-stale.$$.$REPAIR_LEDGER_SEQ"
-    path_present "$_rac_quarantine" && {
-      repair_admission_diag_block unsafe_malformed_lock canonical_stale_quarantine_collision mervlan_maintenance.lock
-      return 1
-    }
-    path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || {
-      repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_replaced_during_check mervlan_maintenance.lock
-      return 1
-    }
-    repair_owner_read "$MERV_REPAIR_MAINTENANCE_LOCK/owner" || {
-      repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_replaced_during_check mervlan_maintenance.lock
-      return 1
-    }
-    [ "$REPAIR_OWNER_PID" = "$_rac_old_pid" ] &&
-      [ "$REPAIR_OWNER_START" = "$_rac_old_start" ] &&
-      [ "$REPAIR_OWNER_NONCE" = "$_rac_old_nonce" ] &&
-      [ "$REPAIR_OWNER_CREATED" = "$_rac_old_created" ] &&
-      [ "$REPAIR_OWNER_HEARTBEAT" = "$_rac_old_heartbeat" ] || {
-        repair_admission_diag_block unknown_unverifiable_ownership canonical_owner_replaced_during_check mervlan_maintenance.lock
-        return 1
-      }
-    mv "${MERV_REPAIR_MAINTENANCE_LOCK}" "$_rac_quarantine" 2>/dev/null || {
-      repair_admission_diag_block unknown_unverifiable_ownership canonical_stale_quarantine_failed mervlan_maintenance.lock
-      return 1
-    }
-  fi
-  _rac_parent=${MERV_REPAIR_MAINTENANCE_LOCK%/*}
-  mkdir_chain_safe "$_rac_parent" || {
-    repair_admission_diag_block unsafe_malformed_lock maintenance_parent_unavailable mervlan_maintenance.lock
-    return 1
-  }
-  if ! mkdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null; then
-    repair_admission_diag_block maintenance_lock_claim_failed maintenance_lock_claim_raced mervlan_maintenance.lock
-    return 1
-  fi
-  REPAIR_LOCK_START=$(repair_proc_start "$$" 2>/dev/null || printf '')
-  if ! repair_owner_positive_uint "$REPAIR_LOCK_START"; then
-    if path_present "$MERV_REPAIR_MAINTENANCE_LOCK" &&
-       [ ! -L "$MERV_REPAIR_MAINTENANCE_LOCK" ] &&
-       [ -d "$MERV_REPAIR_MAINTENANCE_LOCK" ] &&
-       ! path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner"; then
-      rmdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null || :
-    fi
-    repair_admission_diag_block unknown_unverifiable_ownership repair_owner_creation_failed mervlan_maintenance.lock
-    return 1
-  fi
-  REPAIR_LOCK_NONCE="repair.$$.${REPAIR_LEDGER_SEQ}"
-  REPAIR_LOCK_CREATED=$(date +%s 2>/dev/null || printf '0')
-  if ! repair_owner_positive_uint "$REPAIR_LOCK_CREATED" ||
-     ! repair_owner_write "$MERV_REPAIR_MAINTENANCE_LOCK" "$$" "$REPAIR_LOCK_START" \
-       "$REPAIR_LOCK_NONCE" "$REPAIR_LOCK_CREATED"; then
-    if path_present "$MERV_REPAIR_MAINTENANCE_LOCK" &&
-       [ ! -L "$MERV_REPAIR_MAINTENANCE_LOCK" ] &&
-       [ -d "$MERV_REPAIR_MAINTENANCE_LOCK" ] &&
-       ! path_present "$MERV_REPAIR_MAINTENANCE_LOCK/owner"; then
-      rmdir "$MERV_REPAIR_MAINTENANCE_LOCK" 2>/dev/null || :
-    fi
-    repair_admission_diag_block unknown_unverifiable_ownership repair_owner_creation_failed mervlan_maintenance.lock
-    return 1
-  fi
-  REPAIR_LOCK_OWNED=1
-  if ! repair_legacy_exclusion_check post_acquisition; then
-    repair_lock_release || :
-    return 1
-  fi
-  return 0
-}
-
-snapshot_protected_files() {
-  for _spf_rel in settings/settings.json .ssh/vlan_manager .ssh/vlan_manager.pub \
-    tmp/mac_shield.db tmp/mac_shield_override.db tmp/client_name_override.db \
-    flags/.install_ok www/settings/hardware_profiles.json
-  do
-    _spf_src="$MERV_BASE/$_spf_rel" _spf_dst="$PROTECTED_DIR/$_spf_rel"
-    if path_present "$_spf_src"; then
-      path_regular "$_spf_src" || return 1
-      mkdir_chain_safe "${_spf_dst%/*}" || return 1
-      cp -p "$_spf_src" "$_spf_dst" 2>/dev/null || return 1
-      printf 'present %s\n' "$_spf_rel" >>"$PROTECTED_DIR/index" || return 1
-    else
-      printf 'absent %s\n' "$_spf_rel" >>"$PROTECTED_DIR/index" || return 1
-    fi
-  done
-  return 0
-}
-
-verify_protected_files() {
-  while IFS=' ' read -r _vpf_state _vpf_rel; do
-    _vpf_src="$MERV_BASE/$_vpf_rel" _vpf_saved="$PROTECTED_DIR/$_vpf_rel"
-    case "$_vpf_state" in
-      present) path_regular "$_vpf_src" && cmp -s "$_vpf_saved" "$_vpf_src" || return 1 ;;
-      absent) path_present "$_vpf_src" && return 1 ;;
-      *) return 1 ;;
-    esac
-  done <"$PROTECTED_DIR/index"
-  return 0
-}
-
-ledger_append() {
-  _la_record="$1"
-  [ "${MERV_REPAIR_TEST_FAIL_LEDGER:-}" != before ] || return 1
-  REPAIR_LEDGER_SEQ=$((REPAIR_LEDGER_SEQ + 1))
-  _la_tmp="$LEDGER_FILE.tmp.$$.$REPAIR_LEDGER_SEQ"
-  ( umask 077
-    [ ! -f "$LEDGER_FILE" ] || cat "$LEDGER_FILE"
-    printf '%s\n' "$_la_record"
-  ) >"$_la_tmp" 2>/dev/null || { rm -f "$_la_tmp" 2>/dev/null || :; return 1; }
-  chmod 600 "$_la_tmp" 2>/dev/null || { rm -f "$_la_tmp" 2>/dev/null || :; return 1; }
-  mv -f "$_la_tmp" "$LEDGER_FILE" 2>/dev/null || { rm -f "$_la_tmp" 2>/dev/null || :; return 1; }
-  return 0
-}
-
-ledger_mark_published() {
-  _lmp_path="$1"
-  REPAIR_LEDGER_SEQ=$((REPAIR_LEDGER_SEQ + 1))
-  _lmp_tmp="$LEDGER_FILE.tmp.$$.$REPAIR_LEDGER_SEQ"
-  awk -F '|' -v target="$_lmp_path" 'BEGIN{OFS="|"} {if($1=="pending" && $3==target)$1="published"; print}' \
-    "$LEDGER_FILE" >"$_lmp_tmp" 2>/dev/null || { rm -f "$_lmp_tmp" 2>/dev/null || :; return 1; }
-  mv -f "$_lmp_tmp" "$LEDGER_FILE" 2>/dev/null || { rm -f "$_lmp_tmp" 2>/dev/null || :; return 1; }
-  return 0
-}
-
-rollback_transaction() {
-  [ -f "$LEDGER_FILE" ] || return 0
-  _rt_reverse="$RUN_DIR/ledger.reverse"
-  sed '1!G;h;$!d' "$LEDGER_FILE" >"$_rt_reverse" 2>/dev/null || return 1
-  _rt_failed=0
-  while IFS='|' read -r _rt_state _rt_mode _rt_rel _rt_kind _rt_backup _rt_source; do
-    [ -n "$_rt_rel" ] || continue
-    _rt_dest="$MERV_BASE/$_rt_rel"
-    _rt_tmp="$_rt_dest.repair-rollback.$$.$REPAIR_LEDGER_SEQ"
-    if [ "$_rt_state" = pending ] &&
-       ! { path_regular "$_rt_dest" && cmp -s "$_rt_source" "$_rt_dest"; }; then
-      # A pending record can legitimately describe a destination whose backup
-      # was captured but whose publication never started. Treat that exact
-      # unchanged pre-image as already rolled back; anything else is a
-      # successor/obstruction and must remain a recovery failure.
-      case "$_rt_kind" in
-        old) path_regular "$_rt_dest" && path_regular "$_rt_backup" &&
-              cmp -s "$_rt_backup" "$_rt_dest" || _rt_failed=1 ;;
-        new) path_present "$_rt_dest" && _rt_failed=1 ;;
-        *) _rt_failed=1 ;;
-      esac
-      continue
-    fi
-    if [ "$_rt_state" != pending ] && [ "$_rt_state" != published ]; then
-      _rt_failed=1
-      continue
-    fi
-    if ! path_regular "$_rt_dest" || ! cmp -s "$_rt_source" "$_rt_dest"; then
-      _rt_failed=1
-      continue
-    fi
-    case "$_rt_kind" in
-      old)
-        path_regular "$_rt_backup" || { _rt_failed=1; continue; }
-        cp -p "$_rt_backup" "$_rt_tmp" 2>/dev/null && chmod "$_rt_mode" "$_rt_tmp" 2>/dev/null &&
-          mv -f "$_rt_tmp" "$_rt_dest" 2>/dev/null || _rt_failed=1
-        path_regular "$_rt_dest" && cmp -s "$_rt_backup" "$_rt_dest" || _rt_failed=1
-        ;;
-      new)
-        rm -f "$_rt_dest" 2>/dev/null || _rt_failed=1
-        path_present "$_rt_dest" && _rt_failed=1
-        ;;
-      *) _rt_failed=1 ;;
-    esac
-    rm -f "$_rt_tmp" 2>/dev/null || :
-  done <"$_rt_reverse"
-  [ "$_rt_failed" -eq 0 ] || { REPAIR_ROLLBACK_FAILED=1; return 1; }
-  return 0
-}
-
-repair_publish_temp_cleanup() {
-  [ -n "$REPAIR_PUBLISH_TMP" ] || return 0
-  if path_present "$REPAIR_PUBLISH_TMP"; then
-    path_regular "$REPAIR_PUBLISH_TMP" &&
-      cmp -s "$REPAIR_PUBLISH_SOURCE" "$REPAIR_PUBLISH_TMP" || return 1
-    rm -f "$REPAIR_PUBLISH_TMP" 2>/dev/null || return 1
-    path_present "$REPAIR_PUBLISH_TMP" && return 1
-  fi
-  REPAIR_PUBLISH_TMP=""
-  REPAIR_PUBLISH_SOURCE=""
-  return 0
-}
-
-publish() {
-  REPAIR_PUBLISH_TMP=""
-  REPAIR_PUBLISH_SOURCE=""
-  : >"$LEDGER_FILE" || return 1
-  while IFS=' ' read -r _pub_mode _pub_rel; do
-    _pub_source="$STAGE_DIR/$_pub_rel"
-    _pub_dest="$MERV_BASE/$_pub_rel"
-    _pub_parent=${_pub_dest%/*}
-    path_chain_safe "$_pub_parent" || return 1
-    mkdir_chain_safe "$_pub_parent" || return 1
-    _pub_kind=new _pub_backup=none
-    if path_present "$_pub_dest"; then
-      path_regular "$_pub_dest" || return 1
-      _pub_kind=old
-      _pub_backup="$BACKUP_DIR/$_pub_rel"
-      mkdir_chain_safe "${_pub_backup%/*}" || return 1
-    fi
-    # The ledger is the first durable mutation record for this destination.
-    # It is written before backup copy, temp publication, or destination mv.
-    ledger_append "pending|$_pub_mode|$_pub_rel|$_pub_kind|$_pub_backup|$_pub_source" || return 1
-    if [ "$_pub_kind" = old ]; then
-      cp -p "$_pub_dest" "$_pub_backup" 2>/dev/null || return 1
-      path_regular "$_pub_backup" || return 1
-    fi
-    _pub_tmp="$_pub_dest.repair.$$.$REPAIR_LEDGER_SEQ"
-    path_present "$_pub_tmp" && return 1
-    REPAIR_PUBLISH_TMP="$_pub_tmp"
-    REPAIR_PUBLISH_SOURCE="$_pub_source"
-    cp -p "$_pub_source" "$_pub_tmp" 2>/dev/null || return 1
-    chmod "$_pub_mode" "$_pub_tmp" 2>/dev/null || return 1
-    if ! repair_owner_owned_and_current; then
-      REPAIR_OWNER_LOST=1
-      return 1
-    fi
-    repair_legacy_exclusion_check publication || return 1
-    [ "${MERV_REPAIR_TEST_FAIL_PATH:-}" != "$_pub_rel" ] || return 1
-    mv -f "$_pub_tmp" "$_pub_dest" 2>/dev/null || return 1
-    REPAIR_PUBLISH_TMP=""
-    REPAIR_PUBLISH_SOURCE=""
-    path_regular "$_pub_dest" && cmp -s "$_pub_source" "$_pub_dest" || return 1
-    ledger_mark_published "$_pub_rel" || return 1
-  done <"$PATHS_FILE"
-  return 0
-}
-
-post_publish_verify() {
-  if ! repair_owner_owned_and_current; then
-    REPAIR_OWNER_LOST=1
-    return 1
-  fi
-  repair_legacy_exclusion_check post_publish_verify || return 1
-  while IFS=' ' read -r _ppv_mode _ppv_rel; do
-    _ppv_dest="$MERV_BASE/$_ppv_rel" _ppv_source="$STAGE_DIR/$_ppv_rel"
-    path_regular "$_ppv_dest" && cmp -s "$_ppv_source" "$_ppv_dest" || return 1
-    mode_matches "$_ppv_mode" "$_ppv_dest" || return 1
-  done <"$PATHS_FILE"
-  verify_protected_files || return 1
-  return 0
-}
-
-repair_prior_workspace_check() {
-  _rpw_root="${MERV_REPAIR_BOOTSTRAP_DIR:-$MERV_REPAIR_TMP_ROOT}"
-  path_chain_safe "$_rpw_root" || return 1
-  [ -d "$_rpw_root" ] && [ ! -L "$_rpw_root" ] || return 1
-  for _rpw_entry in "$_rpw_root"/mervlan_repair.*; do
-    path_present "$_rpw_entry" || continue
-    if [ ! -L "$_rpw_entry" ] && [ -d "$_rpw_entry" ] &&
-       path_regular "$_rpw_entry/.owner" &&
-       grep -Fqx 'mervlan-repair-workspace-v2' "$_rpw_entry/.owner" 2>/dev/null; then
-      # A retained workspace with no ledger has not reached a destination
-      # mutation.  Leave its evidence untouched and allow a fresh, exclusive
-      # run.  Any non-empty ledger represents an admitted transaction and is
-      # conservatively blocked for explicit recovery inspection.
-      if ! path_present "$_rpw_entry/ledger"; then
-        continue
-      fi
-      [ ! -L "$_rpw_entry/ledger" ] && [ -f "$_rpw_entry/ledger" ] || return 1
-      [ ! -s "$_rpw_entry/ledger" ] && continue
-    fi
-    log "A preserved repair workspace is present at $_rpw_entry; inspect it before retrying repair."
-    return 1
-  done
-  return 0
-}
-
-prepare_workspace() {
-  _pw_root="${MERV_REPAIR_BOOTSTRAP_DIR:-$MERV_REPAIR_TMP_ROOT}"
-  path_chain_safe "$_pw_root" || return 1
-  [ -d "$_pw_root" ] && [ ! -L "$_pw_root" ] || return 1
-  _pw_now=$(date +%s 2>/dev/null || printf '0')
-  case "$_pw_now" in ''|*[!0-9]*) _pw_now=0 ;; esac
-  _pw_try=0
-  while [ "$_pw_try" -lt 16 ]; do
-    RUN_DIR="${_pw_root%/}/mervlan_repair.${_pw_now}.$$.$_pw_try"
-    if ( umask 077; mkdir "$RUN_DIR" ) 2>/dev/null; then
-      printf 'mervlan-repair-workspace-v2\n' >"$RUN_DIR/.owner" || return 1
-      chmod 600 "$RUN_DIR/.owner" 2>/dev/null || return 1
-      EXTRACT_DIR="$RUN_DIR/extract"
-      STAGE_DIR="$RUN_DIR/stage"
-      BACKUP_DIR="$RUN_DIR/backup"
-      PATHS_FILE="$RUN_DIR/paths"
-      LEDGER_FILE="$RUN_DIR/ledger"
-      PROTECTED_DIR="$RUN_DIR/protected"
-      SNAPSHOT_ARCHIVE="$RUN_DIR/snapshot.tar.gz"
-      mkdir "$EXTRACT_DIR" "$STAGE_DIR" "$BACKUP_DIR" "$PROTECTED_DIR" || return 1
-      : >"$PROTECTED_DIR/index" || return 1
-      return 0
-    fi
-    _pw_try=$((_pw_try + 1))
-  done
-  RUN_DIR=""
+  if ! exists "$_lqd_lock"; then mv "$_lqd_quarantine" "$_lqd_lock" 2>/dev/null || :; fi
   return 1
 }
-
-extract_snapshot() {
-  archive_members_valid "$SNAPSHOT_ARCHIVE" || return 1
-  if [ -n "$SNAPSHOT_RAW" ]; then
-    tar -xf "$SNAPSHOT_RAW" -C "$EXTRACT_DIR" || return 1
-  else
-    tar -xzf "$SNAPSHOT_ARCHIVE" -C "$EXTRACT_DIR" || return 1
-  fi
-  path_regular "$EXTRACT_DIR/$SNAPSHOT_ROOT/functions/update_mervlan_repair.manifest" || return 1
-  printf '%s\n' "$EXTRACT_DIR/$SNAPSHOT_ROOT" >"$RUN_DIR/source-root" || return 1
-  return 0
-}
-
-# The initial raw bootstrap is only a transport.  Once the immutable archive
-# has been validated and extracted, the repair engine from that exact snapshot
-# takes over before admission or active-tree publication.
-repair_handoff_exec() {
-  if [ "${MERV_REPAIR_HANDOFF_STATE:-}" = v2 ]; then
-    return 0
-  fi
-    _rhe_engine="$EXTRACT_DIR/$SNAPSHOT_ROOT/functions/update_mervlan_repair.sh"
-    path_regular "$_rhe_engine" || return 1
-    _rhe_token="handoff.$$.${REPAIR_LEDGER_SEQ}"
-    token_valid "$_rhe_token" || return 1
-    {
-      printf 'format=2\n'
-      printf 'token=%s\n' "$_rhe_token"
-      printf 'run_dir=%s\n' "$RUN_DIR"
-      printf 'source_root=%s\n' "$EXTRACT_DIR/$SNAPSHOT_ROOT"
-      printf 'snapshot_root=%s\n' "$SNAPSHOT_ROOT"
-      printf 'archive=%s\n' "$SNAPSHOT_ARCHIVE"
-      printf 'protected=%s\n' "$PROTECTED_DIR"
-    } >"$RUN_DIR/.handoff" 2>/dev/null || return 1
-    chmod 600 "$RUN_DIR/.handoff" 2>/dev/null || return 1
-    MERV_REPAIR_HANDOFF_STATE=v2 \
-    MERV_REPAIR_HANDOFF_TOKEN="$_rhe_token" \
-    MERV_REPAIR_HANDOFF_RUN_DIR="$RUN_DIR" \
-    MERV_REPAIR_HANDOFF_SOURCE_ROOT="$EXTRACT_DIR/$SNAPSHOT_ROOT" \
-    MERV_REPAIR_HANDOFF_SNAPSHOT_ROOT="$SNAPSHOT_ROOT" \
-    MERV_REPAIR_HANDOFF_ARCHIVE="$SNAPSHOT_ARCHIVE" \
-    MERV_REPAIR_HANDOFF_PROTECTED_DIR="$PROTECTED_DIR" \
-    exec /bin/sh "$_rhe_engine" "$REF"
-    return $?
-}
-
-repair_handoff_adopt() {
-  [ "${MERV_REPAIR_HANDOFF_STATE:-}" = v2 ] || return 1
-  _rha_run="${MERV_REPAIR_HANDOFF_RUN_DIR:-}"
-  _rha_source="${MERV_REPAIR_HANDOFF_SOURCE_ROOT:-}"
-  _rha_archive="${MERV_REPAIR_HANDOFF_ARCHIVE:-}"
-  _rha_protected="${MERV_REPAIR_HANDOFF_PROTECTED_DIR:-}"
-  _rha_token="${MERV_REPAIR_HANDOFF_TOKEN:-}"
-  [ -n "$_rha_run" ] && [ -n "$_rha_source" ] && [ -n "$_rha_archive" ] &&
-    [ -n "$_rha_protected" ] || return 1
-  path_chain_safe "$_rha_run" || return 1
-  [ ! -L "$_rha_run" ] && [ -d "$_rha_run" ] || return 1
-  _rha_parent=${_rha_run%/*}
-  _rha_base=${_rha_run##*/}
-  case "$_rha_base" in mervlan_repair.*) ;; *) return 1 ;; esac
-  case "$_rha_run" in "$_rha_parent"/mervlan_repair.*) ;; *) return 1 ;; esac
-  path_regular "$_rha_run/.owner" || return 1
-  grep -Fqx 'mervlan-repair-workspace-v2' "$_rha_run/.owner" 2>/dev/null || return 1
-  path_regular "$_rha_run/.handoff" || return 1
-  token_valid "$_rha_token" || return 1
-  grep -Fqx 'format=2' "$_rha_run/.handoff" 2>/dev/null || return 1
-  grep -Fqx "token=$_rha_token" "$_rha_run/.handoff" 2>/dev/null || return 1
-  grep -Fqx "run_dir=$_rha_run" "$_rha_run/.handoff" 2>/dev/null || return 1
-  grep -Fqx "source_root=$_rha_source" "$_rha_run/.handoff" 2>/dev/null || return 1
-  grep -Fqx "archive=$_rha_archive" "$_rha_run/.handoff" 2>/dev/null || return 1
-  grep -Fqx "protected=$_rha_protected" "$_rha_run/.handoff" 2>/dev/null || return 1
-  case "$_rha_source" in "$_rha_run/extract"/mervlan-*) ;; *) return 1 ;; esac
-  case "$_rha_archive" in "$_rha_run/snapshot.tar.gz") ;; *) return 1 ;; esac
-  case "$_rha_protected" in "$_rha_run/protected") ;; *) return 1 ;; esac
-  path_regular "$_rha_source/functions/update_mervlan_repair.manifest" || return 1
-  [ ! -L "$_rha_source" ] && [ -d "$_rha_source" ] || return 1
-  path_regular "$_rha_archive" || return 1
-  [ ! -L "$_rha_protected" ] && [ -d "$_rha_protected" ] || return 1
-  path_regular "$_rha_protected/index" || return 1
-
-  RUN_DIR="$_rha_run"
-  EXTRACT_DIR="$_rha_run/extract"
-  STAGE_DIR="$_rha_run/stage"
-  BACKUP_DIR="$_rha_run/backup"
-  PATHS_FILE="$_rha_run/paths"
-  LEDGER_FILE="$_rha_run/ledger"
-  PROTECTED_DIR="$_rha_protected"
-  SNAPSHOT_ARCHIVE="$_rha_archive"
-  SNAPSHOT_ROOT="${_rha_source##*/}"
-  [ ! -L "$EXTRACT_DIR" ] && [ -d "$EXTRACT_DIR" ] || return 1
-  [ ! -L "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ] || return 1
-  [ ! -L "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] || return 1
-  archive_members_valid "$SNAPSHOT_ARCHIVE" || return 1
-  [ "$SNAPSHOT_ROOT" = "${MERV_REPAIR_HANDOFF_SNAPSHOT_ROOT:-$SNAPSHOT_ROOT}" ] || return 1
-  [ "$EXTRACT_DIR/$SNAPSHOT_ROOT" = "$_rha_source" ] || return 1
-  return 0
-}
-
-stage_snapshot_payload() {
-  _ssp_root="$EXTRACT_DIR/$SNAPSHOT_ROOT"
-  _ssp_manifest="$_ssp_root/functions/update_mervlan_repair.manifest"
-  parse_manifest "$_ssp_manifest" || return 1
-  while IFS=' ' read -r _ssp_mode _ssp_rel; do
-    _ssp_source="$_ssp_root/$_ssp_rel" _ssp_dest="$STAGE_DIR/$_ssp_rel"
-    path_regular "$_ssp_source" || return 1
-    mkdir_chain_safe "${_ssp_dest%/*}" || return 1
-    cp -p "$_ssp_source" "$_ssp_dest" 2>/dev/null || return 1
-    chmod "$_ssp_mode" "$_ssp_dest" 2>/dev/null || return 1
-  done <"$PATHS_FILE"
-  return 0
-}
-
-repair_exit_handler() {
-  _reh_status=$?
-  trap - EXIT HUP INT TERM
-  if [ "$REPAIR_SUCCESS" = 1 ] && [ "$REPAIR_ROLLBACK_FAILED" = 0 ] && [ "$REPAIR_LOCK_OWNED" = 0 ]; then
-    case "${RUN_DIR:-}" in
-      "${MERV_REPAIR_BOOTSTRAP_DIR:-$MERV_REPAIR_TMP_ROOT}"/mervlan_repair.*) rm -rf "$RUN_DIR" 2>/dev/null || : ;;
+action_parent_check() {
+  ACTION_PARENT=0
+  if [ "${MERV_ACTION_LOCK_PARENT_HELD:-0}" != 1 ]; then
+    case "${MERV_ACTION_LOCK_PARENT_PID:-}:${MERV_ACTION_LOCK_PARENT_START:-}:${MERV_ACTION_LOCK_PARENT_NONCE:-}" in
+      ::) return 0 ;;
+      *) return 1 ;;
     esac
-  elif [ -n "${RUN_DIR:-}" ]; then
-    log "Repair evidence retained at $RUN_DIR"
   fi
-  exit "$_reh_status"
+  case "${MERV_ACTION_LOCK_PARENT_PID:-}:${MERV_ACTION_LOCK_PARENT_START:-}" in
+    *[!0-9:]*|:*|*:) return 1 ;; esac
+  case "${MERV_ACTION_LOCK_PARENT_NONCE:-}" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  ACTION_PARENT_PID=$MERV_ACTION_LOCK_PARENT_PID
+  ACTION_PARENT_START=$MERV_ACTION_LOCK_PARENT_START
+  ACTION_PARENT_NONCE=$MERV_ACTION_LOCK_PARENT_NONCE
+  _ap_lock="${MERV_ACTION_LOCK_PATH:-$MERV_REPAIR_ACTION_LOCK}"
+  [ "$_ap_lock" = "$MERV_REPAIR_ACTION_LOCK" ] || return 1
+  owner_tuple_matches "$_ap_lock" "$ACTION_PARENT_PID" "$ACTION_PARENT_START" "$ACTION_PARENT_NONCE" || return 1
+  ACTION_PARENT=1
+  return 0
 }
-
-repair_signal_handler() {
-  _rsh_status="$1"
-  REPAIR_INTERRUPTED=1
-  trap - HUP INT TERM
-  if [ "$REPAIR_LOCK_OWNED" = 1 ] && [ -f "$LEDGER_FILE" ]; then
-    rollback_transaction || :
-  fi
-  repair_lock_release || :
-  exit "$_rsh_status"
-}
-
-main() {
-  valid_ref "${1:-main}" || { log 'Invalid branch; use main, dev, or a safe custom branch name.'; return 2; }
-  case "$MERV_BASE" in ''|/|/tmp|/jffs|/jffs/addons|*..*|*//*|*[!A-Za-z0-9_./-]*) log 'Unsafe MERV_BASE refused.'; return 2 ;; esac
-  path_chain_safe "$MERV_BASE" && [ -d "$MERV_BASE" ] && [ ! -L "$MERV_BASE" ] || { log 'MERV_BASE is missing or unsafe.'; return 2; }
-  if [ "${MERV_REPAIR_HANDOFF_STATE:-}" != v2 ]; then
-    find_curl || { log 'curl is unavailable.'; return 2; }
-    repair_prior_workspace_check || { log 'A prior repair workspace blocks automatic rerun; inspect the retained evidence first.'; return 1; }
-    prepare_workspace || { log 'Could not allocate an exclusive repair workspace.'; return 1; }
-  else
-    repair_handoff_adopt || { log 'The same-snapshot repair handoff is invalid; evidence was retained.'; return 1; }
-  fi
-  REPAIR_PROGRESS_ACTION=repairmain_vlanmgr
-  [ "$REF" = dev ] && REPAIR_PROGRESS_ACTION=repairdev_vlanmgr
-  if [ "${MERV_REPAIR_HANDOFF_STATE:-}" != v2 ]; then
-    progress starting prepare 1 'Preparing emergency repair'
-    snapshot_protected_files || { progress failed failed 0 'Protected-data snapshot failed'; return 1; }
-    progress running snapshot 10 'Downloading one immutable repair snapshot'
-    fetch_snapshot "$SNAPSHOT_ARCHIVE" || { progress failed failed 0 'Repair snapshot download failed'; return 1; }
-    extract_snapshot || { progress failed failed 0 'Repair snapshot archive validation failed'; return 1; }
-    repair_handoff_exec || { progress failed failed 0 'Same-snapshot repair-engine handoff failed'; return 1; }
-  fi
-  repair_admit || { progress failed failed 0 'Maintenance admission failed'; return 1; }
-  progress running manifest 30 'Validating the snapshot manifest'
-  stage_snapshot_payload || { progress failed failed 0 'Repair manifest or dependency closure failed'; return 1; }
-  progress running validate 70 'Validating the complete repair cohort'
-  validate_stage || { progress failed failed 0 'Staged repair validation failed'; return 1; }
-  progress running publish 88 'Publishing the admitted repair transaction'
-  REPAIR_OWNER_LOST=0
-  if ! publish; then
-    repair_publish_temp_cleanup || log 'Repair publication temporary successor could not be safely removed; do not remove the retained evidence.'
-    if [ "$REPAIR_OWNER_LOST" = 0 ]; then
-      rollback_transaction || log 'Repair rollback was incomplete; do not remove the retained evidence.'
-    else
-      log 'Canonical maintenance owner changed during repair publication; preserving the successor and retained evidence.'
-    fi
-    repair_lock_release || :
-    progress failed failed 0 'Repair publication failed; evidence was retained'
-    return 1
-  fi
-  if ! post_publish_verify; then
-    if [ "$REPAIR_OWNER_LOST" = 0 ]; then
-      rollback_transaction || log 'Post-publication rollback was incomplete; do not remove the retained evidence.'
-    else
-      log 'Canonical maintenance owner changed before post-publication rollback; preserving the successor and retained evidence.'
-    fi
-    repair_lock_release || :
-    progress failed failed 0 'Post-publication verification failed; evidence was retained'
-    return 1
-  fi
-  repair_owner_owned_and_current || {
-    log 'Canonical maintenance owner changed before repair finalization; evidence was retained.'
-    progress failed failed 0 'Maintenance owner changed before repair finalization; evidence was retained'
+write_lock_value() {
+  _wlv_dir="$1" _wlv_name="$2" _wlv_value="$3"
+  LOCK_SEQ=$((LOCK_SEQ + 1))
+  _wlv_tmp="$_wlv_dir/.$_wlv_name.tmp.$$.$LOCK_SEQ"
+  (umask 077; printf '%s\n' "$_wlv_value" >"$_wlv_tmp") 2>/dev/null || return 1
+  chmod 600 "$_wlv_tmp" 2>/dev/null && mv -f "$_wlv_tmp" "$_wlv_dir/$_wlv_name" 2>/dev/null || {
+    rm -f "$_wlv_tmp" 2>/dev/null || :
     return 1
   }
-  if ! repair_lock_release; then
-    progress failed failed 0 'Maintenance owner release failed; evidence was retained'
-    return 1
-  fi
-  REPAIR_SUCCESS=1
-  if repair_webui_terminal_deferred; then
-    progress running dispatcher-finalize 99 'Repair completed; finalizing WebUI action ownership'
-    log 'Repair completed; dispatcher will finalize WebUI action ownership.'
-  else
-    progress complete complete 100 'Emergency repair completed'
-  fi
-  log "MerVLAN update components repaired successfully from branch: $REF"
-  log 'No update was started.'
   return 0
 }
-
-trap repair_exit_handler EXIT
-trap 'repair_signal_handler 129' HUP
-trap 'repair_signal_handler 130' INT
-trap 'repair_signal_handler 143' TERM
-
+lock_acquire_one() {
+  _lao_lock="$1" _lao_nonce="$2"
+  safe_chain "${_lao_lock%/*}" || return 1
+  ensure_dir "${_lao_lock%/*}" || return 1
+  _lao_attempt=0
+  while ! mkdir "$_lao_lock" 2>/dev/null; do
+    lock_owner_state "$_lao_lock" || return 1
+    case "$LOCK_OWNER_STATE" in
+      dead|reused) lock_quarantine_dead "$_lao_lock" || return 1 ;;
+      *) return 1 ;;
+    esac
+    _lao_attempt=$((_lao_attempt + 1))
+    [ "$_lao_attempt" -lt 8 ] || return 1
+  done
+  chmod 700 "$_lao_lock" 2>/dev/null || { rmdir "$_lao_lock" 2>/dev/null || :; return 1; }
+  for _lao_field in pid proc_start_time owner_nonce created heartbeat; do
+    case "$_lao_field" in
+      pid) _lao_value=$$ ;;
+      proc_start_time) _lao_value=$LOCK_START ;;
+      owner_nonce) _lao_value=$_lao_nonce ;;
+      created|heartbeat) _lao_value=$LOCK_CREATED ;;
+    esac
+    write_lock_value "$_lao_lock" "$_lao_field" "$_lao_value" || {
+      rm -f "$_lao_lock/pid" "$_lao_lock/proc_start_time" "$_lao_lock/owner_nonce" \
+        "$_lao_lock/created" "$_lao_lock/heartbeat" 2>/dev/null || :
+      rmdir "$_lao_lock" 2>/dev/null || :
+      return 1
+    }
+  done
+  _lao_tmp="$_lao_lock/.owner.tmp.$$.$LOCK_SEQ"
+  (umask 077
+    printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=%s\nheartbeat=%s\n' \
+      "$$" "$LOCK_START" "$_lao_nonce" "$LOCK_CREATED" "$LOCK_CREATED" >"$_lao_tmp"
+  ) 2>/dev/null || { rm -f "$_lao_tmp" 2>/dev/null || :; return 1; }
+  chmod 600 "$_lao_tmp" 2>/dev/null && mv -f "$_lao_tmp" "$_lao_lock/owner" 2>/dev/null || {
+    rm -f "$_lao_tmp" "$_lao_lock/pid" "$_lao_lock/proc_start_time" \
+      "$_lao_lock/owner_nonce" "$_lao_lock/created" "$_lao_lock/heartbeat" 2>/dev/null || :
+    rmdir "$_lao_lock" 2>/dev/null || :
+    return 1
+  }
+  owner_tuple_matches "$_lao_lock" "$$" "$LOCK_START" "$_lao_nonce"
+}
+lock_release_one() {
+  _lro_lock="$1" _lro_nonce="$2"
+  owner_tuple_matches "$_lro_lock" "$$" "$LOCK_START" "$_lro_nonce" || return 1
+  _lro_restore="$_lro_lock.owner.restore.$$.$LOCK_SEQ"
+  exists "$_lro_restore" && return 1
+  cp "$_lro_lock/owner" "$_lro_restore" && chmod 600 "$_lro_restore" || return 1
+  rm -f "$_lro_lock/owner" "$_lro_lock/pid" "$_lro_lock/proc_start_time" \
+    "$_lro_lock/owner_nonce" "$_lro_lock/created" "$_lro_lock/heartbeat" || {
+      mv -f "$_lro_restore" "$_lro_lock/owner" 2>/dev/null || :
+      return 1
+    }
+  if ! rmdir "$_lro_lock"; then
+    if [ -d "$_lro_lock" ] && [ ! -L "$_lro_lock" ] && ! exists "$_lro_lock/owner"; then
+      mv -f "$_lro_restore" "$_lro_lock/owner" 2>/dev/null || return 1
+    else
+      rm -f "$_lro_restore" 2>/dev/null || :
+    fi
+    return 1
+  fi
+  rm -f "$_lro_restore" 2>/dev/null || :
+}
+owner_ok() {
+  [ "$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$LOCK_START" ] || return 1
+  if [ "$ACTION_PARENT" -eq 1 ]; then
+    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$ACTION_PARENT_PID" "$ACTION_PARENT_START" "$ACTION_PARENT_NONCE" || return 1
+  elif [ "$ACTION_LOCKED" -eq 1 ]; then
+    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$$" "$LOCK_START" "$ACTION_NONCE" || return 1
+  else return 1; fi
+  [ "$MAINTENANCE_LOCKED" -eq 1 ] &&
+    owner_tuple_matches "$MERV_REPAIR_LOCK" "$$" "$LOCK_START" "$MAINTENANCE_NONCE" || return 1
+  [ "$MANAGER_LOCKED" -eq 1 ] &&
+    owner_tuple_matches "$MERV_REPAIR_MANAGER_LOCK" "$$" "$LOCK_START" "$MANAGER_NONCE"
+}
+acquire() {
+  action_parent_check || return 1
+  LOCK_START=$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT") || return 1
+  LOCK_CREATED=$(date +%s 2>/dev/null || printf '')
+  case "$LOCK_CREATED" in ''|*[!0-9]*) return 1 ;; esac
+  ACTION_NONCE="repair.$$.$LOCK_START.action"
+  MAINTENANCE_NONCE="repair.$$.$LOCK_START.maintenance"
+  MANAGER_NONCE="repair.$$.$LOCK_START.manager"
+  if [ "$ACTION_PARENT" -eq 0 ]; then
+    lock_acquire_one "$MERV_REPAIR_ACTION_LOCK" "$ACTION_NONCE" || return 1
+    ACTION_LOCKED=1
+  fi
+  lock_acquire_one "$MERV_REPAIR_LOCK" "$MAINTENANCE_NONCE" || return 1
+  MAINTENANCE_LOCKED=1
+  lock_acquire_one "$MERV_REPAIR_MANAGER_LOCK" "$MANAGER_NONCE" || return 1
+  MANAGER_LOCKED=1
+  owner_ok || return 1
+  status ADMISSION 'action, maintenance and Manager ownership acquired'
+}
+release() {
+  _rel_rc=0
+  if [ "$MANAGER_LOCKED" -eq 1 ]; then
+    lock_release_one "$MERV_REPAIR_MANAGER_LOCK" "$MANAGER_NONCE" && MANAGER_LOCKED=0 || _rel_rc=1
+  fi
+  if [ "$MAINTENANCE_LOCKED" -eq 1 ]; then
+    lock_release_one "$MERV_REPAIR_LOCK" "$MAINTENANCE_NONCE" && MAINTENANCE_LOCKED=0 || _rel_rc=1
+  fi
+  if [ "$ACTION_LOCKED" -eq 1 ]; then
+    lock_release_one "$MERV_REPAIR_ACTION_LOCK" "$ACTION_NONCE" && ACTION_LOCKED=0 || _rel_rc=1
+  fi
+  return "$_rel_rc"
+}
+# Historical writer inventory (identical recognized basenames to accepted R1).
+mutator() {
+  case "$1" in
+    "$MERV_BASE"/install.sh|"$MERV_BASE"/uninstall.sh|\
+    "$MERV_BASE"/functions/update_mervlan.sh|"$MERV_BASE"/functions/mervlan_manager.sh|\
+    "$MERV_BASE"/functions/sync_nodes.sh|"$MERV_BASE"/functions/execute_nodes.sh|\
+    "$MERV_BASE"/functions/service-event-handler.sh|"$MERV_BASE"/functions/mervlan_backup.sh|\
+    "$MERV_BASE"/functions/mervlan_recover.sh|"$MERV_BASE"/functions/mervlan_boot.sh|\
+    "$MERV_BASE"/functions/mervlan_boot_wrap.sh|"$MERV_BASE"/functions/heal_event.sh|\
+    "$MERV_BASE"/functions/save_settings.sh|"$MERV_BASE"/functions/hw_probe.sh|\
+    "$MERV_BASE"/functions/dropbear_sshkey_gen.sh) return 0 ;; esac
+  return 1
+}
+relative_candidate() {
+  case "$1" in ''|/*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  case "${1##*/}" in
+    install.sh|uninstall.sh|update_mervlan.sh|mervlan_manager.sh|\
+    sync_nodes.sh|execute_nodes.sh|service-event-handler.sh|mervlan_backup.sh|mervlan_recover.sh|\
+    mervlan_boot.sh|mervlan_boot_wrap.sh|heal_event.sh|\
+    save_settings.sh|hw_probe.sh|dropbear_sshkey_gen.sh) return 0 ;;
+  esac
+  return 1
+}
+# Strip harmless ./ components, including nested ones. Reject '..' and
+# malformed candidates instead of assuming their resulting path is harmless.
+normalize_relative() (
+  rest=$1; output=
+  case "$rest" in ''|/*|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  while [ -n "$rest" ]; do
+    case "$rest" in */*) component=${rest%%/*}; rest=${rest#*/} ;;
+      *) component=$rest; rest= ;; esac
+    case "$component" in ''|.) : ;;
+      *) if [ -n "$output" ]; then output="$output/$component";
+         else output=$component; fi ;; esac
+  done
+  [ -n "$output" ] || return 1
+  printf '%s\n' "$output"
+)
+readonly_dispatcher_action() {
+  _rda_found=0
+  while IFS= read -r _rda_arg || [ -n "$_rda_arg" ]; do
+    case "$_rda_arg" in
+      checkservice_vlanmgr|checkservice-vlanmgr|collectclients_vlanmgr|collectclients-vlanmgr|\
+      collectclients_vlanmgr_pgt_*|collectclients-vlanmgr-pgt_*|clearclilog_vlanmgr|clearclilog-vlanmgr)
+        _rda_found=1 ;;
+    esac
+  done <<EOF
+$1
+EOF
+  [ "$_rda_found" -eq 1 ]
+}
+scan_processes() {
+  safe_chain "$MERV_REPAIR_PROC_ROOT" && [ -d "$MERV_REPAIR_PROC_ROOT" ] &&
+    [ -r "$MERV_REPAIR_PROC_ROOT" ] && [ -x "$MERV_REPAIR_PROC_ROOT" ] || return 1
+  for entry in "$MERV_REPAIR_PROC_ROOT"/[0-9]*; do
+    exists "$entry" || continue
+    [ -d "$entry" ] && [ ! -L "$entry" ] || return 1
+    pid=${entry##*/}
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    case "$pid" in *[1-9]*) : ;; *) return 1 ;; esac
+    regular "$entry/cmdline" && [ -r "$entry/cmdline" ] || return 1
+    # Important: read each PID only when its turn arrives. Never pre-shortlist.
+    argv=$(tr '\000' '\n' <"$entry/cmdline") || return 1
+    [ -n "$argv" ] || continue
+    matched=0; matched_count=0; matched_arg=
+    # Exact absolute paths take priority; all other arguments are inspected
+    # as relative candidates, including BARE filenames (the R1 regression).
+    while IFS= read -r arg || [ -n "$arg" ]; do
+      if mutator "$arg"; then
+        matched=1; matched_count=$((matched_count+1)); matched_arg="$arg"
+      fi
+    done <<ARGS
+$argv
+ARGS
+    if [ "$matched" -eq 0 ]; then
+      while IFS= read -r arg || [ -n "$arg" ]; do
+        relative_candidate "$arg" || continue
+        [ -L "$entry/cwd" ] || return 1
+        cwd=$(readlink "$entry/cwd" 2>/dev/null) || return 1
+        safe_chain "$cwd" && [ -d "$cwd" ] && [ ! -L "$cwd" ] || return 1
+        normalized=$(normalize_relative "$arg") || return 1
+        if mutator "${cwd%/}/$normalized"; then
+          matched=1; matched_count=$((matched_count+1)); matched_arg="${cwd%/}/$normalized"
+        else
+          # A known script basename under the addon with unexpected spelling
+          # must not silently pass when it does not resolve to a known writer.
+          case "$cwd" in "$MERV_BASE"|"$MERV_BASE"/*)
+            status REFUSED 'ambiguous addon-relative writer candidate'; return 1 ;;
+          esac
+        fi
+      done <<ARGS
+$argv
+ARGS
+    fi
+    if [ "$matched" -eq 1 ]; then
+      # A WebUI transport may own the global action lock. Admit only that
+      # authenticated dispatcher process; every other recognized mutator blocks.
+      if [ "$ACTION_PARENT" -eq 1 ] && [ "$pid" = "$ACTION_PARENT_PID" ] &&
+         [ "$matched_count" -eq 1 ] &&
+         [ "$matched_arg" = "$MERV_BASE/functions/service-event-handler.sh" ] &&
+         [ "$(proc_start "$pid" "$MERV_REPAIR_PROC_ROOT" 2>/dev/null)" = "$ACTION_PARENT_START" ]; then
+        continue
+      fi
+      if [ "$matched_count" -eq 1 ] &&
+         [ "$matched_arg" = "$MERV_BASE/functions/service-event-handler.sh" ] &&
+         readonly_dispatcher_action "$argv"; then
+        continue
+      fi
+      # R1 checks the process generation and liveness for any candidate.
+      # Our lean policy is stricter: unreadable/disappeared/reused identities
+      # also BLOCK, rather than treating a stale observation as safe.
+      start=$(proc_start "$pid" "$MERV_REPAIR_PROC_ROOT" 2>/dev/null) || {
+        status REFUSED 'writer process identity unavailable'; return 1;
+      }
+      kill -0 "$pid" 2>/dev/null || {
+        status REFUSED 'writer process liveness uncertain'; return 1;
+      }
+      [ "$(proc_start "$pid" "$MERV_REPAIR_PROC_ROOT" 2>/dev/null)" = "$start" ] || {
+        status REFUSED 'writer process generation changed'; return 1;
+      }
+      status REFUSED "recognized writer pid=$pid"; return 1
+    fi
+  done
+  return 0
+}
+capacity_kib() {
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4}'
+}
+preflight() {
+  available=$(awk '$1=="MemAvailable:" {print $2}' "$MERV_REPAIR_MEMINFO") || return 1
+  case "$available" in ''|*[!0-9]*) return 1 ;; esac
+  tmpfree=$(capacity_kib "$MERV_REPAIR_TMP_ROOT")
+  flashfree=$(capacity_kib "$MERV_BASE")
+  case "$tmpfree:$flashfree" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  status PREFLIGHT "MemAvailable=${available}KiB tmpFree=${tmpfree}KiB destFree=${flashfree}KiB"
+  [ "$available" -ge "$REPAIR_MIN_AVAILABLE_KIB" ] &&
+    [ "$tmpfree" -ge "$REPAIR_MIN_TMP_FREE_KIB" ] &&
+    [ "$flashfree" -ge "$REPAIR_MIN_DEST_FREE_KIB" ]
+}
+# Refuse unresolved workspaces from BOTH this engine and the accepted R1.
+# A known pre-transaction workspace is harmless but is never deleted here.
+prior_workspaces_clear() {
+  for prior_root in "$MERV_REPAIR_TMP_ROOT" "${MERV_REPAIR_BOOTSTRAP_DIR:-$MERV_REPAIR_TMP_ROOT}"; do
+    safe_chain "$prior_root" && [ -d "$prior_root" ] && [ ! -L "$prior_root" ] || return 1
+    for pattern in mervlan_lean mervlan_repair; do
+      for prior in "$prior_root"/"$pattern".*; do
+        exists "$prior" || continue
+        [ -d "$prior" ] && [ ! -L "$prior" ] && regular "$prior/.owner" || return 1
+        case "$pattern" in
+          mervlan_lean) grep -Fqx 'lean-repair-v1' "$prior/.owner" || return 1 ;;
+          mervlan_repair) grep -Fqx 'mervlan-repair-workspace-v2' "$prior/.owner" || return 1 ;;
+        esac
+        if exists "$prior/ledger"; then
+          regular "$prior/ledger" || return 1
+          [ ! -s "$prior/ledger" ] || return 1
+        fi
+      done
+    done
+  done
+}
+create_work() {
+  safe_chain "$MERV_REPAIR_TMP_ROOT" && [ -d "$MERV_REPAIR_TMP_ROOT" ] || return 1
+  prior_workspaces_clear || return 1
+  i=0
+  while [ "$i" -lt 8 ]; do
+    WORK="$MERV_REPAIR_TMP_ROOT/mervlan_lean.$RUN_START.$$.$i"
+    if (umask 077; mkdir "$WORK") 2>/dev/null; then break; fi
+    i=$((i+1))
+  done
+  [ -d "$WORK" ] || return 1
+  (umask 077; printf 'lean-repair-v1\n' >"$WORK/.owner") || return 1
+  ARCHIVE="$WORK/snapshot.tar.gz"; STAGE="$WORK/stage"; BACKUP=""
+  LEDGER=""; MANIFEST="$WORK/expected.manifest"; COHORT="$WORK/cohort"
+  mkdir "$STAGE" "$WORK/extract" "$WORK/protected" || return 1
+  write_contract
+}
+fetch_archive() {
+  status DOWNLOAD "HTTPS source=$REF; connect<=5s attempt<=18s total~38s"
+  # No retry of the archive after validation: this is the one source snapshot.
+  "$MERV_REPAIR_CURL" -fsSL --proto '=https' --proto-redir '=https' \
+    --connect-timeout 5 --max-time 18 --retry 1 --retry-delay 1 \
+    --retry-max-time 38 --max-filesize 8388608 \
+    -o "$ARCHIVE.part" "$MERV_REPAIR_SNAPSHOT_BASE/$REF" || return 1
+  regular "$ARCHIVE.part" && [ -s "$ARCHIVE.part" ] || return 1
+  bytes=$(wc -c <"$ARCHIVE.part") || return 1
+  [ "$bytes" -le 8388608 ] || return 1
+  mv "$ARCHIVE.part" "$ARCHIVE" || return 1
+  status DOWNLOAD "complete compressedBytes=$bytes"
+}
+validate_archive() {
+  # Stream cap protects /tmp against a gzip bomb; tar still verifies CRC.
+  expanded=$(gzip -dc "$ARCHIVE" 2>/dev/null | head -c 16777217 | wc -c) || return 1
+  [ "$expanded" -le 16777216 ] || return 1
+  tar -tzf "$ARCHIVE" >"$WORK/names" 2>/dev/null || return 1
+  tar -tvzf "$ARCHIVE" >"$WORK/details" 2>/dev/null || return 1
+  : >"$WORK/seen"; ROOT=; n=0
+  while IFS= read -r member || [ -n "$member" ]; do
+    case "$member" in */) member=${member%/} ;; esac
+    valid_rel "$member" || return 1
+    candidate=${member%%/*}
+    case "$candidate" in mervlan-*) : ;; *) return 1 ;; esac
+    [ -z "$ROOT" ] && ROOT=$candidate
+    [ "$candidate" = "$ROOT" ] || return 1
+    printf '%s\n' "$member" >>"$WORK/seen" || return 1
+    n=$((n+1)); [ "$n" -le 4096 ] || return 1
+  done <"$WORK/names"
+  [ "$n" -ge 58 ] || return 1
+  awk 'seen[$0]++ {exit 1}' "$WORK/seen" || return 1
+  while IFS= read -r detail || [ -n "$detail" ]; do
+    case "$detail" in -*|d*) : ;; *) return 1 ;; esac
+    case "$detail" in *' -> '*|*' link to '*) return 1 ;; esac
+  done <"$WORK/details"
+  # Extract ONLY the embedded allowlist, never execute downloaded scripts.
+  set --
+  while IFS=' ' read -r mode relative; do
+    case "$mode:$relative" in 0644:*|0755:*) : ;; *) return 1 ;; esac
+    valid_rel "$relative" || return 1
+    set -- "$@" "$ROOT/$relative"
+  done <"$COHORT"
+  tar -xzf "$ARCHIVE" -C "$WORK/extract" "$@" 2>/dev/null || return 1
+  SOURCE_ROOT="$WORK/extract/$ROOT"
+  actual_manifest="$SOURCE_ROOT/functions/update_mervlan_repair.manifest"
+  regular "$actual_manifest" && cmp -s "$MANIFEST" "$actual_manifest" || return 1
+  status ARCHIVE "validated members=$n uncompressedBytes=$expanded manifest=exact"
+}
+stage_files() {
+  size=0; count=0
+  while IFS=' ' read -r mode relative; do
+    from="$SOURCE_ROOT/$relative"; to="$STAGE/$relative"
+    safe_chain "${from%/*}" && regular "$from" && [ -s "$from" ] || return 1
+    ensure_dir "${to%/*}" || return 1
+    cp "$from" "$to" && chmod "$mode" "$to" || return 1
+    regular "$to" && cmp -s "$from" "$to" || return 1
+    case "$relative" in *.sh) sh -n "$to" >/dev/null 2>&1 || return 1 ;; esac
+    this=$(wc -c <"$to") || return 1
+    size=$((size+this)); [ "$size" -le 8388608 ] || return 1
+    count=$((count+1))
+  done <"$COHORT"
+  [ "$count" -eq 58 ] || return 1
+  status STAGING "complete files=$count bytes=$size"
+}
+mode_ok() {
+  listing=$(LC_ALL=C ls -ld "$2" 2>/dev/null) || return 1
+  perms=${listing%% *}
+  case "$1:$perms" in 0755:-rwxr-xr-x|0644:-rw-r--r--) return 0 ;; esac
+  return 1
+}
+mode_value() {
+  _mv_path="$1"
+  _mv_line=$(LC_ALL=C ls -ld "$_mv_path" 2>/dev/null) || return 1
+  _mv_mode=${_mv_line%% *}
+  [ "${#_mv_mode}" -eq 10 ] || return 1
+  case "$_mv_mode" in [d-]?????????) printf '%s\n' "$_mv_mode" ;; *) return 1 ;; esac
+}
+mode_record_valid() {
+  case "$1" in -[r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]) return 0 ;; *) return 1 ;; esac
+}
+sha_valid() {
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in *[!0123456789abcdef]*) return 1 ;; esac
+}
+sha256_file() {
+  _sf_path="$1" _sf_hash=""
+  regular "$_sf_path" || return 1
+  if type sha256sum >/dev/null 2>&1; then
+    _sf_line=$(sha256sum "$_sf_path" 2>/dev/null) || return 1
+    _sf_hash=${_sf_line%% *}
+  elif type openssl >/dev/null 2>&1; then
+    _sf_line=$(openssl dgst -sha256 "$_sf_path" 2>/dev/null) || return 1
+    _sf_hash=${_sf_line##* }
+  else
+    return 1
+  fi
+  sha_valid "$_sf_hash" || return 1
+  printf '%s\n' "$_sf_hash"
+}
+path_in_contract() {
+  _pic_want="$1" _pic_found=0
+  while IFS=' ' read -r _pic_mode _pic_rel; do
+    [ "$_pic_rel" = "$_pic_want" ] && _pic_found=1
+  done <"$COHORT"
+  [ "$_pic_found" -eq 1 ]
+}
+repair_test_fault() {
+  [ "${MERV_REPAIR_TEST_ONLY:-0}" = 1 ] || return 1
+  [ "${1:-}" = "${2:-}" ]
+}
+protected_files() {
+  protected_relatives='settings/settings.json .ssh/vlan_manager .ssh/vlan_manager.pub \
+    tmp/mac_shield.db tmp/mac_shield_override.db tmp/client_name_override.db \
+    flags/.install_ok www/settings/hardware_profiles.json'
+  for rel in $protected_relatives; do
+    src="$MERV_BASE/$rel"; saved="$WORK/protected/$rel"
+    if exists "$src"; then
+      regular "$src" || return 1
+      ensure_dir "${saved%/*}" || return 1
+      cp -p "$src" "$saved" || return 1
+      cmp -s "$src" "$saved" || return 1
+      printf 'present %s\n' "$rel" >>"$WORK/protected.index" || return 1
+    else
+      printf 'absent %s\n' "$rel" >>"$WORK/protected.index" || return 1
+    fi
+  done
+  chmod 600 "$WORK/protected.index" 2>/dev/null || return 1
+}
+protected_unchanged() {
+  while IFS=' ' read -r _pu_state _pu_rel; do
+    case "$_pu_state" in
+      present) regular "$MERV_BASE/$_pu_rel" && cmp -s "$WORK/protected/$_pu_rel" "$MERV_BASE/$_pu_rel" || return 1 ;;
+      absent) exists "$MERV_BASE/$_pu_rel" && return 1 ;;
+      *) return 1 ;;
+    esac
+  done <"$WORK/protected.index"
+  return 0
+}
+new_transaction() {
+  BACKUP_ROOT=${MERV_REPAIR_BACKUP_ROOT%/}
+  case "$BACKUP_ROOT" in ''|/|*..*|*//*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  case "$BACKUP_ROOT" in "$MERV_BASE"|"$MERV_BASE"/*) return 1 ;; esac
+  safe_chain "$BACKUP_ROOT" || return 1
+  ensure_dir "$BACKUP_ROOT" || return 1
+  prior_transactions_clear || return 1
+  _nt_now=$(date +%s 2>/dev/null || printf '')
+  case "$_nt_now" in ''|*[!0-9]*) return 1 ;; esac
+  _nt_try=0
+  while [ "$_nt_try" -lt 16 ]; do
+    TXN_ID="mervlan.repair.$_nt_now.$$.$_nt_try"
+    TXN_DIR="$BACKUP_ROOT/$TXN_ID"
+    if (umask 077; mkdir "$TXN_DIR") 2>/dev/null; then break; fi
+    _nt_try=$((_nt_try + 1))
+  done
+  [ -d "$TXN_DIR" ] && [ ! -L "$TXN_DIR" ] || return 1
+  chmod 700 "$TXN_DIR" || return 1
+  BACKUP="$TXN_DIR/original"
+  INDEX_FILE="$TXN_DIR/index"
+  READY_FILE="$TXN_DIR/READY"
+  LEDGER="$TXN_DIR/journal"
+  RECOVERY_HELPER="$TXN_DIR/recover.sh"
+  mkdir "$BACKUP" || return 1
+  chmod 700 "$BACKUP" || return 1
+  cp -p "$0" "$RECOVERY_HELPER" 2>/dev/null || return 1
+  chmod 700 "$RECOVERY_HELPER" || return 1
+  cmp -s "$0" "$RECOVERY_HELPER" || return 1
+  sh -n "$RECOVERY_HELPER" >/dev/null 2>&1 || return 1
+  return 0
+}
+backup_capacity_check() {
+  _bc_total=0
+  while IFS=' ' read -r _bc_mode _bc_rel; do
+    _bc_target="$MERV_BASE/$_bc_rel"
+    safe_chain "${_bc_target%/*}" || return 1
+    if exists "$_bc_target"; then
+      regular "$_bc_target" || return 1
+      _bc_size=$(wc -c <"$_bc_target" 2>/dev/null | tr -d ' ') || return 1
+      case "$_bc_size" in ''|*[!0-9]*) return 1 ;; esac
+      _bc_total=$((_bc_total + _bc_size))
+      [ "$_bc_total" -le 8388608 ] || return 1
+    fi
+  done <"$COHORT"
+  _bc_helper=$(wc -c <"$RECOVERY_HELPER" 2>/dev/null | tr -d ' ') || return 1
+  case "$_bc_helper" in ''|*[!0-9]*) return 1 ;; esac
+  _bc_free=$(capacity_kib "$BACKUP_ROOT")
+  case "$_bc_free" in ''|*[!0-9]*) return 1 ;; esac
+  _bc_need=$(((_bc_total + _bc_helper + 65535) / 1024 + REPAIR_MIN_DEST_FREE_KIB))
+  [ "$_bc_free" -ge "$_bc_need" ] || return 1
+  BACKUP_ESTIMATE=$_bc_total
+  return 0
+}
+backup_payload_verify() {
+  _bpv_count=0 _bpv_total=0
+  exec 3<"$INDEX_FILE" || return 1
+  while IFS=' ' read -r _bpv_newmode _bpv_rel; do
+    IFS='|' read -r _bpv_kind _bpv_oldmode _bpv_size _bpv_oldhash _bpv_newhash _bpv_path <&3 || { exec 3<&-; return 1; }
+    [ "$_bpv_rel" = "$_bpv_path" ] && sha_valid "$_bpv_newhash" || { exec 3<&-; return 1; }
+    if [ -d "${STAGE:-/nonexistent}" ]; then
+      path_regular "$STAGE/$_bpv_rel" || { exec 3<&-; return 1; }
+      _bpv_stage_hash=$(sha256_file "$STAGE/$_bpv_rel") || { exec 3<&-; return 1; }
+      [ "$_bpv_stage_hash" = "$_bpv_newhash" ] || { exec 3<&-; return 1; }
+    fi
+    case "$_bpv_kind" in
+      old)
+        mode_record_valid "$_bpv_oldmode" || { exec 3<&-; return 1; }
+        case "$_bpv_size" in ''|*[!0-9]*) exec 3<&-; return 1 ;; esac
+        sha_valid "$_bpv_oldhash" || { exec 3<&-; return 1; }
+        _bpv_saved="$BACKUP/$_bpv_rel"
+        path_regular "$_bpv_saved" || { exec 3<&-; return 1; }
+        _bpv_saved_hash=$(sha256_file "$_bpv_saved") || { exec 3<&-; return 1; }
+        _bpv_saved_size=$(wc -c <"$_bpv_saved" 2>/dev/null | tr -d ' ') || { exec 3<&-; return 1; }
+        _bpv_saved_mode=$(mode_value "$_bpv_saved") || { exec 3<&-; return 1; }
+        [ "$_bpv_saved_hash" = "$_bpv_oldhash" ] && [ "$_bpv_saved_size" = "$_bpv_size" ] &&
+          [ "$_bpv_saved_mode" = "$_bpv_oldmode" ] || { exec 3<&-; return 1; }
+        _bpv_total=$((_bpv_total + _bpv_size))
+        [ "$_bpv_total" -le 8388608 ] || { exec 3<&-; return 1; }
+        ;;
+      new)
+        [ "$_bpv_oldmode" = - ] && [ "$_bpv_size" = 0 ] && [ "$_bpv_oldhash" = - ] || { exec 3<&-; return 1; }
+        exists "$BACKUP/$_bpv_rel" && { exec 3<&-; return 1; }
+        ;;
+      *) exec 3<&-; return 1 ;;
+    esac
+    _bpv_count=$((_bpv_count + 1))
+  done <"$COHORT"
+  if IFS='|' read -r _bpv_extra <&3; then exec 3<&-; return 1; fi
+  exec 3<&-
+  [ "$_bpv_count" -eq 58 ] && [ "$_bpv_total" -le 8388608 ] || return 1
+  return 0
+}
+journal_validate() {
+  [ -n "$LEDGER" ] && path_regular "$LEDGER" || return 1
+  _jv_size=$(wc -c <"$LEDGER" 2>/dev/null | tr -d ' ') || return 1
+  case "$_jv_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$_jv_size" -le 16384 ] || return 1
+  _jv_n=0 _jv_first=1 JOURNAL_STATE= _jv_done=0
+  while IFS= read -r _jv_line || [ -n "$_jv_line" ]; do
+    _jv_n=$((_jv_n + 1)); [ "$_jv_n" -le 120 ] || return 1
+    if [ "$_jv_first" -eq 1 ]; then
+      [ "$_jv_line" = format=1 ] || return 1
+      _jv_first=0
+      continue
+    fi
+    case "$_jv_line" in
+      state=prepared|state=publishing|state=committed|state=rolled-back)
+        JOURNAL_STATE=${_jv_line#state=} ;;
+      pending\|*|done\|*)
+        _jv_rel=${_jv_line#*|}
+        valid_rel "$_jv_rel" && path_in_contract "$_jv_rel" || return 1
+        case "$_jv_line" in done\|*) _jv_done=$((_jv_done + 1)) ;; esac
+        ;;
+      *) return 1 ;;
+    esac
+  done <"$LEDGER"
+  [ "$_jv_first" -eq 0 ] && [ -n "$JOURNAL_STATE" ] || return 1
+  awk -F '|' '$1=="pending" && p[$2]++ {exit 1} $1=="done" && d[$2]++ {exit 1}' "$LEDGER" >/dev/null 2>&1 || return 1
+  if [ "$JOURNAL_STATE" = committed ]; then [ "$_jv_done" -eq 58 ] || return 1; fi
+  if [ "$JOURNAL_STATE" = prepared ]; then [ "$_jv_done" -eq 0 ] && [ "$_jv_n" -eq 2 ] || return 1; fi
+  return 0
+}
+journal_append() {
+  _ja_line="$1"
+  [ -n "$LEDGER" ] || return 1
+  if path_present "$LEDGER"; then path_regular "$LEDGER" && journal_validate || return 1; fi
+  JOURNAL_SEQ=$((JOURNAL_SEQ + 1))
+  _ja_tmp="$LEDGER.tmp.$$.$JOURNAL_SEQ"
+  (umask 077
+    [ ! -f "$LEDGER" ] || cat "$LEDGER"
+    printf '%s\n' "$_ja_line"
+  ) >"$_ja_tmp" 2>/dev/null || { rm -f "$_ja_tmp" 2>/dev/null || :; return 1; }
+  chmod 600 "$_ja_tmp" && mv -f "$_ja_tmp" "$LEDGER" 2>/dev/null || {
+    rm -f "$_ja_tmp" 2>/dev/null || :
+    return 1
+  }
+  return 0
+}
+backup_files() {
+  new_transaction || return 1
+  printf 'format=1\nstate=prepared\n' >"$LEDGER" || return 1
+  chmod 600 "$LEDGER" || return 1
+  backup_capacity_check || return 1
+  _bf_tmp="$INDEX_FILE.tmp.$$"
+  (umask 077; : >"$_bf_tmp") || return 1
+  _bf_total=0
+  while IFS=' ' read -r _bf_newmode _bf_rel; do
+    _bf_target="$MERV_BASE/$_bf_rel"; _bf_saved="$BACKUP/$_bf_rel"; _bf_new="$STAGE/$_bf_rel"
+    _bf_newhash=$(sha256_file "$_bf_new") || return 1
+    if exists "$_bf_target"; then
+      regular "$_bf_target" || return 1
+      _bf_oldmode=$(mode_value "$_bf_target") || return 1
+      _bf_size=$(wc -c <"$_bf_target" 2>/dev/null | tr -d ' ') || return 1
+      case "$_bf_size" in ''|*[!0-9]*) return 1 ;; esac
+      _bf_total=$((_bf_total + _bf_size)); [ "$_bf_total" -le 8388608 ] || return 1
+      _bf_oldhash=$(sha256_file "$_bf_target") || return 1
+      ensure_dir "${_bf_saved%/*}" || return 1
+      cp -p "$_bf_target" "$_bf_saved" || return 1
+      cmp -s "$_bf_target" "$_bf_saved" || return 1
+      [ "$(mode_value "$_bf_saved")" = "$_bf_oldmode" ] || return 1
+      printf 'old|%s|%s|%s|%s|%s\n' "$_bf_oldmode" "$_bf_size" "$_bf_oldhash" "$_bf_newhash" "$_bf_rel" >>"$_bf_tmp" || return 1
+    else
+      printf 'new|-|0|-|%s|%s\n' "$_bf_newhash" "$_bf_rel" >>"$_bf_tmp" || return 1
+    fi
+  done <"$COHORT"
+  chmod 600 "$_bf_tmp" && mv -f "$_bf_tmp" "$INDEX_FILE" || return 1
+  backup_payload_verify || return 1
+  _bf_contract_hash=$(sha256_file "$MANIFEST") || return 1
+  _bf_index_hash=$(sha256_file "$INDEX_FILE") || return 1
+  _bf_helper_hash=$(sha256_file "$RECOVERY_HELPER") || return 1
+  sync || return 1
+  _bf_ready_tmp="$READY_FILE.tmp.$$"
+  (umask 077
+    printf 'format=1\ntxn_id=%s\ncontract_sha256=%s\nindex_sha256=%s\nrecovery_sha256=%s\nfile_count=58\n' \
+      "$TXN_ID" "$_bf_contract_hash" "$_bf_index_hash" "$_bf_helper_hash" >"$_bf_ready_tmp"
+  ) || return 1
+  chmod 600 "$_bf_ready_tmp" && mv -f "$_bf_ready_tmp" "$READY_FILE" || return 1
+  sync || return 1
+  [ "$(cat "$READY_FILE" 2>/dev/null)" = "$(printf 'format=1\ntxn_id=%s\ncontract_sha256=%s\nindex_sha256=%s\nrecovery_sha256=%s\nfile_count=58' \
+    "$TXN_ID" "$_bf_contract_hash" "$_bf_index_hash" "$_bf_helper_hash")" ] || return 1
+  status BACKUP "persistent manifest backup ready originalBytes=$_bf_total id=$TXN_ID"
+}
+backup_verify() {
+  [ -d "$TXN_DIR" ] && [ ! -L "$TXN_DIR" ] && [ "$(mode_value "$TXN_DIR")" = drwx------ ] || return 1
+  [ -d "$BACKUP" ] && [ ! -L "$BACKUP" ] && [ "$(mode_value "$BACKUP")" = drwx------ ] || return 1
+  path_regular "$INDEX_FILE" && [ "$(mode_value "$INDEX_FILE")" = -rw------- ] || return 1
+  path_regular "$RECOVERY_HELPER" && [ "$(mode_value "$RECOVERY_HELPER")" = -rwx------ ] || return 1
+  path_regular "$READY_FILE" && [ "$(mode_value "$READY_FILE")" = -rw------- ] || return 1
+  backup_payload_verify || return 1
+  _bv_contract=$(sha256_file "$MANIFEST") || return 1
+  _bv_index=$(sha256_file "$INDEX_FILE") || return 1
+  _bv_helper=$(sha256_file "$RECOVERY_HELPER") || return 1
+  _bv_expected=$(printf 'format=1\ntxn_id=%s\ncontract_sha256=%s\nindex_sha256=%s\nrecovery_sha256=%s\nfile_count=58\n' \
+    "$TXN_ID" "$_bv_contract" "$_bv_index" "$_bv_helper")
+  [ "$(cat "$READY_FILE" 2>/dev/null)" = "$_bv_expected" ] || return 1
+  journal_validate || return 1
+  return 0
+}
+prior_transactions_clear() {
+  _ptc_root=${MERV_REPAIR_BACKUP_ROOT%/}
+  safe_chain "$_ptc_root" || return 1
+  [ -d "$_ptc_root" ] && [ ! -L "$_ptc_root" ] || return 1
+  for _ptc_dir in "$_ptc_root"/mervlan.repair.*; do
+    exists "$_ptc_dir" || continue
+    [ ! -L "$_ptc_dir" ] && [ -d "$_ptc_dir" ] || return 1
+    if ! path_present "$_ptc_dir/READY"; then
+      # A prepared journal proves publication never started. Missing or
+      # unreadable evidence is ambiguous and must block a new replacement.
+      _ptc_saved_txn=$TXN_DIR _ptc_saved_id=$TXN_ID _ptc_saved_backup=$BACKUP
+      _ptc_saved_index=$INDEX_FILE _ptc_saved_ready=$READY_FILE
+      _ptc_saved_helper=$RECOVERY_HELPER _ptc_saved_ledger=$LEDGER
+      TXN_DIR=$_ptc_dir TXN_ID=${_ptc_dir##*/} BACKUP=$_ptc_dir/original
+      INDEX_FILE=$_ptc_dir/index READY_FILE=$_ptc_dir/READY
+      RECOVERY_HELPER=$_ptc_dir/recover.sh LEDGER=$_ptc_dir/journal
+      if ! path_regular "$LEDGER" || ! journal_validate || [ "$JOURNAL_STATE" != prepared ]; then
+        TXN_DIR=$_ptc_saved_txn TXN_ID=$_ptc_saved_id BACKUP=$_ptc_saved_backup
+        INDEX_FILE=$_ptc_saved_index READY_FILE=$_ptc_saved_ready
+        RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
+        return 1
+      fi
+      TXN_DIR=$_ptc_saved_txn TXN_ID=$_ptc_saved_id BACKUP=$_ptc_saved_backup
+      INDEX_FILE=$_ptc_saved_index READY_FILE=$_ptc_saved_ready
+      RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
+      continue
+    fi
+    _ptc_saved_txn=$TXN_DIR _ptc_saved_id=$TXN_ID _ptc_saved_backup=$BACKUP
+    _ptc_saved_index=$INDEX_FILE _ptc_saved_ready=$READY_FILE
+    _ptc_saved_helper=$RECOVERY_HELPER _ptc_saved_ledger=$LEDGER
+    TXN_DIR=$_ptc_dir TXN_ID=${_ptc_dir##*/} BACKUP=$_ptc_dir/original
+    INDEX_FILE=$_ptc_dir/index READY_FILE=$_ptc_dir/READY
+    RECOVERY_HELPER=$_ptc_dir/recover.sh LEDGER=$_ptc_dir/journal
+    if ! path_regular "$LEDGER" || ! journal_validate; then
+      TXN_DIR=$_ptc_saved_txn TXN_ID=$_ptc_saved_id BACKUP=$_ptc_saved_backup
+      INDEX_FILE=$_ptc_saved_index READY_FILE=$_ptc_saved_ready
+      RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
+      return 1
+    fi
+    case "$JOURNAL_STATE" in prepared|committed|rolled-back) : ;;
+      publishing)
+        TXN_DIR=$_ptc_saved_txn TXN_ID=$_ptc_saved_id BACKUP=$_ptc_saved_backup
+        INDEX_FILE=$_ptc_saved_index READY_FILE=$_ptc_saved_ready
+        RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
+        return 1 ;;
+      *)
+        TXN_DIR=$_ptc_saved_txn TXN_ID=$_ptc_saved_id BACKUP=$_ptc_saved_backup
+        INDEX_FILE=$_ptc_saved_index READY_FILE=$_ptc_saved_ready
+        RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
+        return 1 ;;
+    esac
+    TXN_DIR=$_ptc_saved_txn TXN_ID=$_ptc_saved_id BACKUP=$_ptc_saved_backup
+    INDEX_FILE=$_ptc_saved_index READY_FILE=$_ptc_saved_ready
+    RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
+  done
+  return 0
+}
+record_original_state() {
+  _ros_all=1
+  exec 3<"$INDEX_FILE" || return 1
+  while IFS=' ' read -r _ros_newmode _ros_rel; do
+    IFS='|' read -r _ros_kind _ros_oldmode _ros_size _ros_oldhash _ros_newhash _ros_path <&3 || { exec 3<&-; return 1; }
+    [ "$_ros_rel" = "$_ros_path" ] || { exec 3<&-; return 1; }
+    _ros_target="$MERV_BASE/$_ros_rel"
+    safe_chain "${_ros_target%/*}" || { exec 3<&-; return 1; }
+    case "$_ros_kind" in
+      old)
+        if ! regular "$_ros_target" || [ "$(sha256_file "$_ros_target" 2>/dev/null)" != "$_ros_oldhash" ] ||
+           [ "$(mode_value "$_ros_target" 2>/dev/null)" != "$_ros_oldmode" ]; then _ros_all=0; fi ;;
+      new) exists "$_ros_target" && _ros_all=0 ;;
+      *) exec 3<&-; return 1 ;;
+    esac
+  done <"$COHORT"
+  exec 3<&-
+  [ "$_ros_all" -eq 1 ]
+}
+restore_entry() {
+  _re_kind="$1" _re_oldmode="$2" _re_size="$3" _re_oldhash="$4" _re_newhash="$5" _re_rel="$6" _re_newmode="$7"
+  _re_target="$MERV_BASE/$_re_rel"
+  _re_publish="$_re_target.mervlan-repair.$TXN_ID.publish.part"
+  _re_restore="$_re_target.mervlan-repair.$TXN_ID.restore.part"
+  safe_chain "${_re_target%/*}" || return 1
+  for _re_tmp in "$_re_publish" "$_re_restore"; do
+    if exists "$_re_tmp"; then
+      regular "$_re_tmp" || return 1
+      case "$_re_tmp" in
+        "$_re_publish")
+          [ "$(sha256_file "$_re_tmp" 2>/dev/null)" = "$_re_newhash" ] &&
+            mode_ok "$_re_newmode" "$_re_tmp" || return 1 ;;
+        "$_re_restore")
+          [ "$_re_kind" = old ] &&
+            [ "$(sha256_file "$_re_tmp" 2>/dev/null)" = "$_re_oldhash" ] &&
+            [ "$(mode_value "$_re_tmp" 2>/dev/null)" = "$_re_oldmode" ] || return 1 ;;
+      esac
+      rm -f "$_re_tmp" || return 1
+      exists "$_re_tmp" && return 1
+    fi
+  done
+  case "$_re_kind" in
+    old)
+      if regular "$_re_target" &&
+         [ "$(sha256_file "$_re_target" 2>/dev/null)" = "$_re_oldhash" ] &&
+         [ "$(mode_value "$_re_target" 2>/dev/null)" = "$_re_oldmode" ]; then
+        return 0
+      fi
+      if exists "$_re_target"; then
+        regular "$_re_target" || return 1
+        [ "$(sha256_file "$_re_target" 2>/dev/null)" = "$_re_newhash" ] &&
+          mode_ok "$_re_newmode" "$_re_target" || return 1
+      fi
+      ensure_dir "${_re_target%/*}" || return 1
+      cp -p "$BACKUP/$_re_rel" "$_re_restore" 2>/dev/null || return 1
+      [ "$(sha256_file "$_re_restore" 2>/dev/null)" = "$_re_oldhash" ] &&
+        [ "$(mode_value "$_re_restore" 2>/dev/null)" = "$_re_oldmode" ] || return 1
+      owner_ok && scan_processes || return 1
+      sync || return 1
+      mv -f "$_re_restore" "$_re_target" || return 1
+      regular "$_re_target" && [ "$(sha256_file "$_re_target")" = "$_re_oldhash" ] &&
+        [ "$(mode_value "$_re_target")" = "$_re_oldmode" ] || return 1
+      ;;
+    new)
+      if exists "$_re_target"; then
+        regular "$_re_target" || return 1
+        [ "$(sha256_file "$_re_target" 2>/dev/null)" = "$_re_newhash" ] &&
+          mode_ok "$_re_newmode" "$_re_target" || return 1
+        owner_ok && scan_processes || return 1
+        rm -f "$_re_target" || return 1
+      fi
+      exists "$_re_target" && return 1
+      ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+destination_states_known() {
+  exec 3<"$INDEX_FILE" || return 1
+  while IFS=' ' read -r _dsk_mode _dsk_rel; do
+    IFS='|' read -r _dsk_kind _dsk_oldmode _dsk_size _dsk_oldhash _dsk_newhash _dsk_path <&3 || { exec 3<&-; return 1; }
+    [ "$_dsk_rel" = "$_dsk_path" ] || { exec 3<&-; return 1; }
+    _dsk_target="$MERV_BASE/$_dsk_rel"
+    safe_chain "${_dsk_target%/*}" || { exec 3<&-; return 1; }
+    _dsk_publish="$_dsk_target.mervlan-repair.$TXN_ID.publish.part"
+    _dsk_restore="$_dsk_target.mervlan-repair.$TXN_ID.restore.part"
+    if exists "$_dsk_publish"; then
+      regular "$_dsk_publish" &&
+        [ "$(sha256_file "$_dsk_publish" 2>/dev/null)" = "$_dsk_newhash" ] &&
+        mode_ok "$_dsk_mode" "$_dsk_publish" || { exec 3<&-; return 1; }
+    fi
+    if exists "$_dsk_restore"; then
+      [ "$_dsk_kind" = old ] && regular "$_dsk_restore" &&
+        [ "$(sha256_file "$_dsk_restore" 2>/dev/null)" = "$_dsk_oldhash" ] &&
+        [ "$(mode_value "$_dsk_restore" 2>/dev/null)" = "$_dsk_oldmode" ] || { exec 3<&-; return 1; }
+    fi
+    if exists "$_dsk_target"; then
+      regular "$_dsk_target" || { exec 3<&-; return 1; }
+      _dsk_hash=$(sha256_file "$_dsk_target" 2>/dev/null) || { exec 3<&-; return 1; }
+      _dsk_actual_mode=$(mode_value "$_dsk_target" 2>/dev/null) || { exec 3<&-; return 1; }
+      case "$_dsk_kind" in
+        old)
+          { [ "$_dsk_hash" = "$_dsk_oldhash" ] && [ "$_dsk_actual_mode" = "$_dsk_oldmode" ]; } ||
+          { [ "$_dsk_hash" = "$_dsk_newhash" ] && mode_ok "$_dsk_mode" "$_dsk_target"; } || {
+            exec 3<&-; return 1;
+          } ;;
+        new)
+          [ "$_dsk_hash" = "$_dsk_newhash" ] && mode_ok "$_dsk_mode" "$_dsk_target" || {
+            exec 3<&-; return 1;
+          } ;;
+        *) exec 3<&-; return 1 ;;
+      esac
+    else
+      [ "$_dsk_kind" = old ] || [ "$_dsk_kind" = new ] || { exec 3<&-; return 1; }
+    fi
+  done <"$COHORT"
+  exec 3<&-
+  return 0
+}
+restore_transaction() {
+  backup_verify || return 1
+  case "$JOURNAL_STATE" in prepared|publishing|rolled-back) : ;;
+    committed) return 1 ;;
+    *) return 1 ;;
+  esac
+  destination_states_known || return 1
+  status ROLLBACK "restoring transaction=$TXN_ID"
+  exec 3<"$INDEX_FILE" || return 1
+  while IFS=' ' read -r _rt_newmode _rt_rel; do
+    IFS='|' read -r _rt_kind _rt_oldmode _rt_size _rt_oldhash _rt_newhash _rt_path <&3 || { exec 3<&-; return 1; }
+    [ "$_rt_rel" = "$_rt_path" ] || { exec 3<&-; return 1; }
+    restore_entry "$_rt_kind" "$_rt_oldmode" "$_rt_size" "$_rt_oldhash" \
+      "$_rt_newhash" "$_rt_rel" "$_rt_newmode" || { exec 3<&-; return 1; }
+  done <"$COHORT"
+  exec 3<&-
+  record_original_state || return 1
+  sync || return 1
+  [ "$JOURNAL_STATE" = rolled-back ] || journal_append state=rolled-back || return 1
+  sync || return 1
+  ROLLBACK_OK=1 TX=0
+  status ROLLBACK 'all manifest targets match original bytes, modes and absent states'
+  return 0
+}
+publication() {
+  backup_verify || return 1
+  journal_append state=publishing || return 1
+  TX=1
+  sync || return 1
+  exec 3<"$INDEX_FILE" || return 1
+  while IFS=' ' read -r _pb_mode _pb_rel; do
+    IFS='|' read -r _pb_kind _pb_oldmode _pb_size _pb_oldhash _pb_newhash _pb_path <&3 || { exec 3<&-; return 1; }
+    [ "$_pb_rel" = "$_pb_path" ] || { exec 3<&-; return 1; }
+    _pb_target="$MERV_BASE/$_pb_rel" _pb_source="$STAGE/$_pb_rel"
+    safe_chain "${_pb_target%/*}" && ensure_dir "${_pb_target%/*}" || { exec 3<&-; return 1; }
+    case "$_pb_kind" in
+      old) regular "$_pb_target" && [ "$(sha256_file "$_pb_target" 2>/dev/null)" = "$_pb_oldhash" ] &&
+             [ "$(mode_value "$_pb_target" 2>/dev/null)" = "$_pb_oldmode" ] || { exec 3<&-; return 1; } ;;
+      new) exists "$_pb_target" && { exec 3<&-; return 1; } ;;
+      *) exec 3<&-; return 1 ;;
+    esac
+    _pb_tmp="$_pb_target.mervlan-repair.$TXN_ID.publish.part"
+    exists "$_pb_tmp" && { exec 3<&-; return 1; }
+    cp "$_pb_source" "$_pb_tmp" && chmod "$_pb_mode" "$_pb_tmp" || { exec 3<&-; return 1; }
+    regular "$_pb_tmp" && [ "$(sha256_file "$_pb_tmp" 2>/dev/null)" = "$_pb_newhash" ] &&
+      mode_ok "$_pb_mode" "$_pb_tmp" || { exec 3<&-; return 1; }
+    journal_append "pending|$_pb_rel" || { exec 3<&-; return 1; }
+    sync || { exec 3<&-; return 1; }
+    owner_ok && scan_processes || { exec 3<&-; return 1; }
+    if repair_test_fault "${MERV_REPAIR_TEST_PAUSE_AT:-}" "$((PUBLISHED+1))"; then sleep 30; fi
+    repair_test_fault "${MERV_REPAIR_TEST_FAIL_AT:-}" "$((PUBLISHED+1))" && { exec 3<&-; return 1; }
+    mv -f "$_pb_tmp" "$_pb_target" || { exec 3<&-; return 1; }
+    regular "$_pb_target" && [ "$(sha256_file "$_pb_target" 2>/dev/null)" = "$_pb_newhash" ] &&
+      mode_ok "$_pb_mode" "$_pb_target" || { exec 3<&-; return 1; }
+    repair_test_fault "${MERV_REPAIR_TEST_FAIL_AFTER_AT:-}" "$((PUBLISHED+1))" && { exec 3<&-; return 1; }
+    journal_append "done|$_pb_rel" || { exec 3<&-; return 1; }
+    PUBLISHED=$((PUBLISHED + 1))
+    VERIFIED=$((VERIFIED + 1))
+    if [ $((PUBLISHED % 10)) -eq 0 ] || [ "$PUBLISHED" -eq 58 ]; then
+      status PUBLISH "replaced=$PUBLISHED verified=$VERIFIED/58"
+    fi
+  done <"$COHORT"
+  exec 3<&-
+  [ "$PUBLISHED" -eq 58 ] && [ "$VERIFIED" -eq 58 ] || return 1
+  return 0
+}
+final_verify() {
+  owner_ok && scan_processes || return 1
+  while IFS=' ' read -r _fv_mode _fv_rel; do
+    _fv_target="$MERV_BASE/$_fv_rel" _fv_source="$STAGE/$_fv_rel"
+    regular "$_fv_target" && cmp -s "$_fv_source" "$_fv_target" && mode_ok "$_fv_mode" "$_fv_target" || return 1
+  done <"$COHORT"
+  protected_unchanged
+}
+rollback() {
+  owner_ok || return 1
+  restore_transaction
+}
+create_recovery_work() {
+  safe_chain "$MERV_REPAIR_TMP_ROOT" && [ -d "$MERV_REPAIR_TMP_ROOT" ] || return 1
+  _crw_now=$(date +%s 2>/dev/null || printf '')
+  case "$_crw_now" in ''|*[!0-9]*) return 1 ;; esac
+  _crw_try=0
+  while [ "$_crw_try" -lt 16 ]; do
+    WORK="$MERV_REPAIR_TMP_ROOT/mervlan_recovery.$_crw_now.$$.$_crw_try"
+    if (umask 077; mkdir "$WORK") 2>/dev/null; then break; fi
+    _crw_try=$((_crw_try + 1))
+  done
+  [ -d "$WORK" ] && [ ! -L "$WORK" ] || return 1
+  chmod 700 "$WORK" || return 1
+  printf 'mervlan-repair-recovery-v1\n' >"$WORK/.owner" || return 1
+  chmod 600 "$WORK/.owner" || return 1
+  MANIFEST="$WORK/expected.manifest" COHORT="$WORK/cohort"
+  write_contract || return 1
+}
+recover_main() {
+  _rm_id="${2:-}"
+  case "$_rm_id" in mervlan.repair.*) : ;; *) return 2 ;; esac
+  case "$_rm_id" in *..*|*/*|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  test_roots_valid || return 2
+  MERV_REPAIR_BACKUP_ROOT=${MERV_REPAIR_BACKUP_ROOT%/}
+  TXN_ID=$_rm_id TXN_DIR="$MERV_REPAIR_BACKUP_ROOT/$_rm_id"
+  BACKUP="$TXN_DIR/original" INDEX_FILE="$TXN_DIR/index"
+  READY_FILE="$TXN_DIR/READY" LEDGER="$TXN_DIR/journal" RECOVERY_HELPER="$TXN_DIR/recover.sh"
+  safe_chain "$MERV_BASE" && [ -d "$MERV_BASE" ] &&
+    safe_chain "$MERV_REPAIR_BACKUP_ROOT" && safe_chain "$TXN_DIR" || return 1
+  create_recovery_work || return 1
+  action_parent_check || return 1
+  scan_processes || return 1
+  acquire || return 1
+  scan_processes || return 1
+  backup_verify || { status REFUSED 'backup is incomplete or corrupt'; return 1; }
+  case "$JOURNAL_STATE" in
+    committed) status REFUSED 'committed repair is not eligible for rollback'; return 1 ;;
+    rolled-back)
+      record_original_state || return 1
+      ROLLBACK_OK=1
+      status RECOVERY 'previous rollback verified'
+      ;;
+    prepared|publishing)
+      restore_transaction || { status RECOVERY 'unknown or unsafe destination state; evidence retained'; return 1; }
+      ;;
+    *) return 1 ;;
+  esac
+  owner_ok || return 1
+  release || return 1
+  COMMITTED=1
+  status RECOVERY 'manifest originals restored; persistent evidence retained'
+  return 0
+}
+repair_handoff_write() {
+  _rhw_engine="$SOURCE_ROOT/functions/update_mervlan_repair.sh"
+  regular "$_rhw_engine" || return 1
+  cmp -s "$0" "$_rhw_engine" || {
+    status REFUSED 'downloaded Repair executable does not match trusted bootstrap'
+    return 1
+  }
+  HANDOFF_START=$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT") || return 1
+  HANDOFF_FILE="$WORK/.handoff"
+  _rhw_tmp="$HANDOFF_FILE.tmp.$$"
+  (umask 077
+    printf 'format=1\nref=%s\nroot=%s\npid=%s\nproc_start_time=%s\n' \
+      "$REF" "$ROOT" "$$" "$HANDOFF_START" >"$_rhw_tmp"
+  ) || return 1
+  chmod 600 "$_rhw_tmp" && mv -f "$_rhw_tmp" "$HANDOFF_FILE" || return 1
+  sync || return 1
+  exec /bin/sh "$_rhw_engine" --continue "$WORK"
+}
+repair_handoff_adopt() {
+  WORK="${2:-}"
+  case "$WORK" in "$MERV_REPAIR_TMP_ROOT"/mervlan_lean.*) : ;; *) return 1 ;; esac
+  safe_chain "$WORK" && [ -d "$WORK" ] && [ ! -L "$WORK" ] || return 1
+  regular "$WORK/.owner" && [ "$(cat "$WORK/.owner" 2>/dev/null)" = lean-repair-v1 ] || return 1
+  regular "$WORK/.handoff" && [ "$(mode_value "$WORK/.handoff")" = -rw------- ] || return 1
+  _rha_n=0 REF= ROOT= _rha_pid= _rha_start=
+  while IFS= read -r _rha_line || [ -n "$_rha_line" ]; do
+    _rha_n=$((_rha_n + 1)); [ "$_rha_n" -le 5 ] || return 1
+    case "$_rha_line" in
+      format=1) [ "$_rha_n" -eq 1 ] || return 1 ;;
+      ref=*) REF=${_rha_line#ref=} ;;
+      root=*) ROOT=${_rha_line#root=} ;;
+      pid=*) _rha_pid=${_rha_line#pid=} ;;
+      proc_start_time=*) _rha_start=${_rha_line#proc_start_time=} ;;
+      *) return 1 ;;
+    esac
+  done <"$WORK/.handoff"
+  [ "$_rha_n" -eq 5 ] && valid_ref "$REF" || return 1
+  case "$ROOT" in mervlan-[A-Za-z0-9._-]*) : ;; *) return 1 ;; esac
+  [ "$_rha_pid" = "$$" ] && [ "$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$_rha_start" ] || return 1
+  ARCHIVE="$WORK/snapshot.tar.gz" STAGE="$WORK/stage" BACKUP= MANIFEST="$WORK/expected.manifest"
+  COHORT="$WORK/cohort" SOURCE_ROOT="$WORK/extract/$ROOT"
+  regular "$ARCHIVE" && [ ! -L "$SOURCE_ROOT" ] && [ -d "$SOURCE_ROOT" ] || return 1
+  regular "$SOURCE_ROOT/functions/update_mervlan_repair.manifest" || return 1
+  regular "$SOURCE_ROOT/functions/update_mervlan_repair.sh" || return 1
+  cmp -s "$0" "$SOURCE_ROOT/functions/update_mervlan_repair.sh" || return 1
+  write_contract || return 1
+  cmp -s "$MANIFEST" "$SOURCE_ROOT/functions/update_mervlan_repair.manifest" || return 1
+  [ -d "$STAGE" ] && [ ! -L "$STAGE" ] && [ -d "$WORK/protected" ] &&
+    [ ! -L "$WORK/protected" ] || return 1
+  return 0
+}
+test_roots_valid() {
+  case "$MERV_BASE" in
+    /jffs/addons/mervlan)
+      [ "${MERV_REPAIR_TEST_ONLY:-0}" = 0 ] || return 1
+      [ "$MERV_REPAIR_BACKUP_ROOT" = /jffs/addons/mervlan_backups ] || return 1
+      [ "$MERV_REPAIR_SNAPSHOT_BASE" = https://codeload.github.com/r80xcore/mervlan/tar.gz ] || return 1
+      ;;
+    /tmp/mervlan_standalone_fixture.*/jffs/addons/mervlan)
+      [ "${MERV_REPAIR_TEST_ONLY:-0}" = 1 ] || return 1
+      case "$MERV_REPAIR_BACKUP_ROOT" in /tmp/mervlan_standalone_fixture.*/jffs/addons/mervlan_backups) : ;; *) return 1 ;; esac
+      [ "$MERV_REPAIR_PROC_ROOT" != /proc ] && [ "$MERV_REPAIR_MEMINFO" != /proc/meminfo ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ "${MERV_REPAIR_SNAPSHOT_BASE#https://}" != "$MERV_REPAIR_SNAPSHOT_BASE" ] || return 1
+  return 0
+}
+repair_run() {
+  action_parent_check || stop 'action lock parent is malformed or unauthenticated'
+  scan_processes || stop 'initial legacy mutator exclusion failed'
+  acquire || stop 'action, maintenance or Manager ownership is unavailable'
+  scan_processes || stop 'post-acquisition legacy mutator exclusion failed'
+  protected_files || stop 'protected-state snapshot failed'
+  backup_files || stop 'persistent manifest backup failed; no installed files were replaced'
+  preflight || stop 'resource preflight before publication failed'
+  publication || stop 'publication failed; rollback will be attempted'
+  final_verify || stop 'final content, mode, protected-state or owner verification failed'
+  sync || stop 'could not durably flush verified replacement files'
+  owner_ok && journal_append state=committed || stop 'could not durably mark the verified repair committed'
+  COMMITTED=1 TX=0
+  sync || stop 'could not durably finish the Repair transaction'
+  owner_ok || stop 'ownership changed before release'
+  release || stop 'ownership release failed'
+  status SUCCESS "files=58 backup=$TXN_ID no Update/Apply invoked"
+}
+cleanup() {
+  _cleanup_rc=$?
+  trap - 0 HUP INT TERM
+  if [ "$COMMITTED" -ne 1 ] && [ "$TX" -eq 1 ]; then
+    if owner_ok; then rollback || { status RECOVERY 'synchronous rollback incomplete; persistent evidence retained'; _cleanup_rc=1; }
+    else status RECOVERY 'owner identity changed; rollback skipped and persistent evidence retained'; _cleanup_rc=1; fi
+  fi
+  if [ "$MANAGER_LOCKED" -eq 1 ] || [ "$MAINTENANCE_LOCKED" -eq 1 ] || [ "$ACTION_LOCKED" -eq 1 ]; then
+    release || { status ERROR 'lock release failed; inspect lock ownership'; _cleanup_rc=1; }
+  fi
+  if [ -n "${WORK:-}" ] && [ -d "$WORK" ] && [ ! -L "$WORK" ]; then
+    case "$WORK" in
+      "$MERV_REPAIR_TMP_ROOT"/mervlan_lean.*|"$MERV_REPAIR_TMP_ROOT"/mervlan_recovery.*)
+        if [ "$_cleanup_rc" -eq 0 ] && { [ "$COMMITTED" -eq 1 ] || [ "$ROLLBACK_OK" -eq 1 ] || [ "$TX" -eq 0 ]; }; then
+          rm -rf "$WORK" 2>/dev/null || { status EVIDENCE "temporary workspace retained=$WORK"; _cleanup_rc=1; }
+        else
+          status EVIDENCE "temporary workspace retained=$WORK"
+        fi ;;
+      *) status EVIDENCE 'temporary workspace path was not recognized'; _cleanup_rc=1 ;;
+    esac
+  fi
+  exit "$_cleanup_rc"
+}
+main() {
+  case "${1:-}" in
+    recover) recover_main "$@"; return $? ;;
+    --continue)
+      test_roots_valid || stop 'unsafe runtime roots'
+      repair_handoff_adopt "$@" || stop 'same-snapshot handoff is invalid'
+      stage_files || stop 'trusted snapshot staging failed'
+      repair_run
+      ;;
+    *)
+      valid_ref "${1:-}" || stop 'provide a full 40-character immutable source commit SHA'
+      test_roots_valid || stop 'unsafe runtime roots'
+      safe_chain "$MERV_BASE" && [ -d "$MERV_BASE" ] || stop 'unsafe or missing addon directory'
+      preflight || stop 'resource preflight failed'
+      create_work || stop 'private workspace unavailable or earlier work remains unresolved'
+      fetch_archive || stop 'bounded immutable snapshot download failed'
+      validate_archive || stop 'archive or trusted manifest validation failed'
+      repair_handoff_write
+      ;;
+  esac
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 main "$@"
 exit $?

@@ -1003,89 +1003,25 @@ modifies the original.
 
 #### Emergency Update Repair
 
-Emergency Repair restores the selected branch's manifest-listed MerVLAN program and static files when the installed updater or support files are damaged or missing. The engine runs independently of the installed MerVLAN libraries. Repair preserves personal settings, SSH keys, databases, runtime state, and backups. It does not run Update, Apply, Sync, Uninstall, restart services, or reboot.
+Emergency Repair replaces the 58 trusted manifest targets from one immutable source snapshot. It does not source or execute installed MerVLAN libraries, validate old application scripts, alter protected settings or databases, or run Update, Apply, Sync, Uninstall, restart services, or reboot. Run a normal Update separately after Repair succeeds.
 
-A previous repair with a non-empty transaction ledger blocks automatic rerun. Preserve its workspace and investigate recovery; do not remove its ledger, temporary files, or maintenance lock to retry. Select the intended branch carefully: repair from another branch can replace branch-owned files.
-
-| Command | Action |
-| --- | --- |
-| `sh functions/update_mervlan_repair.sh main` | Repair from the supported `main` branch. |
-| `sh functions/update_mervlan_repair.sh dev` | Repair from the supported `dev` branch. |
-| `sh functions/update_mervlan_repair.sh feature/example` | Repair from a named branch using a known-working installed engine. |
-
-The Web UI's **Repair update components before update** option runs its normal Update stage only after Repair succeeds; a stable-release repair uses `main`, not the selected release tag. The SSH bootstrap below is Repair-only: it has no automatic Update step and does not require an `AUTO_UPDATE` setting. Use it when the installed engine cannot be started. For this test branch, run the following over SSH from the router shell. Change the first `BRANCH=` value to select another bootstrap branch.
+Run Repair from a separately verified copy because the installed Repair entrypoint may be damaged. Obtain the shell file through a trusted transfer channel, verify its SHA-256 against a separately supplied digest, and place it at `/tmp/update_mervlan_repair.sh`. The source snapshot reference must be the full lowercase 40-character commit SHA for a repository snapshot containing that same Repair implementation; branch names such as `main` and `dev` are rejected.
 
 ```sh
-BRANCH="pre_v0.53.29-RC3-repair-test"
-(
-  case "$BRANCH" in
-    ''|*[!A-Za-z0-9._-]*|*..*|*.lock|[!A-Za-z0-9]*|*[!A-Za-z0-9])
-      printf '%s\n' 'Invalid repair branch name' >&2; exit 2 ;;
-  esac
-  [ "${#BRANCH}" -le 96 ] || { printf '%s\n' 'Branch name too long' >&2; exit 2; }
-  umask 077
-  D=""
-  bootstrap_exit() {
-    rc=$?
-    trap - 0
-    [ -n "$D" ] || exit "$rc"
-    case "$D" in
-      /tmp/mervlan-bootstrap.*) ;;
-      *) printf 'Bootstrap workspace path rejected; retained evidence: %s\n' "$D" >&2; exit 1 ;;
-    esac
-    if [ "$rc" -eq 0 ]; then
-      if rm -rf "$D"; then
-        exit 0
-      fi
-      printf 'Bootstrap cleanup failed; retained evidence: %s\n' "$D" >&2
-      exit 1
-    fi
-    printf 'Bootstrap failed (%s); retained evidence: %s\n' "$rc" "$D" >&2
-    exit "$rc"
-  }
-  trap 'bootstrap_exit' 0
-  n=0
-  while [ "$n" -lt 8 ]; do
-    D="/tmp/mervlan-bootstrap.$$.${n}"
-    if ( umask 077; mkdir "$D" ) 2>/dev/null; then
-      break
-    fi
-    D=""
-    n=$((n + 1))
-  done
-  [ -n "$D" ] || { printf '%s\n' 'Unable to allocate private bootstrap workspace after 8 attempts' >&2; exit 1; }
-  curl -fsSL --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 --max-filesize 262144 \
-    -o "$D/repair.sh" \
-    "https://raw.githubusercontent.com/r80xcore/mervlan/refs/heads/$BRANCH/functions/update_mervlan_repair.sh"
-  curl_rc=$?
-  [ "$curl_rc" -eq 0 ] || exit "$curl_rc"
-  [ -s "$D/repair.sh" ] && [ ! -L "$D/repair.sh" ] || {
-    printf '%s\n' 'Repair bootstrap entrypoint is missing or unsafe' >&2
-    exit 1
-  }
-  bootstrap_size=$(wc -c < "$D/repair.sh" 2>/dev/null | awk 'NR == 1 { print $1 }')
-  case "$bootstrap_size" in
-    ''|*[!0-9]*) printf '%s\n' 'Could not validate Repair bootstrap entrypoint size' >&2; exit 1 ;;
-  esac
-  [ "$bootstrap_size" -le 262144 ] || {
-    printf '%s\n' 'Repair bootstrap entrypoint exceeds 256 KiB' >&2
-    exit 1
-  }
-  /bin/sh -n "$D/repair.sh"
-  syntax_rc=$?
-  [ "$syntax_rc" -eq 0 ] || exit "$syntax_rc"
-  /bin/sh "$D/repair.sh" "$BRANCH"
-)
+REPAIR=/tmp/update_mervlan_repair.sh
+SOURCE_SHA='<maintainer-approved 40-character immutable commit SHA>'
+/bin/sh "$REPAIR" "$SOURCE_SHA"
 ```
 
-The bootstrap validates a bounded branch name before downloading; it permits ASCII letters, digits, dots, underscores, and dashes, requires an alphanumeric first and last character, and rejects `..` and a `.lock` suffix. Slash-separated names are deliberately not accepted by this compact bootstrap. The selected branch appears in both the download URL and the engine argument.
+The current WebUI dispatcher passes branch labels and is not wired to this immutable-ref candidate. Use the direct standalone entrypoint until the dispatcher is configured with an approved pinned SHA. The dispatcher remains optional and is not part of the recovery dependency chain.
 
-Both the bootstrap download and the engine's complete source-snapshot download require HTTPS for the initial URL and redirects. The bootstrap asks curl to reject entrypoints larger than 256 KiB and checks the downloaded byte count before execution. Each transfer has a 30-second limit and the bootstrap retries once after a one-second delay (at most about 61 seconds across both attempts). On curl versions before 8.4, `--max-filesize` cannot stop an unknown-length response after transfer begins; the post-download check still prevents such an entrypoint from running, while the transfer remains bounded by its timeout. The bootstrap uses a private `/tmp` workspace with mode `0700`, allocated by up to eight exclusive `mkdir` attempts using the process ID and attempt number. An existing name is never reused or removed; allocation failure is reported before any download. It checks the downloaded file and shell syntax before execution. On success it removes only the workspace it created; on failure after workspace creation it retains the evidence and prints its path. Invalid branch input exits with status 2; exit status 0 means Repair completed successfully, and download, validation, repair, or cleanup failures return a nonzero status. This avoids a `mktemp` dependency and uses the portable `0` exit trap. This bootstrap requires curl with `--proto` and `--proto-redir` support (introduced in curl 7.21.0 or newer); unsupported options fail closed, with no unrestricted fallback.
+Before publication, Repair saves and verifies the exact original bytes, modes, paths, and absent-file states in `/jffs/addons/mervlan_backups/`. A `READY` marker is written only after the persistent backup validates. If publication is interrupted, preserve the bundle and use its independent helper with the exact transaction ID:
 
-The downloaded standalone engine obtains and validates one complete source snapshot, then hands control to the Repair engine inside that exact snapshot before admission or publication. Thus the repair operation and its manifest/payload come from one validated archive. The raw bootstrap and archive are separate branch requests, so a branch that moves between requests can yield a newer snapshot; use a trusted, stable branch when that matters. HTTPS protects transport but does not pin branch contents to a commit.
+```sh
+/bin/sh /jffs/addons/mervlan_backups/<transaction-id>/recover.sh recover <transaction-id>
+```
 
-The prior interrupted MAIN repair is separate recovery work. Do not run another Repair, Update, reboot, lock deletion, or workspace cleanup on MAIN without separate authorization and recovery verification.
+The recovery helper refuses a missing or corrupt backup, an unknown target state, or an ambiguous lock. Do not delete its evidence or lock files to retry. This candidate has not been run on an ASUS router.
 
 #### Backup
 
