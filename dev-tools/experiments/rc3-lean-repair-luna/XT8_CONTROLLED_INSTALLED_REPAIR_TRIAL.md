@@ -21,19 +21,22 @@ Candidate Repair SHA-256:
 Update coordinator SHA-256:
 
 ```text
-499f939262acd166dac456d3c7445b5439d2dd4a6cad69fec996cacd121df1d2  update_mervlan.sh
+7bb9dcdd0593d156f1a0d7ff15002790a3fff3759c655d7513251d0038440fff  update_mervlan.sh
 ```
 
-Both exact files are included in the reviewed RC3 checkpoint on
-`pre_v0.53.29-RC3-repair-test`:
+The corrected immutable checkpoint commit is pending maintainer-approved
+commit and push. Do not use the older checkpoint below; it does not contain
+the corrected Update coordinator. After the approved checkpoint is pushed,
+replace the pending value with that full commit SHA and verify that the commit
+contains both exact files above before any trial.
 
 ```text
-ee97753bb54bea36bb2e73dd94e2ec86f25321d6
+PENDING_APPROVED_CHECKPOINT_SHA
 ```
 
-Set `SOURCE_COMMIT` to this full 40-character SHA. Before any trial, use the
-exact reviewed files from this immutable commit and recheck both file hashes.
-Do not use a moving branch or tag.
+Set `SOURCE_COMMIT` to the pinned full 40-character SHA. Before any trial, use
+the exact reviewed files from this immutable commit and recheck both file
+hashes. Do not use a moving branch or tag.
 
 ## 1. Read-only MAIN preflight
 

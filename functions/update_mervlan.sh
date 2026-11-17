@@ -183,6 +183,14 @@ UPDATE_RC3_REPAIR_BACKUP_PATH=""
 UPDATE_RC3_REPAIR_RESULT_FILE=""
 UPDATE_RC3_REPAIR_CHILD_ACTIVE="0"
 UPDATE_RC3_REPAIR_INPUT=""
+UPDATE_RC3_MANAGER_BARRIER_PATH=""
+UPDATE_RC3_MANAGER_BARRIER_NONCE=""
+UPDATE_RC3_MANAGER_BARRIER_OWNED="0"
+UPDATE_RC3_ACTION_BARRIER_PATH=""
+UPDATE_RC3_ACTION_BARRIER_NONCE=""
+UPDATE_RC3_ACTION_BARRIER_START=""
+UPDATE_RC3_ACTION_BARRIER_MODE="none"
+UPDATE_RC3_ACTION_BARRIER_RELEASE="0"
 UPDATE_RC3_REPAIR_SHA256="587c002f36d1191bbcde4959a0c6d5256494abac522d82af2b8d85d0746856a1"
 UPDATE_JFFS_RESERVE_KB="${MERV_UPDATE_JFFS_RESERVE_KB:-5120}"
 case "$UPDATE_JFFS_RESERVE_KB" in
@@ -1055,6 +1063,96 @@ update_rc3_input_path_shape_valid() {
 	case "$_update_rc3_token" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
 }
 
+# BEGIN MERVLAN_UPDATE_RC3_MANAGER_PUBLICATION_BARRIER
+update_rc3_publication_barrier_acquire() {
+	[ "${UPDATE_RC3_REPAIR_MODE:-0}" = "1" ] || return 0
+	type merv_action_lock_enter >/dev/null 2>&1 || return 1
+	type merv_action_lock_leave >/dev/null 2>&1 || return 1
+	type merv_owner_lock_state >/dev/null 2>&1 || return 1
+	type merv_owner_lock_acquire >/dev/null 2>&1 || return 1
+	type merv_owner_lock_owner_matches >/dev/null 2>&1 || return 1
+	type merv_owner_lock_release >/dev/null 2>&1 || return 1
+
+	UPDATE_RC3_ACTION_BARRIER_PATH="${MERV_ACTION_LOCK_PATH:-$LOCKDIR/mervlan_action.lock}"
+	if [ "${MERV_ACTION_LOCK_MODE:-none}" = "self" ]; then
+		[ "${MERV_ACTION_LOCK_PATH_ACTIVE:-}" = "$UPDATE_RC3_ACTION_BARRIER_PATH" ] &&
+			merv_owner_lock_owner_matches "$UPDATE_RC3_ACTION_BARRIER_PATH" \
+				"${MERV_ACTION_LOCK_NONCE:-}" || return 1
+		UPDATE_RC3_ACTION_BARRIER_MODE="self"
+		UPDATE_RC3_ACTION_BARRIER_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+		UPDATE_RC3_ACTION_BARRIER_START="${MERV_ACTION_LOCK_START:-}"
+		UPDATE_RC3_ACTION_BARRIER_RELEASE="0"
+	else
+		merv_action_lock_enter "$UPDATE_RC3_ACTION_BARRIER_PATH" || return 1
+		UPDATE_RC3_ACTION_BARRIER_MODE="${MERV_ACTION_LOCK_MODE:-none}"
+		UPDATE_RC3_ACTION_BARRIER_NONCE="${MERV_ACTION_LOCK_NONCE:-}"
+		UPDATE_RC3_ACTION_BARRIER_START="${MERV_ACTION_LOCK_START:-}"
+		case "$UPDATE_RC3_ACTION_BARRIER_MODE" in
+			self)
+				UPDATE_RC3_ACTION_BARRIER_RELEASE="1"
+				;;
+			parent)
+				UPDATE_RC3_ACTION_BARRIER_RELEASE="0"
+				;;
+			*)
+				return 1
+				;;
+		esac
+	fi
+	[ -n "$UPDATE_RC3_ACTION_BARRIER_NONCE" ] &&
+		[ -n "$UPDATE_RC3_ACTION_BARRIER_START" ] || return 1
+
+	UPDATE_RC3_MANAGER_BARRIER_PATH="$LOCKDIR/mervlan_manager.lock"
+	merv_owner_lock_state "$UPDATE_RC3_MANAGER_BARRIER_PATH" >/dev/null 2>&1 || {
+		update_rc3_publication_barrier_action_release || :
+		return 1
+	}
+	[ "${MERV_OWNER_LOCK_STATE:-unknown}" = "absent" ] || {
+		update_rc3_publication_barrier_action_release || :
+		return 1
+	}
+	# Zero retries make a live or unknown Manager owner a hard prepublication
+	# refusal. The action lock is acquired first, matching Manager lock order,
+	# so an admitted legacy Manager cannot wait behind this runtime barrier.
+	merv_owner_lock_acquire "$UPDATE_RC3_MANAGER_BARRIER_PATH" 420 0 \
+		rc3-repair-manager-barrier || {
+		update_rc3_publication_barrier_action_release || :
+		return 1
+	}
+	UPDATE_RC3_MANAGER_BARRIER_NONCE="${MERV_LOCK_NONCE:-}"
+	if [ -z "$UPDATE_RC3_MANAGER_BARRIER_NONCE" ] ||
+	   ! merv_owner_lock_owner_matches "$UPDATE_RC3_MANAGER_BARRIER_PATH" \
+	     "$UPDATE_RC3_MANAGER_BARRIER_NONCE"; then
+		update_mark_recovery_required
+		error -c cli,vlan "RC3 Repair could not authenticate its Manager publication barrier; maintenance state retained"
+		return 1
+	fi
+	UPDATE_RC3_MANAGER_BARRIER_OWNED="1"
+	info -c cli,vlan "RC3 Repair Manager publication barrier acquired under Update maintenance ownership"
+	return 0
+}
+
+update_rc3_publication_barrier_release_manager() {
+	[ "${UPDATE_RC3_MANAGER_BARRIER_OWNED:-0}" = "1" ] || return 0
+	merv_owner_lock_release "$UPDATE_RC3_MANAGER_BARRIER_PATH" \
+		"$UPDATE_RC3_MANAGER_BARRIER_NONCE" || return 1
+	UPDATE_RC3_MANAGER_BARRIER_OWNED="0"
+	UPDATE_RC3_MANAGER_BARRIER_NONCE=""
+	return 0
+}
+
+update_rc3_publication_barrier_action_release() {
+	[ "${UPDATE_RC3_ACTION_BARRIER_RELEASE:-0}" = "1" ] || return 0
+	merv_action_lock_leave "$UPDATE_RC3_ACTION_BARRIER_PATH" \
+		"$UPDATE_RC3_ACTION_BARRIER_NONCE" "$UPDATE_RC3_ACTION_BARRIER_START" self || return 1
+	UPDATE_RC3_ACTION_BARRIER_RELEASE="0"
+	UPDATE_RC3_ACTION_BARRIER_NONCE=""
+	UPDATE_RC3_ACTION_BARRIER_START=""
+	UPDATE_RC3_ACTION_BARRIER_MODE="none"
+	return 0
+}
+# END MERVLAN_UPDATE_RC3_MANAGER_PUBLICATION_BARRIER
+
 update_rc3_context_valid() {
 	if [ "${MERV_UPDATE_RC3_TEST_ONLY:-0}" = 1 ]; then
 		case "$MERV_BASE" in /tmp/mervlan_lean_fixture.*/addon) : ;; *) return 1 ;; esac
@@ -1159,6 +1257,7 @@ update_run_rc3_repair_candidate() {
 	cp "$UPDATE_RC3_REPAIR_INPUT" "$UPDATE_RC3_REPAIR_ENGINE" && chmod 700 "$UPDATE_RC3_REPAIR_ENGINE" || fail_update rc3_candidate "Could not prepare private candidate copy"
 	_update_rc3_copied_sha=$(update_rc3_candidate_sha256 "$UPDATE_RC3_REPAIR_ENGINE") || fail_update rc3_candidate "Could not hash the private candidate copy"
 	[ "$_update_rc3_copied_sha" = "$UPDATE_RC3_REPAIR_SHA256" ] || fail_update rc3_candidate "Private candidate copy hash changed"
+	update_rc3_publication_barrier_acquire || fail_update rc3_manager_barrier "Could not establish exclusive Manager/action locks before RC3 Repair publication"
 	info -c cli,vlan "Starting RC3 Repair candidate as a child of the authenticated Update owner"
 	UPDATE_RC3_REPAIR_CHILD_ACTIVE=1
 	if [ "${MERV_UPDATE_RC3_TEST_ONLY:-0}" = 1 ]; then
@@ -1290,6 +1389,19 @@ update_run_rc3_repair_candidate() {
 		return 1
 	fi
 	UPDATE_MAINTENANCE_LOCK_OWNED=0
+	# Keep both existing publication barriers until Update maintenance has
+	# ended. A legacy Manager that honors only mervlan_manager.lock may already
+	# be waiting there; it must not wake while quiescence is still active.
+	if ! update_rc3_publication_barrier_release_manager; then
+		update_mark_recovery_required
+		update_record_phase finalization-failed rc3_manager_barrier_release_failed || :
+		return 1
+	fi
+	if ! update_rc3_publication_barrier_action_release; then
+		update_mark_recovery_required
+		update_record_phase finalization-failed rc3_action_barrier_release_failed || :
+		return 1
+	fi
 	trap - EXIT INT TERM
 	if [ "$UPDATE_RC3_TERMINAL" = published ]; then
 		info -c cli,vlan "RC3 Repair published 57 files; all 58 entries verified and the production Repair entrypoint remained unchanged; durable backup retained at $UPDATE_BACKUP_FINAL"
@@ -1631,6 +1743,15 @@ cleanup_tmp() {
 		if [ "$UPDATE_PRESERVE_TMP" != "1" ] && [ -n "$TMP_BASE" ] && [ -d "$TMP_BASE" ]; then
 			rm -rf "$TMP_BASE" 2>/dev/null || _update_cleanup_failed=1
 		fi
+		if [ "${UPDATE_RC3_MANAGER_BARRIER_OWNED:-0}" = "1" ] &&
+		   [ "${UPDATE_SUCCESS_FINALIZING:-0}" != "1" ] &&
+		   [ "$UPDATE_RECOVERY_REQUIRED" != "1" ]; then
+			if ! update_rc3_publication_barrier_release_manager; then
+				_update_cleanup_failed=1
+				update_mark_recovery_required
+				error -c cli,vlan "Update cleanup could not release the RC3 Manager publication barrier; maintenance and recovery state retained"
+			fi
+		fi
 		if [ "$UPDATE_MAINTENANCE_LOCK_OWNED" = "1" ] &&
 		   [ "${UPDATE_SUCCESS_FINALIZING:-0}" != "1" ] &&
 		   [ "$UPDATE_RECOVERY_REQUIRED" != "1" ]; then
@@ -1640,6 +1761,15 @@ cleanup_tmp() {
 			else
 				_update_cleanup_failed=1
 				error -c cli,vlan "Update cleanup could not release the maintenance owner lock; recovery is required"
+			fi
+		fi
+		if [ "${UPDATE_RC3_ACTION_BARRIER_RELEASE:-0}" = "1" ] &&
+		   [ "${UPDATE_SUCCESS_FINALIZING:-0}" != "1" ] &&
+		   [ "$UPDATE_RECOVERY_REQUIRED" != "1" ]; then
+			if ! update_rc3_publication_barrier_action_release; then
+				_update_cleanup_failed=1
+				update_mark_recovery_required
+				error -c cli,vlan "Update cleanup could not release the RC3 action publication barrier"
 			fi
 		fi
 	else
