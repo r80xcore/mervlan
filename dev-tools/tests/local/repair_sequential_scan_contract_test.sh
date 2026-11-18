@@ -15,7 +15,13 @@ awk '
   !boundary { print }
   END { if (entry != 1) exit 1 }
 ' "$ENGINE" >"$WORK/functions.sh" || fail 'could not isolate Repair function definitions'
-grep -Fq 'owner_ok && scan_processes || {' "$ENGINE" ||
+awk '
+  /^publish_batch\(\) \{$/ { batch = 1 }
+  batch && /^}/ { batch = 0 }
+  batch && index($0, "owner_ok && scan_processes || return 1") { scan = NR }
+  batch && index($0, "mv -f \"$_pu_tmp\" \"$_pu_target\"") { rename = NR }
+  END { if (!scan || !rename || scan >= rename) exit 1 }
+' "$ENGINE" ||
   fail 'publication does not recheck owner and legacy mutators before rename'
 
 cat >"$WORK/driver.sh" <<'DRIVER'

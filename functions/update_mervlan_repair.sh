@@ -703,6 +703,7 @@ stage_files() {
     count=$((count+1))
   done <"$COHORT"
   [ "$count" -eq 58 ] || return 1
+  STAGED_BYTES=$size
   status STAGING "complete files=$count bytes=$size"
 }
 mode_ok() {
@@ -739,13 +740,6 @@ sha256_file() {
   fi
   sha_valid "$_sf_hash" || return 1
   printf '%s\n' "$_sf_hash"
-}
-path_in_contract() {
-  _pic_want="$1" _pic_found=0
-  while IFS=' ' read -r _pic_mode _pic_rel; do
-    [ "$_pic_rel" = "$_pic_want" ] && _pic_found=1
-  done <"$COHORT"
-  [ "$_pic_found" -eq 1 ]
 }
 repair_test_fault() {
   [ "${MERV_REPAIR_TEST_ONLY:-0}" = 1 ] || return 1
@@ -838,7 +832,7 @@ backup_payload_verify() {
   while IFS=' ' read -r _bpv_newmode _bpv_rel; do
     IFS='|' read -r _bpv_kind _bpv_oldmode _bpv_size _bpv_oldhash _bpv_newhash _bpv_path <&3 || { exec 3<&-; return 1; }
     [ "$_bpv_rel" = "$_bpv_path" ] && sha_valid "$_bpv_newhash" || { exec 3<&-; return 1; }
-    if [ -d "${STAGE:-/nonexistent}" ]; then
+    if [ "${1:-}" = verify-stage ]; then
       path_regular "$STAGE/$_bpv_rel" || { exec 3<&-; return 1; }
       _bpv_stage_hash=$(sha256_file "$STAGE/$_bpv_rel") || { exec 3<&-; return 1; }
       [ "$_bpv_stage_hash" = "$_bpv_newhash" ] || { exec 3<&-; return 1; }
@@ -872,44 +866,65 @@ backup_payload_verify() {
   return 0
 }
 journal_validate() {
+  JOURNAL_STATE=
   [ -n "$LEDGER" ] && path_regular "$LEDGER" || return 1
   _jv_size=$(wc -c <"$LEDGER" 2>/dev/null | tr -d ' ') || return 1
   case "$_jv_size" in ''|*[!0-9]*) return 1 ;; esac
   [ "$_jv_size" -le 16384 ] || return 1
-  _jv_n=0 _jv_first=1 JOURNAL_STATE= _jv_done=0
-  while IFS= read -r _jv_line || [ -n "$_jv_line" ]; do
-    _jv_n=$((_jv_n + 1)); [ "$_jv_n" -le 120 ] || return 1
-    if [ "$_jv_first" -eq 1 ]; then
-      [ "$_jv_line" = format=1 ] || return 1
-      _jv_first=0
-      continue
-    fi
-    case "$_jv_line" in
-      state=prepared|state=publishing|state=committed|state=rolled-back)
-        JOURNAL_STATE=${_jv_line#state=} ;;
-      pending\|*|done\|*)
-        _jv_rel=${_jv_line#*|}
-        valid_rel "$_jv_rel" && path_in_contract "$_jv_rel" || return 1
-        case "$_jv_line" in done\|*) _jv_done=$((_jv_done + 1)) ;; esac
-        ;;
-      *) return 1 ;;
-    esac
-  done <"$LEDGER"
-  [ "$_jv_first" -eq 0 ] && [ -n "$JOURNAL_STATE" ] || return 1
-  awk -F '|' '$1=="pending" && p[$2]++ {exit 1} $1=="done" && d[$2]++ {exit 1}' "$LEDGER" >/dev/null 2>&1 || return 1
-  if [ "$JOURNAL_STATE" = committed ]; then [ "$_jv_done" -eq 58 ] || return 1; fi
-  if [ "$JOURNAL_STATE" = prepared ]; then [ "$_jv_done" -eq 0 ] && [ "$_jv_n" -eq 2 ] || return 1; fi
-  return 0
+  # BusyBox awk can treat a NUL as a record separator.
+  tr -d '\000' <"$LEDGER" | cmp -s "$LEDGER" - || return 1
+  # Index the embedded cohort once per validation. Exact record keys also
+  # reject extra separators, whitespace and paths outside the contract.
+  JOURNAL_STATE=$(awk '
+    function reject() { invalid = 1; exit 1 }
+    FILENAME == ARGV[1] {
+      allowed["pending|" $2] = allowed["done|" $2] = 1
+      next
+    }
+    FNR > 120 { reject() }
+    FNR == 1 {
+      if ($0 != "format=1") reject()
+      next
+    }
+    /^state=(prepared|publishing|committed|rolled-back)$/ {
+      state = substr($0, 7)
+      next
+    }
+    {
+      if (!($0 in allowed) || seen[$0]++) reject()
+      if (substr($0, 1, 5) == "done|") completed++
+    }
+    END {
+      if (invalid || state == "" ||
+          (state == "committed" && completed != 58) ||
+          (state == "prepared" && FNR != 2)) exit 1
+      print state
+    }
+  ' "$COHORT" "$LEDGER" 2>/dev/null) || return 1
 }
 journal_append() {
   _ja_line="$1"
-  [ -n "$LEDGER" ] || return 1
-  if path_present "$LEDGER"; then path_regular "$LEDGER" && journal_validate || return 1; fi
+  journal_validate || return 1
   JOURNAL_SEQ=$((JOURNAL_SEQ + 1))
   _ja_tmp="$LEDGER.tmp.$$.$JOURNAL_SEQ"
   (umask 077
-    [ ! -f "$LEDGER" ] || cat "$LEDGER"
-    printf '%s\n' "$_ja_line"
+    cat "$LEDGER" || exit 1
+    # Intent covers the complete verified index. Completion is emitted only
+    # after all destinations have passed final verification and the data flush.
+    _ja_record=
+    case "$_ja_line" in
+      state=publishing) printf '%s\n' "$_ja_line" || exit 1; _ja_record=pending ;;
+      state=committed) _ja_record=done ;;
+    esac
+    if [ -n "$_ja_record" ]; then
+      _ja_n=0
+      while IFS=' ' read -r _ja_mode _ja_path; do
+        printf '%s|%s\n' "$_ja_record" "$_ja_path" || exit 1
+        _ja_n=$((_ja_n + 1))
+      done <"$COHORT" || exit 1
+      [ "$_ja_n" -eq 58 ] || exit 1
+    fi
+    if [ "$_ja_line" != state=publishing ]; then printf '%s\n' "$_ja_line"; fi
   ) >"$_ja_tmp" 2>/dev/null || { rm -f "$_ja_tmp" 2>/dev/null || :; return 1; }
   chmod 600 "$_ja_tmp" && mv -f "$_ja_tmp" "$LEDGER" 2>/dev/null || {
     rm -f "$_ja_tmp" 2>/dev/null || :
@@ -967,7 +982,7 @@ backup_verify() {
   path_regular "$INDEX_FILE" && [ "$(mode_value "$INDEX_FILE")" = -rw------- ] || return 1
   path_regular "$RECOVERY_HELPER" && [ "$(mode_value "$RECOVERY_HELPER")" = -rwx------ ] || return 1
   path_regular "$READY_FILE" && [ "$(mode_value "$READY_FILE")" = -rw------- ] || return 1
-  backup_payload_verify || return 1
+  backup_payload_verify "$@" || return 1
   _bv_contract=$(sha256_file "$MANIFEST") || return 1
   _bv_index=$(sha256_file "$INDEX_FILE") || return 1
   _bv_helper=$(sha256_file "$RECOVERY_HELPER") || return 1
@@ -1177,47 +1192,73 @@ restore_transaction() {
   status ROLLBACK 'all manifest targets match original bytes, modes and absent states'
   return 0
 }
-publication() {
-  backup_verify || return 1
-  journal_append state=publishing || return 1
-  TX=1
+publish_batch() {
+  # All siblings in the batch are verified and flushed before any rename.
   sync || return 1
-  exec 3<"$INDEX_FILE" || return 1
-  while IFS=' ' read -r _pb_mode _pb_rel; do
-    IFS='|' read -r _pb_kind _pb_oldmode _pb_size _pb_oldhash _pb_newhash _pb_path <&3 || { exec 3<&-; return 1; }
-    [ "$_pb_rel" = "$_pb_path" ] || { exec 3<&-; return 1; }
-    _pb_target="$MERV_BASE/$_pb_rel" _pb_source="$STAGE/$_pb_rel"
-    safe_chain "${_pb_target%/*}" && ensure_dir "${_pb_target%/*}" || { exec 3<&-; return 1; }
-    case "$_pb_kind" in
-      old) regular "$_pb_target" && [ "$(sha256_file "$_pb_target" 2>/dev/null)" = "$_pb_oldhash" ] &&
-             [ "$(mode_value "$_pb_target" 2>/dev/null)" = "$_pb_oldmode" ] || { exec 3<&-; return 1; } ;;
-      new) exists "$_pb_target" && { exec 3<&-; return 1; } ;;
-      *) exec 3<&-; return 1 ;;
+  while [ "$#" -gt 0 ]; do
+    _pu_mode=$1 _pu_rel=$2
+    shift 2
+    IFS='|' read -r _pu_kind _pu_oldmode _pu_size _pu_oldhash _pu_newhash _pu_path <&4 || return 1
+    [ "$_pu_rel" = "$_pu_path" ] || return 1
+    _pu_target="$MERV_BASE/$_pu_rel"
+    _pu_tmp="$_pu_target.mervlan-repair.$TXN_ID.publish.part"
+    safe_chain "${_pu_target%/*}" && regular "$_pu_tmp" &&
+      cmp -s "$STAGE/$_pu_rel" "$_pu_tmp" && mode_ok "$_pu_mode" "$_pu_tmp" || return 1
+    case "$_pu_kind" in
+      old) regular "$_pu_target" && [ "$(sha256_file "$_pu_target" 2>/dev/null)" = "$_pu_oldhash" ] &&
+             [ "$(mode_value "$_pu_target" 2>/dev/null)" = "$_pu_oldmode" ] || return 1 ;;
+      new) if exists "$_pu_target"; then return 1; fi ;;
+      *) return 1 ;;
     esac
-    _pb_tmp="$_pb_target.mervlan-repair.$TXN_ID.publish.part"
-    exists "$_pb_tmp" && { exec 3<&-; return 1; }
-    cp "$_pb_source" "$_pb_tmp" && chmod "$_pb_mode" "$_pb_tmp" || { exec 3<&-; return 1; }
-    regular "$_pb_tmp" && [ "$(sha256_file "$_pb_tmp" 2>/dev/null)" = "$_pb_newhash" ] &&
-      mode_ok "$_pb_mode" "$_pb_tmp" || { exec 3<&-; return 1; }
-    journal_append "pending|$_pb_rel" || { exec 3<&-; return 1; }
-    sync || { exec 3<&-; return 1; }
-    owner_ok && scan_processes || { exec 3<&-; return 1; }
+    owner_ok && scan_processes || return 1
     if repair_test_fault "${MERV_REPAIR_TEST_PAUSE_AT:-}" "$((PUBLISHED+1))"; then sleep 30; fi
-    repair_test_fault "${MERV_REPAIR_TEST_FAIL_AT:-}" "$((PUBLISHED+1))" && { exec 3<&-; return 1; }
-    mv -f "$_pb_tmp" "$_pb_target" || { exec 3<&-; return 1; }
-    regular "$_pb_target" && [ "$(sha256_file "$_pb_target" 2>/dev/null)" = "$_pb_newhash" ] &&
-      mode_ok "$_pb_mode" "$_pb_target" || { exec 3<&-; return 1; }
-    repair_test_fault "${MERV_REPAIR_TEST_FAIL_AFTER_AT:-}" "$((PUBLISHED+1))" && { exec 3<&-; return 1; }
-    journal_append "done|$_pb_rel" || { exec 3<&-; return 1; }
+    repair_test_fault "${MERV_REPAIR_TEST_FAIL_AT:-}" "$((PUBLISHED+1))" && return 1
+    mv -f "$_pu_tmp" "$_pu_target" || return 1
+    regular "$_pu_target" && [ "$(sha256_file "$_pu_target" 2>/dev/null)" = "$_pu_newhash" ] &&
+      mode_ok "$_pu_mode" "$_pu_target" || return 1
+    repair_test_fault "${MERV_REPAIR_TEST_FAIL_AFTER_AT:-}" "$((PUBLISHED+1))" && return 1
     PUBLISHED=$((PUBLISHED + 1))
     VERIFIED=$((VERIFIED + 1))
     if [ $((PUBLISHED % 10)) -eq 0 ] || [ "$PUBLISHED" -eq 58 ]; then
       status PUBLISH "replaced=$PUBLISHED verified=$VERIFIED/58"
     fi
+  done
+}
+prepare_publication() {
+  set --
+  while IFS=' ' read -r _pb_mode _pb_rel; do
+    IFS='|' read -r _pb_kind _pb_oldmode _pb_size _pb_oldhash _pb_newhash _pb_path <&3 || return 1
+    [ "$_pb_rel" = "$_pb_path" ] || return 1
+    _pb_target="$MERV_BASE/$_pb_rel" _pb_source="$STAGE/$_pb_rel"
+    safe_chain "${_pb_target%/*}" && ensure_dir "${_pb_target%/*}" || return 1
+    _pb_tmp="$_pb_target.mervlan-repair.$TXN_ID.publish.part"
+    exists "$_pb_tmp" && return 1
+    cp "$_pb_source" "$_pb_tmp" && chmod "$_pb_mode" "$_pb_tmp" || return 1
+    regular "$_pb_tmp" && [ "$(sha256_file "$_pb_tmp" 2>/dev/null)" = "$_pb_newhash" ] &&
+      mode_ok "$_pb_mode" "$_pb_tmp" || return 1
+    set -- "$@" "$_pb_mode" "$_pb_rel"
+    if [ "$_pb_batch" -eq 1 ]; then
+      publish_batch "$@" || return 1
+      set --
+    fi
   done <"$COHORT"
-  exec 3<&-
-  [ "$PUBLISHED" -eq 58 ] && [ "$VERIFIED" -eq 58 ] || return 1
-  return 0
+  if [ "$#" -gt 0 ]; then publish_batch "$@" || return 1; fi
+  [ "$PUBLISHED" -eq 58 ] && [ "$VERIFIED" -eq 58 ]
+}
+publication() {
+  # Preserve the ordinary flash floor and allow 1 MiB for batch metadata.
+  # With less spare space, keep the original one-sibling footprint.
+  _pb_batch=1
+  if [ "$flashfree" -ge "$((REPAIR_MIN_DEST_FREE_KIB + 1024 + (STAGED_BYTES + 1023) / 1024))" ]; then
+    _pb_batch=58
+    backup_verify || return 1
+  else
+    backup_verify verify-stage || return 1
+  fi
+  journal_append state=publishing || return 1
+  TX=1
+  sync || return 1
+  prepare_publication 3<"$INDEX_FILE" 4<"$INDEX_FILE"
 }
 final_verify() {
   owner_ok && scan_processes || return 1
@@ -1298,7 +1339,7 @@ repair_handoff_write() {
       "$REF" "$ROOT" "$$" "$HANDOFF_START" >"$_rhw_tmp"
   ) || return 1
   chmod 600 "$_rhw_tmp" && mv -f "$_rhw_tmp" "$HANDOFF_FILE" || return 1
-  sync || return 1
+  # The same PID consumes this scratch handoff immediately, before any transaction.
   exec /bin/sh "$_rhw_engine" --continue "$WORK"
 }
 repair_handoff_adopt() {

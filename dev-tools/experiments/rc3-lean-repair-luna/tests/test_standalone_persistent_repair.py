@@ -141,8 +141,14 @@ printf '%s\\n' "$count" >"$MERV_REPAIR_SYNC_COUNTER"
     def start(self, extra=None):
         env = self.env.copy()
         env.update(extra or {})
+        if env.get('MERV_REPAIR_TEST_PAUSE_AT'):
+            pause = self.fakebin / 'sleep'
+            pause.write_text('#!/bin/sh\n: >"$TEST_PAUSE_MARKER"\nexec /bin/sleep "$@"\n')
+            pause.chmod(0o755)
+            env['TEST_PAUSE_MARKER'] = str(self.root / 'publication.paused')
         return subprocess.Popen(['/bin/sh', str(ENGINE), REF], env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
 
     def bundle(self):
         found = list(self.backups.glob('mervlan.repair.*'))
@@ -245,16 +251,16 @@ done
     return real
 
 
-def wait_for_pending_and_kill(f, proc, nth):
+def wait_for_pending_and_kill(f, proc):
     deadline = time.time() + 45
     while time.time() < deadline:
-        bundles = list(f.backups.glob('mervlan.repair.*'))
-        if bundles and (bundles[0] / 'journal').exists():
-            journal = (bundles[0] / 'journal').read_text(errors='replace')
-            if 'state=publishing\n' in journal and journal.count('done|') >= nth - 1 and 'pending|' in journal:
-                proc.send_signal(signal.SIGKILL)
-                proc.wait(timeout=10)
-                return bundles[0]
+        if (f.root / 'publication.paused').is_file():
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
+            bundle = f.bundle()
+            journal = (bundle / 'journal').read_text()
+            assert 'state=publishing\n' in journal and journal.count('pending|') == 58
+            return bundle
         if proc.poll() is not None:
             out, err = proc.communicate()
             raise AssertionError(f'repair exited before interruption gate: {proc.returncode}\n{err[-3000:]}')
@@ -577,7 +583,7 @@ def test_backup_sync_failure_stops_before_ready_or_publication():
     try:
         counter = f.root / 'sync.calls'
         r = f.run({'MERV_REPAIR_SYNC_COUNTER': str(counter),
-                   'MERV_REPAIR_SYNC_FAIL_AT': '2'})
+                   'MERV_REPAIR_SYNC_FAIL_AT': '1'})
         refused(r, 'persistent manifest backup failed; no installed files were replaced')
         f.assert_original()
         f.assert_protected()
@@ -594,7 +600,7 @@ def test_precommit_sync_failure_rolls_back():
     try:
         counter = f.root / 'sync.calls'
         r = f.run({'MERV_REPAIR_SYNC_COUNTER': str(counter),
-                   'MERV_REPAIR_SYNC_FAIL_AT': '63'})
+                   'MERV_REPAIR_SYNC_FAIL_AT': '5'})
         refused(r, 'could not durably flush verified replacement files')
         f.assert_original()
         f.assert_protected()
@@ -609,7 +615,7 @@ def test_final_commit_sync_failure_retains_verified_files_and_evidence():
     try:
         counter = f.root / 'sync.calls'
         r = f.run({'MERV_REPAIR_SYNC_COUNTER': str(counter),
-                   'MERV_REPAIR_SYNC_FAIL_AT': '64'})
+                   'MERV_REPAIR_SYNC_FAIL_AT': '6'})
         refused(r, 'could not durably finish the Repair transaction')
         f.assert_replaced()
         f.assert_protected()
@@ -624,7 +630,7 @@ def test_interruption_recovery_without_installed_helpers():
     f = Fixture()
     proc = f.start({'MERV_REPAIR_TEST_PAUSE_AT': '9'})
     try:
-        bundle = wait_for_pending_and_kill(f, proc, 9)
+        bundle = wait_for_pending_and_kill(f, proc)
         # Exercise a genuinely mixed state, then remove installed lifecycle helpers.
         changed = sum((f.base / rel).read_bytes() != data for rel, (data, _) in f.original.items())
         assert changed == 7, f'expected seven originally present files among the first eight publications, got {changed}'
@@ -649,7 +655,7 @@ def test_corrupt_backup_refuses_before_restore():
     f = Fixture()
     proc = f.start({'MERV_REPAIR_TEST_PAUSE_AT': '5'})
     try:
-        bundle = wait_for_pending_and_kill(f, proc, 5)
+        bundle = wait_for_pending_and_kill(f, proc)
         mixed_before = {rel: current_state(f, rel) for _, rel in FILES}
         original_file = bundle / 'original/functions/update_mervlan.sh'
         original_file.write_bytes(b'corrupted backup\n')
@@ -672,7 +678,7 @@ def test_unknown_publication_temporary_refuses_before_restore():
     f = Fixture()
     proc = f.start({'MERV_REPAIR_TEST_PAUSE_AT': '5'})
     try:
-        bundle = wait_for_pending_and_kill(f, proc, 5)
+        bundle = wait_for_pending_and_kill(f, proc)
         mixed_before = {rel: current_state(f, rel) for _, rel in FILES}
         _, rel = FILES[4]
         tmp = Path(str(f.base / rel) + f'.mervlan-repair.{bundle.name}.publish.part')
@@ -686,6 +692,255 @@ def test_unknown_publication_temporary_refuses_before_restore():
     finally:
         if proc.poll() is None:
             proc.kill(); proc.wait()
+        f.close()
+
+
+def test_journal_validator_rejects_corrupt_evidence():
+    with tempfile.TemporaryDirectory(prefix='mervlan-journal-test.') as directory:
+        root = Path(directory)
+        ledger = root / 'journal'
+        script = root / 'validate.sh'
+        script.write_bytes(ENGINE.read_bytes().split(b'\ntrap cleanup 0\n', 1)[0] +
+                           b'\nCOHORT=$1 LEDGER=$2\njournal_validate || exit 1\nprintf "%s\\n" "$JOURNAL_STATE"\n')
+        cohort = root / 'cohort'
+        cohort.write_bytes(b'\n'.join(MANIFEST.splitlines()[2:]) + b'\n')
+        prepared = b'format=1\nstate=prepared\n'
+        publishing = prepared + b'state=publishing\n'
+        records = b''.join(f'pending|{rel}\ndone|{rel}\n'.encode() for _, rel in FILES)
+        pending, done = records.splitlines(keepends=True)[:2]
+        malformed = (
+            b'', b'format=2\nstate=prepared\n', b'format=1\n',
+            prepared + pending, publishing + b'state=unknown\n',
+            publishing + b'pending|outside/manifest\n',
+            publishing + b'pending|./changelog.txt\n',
+            publishing + b'pending|changelog.txt|extra\n',
+            publishing + b'pending|changelog.txt \n',
+            publishing + pending + pending, publishing + done + done,
+            publishing + pending.rstrip(b'\n') + b'\0' + done,
+            publishing + b'state=committed\n',
+            publishing + records + b'state=committed\nstate=rolled-back\n',
+            publishing + b'x' * 16384,
+        )
+        expected = ((prepared, 'prepared'), (publishing + pending, 'publishing'),
+                    (publishing + records + b'state=committed', 'committed'),
+                    (publishing + records + b'state=rolled-back\n', 'rolled-back'))
+        for data, state in (*expected, *((data, None) for data in malformed)):
+            ledger.write_bytes(data)
+            result = subprocess.run(['/bin/sh', script, cohort, ledger], capture_output=True,
+                                    text=True, timeout=5)
+            assert (result.returncode == 0) == (state is not None), data[:160]
+            if state is not None:
+                assert result.stdout.strip() == state, result.stdout
+
+
+def test_journal_copy_failure_preserves_recoverable_prefix():
+    f = Fixture()
+    try:
+        cat = f.fakebin / 'cat'
+        cat.write_text("""#!/bin/sh
+case "${1:-}" in
+  */journal)
+    if [ ! -e "$TEST_COPY_FAILED" ] && grep -qx 'state=publishing' "$1"; then
+      : >"$TEST_COPY_FAILED"
+      printf 'format=1\\n'
+      exit 1
+    fi ;;
+esac
+exec /bin/cat "$@"
+""")
+        cat.chmod(0o755)
+        marker = f.root / 'copy-failed'
+        result = f.run({'TEST_COPY_FAILED': str(marker)})
+        refused(result, 'could not durably mark the verified repair committed')
+        assert marker.exists()
+        f.assert_original()
+        f.assert_protected()
+        journal = (f.bundle() / 'journal').read_text()
+        assert journal.count('pending|') == 58 and 'done|' not in journal
+        assert journal.endswith('state=rolled-back\n'), journal
+    finally:
+        f.close()
+
+
+def test_partial_sibling_creation_never_publishes_and_refuses_unknown_recovery():
+    for interruption in ('sigkill', 'allocation-failure'):
+        f = Fixture()
+        try:
+            cp = f.fakebin / 'cp'
+            if interruption == 'sigkill':
+                action = 'kill -KILL "$PPID"\nexit 99'
+            else:
+                action = 'exit 1'
+            cp.write_text('''#!/bin/sh
+dest=
+for arg do dest=$arg; done
+case "$dest" in
+  *.publish.part)
+    printf 'partial sibling fixture\\n' >"$dest" || exit 2
+    ACTION
+    ;;
+esac
+exec /bin/cp "$@"
+'''.replace('ACTION', action))
+            cp.chmod(0o755)
+            result = f.run()
+            if interruption == 'sigkill':
+                assert result.returncode == -signal.SIGKILL, (result.returncode, result.stderr[-2000:])
+            else:
+                refused(result, 'publication failed')
+                assert 'synchronous rollback incomplete' in result.stderr
+
+            bundle = f.bundle()
+            journal = (bundle / 'journal').read_text()
+            assert journal.count('pending|') == 58 and 'done|' not in journal
+            assert 'state=publishing\n' in journal
+            siblings = list(f.base.glob('**/*.publish.part'))
+            assert len(siblings) == 1 and siblings[0].read_bytes() == b'partial sibling fixture\n'
+            f.assert_original()
+            f.assert_protected()
+            if interruption == 'allocation-failure':
+                assert not list(f.locks.iterdir()), 'Repair left a lock owned after staging failure'
+
+            f.reboot_tmp()
+            recovery = subprocess.run(['/bin/sh', bundle / 'recover.sh', 'recover', bundle.name],
+                                      env=f.env, capture_output=True, text=True, timeout=60)
+            refused(recovery, 'unknown or unsafe destination state')
+            assert siblings[0].exists(), 'unknown sibling evidence was removed'
+            f.assert_original()
+            f.assert_protected()
+        finally:
+            f.close()
+
+
+def test_interruption_at_durable_transaction_boundaries():
+    for gate in ('before-ready', 'after-ready', 'before-rename', 'after-rename',
+                 'between-files', 'before-batch-flush', 'damaged-preflush',
+                 'before-commit', 'during-rollback'):
+        f = Fixture()
+        try:
+            sync = f.fakebin / 'sync'
+            sync_real = f.fakebin / 'sync.real'
+            sync.rename(sync_real)
+            sync.write_text("""#!/bin/sh
+"$TEST_BIN/sync.real" "$@" || exit $?
+read count <"$MERV_REPAIR_SYNC_COUNTER" || exit 2
+case "$TEST_GATE:$count" in
+  before-ready:1|after-ready:2|before-batch-flush:4|damaged-preflush:4|before-commit:5)
+    kill -KILL "$PPID" ;;
+esac
+""")
+            sync.chmod(0o755)
+            mv = f.fakebin / 'mv'
+            mv.write_text("""#!/bin/sh
+for dest do :; done
+case "$TEST_GATE:$dest" in
+  before-rename:*/changelog.txt|between-files:*/mervlan.asp)
+    kill -KILL "$PPID"
+    exit 1 ;;
+esac
+/bin/mv "$@" || exit $?
+case "$TEST_GATE:$dest" in
+  after-rename:*/changelog.txt|during-rollback:*/mervlan.asp)
+    # The rollback case only matches the restore rename.
+    case "$TEST_GATE:$*" in
+      after-rename:*|during-rollback:*.restore.part*) kill -KILL "$PPID" ;;
+    esac ;;
+esac
+""")
+            mv.chmod(0o755)
+            extra = {'TEST_GATE': gate, 'TEST_BIN': str(f.fakebin),
+                     'MERV_REPAIR_SYNC_COUNTER': str(f.root / 'sync.calls')}
+            if gate == 'during-rollback':
+                extra['MERV_REPAIR_TEST_FAIL_AFTER_AT'] = '9'
+            result = f.run(extra)
+            assert result.returncode == -signal.SIGKILL, (gate, result.stderr)
+            bundle = f.bundle()
+            journal = (bundle / 'journal').read_text()
+            if gate not in ('before-ready', 'after-ready'):
+                assert journal.count('pending|') == 58
+                assert 'done|' not in journal and 'state=committed' not in journal
+            if gate in ('before-ready', 'after-ready'):
+                assert journal.endswith('state=prepared\n')
+                f.assert_original()
+            elif gate in ('before-rename', 'after-rename'):
+                assert (f.base / 'changelog.txt').exists() == (gate == 'after-rename')
+            elif gate == 'between-files':
+                assert (f.base / 'changelog.txt').is_file()
+            elif gate in ('before-batch-flush', 'damaged-preflush'):
+                assert len(list(f.base.glob('**/*.publish.part'))) == 58
+                f.assert_original()
+                if gate == 'damaged-preflush':
+                    next(f.base.glob('**/*.publish.part')).write_bytes(b'partial synthetic sibling\n')
+            elif gate == 'before-commit':
+                f.assert_replaced()
+            else:
+                assert current_state(f, 'mervlan.asp') == f.original['mervlan.asp'][0]
+            mv.unlink()
+            sync_real.replace(sync)
+            f.reboot_tmp()
+            recovery = subprocess.run(['/bin/sh', bundle / 'recover.sh', 'recover', bundle.name],
+                                      env=f.env, capture_output=True, text=True, timeout=60)
+            if gate == 'before-ready':
+                refused(recovery, 'backup is incomplete or corrupt')
+            elif gate == 'damaged-preflush':
+                refused(recovery, 'unknown or unsafe destination state')
+                refused(f.run(), 'persistent manifest backup failed')
+            else:
+                ok(recovery)
+                assert (bundle / 'journal').read_text().endswith('state=rolled-back\n')
+            f.assert_original()
+            f.assert_protected()
+        finally:
+            f.close()
+
+
+def test_low_flash_keeps_one_sibling_barrier():
+    f = Fixture()
+    try:
+        df = f.fakebin / 'df'
+        df.write_text("""#!/bin/sh
+if [ "$2" = "$MERV_BASE" ]; then
+  printf 'Filesystem Blocks Used Available Capacity Mounted\\nfixture 20000 11296 8704 57%% /fixture\\n'
+else
+  exec /bin/df "$@"
+fi
+""")
+        df.chmod(0o755)
+        counter = f.root / 'sync.calls'
+        result = f.run({'MERV_REPAIR_SYNC_COUNTER': str(counter)})
+        ok(result)
+        assert int(counter.read_text()) == 63
+        f.assert_replaced()
+        f.assert_protected()
+    finally:
+        f.close()
+
+
+def test_legacy_writer_appearing_between_batch_renames():
+    f = Fixture()
+    try:
+        mv = f.fakebin / 'mv'
+        mv.write_text("""#!/bin/sh
+for dest do :; done
+/bin/mv "$@" || exit $?
+if [ "$dest" = "$MERV_BASE/changelog.txt" ]; then
+  mkdir "$MERV_REPAIR_PROC_ROOT/987655" || exit 1
+  printf '%s\\000' "$MERV_BASE/functions/update_mervlan.sh" >"$MERV_REPAIR_PROC_ROOT/987655/cmdline"
+fi
+""")
+        mv.chmod(0o755)
+        refused(f.run(), 'publication failed')
+        assert (f.base / 'changelog.txt').is_file()
+        assert current_state(f, 'mervlan.asp') == f.original['mervlan.asp'][0]
+        shutil.rmtree(f.proc / '987655')
+        f.reboot_tmp()
+        bundle = f.bundle()
+        recovery = subprocess.run(['/bin/sh', bundle / 'recover.sh', 'recover', bundle.name],
+                                  env=f.env, capture_output=True, text=True, timeout=60)
+        ok(recovery)
+        f.assert_original()
+        f.assert_protected()
+    finally:
         f.close()
 
 
@@ -706,7 +961,7 @@ def test_legacy_writer_conflict_and_missing_ready():
     g = Fixture()
     proc = g.start({'MERV_REPAIR_TEST_PAUSE_AT': '4'})
     try:
-        bundle = wait_for_pending_and_kill(g, proc, 4)
+        bundle = wait_for_pending_and_kill(g, proc)
         mixed_before = {rel: current_state(g, rel) for _, rel in FILES}
         (bundle / 'READY').unlink()
         g.reboot_tmp()
@@ -777,6 +1032,12 @@ def main():
         test_interruption_recovery_without_installed_helpers,
         test_corrupt_backup_refuses_before_restore,
         test_unknown_publication_temporary_refuses_before_restore,
+        test_journal_validator_rejects_corrupt_evidence,
+        test_journal_copy_failure_preserves_recoverable_prefix,
+        test_partial_sibling_creation_never_publishes_and_refuses_unknown_recovery,
+        test_interruption_at_durable_transaction_boundaries,
+        test_low_flash_keeps_one_sibling_barrier,
+        test_legacy_writer_appearing_between_batch_renames,
         test_legacy_writer_conflict_and_missing_ready,
         test_owner_format_matches_canonical_library,
     ]
