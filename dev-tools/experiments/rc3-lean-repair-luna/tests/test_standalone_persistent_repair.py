@@ -191,6 +191,60 @@ def refused(result, text=None):
         assert text in result.stderr, f'missing refusal {text!r}: {result.stderr[-2500:]}'
 
 
+def make_live_lock(path, pid=None, nonce='fixture-live-owner', sidecars=True):
+    pid = pid or os.getpid()
+    stat = Path(f'/proc/{pid}/stat').read_text()
+    start = stat.rsplit(')', 1)[1].split()[19]
+    now = str(int(time.time()))
+    values = {
+        'pid': str(pid), 'proc_start_time': start,
+        'owner_nonce': nonce, 'created': now, 'heartbeat': now,
+    }
+    path.mkdir(mode=0o700)
+    (path / 'owner').write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+    (path / 'owner').chmod(0o600)
+    if sidecars:
+        for key, value in values.items():
+            sidecar = path / key
+            sidecar.write_text(value + '\n')
+            sidecar.chmod(0o600)
+    return values
+
+
+def install_mv_injector(f):
+    wrapper = f.fakebin / 'mv'
+    wrapper.write_text('''#!/bin/sh
+dest=
+for arg do dest=$arg; done
+/bin/mv "$@" || exit $?
+if [ -n "${MERV_TEST_DROP_SELF_STAT:-}" ] && [ "$dest" = "${MERV_TEST_ACTION_OWNER_DEST:-}" ]; then
+  pid=$(cat "$MERV_TEST_PID_FILE") || exit 2
+  rm -f "$MERV_TEST_OWNER_PROC_ROOT/$pid/stat"
+fi
+if [ -n "${MERV_TEST_DROP_ACTION_OWNER:-}" ] && [ "$dest" = "${MERV_TEST_MANAGER_OWNER_DEST:-}" ]; then
+  rm -f "$MERV_TEST_ACTION_OWNER_DEST"
+fi
+''')
+    wrapper.chmod(0o755)
+
+
+def gate_curl_until_owner_proc_ready(f):
+    real = f.fakebin / 'curl.real'
+    (f.fakebin / 'curl').rename(real)
+    wrapper = f.fakebin / 'curl'
+    wrapper.write_text('''#!/bin/sh
+"$MERV_TEST_REAL_CURL" "$@" || exit $?
+waited=0
+while [ ! -e "$MERV_TEST_CURL_GATE" ]; do
+  waited=$((waited + 1))
+  [ "$waited" -lt 1000 ] || exit 124
+  sleep 0.01
+done
+''')
+    wrapper.chmod(0o755)
+    return real
+
+
 def wait_for_pending_and_kill(f, proc, nth):
     deadline = time.time() + 45
     while time.time() < deadline:
@@ -226,6 +280,7 @@ def test_success_and_observation():
         (f.locks / 'client_observation.lock').mkdir()
         r = f.run()
         ok(r)
+        assert 'ADMISSION' in r.stderr and 'action, maintenance and Manager ownership acquired' in r.stderr
         f.assert_replaced()
         f.assert_protected()
         bundle = f.bundle()
@@ -257,6 +312,7 @@ def test_lock_conflict_refuses_without_stealing():
         before = {rel: (f.base / rel).read_bytes() for rel in f.original}
         r = f.run()
         refused(r, 'action, maintenance or Manager ownership is unavailable')
+        assert 'admission=manager_lock_failed reason=owner_record_incomplete' in r.stderr
         assert lock.is_dir() and (lock / 'pid').read_text() == '999999\n'
         for rel, data in before.items():
             assert (f.base / rel).read_bytes() == data
@@ -267,26 +323,215 @@ def test_lock_conflict_refuses_without_stealing():
     f = Fixture()
     try:
         lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
-        lock.mkdir(mode=0o700)
-        stat = Path(f'/proc/{os.getpid()}/stat').read_text()
-        start = stat.rsplit(')', 1)[1].split()[19]
-        now = str(int(time.time()))
-        values = {
-            'pid': str(os.getpid()), 'proc_start_time': start,
-            'owner_nonce': 'fixture-live-owner', 'created': now, 'heartbeat': now,
-        }
-        (lock / 'owner').write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
-        for key, value in values.items():
-            (lock / key).write_text(value + '\n')
-        for path in lock.iterdir():
-            path.chmod(0o600)
+        make_live_lock(lock)
         before = {rel: (f.base / rel).read_bytes() for rel in f.original}
         r = f.run()
         refused(r, 'action, maintenance or Manager ownership is unavailable')
-        assert (lock / 'owner').is_file() and (lock / 'pid').read_text() == values['pid'] + '\n'
+        assert 'admission=action_lock_busy reason=live_owner' in r.stderr
+        assert (lock / 'owner').is_file() and (lock / 'pid').read_text() == str(os.getpid()) + '\n'
         for rel, data in before.items():
             assert (f.base / rel).read_bytes() == data
         assert not list(f.backups.glob('mervlan.repair.*'))
+    finally:
+        f.close()
+
+
+def test_canonical_owner_record_diagnostics():
+    # The canonical owner record is authoritative; absent compatibility
+    # sidecars do not hide a live owner or permit Repair to take its lock.
+    f = Fixture()
+    try:
+        lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+        make_live_lock(lock, sidecars=False)
+        r = f.run()
+        refused(r, 'action, maintenance or Manager ownership is unavailable')
+        assert 'admission=action_lock_busy reason=live_owner' in r.stderr
+        assert (lock / 'owner').is_file()
+        assert not list(f.backups.glob('mervlan.repair.*'))
+    finally:
+        f.close()
+
+    for mode, expected in (
+        ('incomplete', 'admission=action_lock_failed reason=owner_record_incomplete'),
+        ('malformed', 'admission=action_lock_failed reason=owner_record_invalid'),
+        ('unsafe', 'admission=action_lock_failed reason=lock_object_unsafe'),
+    ):
+        f = Fixture()
+        try:
+            lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+            if mode == 'unsafe':
+                lock.write_text('unexpected file object\n')
+            else:
+                lock.mkdir(mode=0o700)
+                if mode == 'malformed':
+                    (lock / 'owner').write_text('pid=not-a-pid\n')
+            r = f.run()
+            refused(r, 'action, maintenance or Manager ownership is unavailable')
+            assert expected in r.stderr, f'{mode}: {r.stderr[-2000:]}'
+            assert not list(f.backups.glob('mervlan.repair.*'))
+        finally:
+            f.close()
+
+    f = Fixture()
+    try:
+        lock = Path(f.env['MERV_REPAIR_MANAGER_LOCK'])
+        make_live_lock(lock)
+        r = f.run()
+        refused(r, 'action, maintenance or Manager ownership is unavailable')
+        assert 'admission=manager_lock_busy reason=live_owner' in r.stderr
+        assert not Path(f.env['MERV_REPAIR_ACTION_LOCK']).exists()
+        assert not Path(f.env['MERV_REPAIR_LOCK']).exists()
+        assert lock.is_dir(), 'live Manager owner was altered'
+    finally:
+        f.close()
+
+
+def test_authenticated_action_parent_contract():
+    f = Fixture()
+    try:
+        lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+        owner = make_live_lock(lock, nonce='fixture-parent-owner')
+        env = {
+            'MERV_ACTION_LOCK_PARENT_HELD': '1',
+            'MERV_ACTION_LOCK_PARENT_PID': owner['pid'],
+            'MERV_ACTION_LOCK_PARENT_START': owner['proc_start_time'],
+            'MERV_ACTION_LOCK_PARENT_NONCE': owner['owner_nonce'],
+            'MERV_ACTION_LOCK_PATH': str(lock),
+        }
+        r = f.run(env)
+        ok(r)
+        assert 'action, maintenance and Manager ownership acquired' in r.stderr
+        assert (lock / 'owner').is_file(), 'Repair released its inherited parent lock'
+        assert not Path(f.env['MERV_REPAIR_LOCK']).exists()
+        assert not Path(f.env['MERV_REPAIR_MANAGER_LOCK']).exists()
+        f.assert_replaced()
+        f.assert_protected()
+    finally:
+        f.close()
+
+    f = Fixture()
+    try:
+        lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+        owner = make_live_lock(lock, nonce='fixture-parent-owner')
+        r = f.run({
+            'MERV_ACTION_LOCK_PARENT_HELD': '1',
+            'MERV_ACTION_LOCK_PARENT_PID': owner['pid'],
+            'MERV_ACTION_LOCK_PARENT_START': owner['proc_start_time'],
+            'MERV_ACTION_LOCK_PARENT_NONCE': owner['owner_nonce'],
+            'MERV_ACTION_LOCK_PATH': str(f.locks / 'noncanonical_action.lock'),
+        })
+        refused(r, 'action lock parent is malformed or unauthenticated')
+        assert 'admission=action_parent_invalid' in r.stderr
+        assert (lock / 'owner').is_file(), 'invalid parent path altered canonical owner'
+        assert not Path(f.env['MERV_REPAIR_LOCK']).exists()
+        assert not Path(f.env['MERV_REPAIR_MANAGER_LOCK']).exists()
+    finally:
+        f.close()
+
+
+def test_transient_live_action_lock_is_a_nonblocking_refusal():
+    f = Fixture()
+    holder = subprocess.Popen(['sleep', '30'])
+    try:
+        lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+        make_live_lock(lock, pid=holder.pid, nonce='fixture-transient-owner')
+        started = time.monotonic()
+        r = f.run()
+        elapsed = time.monotonic() - started
+        refused(r, 'action, maintenance or Manager ownership is unavailable')
+        assert 'admission=action_lock_busy reason=live_owner' in r.stderr
+        assert elapsed < 10, f'action lock contention unexpectedly blocked for {elapsed:.2f}s'
+        assert lock.is_dir(), 'live action lock was altered during refusal'
+        assert not list(f.backups.glob('mervlan.repair.*'))
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+        f.close()
+
+
+def test_each_lock_step_reports_failure_and_releases_prior_locks():
+    for stage in ('action', 'maintenance', 'manager'):
+        f = Fixture()
+        try:
+            blocker = f.root / f'{stage}-parent-is-a-file'
+            blocker.write_text('not a directory\n')
+            bad_lock = str(blocker / 'lock')
+            if stage == 'action':
+                extra = {'MERV_REPAIR_ACTION_LOCK': bad_lock}
+            elif stage == 'maintenance':
+                extra = {'MERV_REPAIR_LOCK': bad_lock}
+            else:
+                extra = {'MERV_REPAIR_MANAGER_LOCK': bad_lock}
+            r = f.run(extra)
+            refused(r, 'action, maintenance or Manager ownership is unavailable')
+            assert f'admission={stage}_lock_failed reason=unsafe_lock_path' in r.stderr
+            assert not Path(f.env['MERV_REPAIR_ACTION_LOCK']).exists(), \
+                f'{stage} failure retained a previously acquired action lock'
+            assert not Path(f.env['MERV_REPAIR_LOCK']).exists(), \
+                f'{stage} failure retained a previously acquired maintenance lock'
+            assert not Path(f.env['MERV_REPAIR_MANAGER_LOCK']).exists(), \
+                f'{stage} failure left the Manager lock acquired'
+            assert not list(f.backups.glob('mervlan.repair.*'))
+        finally:
+            f.close()
+
+
+def test_self_owner_verification_diagnostics():
+    # A deterministic host-only mv seam invalidates the fake /proc generation
+    # after the action owner record is published, exercising its self-check.
+    f = Fixture()
+    owner_proc = f.root / 'owner-proc'
+    owner_proc.mkdir()
+    gate = f.root / 'curl.gate'
+    pid_file = f.root / 'repair.pid'
+    action_lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+    install_mv_injector(f)
+    real_curl = gate_curl_until_owner_proc_ready(f)
+    proc = f.start({
+        'MERV_REPAIR_OWNER_PROC_ROOT': str(owner_proc),
+        'MERV_TEST_OWNER_PROC_ROOT': str(owner_proc),
+        'MERV_TEST_PID_FILE': str(pid_file),
+        'MERV_TEST_ACTION_OWNER_DEST': str(action_lock / 'owner'),
+        'MERV_TEST_DROP_SELF_STAT': '1',
+        'MERV_TEST_REAL_CURL': str(real_curl),
+        'MERV_TEST_CURL_GATE': str(gate),
+    })
+    try:
+        child_proc = owner_proc / str(proc.pid)
+        child_proc.mkdir()
+        (child_proc / 'stat').write_text(Path(f'/proc/{proc.pid}/stat').read_text())
+        pid_file.write_text(str(proc.pid) + '\n')
+        gate.touch()
+        _, stderr = proc.communicate(timeout=90)
+        assert proc.returncode != 0
+        assert 'admission=action_lock_failed reason=self_owner_verification_failed' in stderr, stderr[-3000:]
+        assert (action_lock / 'owner').is_file(), 'unverified claim evidence was unexpectedly removed'
+        assert not Path(f.env['MERV_REPAIR_LOCK']).exists()
+        assert not Path(f.env['MERV_REPAIR_MANAGER_LOCK']).exists()
+        assert not list(f.backups.glob('mervlan.repair.*'))
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait()
+        f.close()
+
+    # The combined owner check catches a lost action record after all three
+    # acquisitions; cleanup releases the still-authenticated later locks.
+    f = Fixture()
+    install_mv_injector(f)
+    action_lock = Path(f.env['MERV_REPAIR_ACTION_LOCK'])
+    manager_lock = Path(f.env['MERV_REPAIR_MANAGER_LOCK'])
+    r = f.run({
+        'MERV_TEST_ACTION_OWNER_DEST': str(action_lock / 'owner'),
+        'MERV_TEST_MANAGER_OWNER_DEST': str(manager_lock / 'owner'),
+        'MERV_TEST_DROP_ACTION_OWNER': '1',
+    })
+    try:
+        refused(r, 'action, maintenance or Manager ownership is unavailable')
+        assert 'admission=self_owner_validation_failed reason=action_owner_invalid' in r.stderr
+        assert not Path(f.env['MERV_REPAIR_LOCK']).exists(), 'maintenance lock was not released'
+        assert not manager_lock.exists(), 'Manager lock was not released'
+        assert action_lock.is_dir() and not (action_lock / 'owner').exists(), \
+            'unverifiable action lock evidence was unexpectedly removed'
     finally:
         f.close()
 
@@ -520,6 +765,11 @@ def main():
         test_success_and_observation,
         test_snapshot_engine_mismatch_refuses_before_admission,
         test_lock_conflict_refuses_without_stealing,
+        test_canonical_owner_record_diagnostics,
+        test_authenticated_action_parent_contract,
+        test_transient_live_action_lock_is_a_nonblocking_refusal,
+        test_each_lock_step_reports_failure_and_releases_prior_locks,
+        test_self_owner_verification_diagnostics,
         test_publication_failure_rolls_back,
         test_backup_sync_failure_stops_before_ready_or_publication,
         test_precommit_sync_failure_rolls_back,

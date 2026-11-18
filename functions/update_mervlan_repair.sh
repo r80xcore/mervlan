@@ -26,6 +26,7 @@ TX=0 COMMITTED=0 ROLLBACK_OK=0 PUBLISHED=0 VERIFIED=0
 ACTION_PARENT=0 ACTION_PARENT_PID= ACTION_PARENT_START= ACTION_PARENT_NONCE=
 LOCK_START= LOCK_CREATED= ACTION_NONCE= MAINTENANCE_NONCE= MANAGER_NONCE=
 LOCK_SEQ=0 JOURNAL_SEQ=0 BACKUP_ESTIMATE=0 TXN_ID= HANDOFF_START=
+LOCK_ACQUIRE_REASON= OWNER_CHECK_FAILURE=
 RUN_START=$(date +%s 2>/dev/null || printf '0')
 START_ID= REF= ROOT= COHORT= MANIFEST= STAGE= BACKUP= LEDGER= ARCHIVE=
 BACKUP_ROOT= TXN_DIR= READY_FILE= INDEX_FILE= RECOVERY_HELPER= SOURCE_ROOT=
@@ -193,28 +194,12 @@ owner_tuple_matches() {
   [ "$(proc_start "$OWNER_PID" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$OWNER_START" ] &&
     kill -0 "$OWNER_PID" 2>/dev/null
 }
-owner_sidecars_match() {
-  _osm_dir="$1"
-  for _osm_field in pid proc_start_time owner_nonce created heartbeat; do
-    case "$_osm_field" in
-      pid) _osm_expected=$OWNER_PID ;;
-      proc_start_time) _osm_expected=$OWNER_START ;;
-      owner_nonce) _osm_expected=$OWNER_NONCE ;;
-      created) _osm_expected=$OWNER_CREATED ;;
-      heartbeat) _osm_expected=$OWNER_HEARTBEAT ;;
-    esac
-    _osm_file="$_osm_dir/$_osm_field"
-    [ ! -L "$_osm_file" ] && [ -f "$_osm_file" ] && [ -r "$_osm_file" ] || return 1
-    _osm_size=$(wc -c <"$_osm_file" 2>/dev/null | tr -d ' ') || return 1
-    [ "$_osm_size" -eq $((${#_osm_expected} + 1)) ] || return 1
-    [ "$(cat "$_osm_file" 2>/dev/null)" = "$_osm_expected" ] || return 1
-  done
-  return 0
-}
 lock_owner_state() {
   _los_lock="$1"
   [ ! -L "$_los_lock" ] && [ -d "$_los_lock" ] || return 1
-  owner_fields_read "$_los_lock/owner" && owner_sidecars_match "$_los_lock" || return 1
+  # The canonical v2 owner file is authoritative. Compatibility sidecars may
+  # be absent or stale; they must not override a valid owner identity.
+  owner_fields_read "$_los_lock/owner" || return 1
   _los_pid=$OWNER_PID _los_start=$OWNER_START
   _los_actual=$(proc_start "$_los_pid" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)
   if [ -n "$_los_actual" ]; then
@@ -289,19 +274,46 @@ write_lock_value() {
 }
 lock_acquire_one() {
   _lao_lock="$1" _lao_nonce="$2"
-  safe_chain "${_lao_lock%/*}" || return 1
-  ensure_dir "${_lao_lock%/*}" || return 1
+  LOCK_ACQUIRE_REASON=
+  safe_chain "${_lao_lock%/*}" || { LOCK_ACQUIRE_REASON=unsafe_lock_path; return 1; }
+  ensure_dir "${_lao_lock%/*}" || { LOCK_ACQUIRE_REASON=lock_parent_unavailable; return 1; }
   _lao_attempt=0
   while ! mkdir "$_lao_lock" 2>/dev/null; do
-    lock_owner_state "$_lao_lock" || return 1
+    if ! exists "$_lao_lock"; then
+      LOCK_ACQUIRE_REASON=lock_create_failed
+      return 1
+    fi
+    [ ! -L "$_lao_lock" ] && [ -d "$_lao_lock" ] || {
+      LOCK_ACQUIRE_REASON=lock_object_unsafe
+      return 1
+    }
+    if ! lock_owner_state "$_lao_lock"; then
+      if [ -L "$_lao_lock/owner" ] || { exists "$_lao_lock/owner" && [ ! -f "$_lao_lock/owner" ]; }; then
+        LOCK_ACQUIRE_REASON=owner_object_unsafe
+      elif exists "$_lao_lock/owner" && [ ! -r "$_lao_lock/owner" ]; then
+        LOCK_ACQUIRE_REASON=owner_record_unreadable
+      elif exists "$_lao_lock/owner"; then
+        LOCK_ACQUIRE_REASON=owner_record_invalid
+      else
+        LOCK_ACQUIRE_REASON=owner_record_incomplete
+      fi
+      return 1
+    fi
     case "$LOCK_OWNER_STATE" in
-      dead|reused) lock_quarantine_dead "$_lao_lock" || return 1 ;;
-      *) return 1 ;;
+      dead|reused)
+        lock_quarantine_dead "$_lao_lock" || { LOCK_ACQUIRE_REASON=stale_lock_quarantine_failed; return 1; }
+        ;;
+      live) LOCK_ACQUIRE_REASON=live_owner; return 1 ;;
+      *) LOCK_ACQUIRE_REASON=owner_liveness_unknown; return 1 ;;
     esac
     _lao_attempt=$((_lao_attempt + 1))
-    [ "$_lao_attempt" -lt 8 ] || return 1
+    [ "$_lao_attempt" -lt 8 ] || { LOCK_ACQUIRE_REASON=stale_lock_retry_limit; return 1; }
   done
-  chmod 700 "$_lao_lock" 2>/dev/null || { rmdir "$_lao_lock" 2>/dev/null || :; return 1; }
+  chmod 700 "$_lao_lock" 2>/dev/null || {
+    LOCK_ACQUIRE_REASON=lock_directory_mode_failed
+    rmdir "$_lao_lock" 2>/dev/null || :
+    return 1
+  }
   for _lao_field in pid proc_start_time owner_nonce created heartbeat; do
     case "$_lao_field" in
       pid) _lao_value=$$ ;;
@@ -313,6 +325,7 @@ lock_acquire_one() {
       rm -f "$_lao_lock/pid" "$_lao_lock/proc_start_time" "$_lao_lock/owner_nonce" \
         "$_lao_lock/created" "$_lao_lock/heartbeat" 2>/dev/null || :
       rmdir "$_lao_lock" 2>/dev/null || :
+      LOCK_ACQUIRE_REASON=compatibility_record_write_failed
       return 1
     }
   done
@@ -320,14 +333,23 @@ lock_acquire_one() {
   (umask 077
     printf 'pid=%s\nproc_start_time=%s\nowner_nonce=%s\ncreated=%s\nheartbeat=%s\n' \
       "$$" "$LOCK_START" "$_lao_nonce" "$LOCK_CREATED" "$LOCK_CREATED" >"$_lao_tmp"
-  ) 2>/dev/null || { rm -f "$_lao_tmp" 2>/dev/null || :; return 1; }
+  ) 2>/dev/null || {
+    rm -f "$_lao_tmp" 2>/dev/null || :
+    LOCK_ACQUIRE_REASON=owner_record_write_failed
+    return 1
+  }
   chmod 600 "$_lao_tmp" 2>/dev/null && mv -f "$_lao_tmp" "$_lao_lock/owner" 2>/dev/null || {
     rm -f "$_lao_tmp" "$_lao_lock/pid" "$_lao_lock/proc_start_time" \
       "$_lao_lock/owner_nonce" "$_lao_lock/created" "$_lao_lock/heartbeat" 2>/dev/null || :
     rmdir "$_lao_lock" 2>/dev/null || :
+    LOCK_ACQUIRE_REASON=owner_record_publish_failed
     return 1
   }
-  owner_tuple_matches "$_lao_lock" "$$" "$LOCK_START" "$_lao_nonce"
+  if ! owner_tuple_matches "$_lao_lock" "$$" "$LOCK_START" "$_lao_nonce"; then
+    LOCK_ACQUIRE_REASON=self_owner_verification_failed
+    return 1
+  fi
+  return 0
 }
 lock_release_one() {
   _lro_lock="$1" _lro_nonce="$2"
@@ -351,34 +373,82 @@ lock_release_one() {
   rm -f "$_lro_restore" 2>/dev/null || :
 }
 owner_ok() {
-  [ "$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$LOCK_START" ] || return 1
+  OWNER_CHECK_FAILURE=
+  [ "$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$LOCK_START" ] || {
+    OWNER_CHECK_FAILURE=proc_identity_invalid
+    return 1
+  }
   if [ "$ACTION_PARENT" -eq 1 ]; then
-    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$ACTION_PARENT_PID" "$ACTION_PARENT_START" "$ACTION_PARENT_NONCE" || return 1
+    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$ACTION_PARENT_PID" "$ACTION_PARENT_START" "$ACTION_PARENT_NONCE" || {
+      OWNER_CHECK_FAILURE=parent_action_owner_invalid
+      return 1
+    }
   elif [ "$ACTION_LOCKED" -eq 1 ]; then
-    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$$" "$LOCK_START" "$ACTION_NONCE" || return 1
-  else return 1; fi
-  [ "$MAINTENANCE_LOCKED" -eq 1 ] &&
-    owner_tuple_matches "$MERV_REPAIR_LOCK" "$$" "$LOCK_START" "$MAINTENANCE_NONCE" || return 1
-  [ "$MANAGER_LOCKED" -eq 1 ] &&
-    owner_tuple_matches "$MERV_REPAIR_MANAGER_LOCK" "$$" "$LOCK_START" "$MANAGER_NONCE"
+    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$$" "$LOCK_START" "$ACTION_NONCE" || {
+      OWNER_CHECK_FAILURE=action_owner_invalid
+      return 1
+    }
+  else
+    OWNER_CHECK_FAILURE=action_lock_not_owned
+    return 1
+  fi
+  [ "$MAINTENANCE_LOCKED" -eq 1 ] || { OWNER_CHECK_FAILURE=maintenance_lock_not_owned; return 1; }
+  owner_tuple_matches "$MERV_REPAIR_LOCK" "$$" "$LOCK_START" "$MAINTENANCE_NONCE" || {
+    OWNER_CHECK_FAILURE=maintenance_owner_invalid
+    return 1
+  }
+  [ "$MANAGER_LOCKED" -eq 1 ] || { OWNER_CHECK_FAILURE=manager_lock_not_owned; return 1; }
+  owner_tuple_matches "$MERV_REPAIR_MANAGER_LOCK" "$$" "$LOCK_START" "$MANAGER_NONCE" || {
+    OWNER_CHECK_FAILURE=manager_owner_invalid
+    return 1
+  }
+  return 0
+}
+admission_lock_failure() {
+  _alf_stage="$1"
+  case "$LOCK_ACQUIRE_REASON" in
+    live_owner) status ADMISSION "admission=${_alf_stage}_lock_busy reason=live_owner" ;;
+    owner_liveness_unknown) status ADMISSION "admission=${_alf_stage}_lock_busy reason=owner_liveness_unknown" ;;
+    owner_record_incomplete) status ADMISSION "admission=${_alf_stage}_lock_failed reason=owner_record_incomplete" ;;
+    owner_record_invalid) status ADMISSION "admission=${_alf_stage}_lock_failed reason=owner_record_invalid" ;;
+    *) status ADMISSION "admission=${_alf_stage}_lock_failed reason=$LOCK_ACQUIRE_REASON" ;;
+  esac
+  return 1
 }
 acquire() {
-  action_parent_check || return 1
-  LOCK_START=$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT") || return 1
+  action_parent_check || { status ADMISSION 'admission=action_parent_invalid'; return 1; }
+  LOCK_START=$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT") || {
+    status ADMISSION 'admission=proc_identity_invalid'
+    return 1
+  }
   LOCK_CREATED=$(date +%s 2>/dev/null || printf '')
-  case "$LOCK_CREATED" in ''|*[!0-9]*) return 1 ;; esac
+  case "$LOCK_CREATED" in
+    ''|*[!0-9]*) status ADMISSION 'admission=clock_invalid'; return 1 ;;
+  esac
   ACTION_NONCE="repair.$$.$LOCK_START.action"
   MAINTENANCE_NONCE="repair.$$.$LOCK_START.maintenance"
   MANAGER_NONCE="repair.$$.$LOCK_START.manager"
   if [ "$ACTION_PARENT" -eq 0 ]; then
-    lock_acquire_one "$MERV_REPAIR_ACTION_LOCK" "$ACTION_NONCE" || return 1
+    lock_acquire_one "$MERV_REPAIR_ACTION_LOCK" "$ACTION_NONCE" || {
+      admission_lock_failure action
+      return 1
+    }
     ACTION_LOCKED=1
   fi
-  lock_acquire_one "$MERV_REPAIR_LOCK" "$MAINTENANCE_NONCE" || return 1
+  lock_acquire_one "$MERV_REPAIR_LOCK" "$MAINTENANCE_NONCE" || {
+    admission_lock_failure maintenance
+    return 1
+  }
   MAINTENANCE_LOCKED=1
-  lock_acquire_one "$MERV_REPAIR_MANAGER_LOCK" "$MANAGER_NONCE" || return 1
+  lock_acquire_one "$MERV_REPAIR_MANAGER_LOCK" "$MANAGER_NONCE" || {
+    admission_lock_failure manager
+    return 1
+  }
   MANAGER_LOCKED=1
-  owner_ok || return 1
+  owner_ok || {
+    status ADMISSION "admission=self_owner_validation_failed reason=$OWNER_CHECK_FAILURE"
+    return 1
+  }
   status ADMISSION 'action, maintenance and Manager ownership acquired'
 }
 release() {
@@ -1282,7 +1352,10 @@ test_roots_valid() {
   return 0
 }
 repair_run() {
-  action_parent_check || stop 'action lock parent is malformed or unauthenticated'
+  action_parent_check || {
+    status ADMISSION 'admission=action_parent_invalid'
+    stop 'action lock parent is malformed or unauthenticated'
+  }
   scan_processes || stop 'initial legacy mutator exclusion failed'
   acquire || stop 'action, maintenance or Manager ownership is unavailable'
   scan_processes || stop 'post-acquisition legacy mutator exclusion failed'
