@@ -3,7 +3,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
-ENGINE="$ROOT/functions/update_mervlan_repair.sh"
+ENGINE="${1:-$ROOT/functions/update_mervlan_repair.sh}"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mervlan-repair-sequential.XXXXXX")
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT HUP INT TERM
@@ -52,7 +52,7 @@ printf 'ordinary\000' >"$MERV_REPAIR_PROC_ROOT/$$/cmdline"
 # This substring must not be treated as an exact legacy writer argument.
 printf 'worker\000prefix_heal_event.sh_suffix\000' >"$early"
 printf 'ordinary\000' >"$late"
-printf '/bin/sh\000%s/functions/heal_event.sh\000' "$MERV_BASE" >"$fixture/mutator"
+printf '/bin/sh\000%s/functions/./heal_event.sh\000' "$MERV_BASE" >"$fixture/mutator"
 
 tr() {
   if [ "${1:-}" = '\000' ] && [ "${2:-}" = '\n' ] &&
@@ -77,13 +77,54 @@ case "$phase" in
 esac
 [ ! -e "$MERV_REPAIR_ACTION_LOCK" ] || [ "$phase" = initial ] || fail 'action lock retained'
 printf 'PASS: %s inspected later mutator and refused\n' "$phase"
+
+# Observe each variant against the current PID and canonical fixture cwd.
+ln -s "$MERV_BASE" "${late%/*}/cwd"
+mkdir -p "$MERV_BASE/functions"
+for argument in "$MERV_BASE/functions/heal_event.sh" "$MERV_BASE/functions/./heal_event.sh" \
+  "/./${MERV_BASE#/}/./functions/././heal_event.sh" "$MERV_BASE/functions/../functions/heal_event.sh" \
+  "$MERV_BASE/functions//heal_event.sh"; do
+  printf '/bin/sh\000%s\000' "$argument" >"$late"
+  if scan_processes; then fail "scanner accepted absolute candidate $argument"; fi
+done
+for argument in 'functions/heal_event.sh' './functions/./heal_event.sh' '../heal_event.sh'; do
+  printf '/bin/sh\000%s\000' "$argument" >"$late"
+  if scan_processes; then fail "scanner accepted relative candidate $argument"; fi
+done
+rm "${late%/*}/cwd"
+ln -s "$MERV_BASE/functions" "${late%/*}/cwd"
+printf '/bin/sh\000heal_event.sh\000' >"$late"
+if scan_processes; then fail 'scanner accepted a bare writer'; fi
+printf '/bin/sh\000%s/functions/service-event-handler.sh\000collectclients_vlanmgr\000' "$MERV_BASE" >"$late"
+scan_processes || fail 'recognized read-only dispatcher was refused'
+printf '/bin/sh\000%s/functions/./service-event-handler.sh\000collectclients_vlanmgr\000' "$MERV_BASE" >"$late"
+if scan_processes; then fail 'alternate spelling granted a dispatcher exception'; fi
+printf '/bin/sh\000%s/functions/service-event-handler.sh\000collectclients_vlanmgr\000%s/functions/./heal_event.sh\000' "$MERV_BASE" "$MERV_BASE" >"$late"
+if scan_processes; then fail 'dispatcher exception masked an alternate writer'; fi
+printf '/bin/sh\000%s/other/./unknown.sh\000' "$fixture" >"$late"
+scan_processes || fail 'unknown script outside the addon was refused'
+printf 'ordinary\000' >"$late"
+scan_processes || fail 'ordinary processes were refused'
+rm "$late"
+if scan_processes; then fail 'scanner accepted missing cmdline'; fi
+ln -s "$early" "$late"
+if scan_processes; then fail 'scanner accepted symlinked cmdline'; fi
+rm "$late"
+printf 'ordinary\000' >"$late"
+chmod 000 "$late"
+if [ ! -r "$late" ] && scan_processes; then fail 'scanner accepted unreadable cmdline'; fi
+chmod 600 "$late"
+: >"$MERV_REPAIR_PROC_ROOT/900bad"
+if scan_processes; then fail 'scanner accepted a malformed proc entry'; fi
 DRIVER
 
 failures=0
+shell_run=0
 run_shell() {
+  shell_run=$((shell_run + 1))
   printf 'Repair sequential scan using %s\n' "$*"
   for phase in initial post_acquisition publication; do
-    _case="$WORK/$phase"
+    _case="$WORK/$phase.$shell_run"
     if ! env -i PATH="$PATH" SCAN_PHASE="$phase" "$@" "$WORK/driver.sh" \
         "$phase" "$_case" unused "$WORK/functions.sh"; then failures=1; fi
   done

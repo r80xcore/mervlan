@@ -44,10 +44,10 @@ def git(*args):
     return subprocess.check_output(['git', *args], cwd=ROOT)
 
 
-def instrument(engine):
+def instrument(engine, functions=PROFILE_FUNCTIONS):
     text = engine.decode()
     wrappers = []
-    for name in (*PROFILE_FUNCTIONS, 'sync'):
+    for name in (*functions, 'sync'):
         target = 'command sync' if name == 'sync' else f'profile_original_{name}'
         if name != 'sync':
             declaration = f'\n{name}() {{'
@@ -67,13 +67,13 @@ def instrument(engine):
     return text.replace('\nmain "$@"', '\n' + '\n'.join(wrappers) + '\nexec 9>&2\nmain "$@"').encode()
 
 
-def configure(fixture, engine, archive, processes):
+def configure(fixture, engine, archive, processes, ref=REF):
     script = fixture.root / 'engine.sh'
     script.write_bytes(engine)
     with tarfile.open(fileobj=io.BytesIO(archive), mode='r:') as source, \
             tarfile.open(fixture.archive, 'w:gz', format=tarfile.USTAR_FORMAT) as dest:
         for entry in source:
-            if entry.name == f'mervlan-{REF}/{ENGINE_REL}':
+            if entry.name == f'mervlan-{ref}/{ENGINE_REL}':
                 entry.size = len(engine)
                 dest.addfile(entry, io.BytesIO(engine))
             else:
@@ -130,6 +130,9 @@ def timed(fixture, script, *args):
                 marks[line.split('replaced=')[1].split()[0]] = now
             if ' BACKUP ' in line:
                 marks['ready'] = now
+            for phase in ('STAGING', 'ADMISSION', 'SELECT', 'SUCCESS'):
+                if f' {phase} ' in line:
+                    marks[phase.lower()] = now
         rc = process.wait()
     if rc:
         raise RuntimeError(''.join(messages))

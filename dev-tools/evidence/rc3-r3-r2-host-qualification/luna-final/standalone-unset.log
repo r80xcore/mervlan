@@ -1,0 +1,3 @@
+PASS test_success_and_observation
+PASS test_full_republishes_even_correct_targets_and_preserves_bundle
+PASS 2 focused standalone Repair tests

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Host-only isolated qualification for standalone persistent Repair."""
 from __future__ import annotations
+from hashlib import sha256
 import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -18,6 +20,29 @@ MANIFEST = MANIFEST_PATH.read_bytes()
 FILES = [line.split(' ', 1) for line in MANIFEST.decode().splitlines()[2:]]
 assert len(FILES) == 58
 REF = 'a' * 40
+TEST_SHELL = ['/bin/sh']
+
+
+def busybox_engine_bytes(engine):
+    busybox = shutil.which('busybox')
+    assert busybox
+    handoff = b'exec /bin/sh "$_rhw_engine"'
+    assert engine.count(handoff) == 1
+    engine = engine.replace(handoff, f'exec {busybox} ash "$_rhw_engine"'.encode())
+    start = b'\nset -u\n'
+    # A standalone BusyBox can resolve applets ahead of PATH. Route fault
+    # shims explicitly so their tests exercise the same injection boundaries.
+    shims = 'sync() { "${TEST_BIN_WRAPPERS:?}/sync" "$@"; }\n'
+    for applet in ('cat', 'cmp', 'cp', 'df', 'mv', 'sleep'):
+        shims += f'''{applet}() {{
+  if [ -x "${{TEST_BIN_WRAPPERS:-/nonexistent}}/{applet}" ]; then
+    "$TEST_BIN_WRAPPERS/{applet}" "$@"
+  else
+    command {applet} "$@"
+  fi
+}}
+'''
+    return engine.replace(start, start + shims.encode(), 1)
 
 
 class Fixture:
@@ -78,6 +103,7 @@ class Fixture:
             'MERV_REPAIR_CURL': str(self.fakebin / 'curl'),
             'MERV_REPAIR_TEST_ONLY': '1',
             'TEST_ARCHIVE': str(self.archive),
+            'TEST_BIN_WRAPPERS': str(self.fakebin),
             'PATH': str(self.fakebin) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin'),
         })
 
@@ -135,7 +161,7 @@ printf '%s\\n' "$count" >"$MERV_REPAIR_SYNC_COUNTER"
         env = self.env.copy()
         env.update(extra or {})
         engine = helper or ENGINE
-        return subprocess.run(['/bin/sh', str(engine), REF], env=env, capture_output=True,
+        return subprocess.run([*TEST_SHELL, str(engine), REF], env=env, capture_output=True,
                               text=True, timeout=timeout)
 
     def start(self, extra=None):
@@ -146,7 +172,7 @@ printf '%s\\n' "$count" >"$MERV_REPAIR_SYNC_COUNTER"
             pause.write_text('#!/bin/sh\n: >"$TEST_PAUSE_MARKER"\nexec /bin/sleep "$@"\n')
             pause.chmod(0o755)
             env['TEST_PAUSE_MARKER'] = str(self.root / 'publication.paused')
-        return subprocess.Popen(['/bin/sh', str(ENGINE), REF], env=env,
+        return subprocess.Popen([*TEST_SHELL, str(ENGINE), REF], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 start_new_session=True)
 
@@ -300,7 +326,7 @@ def test_success_and_observation():
             if rel.endswith('.sh'):
                 assert data.startswith(b'\x00old-invalid')
         # A byte-valid committed backup remains ineligible for restoration.
-        r = subprocess.run(['/bin/sh', str(helper), 'recover', bundle.name],
+        r = subprocess.run([*TEST_SHELL, str(helper), 'recover', bundle.name],
                            env=f.env, capture_output=True, text=True, timeout=60)
         refused(r, 'committed repair is not eligible for rollback')
         f.assert_replaced()
@@ -404,6 +430,11 @@ def test_authenticated_action_parent_contract():
             'MERV_ACTION_LOCK_PARENT_NONCE': owner['owner_nonce'],
             'MERV_ACTION_LOCK_PATH': str(lock),
         }
+        parent = f.proc / owner['pid']
+        parent.mkdir()
+        (parent / 'stat').write_bytes((Path('/proc') / owner['pid'] / 'stat').read_bytes())
+        cmdline = parent / 'cmdline'
+        cmdline.write_bytes(os.fsencode(f.base / 'functions/service-event-handler.sh') + b'\0repair\0')
         r = f.run(env)
         ok(r)
         assert 'action, maintenance and Manager ownership acquired' in r.stderr
@@ -412,6 +443,9 @@ def test_authenticated_action_parent_contract():
         assert not Path(f.env['MERV_REPAIR_MANAGER_LOCK']).exists()
         f.assert_replaced()
         f.assert_protected()
+        cmdline.write_bytes(os.fsencode(f.base) + b'/functions/./service-event-handler.sh\0repair\0')
+        refused(f.run(env), 'initial legacy mutator exclusion failed')
+        assert (lock / 'owner').is_file()
     finally:
         f.close()
 
@@ -636,7 +670,7 @@ def test_interruption_recovery_without_installed_helpers():
         assert changed == 7, f'expected seven originally present files among the first eight publications, got {changed}'
         for rel in ('functions/update_mervlan.sh', 'functions/mervlan_boot.sh', 'functions/mervlan_recover.sh'):
             (f.base / rel).unlink()
-        r = subprocess.run(['/bin/sh', str(bundle / 'recover.sh'), 'recover', bundle.name],
+        r = subprocess.run([*TEST_SHELL, str(bundle / 'recover.sh'), 'recover', bundle.name],
                            env=f.env, capture_output=True, text=True, timeout=60)
         ok(r)
         f.assert_original()
@@ -660,7 +694,7 @@ def test_corrupt_backup_refuses_before_restore():
         original_file = bundle / 'original/functions/update_mervlan.sh'
         original_file.write_bytes(b'corrupted backup\n')
         f.reboot_tmp()
-        r = subprocess.run(['/bin/sh', str(bundle / 'recover.sh'), 'recover', bundle.name],
+        r = subprocess.run([*TEST_SHELL, str(bundle / 'recover.sh'), 'recover', bundle.name],
                            env=f.env, capture_output=True, text=True, timeout=60)
         refused(r, 'backup is incomplete or corrupt')
         for _, rel in FILES:
@@ -683,7 +717,7 @@ def test_unknown_publication_temporary_refuses_before_restore():
         _, rel = FILES[4]
         tmp = Path(str(f.base / rel) + f'.mervlan-repair.{bundle.name}.publish.part')
         tmp.write_bytes(b'unknown partial publication temp\n')
-        r = subprocess.run(['/bin/sh', str(bundle / 'recover.sh'), 'recover', bundle.name],
+        r = subprocess.run([*TEST_SHELL, str(bundle / 'recover.sh'), 'recover', bundle.name],
                            env=f.env, capture_output=True, text=True, timeout=60)
         refused(r, 'unknown or unsafe destination state')
         for _, path in FILES:
@@ -726,7 +760,7 @@ def test_journal_validator_rejects_corrupt_evidence():
                     (publishing + records + b'state=rolled-back\n', 'rolled-back'))
         for data, state in (*expected, *((data, None) for data in malformed)):
             ledger.write_bytes(data)
-            result = subprocess.run(['/bin/sh', script, cohort, ledger], capture_output=True,
+            result = subprocess.run([*TEST_SHELL, script, cohort, ledger], capture_output=True,
                                     text=True, timeout=5)
             assert (result.returncode == 0) == (state is not None), data[:160]
             if state is not None:
@@ -802,7 +836,7 @@ exec /bin/cp "$@"
                 assert not list(f.locks.iterdir()), 'Repair left a lock owned after staging failure'
 
             f.reboot_tmp()
-            recovery = subprocess.run(['/bin/sh', bundle / 'recover.sh', 'recover', bundle.name],
+            recovery = subprocess.run([*TEST_SHELL, bundle / 'recover.sh', 'recover', bundle.name],
                                       env=f.env, capture_output=True, text=True, timeout=60)
             refused(recovery, 'unknown or unsafe destination state')
             assert siblings[0].exists(), 'unknown sibling evidence was removed'
@@ -813,7 +847,7 @@ exec /bin/cp "$@"
 
 
 def test_interruption_at_durable_transaction_boundaries():
-    for gate in ('before-ready', 'after-ready', 'before-rename', 'after-rename',
+    for gate in ('before-ready', 'after-ready', 'after-intent', 'before-rename', 'after-rename',
                  'between-files', 'before-batch-flush', 'damaged-preflush',
                  'before-commit', 'during-rollback'):
         f = Fixture()
@@ -825,7 +859,7 @@ def test_interruption_at_durable_transaction_boundaries():
 "$TEST_BIN/sync.real" "$@" || exit $?
 read count <"$MERV_REPAIR_SYNC_COUNTER" || exit 2
 case "$TEST_GATE:$count" in
-  before-ready:1|after-ready:2|before-batch-flush:4|damaged-preflush:4|before-commit:5)
+  before-ready:1|after-ready:2|after-intent:3|before-batch-flush:4|damaged-preflush:4|before-commit:5)
     kill -KILL "$PPID" ;;
 esac
 """)
@@ -862,6 +896,9 @@ esac
             if gate in ('before-ready', 'after-ready'):
                 assert journal.endswith('state=prepared\n')
                 f.assert_original()
+            elif gate == 'after-intent':
+                assert not list(f.base.glob('**/*.publish.part'))
+                f.assert_original()
             elif gate in ('before-rename', 'after-rename'):
                 assert (f.base / 'changelog.txt').exists() == (gate == 'after-rename')
             elif gate == 'between-files':
@@ -878,13 +915,14 @@ esac
             mv.unlink()
             sync_real.replace(sync)
             f.reboot_tmp()
-            recovery = subprocess.run(['/bin/sh', bundle / 'recover.sh', 'recover', bundle.name],
+            recovery = subprocess.run([*TEST_SHELL, bundle / 'recover.sh', 'recover', bundle.name],
                                       env=f.env, capture_output=True, text=True, timeout=60)
             if gate == 'before-ready':
                 refused(recovery, 'backup is incomplete or corrupt')
             elif gate == 'damaged-preflush':
                 refused(recovery, 'unknown or unsafe destination state')
-                refused(f.run(), 'persistent manifest backup failed')
+                refused(f.run(), 'previous transaction unresolved' if f.env.get('FULL') == '0'
+                        else 'persistent manifest backup failed')
             else:
                 ok(recovery)
                 assert (bundle / 'journal').read_text().endswith('state=rolled-back\n')
@@ -925,7 +963,7 @@ for dest do :; done
 /bin/mv "$@" || exit $?
 if [ "$dest" = "$MERV_BASE/changelog.txt" ]; then
   mkdir "$MERV_REPAIR_PROC_ROOT/987655" || exit 1
-  printf '%s\\000' "$MERV_BASE/functions/update_mervlan.sh" >"$MERV_REPAIR_PROC_ROOT/987655/cmdline"
+  printf '%s\\000' "$MERV_BASE/functions/./update_mervlan.sh" >"$MERV_REPAIR_PROC_ROOT/987655/cmdline"
 fi
 """)
         mv.chmod(0o755)
@@ -935,7 +973,7 @@ fi
         shutil.rmtree(f.proc / '987655')
         f.reboot_tmp()
         bundle = f.bundle()
-        recovery = subprocess.run(['/bin/sh', bundle / 'recover.sh', 'recover', bundle.name],
+        recovery = subprocess.run([*TEST_SHELL, bundle / 'recover.sh', 'recover', bundle.name],
                                   env=f.env, capture_output=True, text=True, timeout=60)
         ok(recovery)
         f.assert_original()
@@ -965,13 +1003,14 @@ def test_legacy_writer_conflict_and_missing_ready():
         mixed_before = {rel: current_state(g, rel) for _, rel in FILES}
         (bundle / 'READY').unlink()
         g.reboot_tmp()
-        r = subprocess.run(['/bin/sh', str(bundle / 'recover.sh'), 'recover', bundle.name],
+        r = subprocess.run([*TEST_SHELL, str(bundle / 'recover.sh'), 'recover', bundle.name],
                            env=g.env, capture_output=True, text=True, timeout=60)
         refused(r, 'backup is incomplete or corrupt')
         for _, rel in FILES:
             assert current_state(g, rel) == mixed_before[rel]
         r = g.run()
-        refused(r, 'persistent manifest backup failed; no installed files were replaced')
+        refused(r, 'previous transaction unresolved' if g.env.get('FULL') == '0'
+                else 'persistent manifest backup failed; no installed files were replaced')
         for _, rel in FILES:
             assert current_state(g, rel) == mixed_before[rel], f'new Repair mutated {rel} with a missing prior backup'
     finally:
@@ -1015,6 +1054,506 @@ merv_owner_v2_read "$LOCK_PATH" || exit 1
         f.close()
 
 
+def install_correct_cohort(f):
+    with tarfile.open(f.archive) as snapshot:
+        for mode, rel in FILES:
+            target = f.base / rel
+            target.write_bytes(snapshot.extractfile(f'mervlan-fixture/{rel}').read())
+            target.chmod(int(mode, 8))
+    f.absent.clear()
+    f.original = {rel: ((f.base / rel).read_bytes(), int(mode, 8)) for mode, rel in FILES}
+
+
+def installed_inodes(f):
+    return {rel: (f.base / rel).stat().st_ino for _, rel in FILES if (f.base / rel).is_file()}
+
+
+def damage_selection(f, count):
+    # Gaps exercise the separate index readers in both publication paths.
+    selected = [rel for _, rel in FILES[::2][:count]] if count < 58 else [rel for _, rel in FILES]
+    for i, rel in enumerate(selected):
+        target = f.base / rel
+        data, mode = f.original[rel]
+        if i == 0:
+            target.chmod(0o600)
+            f.original[rel] = (data, 0o600)
+        elif i == 1:
+            target.unlink()
+            f.absent.add(rel)
+            del f.original[rel]
+        else:
+            broken = bytes([data[0] ^ 1]) + data[1:]
+            target.write_bytes(broken)
+            f.original[rel] = (broken, mode)
+    return set(selected)
+
+
+def assert_cohort_matches_snapshot(f):
+    with tarfile.open(f.archive) as snapshot:
+        for mode, rel in FILES:
+            target = f.base / rel
+            assert target.read_bytes() == snapshot.extractfile(f'mervlan-fixture/{rel}').read(), rel
+            assert target.stat().st_mode & 0o7777 == int(mode, 8), rel
+    f.assert_protected()
+
+
+def accepted_r2(f):
+    engine = subprocess.check_output(
+        ['git', 'show', '321d5afac2b4de9441846014e9dddb80e701ae8d:'
+         'functions/update_mervlan_repair.sh'], cwd=ROOT)
+    assert sha256(engine).hexdigest() == 'acdb9ffa862cfda43019f77ac6749eb670ea0f48f584bae543727afc1b96d57e'
+    path = f.root / 'accepted-r2.sh'
+    path.write_bytes(engine)
+    return path
+
+
+def test_selective_replacement_counts_and_original_inodes():
+    for count in (0, 1, 10, 58):
+        f = Fixture()
+        try:
+            install_correct_cohort(f)
+            selected = damage_selection(f, count)
+            before = installed_inodes(f)
+            counter = f.root / 'sync.calls'
+            r = f.run({'FULL': '0', 'MERV_REPAIR_SYNC_COUNTER': str(counter)})
+            ok(r)
+            assert f'replaced={count}' in r.stderr
+            changed = {rel for rel, inode in installed_inodes(f).items() if before.get(rel) != inode}
+            assert changed == selected, (count, changed, selected)
+            assert_cohort_matches_snapshot(f)
+            if count:
+                bundle = f.bundle()
+                journal = (bundle / 'journal').read_text()
+                assert journal.count('pending|') == journal.count('done|') == 58
+                assert len((bundle / 'index').read_text().splitlines()) == 58
+                assert counter.read_text() == '6\n'
+            else:
+                assert not f.backups.exists() and not counter.exists()
+                assert not list(f.tmp.iterdir()) and not list(f.locks.iterdir())
+        finally:
+            f.close()
+
+
+def test_selective_noop_prior_transaction_and_reverification():
+    f = Fixture()
+    try:
+        install_correct_cohort(f)
+        before = installed_inodes(f)
+        old = f.backups / 'mervlan.repair.earlier'
+        old.mkdir(parents=True)
+        journal = old / 'journal'
+        journal.write_text('format=1\nstate=prepared\nstate=publishing\n')
+        refused(f.run({'FULL': '0'}), 'previous transaction unresolved')
+        journal.write_text('format=1\nstate=prepared\n')
+        ok(f.run({'FULL': '0'}))
+        assert list(f.backups.iterdir()) == [old]
+        assert installed_inodes(f) == before
+        # Change a target immediately after its first correct comparison. This
+        # simulates a file change between classification and final verification.
+        cmp = f.fakebin / 'cmp'
+        cmp.write_text('''#!/bin/sh
+/usr/bin/cmp "$@" || exit $?
+if [ "${3:-}" = "$MERV_BASE/changelog.txt" ]; then
+  printf 'changed after comparison' >"$3"
+fi
+''')
+        cmp.chmod(0o755)
+        refused(f.run({'FULL': '0'}), 'selective no-op verification failed')
+        assert list(f.backups.iterdir()) == [old]
+        assert installed_inodes(f) == before
+    finally:
+        f.close()
+
+
+def test_full_republishes_even_correct_targets_and_preserves_bundle():
+    f = Fixture()
+    try:
+        install_correct_cohort(f)
+        before = installed_inodes(f)
+        ok(f.run({'FULL': '1'}))
+        bundle = f.bundle()
+        originals = {p: p.read_bytes() for p in bundle.rglob('*') if p.is_file()}
+        assert all(before[rel] != inode for rel, inode in installed_inodes(f).items())
+        before = installed_inodes(f)
+        ok(f.run({'FULL': '0'}))
+        assert installed_inodes(f) == before
+        assert list(f.backups.iterdir()) == [bundle]
+        assert all(p.read_bytes() == payload for p, payload in originals.items())
+        assert_cohort_matches_snapshot(f)
+    finally:
+        f.close()
+
+
+def test_preserves_predecessor_bundles():
+    f = Fixture()
+    try:
+        r2 = accepted_r2(f)
+        f.make_archive(r2.read_bytes())
+        ok(subprocess.run(['/bin/sh', r2, REF], env={**f.env, 'FULL': '1'},
+                          capture_output=True, text=True, timeout=90))
+        old_r2 = f.bundle()
+        # Model the R1 journal ordering with a complete, digest-valid bundle.
+        old_r1 = old_r2.with_name('mervlan.repair.r1-fixture')
+        shutil.copytree(old_r2, old_r1)
+        journal = old_r1 / 'journal'
+        journal.write_text('format=1\nstate=prepared\nstate=publishing\n' +
+                           ''.join(f'pending|{rel}\ndone|{rel}\n' for _, rel in FILES) +
+                           'state=committed\n')
+        ready = old_r1 / 'READY'
+        ready.write_text(ready.read_text().replace(old_r2.name, old_r1.name))
+        before = {p: (p.read_bytes(), p.stat().st_ino)
+                  for directory in (old_r1, old_r2) for p in directory.rglob('*') if p.is_file()}
+        f.make_archive()
+        # The R3 engine is the only incorrect target on the R2 installation.
+        ok(f.run({'FULL': '0'}))
+        assert len(list(f.backups.iterdir())) == 3
+        assert all((p.read_bytes(), p.stat().st_ino) == state for p, state in before.items())
+        assert_cohort_matches_snapshot(f)
+    finally:
+        f.close()
+
+
+def test_sparse_selective_recovery_both_engines():
+    for use_r2 in (False, True):
+        f = Fixture()
+        proc = None
+        try:
+            install_correct_cohort(f)
+            selected = damage_selection(f, 10)
+            before = installed_inodes(f)
+            proc = f.start({'FULL': '0', 'MERV_REPAIR_TEST_PAUSE_AT': '4'})
+            bundle = wait_for_pending_and_kill(f, proc)
+            assert sum(before.get(rel) != inode for rel, inode in installed_inodes(f).items()) == 3
+            f.reboot_tmp()
+            helper = bundle / 'recover.sh'
+            if use_r2:
+                helper = accepted_r2(f)
+            # Keep the R3 helper named by READY untouched. R2 is the separate
+            # trusted recovery executable and authenticates the R3 bundle.
+            shell = ['/bin/sh'] if use_r2 else TEST_SHELL
+            ok(subprocess.run([*shell, helper, 'recover', bundle.name],
+                              env=f.env, capture_output=True, text=True, timeout=60))
+            f.assert_original()
+            f.assert_protected()
+            for rel, inode in installed_inodes(f).items():
+                if rel not in selected:
+                    assert inode == before[rel], rel
+        finally:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            f.close()
+
+
+def test_refuses_unsafe_objects_invalid_full_and_resource_floors():
+    for defect in ('invalid-mode', 'empty-mode', 'symlink', 'fifo', 'directory', 'unreadable',
+                   'bad-archive', 'ram', 'tmp', 'flash'):
+        f = Fixture()
+        try:
+            target = f.base / 'mervlan.asp'
+            original = target.read_bytes()
+            extra = {}
+            if defect == 'invalid-mode':
+                extra['FULL'] = '2'
+            elif defect == 'empty-mode':
+                extra['FULL'] = ''
+            elif defect in ('symlink', 'fifo', 'directory'):
+                target.unlink()
+                if defect == 'symlink':
+                    target.symlink_to(f.meminfo)
+                elif defect == 'fifo':
+                    os.mkfifo(target)
+                else:
+                    target.mkdir()
+            elif defect == 'unreadable':
+                if os.geteuid() == 0:
+                    continue
+                target.chmod(0)
+            elif defect == 'bad-archive':
+                f.archive.write_bytes(b'malformed gzip')
+            elif defect == 'ram':
+                f.meminfo.write_text('MemAvailable: 32767 kB\n')
+            else:
+                df = f.fakebin / 'df'
+                path = f.tmp if defect == 'tmp' else f.base
+                df.write_text(f'''#!/bin/sh
+if [ "$2" = "{path}" ]; then
+  printf 'Filesystem Blocks Used Available Capacity Mounted\\nfixture 8000 7000 1000 88%% /fixture\\n'
+else
+  exec /bin/df "$@"
+fi
+''')
+                df.chmod(0o755)
+            result = f.run(extra)
+            refused(result)
+            assert not list(f.base.rglob('*.publish.part')) and ' PUBLISH ' not in result.stderr
+            if defect == 'unreadable':
+                target.chmod(0o640)
+            if defect not in ('symlink', 'fifo', 'directory'):
+                assert target.read_bytes() == original
+            f.assert_protected()
+        finally:
+            f.close()
+
+
+def test_corrupt_index_ready_and_helper_refuse_before_changes():
+    for name in ('index', 'READY', 'recover.sh', 'journal'):
+        f = Fixture()
+        proc = f.start({'MERV_REPAIR_TEST_PAUSE_AT': '3'})
+        try:
+            bundle = wait_for_pending_and_kill(f, proc)
+            before = installed_inodes(f)
+            path = bundle / name
+            path.write_bytes(path.read_bytes() + b'corrupt\n')
+            f.reboot_tmp()
+            # Use the separately trusted candidate, including when the
+            # bundled executable itself is the damaged file.
+            result = subprocess.run([*TEST_SHELL, ENGINE, 'recover', bundle.name],
+                                    env=f.env, capture_output=True, text=True, timeout=60)
+            refused(result, 'backup is incomplete or corrupt')
+            assert installed_inodes(f) == before
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            f.close()
+
+
+def test_recovery_refuses_unknown_installed_content():
+    f = Fixture()
+    proc = f.start({'MERV_REPAIR_TEST_PAUSE_AT': '4'})
+    try:
+        bundle = wait_for_pending_and_kill(f, proc)
+        target = f.base / 'mervlan.asp'
+        target.write_bytes(b'unknown installed bytes after interruption\n')
+        mixed = {rel: current_state(f, rel) for _, rel in FILES}
+        inodes = installed_inodes(f)
+        f.reboot_tmp()
+        result = subprocess.run([*TEST_SHELL, bundle / 'recover.sh', 'recover', bundle.name],
+                                env=f.env, capture_output=True, text=True, timeout=60)
+        refused(result, 'unknown or unsafe destination state')
+        assert {rel: current_state(f, rel) for _, rel in FILES} == mixed
+        assert installed_inodes(f) == inodes
+        f.assert_protected()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        f.close()
+
+
+def test_final_verification_failure_rolls_back():
+    f = Fixture()
+    try:
+        cmp = f.fakebin / 'cmp'
+        cmp.write_text('''#!/bin/sh
+if [ -e "$MERV_REPAIR_SYNC_COUNTER" ] && [ "${3:-}" = "$MERV_BASE/changelog.txt" ]; then
+  exit 2
+fi
+exec /usr/bin/cmp "$@"
+''')
+        cmp.chmod(0o755)
+        counter = f.root / 'sync.calls'
+        result = f.run({'MERV_REPAIR_SYNC_COUNTER': str(counter)})
+        refused(result, 'final content, mode, protected-state or owner verification failed')
+        f.assert_original()
+        f.assert_protected()
+        assert (f.bundle() / 'journal').read_text().endswith('state=rolled-back\n')
+    finally:
+        f.close()
+
+
+def test_sparse_selective_low_flash():
+    f = Fixture()
+    try:
+        install_correct_cohort(f)
+        selected = damage_selection(f, 10)
+        before = installed_inodes(f)
+        df = f.fakebin / 'df'
+        df.write_text('''#!/bin/sh
+if [ "$2" = "$MERV_BASE" ]; then
+  printf 'Filesystem Blocks Used Available Capacity Mounted\\nfixture 20000 11296 8704 57%% /fixture\\n'
+else
+  exec /bin/df "$@"
+fi
+''')
+        df.chmod(0o755)
+        counter = f.root / 'sync.calls'
+        ok(f.run({'FULL': '0', 'MERV_REPAIR_SYNC_COUNTER': str(counter)}))
+        assert counter.read_text() == '15\n'
+        assert {rel for rel, inode in installed_inodes(f).items() if before.get(rel) != inode} == selected
+        assert_cohort_matches_snapshot(f)
+    finally:
+        f.close()
+
+
+def classification_race(case, seam='df', historical=False):
+    f = Fixture()
+    try:
+        install_correct_cohort(f)
+        selected = 'mervlan.asp'
+        target = f.base / selected
+        rel = selected
+        mode = f.original[selected][1]
+        target.write_bytes(b'bad-A\n')
+        action = 'cat "$RACE_PAYLOAD" >"$RACE_TARGET"'
+        payload = b'bad-B\n'
+        if case == 'invalid-to-correct':
+            payload = f.original[selected][0]
+        elif case == 'mode-to-mode':
+            target.write_bytes(f.original[selected][0])
+            target.chmod(0o600)
+            action = 'chmod 0640 "$RACE_TARGET"'
+        elif case == 'present-to-absent':
+            action = 'rm "$RACE_TARGET"'
+        elif case == 'absent-to-present':
+            target.unlink()
+            action += f' && chmod {mode:o} "$RACE_TARGET"'
+        elif case in ('unselected-content', 'unselected-mode', 'final-target'):
+            rel = FILES[-1][1] if case == 'final-target' else FILES[0][1]
+            if case == 'unselected-mode':
+                action = 'chmod 0600 "$RACE_TARGET"'
+        elif case == 'present-to-symlink':
+            action = 'rm "$RACE_TARGET" && ln -s "$RACE_PAYLOAD" "$RACE_TARGET"'
+
+        def states():
+            tree = {}
+            for _, path in FILES:
+                entry = f.base / path
+                if entry.is_symlink():
+                    tree[path] = ('link', os.readlink(entry))
+                elif entry.exists():
+                    stat = entry.stat()
+                    tree[path] = (entry.read_bytes(), stat.st_mode & 0o7777, stat.st_ino)
+            return tree
+
+        before = states()
+        payload_path = f.root / 'mutation'
+        payload_path.write_bytes(payload)
+        trigger = f.root / 'mutated'
+        counter = f.root / 'sync.calls'
+        env = {'FULL': '0', 'RACE_TARGET': str(f.base / rel), 'RACE_PAYLOAD': str(payload_path),
+               'RACE_TRIGGER': str(trigger), 'MERV_REPAIR_SYNC_COUNTER': str(counter)}
+        injection = action + ' || exit 97\n: >"$RACE_TRIGGER" || exit 98\n'
+        shim = f.fakebin / seam
+        if seam == 'df':
+            script = ('if [ "$2" = "$MERV_REPAIR_BACKUP_ROOT" ]; then\n' + injection +
+                      'fi\nexec /bin/df "$@"\n')
+        elif seam == 'cp':
+            script = ('for dest do :; done\ncase "$dest" in */original/mervlan.asp)\n' +
+                      injection + ';; esac\nexec /bin/cp "$@"\n')
+        else:
+            shim.rename(f.fakebin / 'sync.real')
+            script = ('"$TEST_BIN_WRAPPERS/sync.real" "$@" || exit $?\n'
+                      'read count <"$MERV_REPAIR_SYNC_COUNTER" || exit 99\n'
+                      'if [ "$count" = 4 ]; then\n' + injection + 'fi\n')
+        shim.write_text('#!/bin/sh\n' + script)
+        shim.chmod(0o755)
+        result = f.run(env)
+        assert trigger.is_file(), (case, seam, result.stderr)
+        bundle = f.bundle()
+        f.assert_protected()
+        journal = (bundle / 'journal').read_text()
+        if historical:
+            ok(result)
+            assert (bundle / 'original' / rel).read_bytes() == payload
+            assert journal.endswith('state=committed\n')
+            assert_cohort_matches_snapshot(f)
+            print('REPRODUCED original R3 accepted same-length invalid B and saved it as original', flush=True)
+            return
+        refused(result, 'publication failed' if seam == 'sync' else 'persistent manifest backup failed')
+        assert ' SUCCESS ' not in result.stderr and 'state=committed' not in journal
+        records = next(f.tmp.glob('mervlan_lean.*/classified')).read_text().splitlines()
+        assert len(records) == len(FILES)
+        for record, (_, path) in zip(records, FILES):
+            source, approved_mode = f.original[path]
+            approved_digest = sha256(source).hexdigest()
+            if path not in before:
+                assert record == f'new|-|0|-|{approved_digest}|{path}|1'
+            else:
+                data, original_mode, _ = before[path]
+                selected_bit = int((data, original_mode) != (source, approved_mode))
+                old_mode = stat.filemode(stat.S_IFREG | original_mode)
+                assert record == (f'old|{old_mode}|{len(data)}|{sha256(data).hexdigest()}|'
+                                  f'{approved_digest}|{path}|{selected_bit}')
+        if seam != 'sync':
+            assert journal == 'format=1\nstate=prepared\n'
+            assert not (bundle / 'READY').exists() and not counter.exists()
+        after = states()
+        assert {k: v for k, v in before.items() if k != rel} == {
+            k: v for k, v in after.items() if k != rel}, (case, seam)
+        if case == 'present-to-absent':
+            assert rel not in after
+        elif case == 'present-to-symlink':
+            assert after[rel] == ('link', str(payload_path))
+        elif case in ('mode-to-mode', 'unselected-mode'):
+            assert after[rel] == (before[rel][0], 0o640 if case == 'mode-to-mode' else 0o600,
+                                  before[rel][2])
+        else:
+            assert after[rel][0] == payload
+            if rel in before:
+                assert after[rel][1:] == before[rel][1:]
+        print(f'PASS classification race {seam} {case}', flush=True)
+    finally:
+        f.close()
+
+
+def test_selective_classification_races():
+    for case in ('invalid-to-invalid', 'invalid-to-correct', 'mode-to-mode',
+                 'present-to-absent', 'absent-to-present', 'unselected-content',
+                 'unselected-mode', 'present-to-symlink', 'final-target'):
+        classification_race(case)
+    classification_race('invalid-to-invalid', seam='cp')
+    classification_race('unselected-content', seam='cp')  # already copied earlier
+    classification_race('invalid-to-invalid', seam='sync')
+
+
+def test_selective_one_content_repair():
+    f = Fixture()
+    try:
+        install_correct_cohort(f)
+        rel = 'mervlan.asp'
+        path = f.base / rel
+        original = path.read_bytes()
+        path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        before = installed_inodes(f)
+        result = f.run({'FULL': '0'})
+        ok(result)
+        assert {name for name, inode in installed_inodes(f).items() if before[name] != inode} == {rel}
+        assert_cohort_matches_snapshot(f)
+    finally:
+        f.close()
+
+
+def test_interrupted_backup_retains_prepared():
+    f = Fixture()
+    try:
+        cp = f.fakebin / 'cp'
+        cp.write_text('''#!/bin/sh
+for dest do :; done
+/bin/cp "$@" || exit $?
+case "$dest" in */original/mervlan.asp) kill -KILL "$PPID" ;; esac
+''')
+        cp.chmod(0o755)
+        result = f.run()
+        assert result.returncode == -signal.SIGKILL, result.stderr
+        bundle = f.bundle()
+        assert (bundle / 'original/mervlan.asp').is_file()
+        assert not (bundle / 'READY').exists()
+        assert (bundle / 'journal').read_text() == 'format=1\nstate=prepared\n'
+        f.assert_original()
+        f.assert_protected()
+        cp.unlink()
+        f.reboot_tmp()
+        result = subprocess.run([*TEST_SHELL, bundle / 'recover.sh', 'recover', bundle.name],
+                                env=f.env, capture_output=True, text=True, timeout=60)
+        refused(result, 'backup is incomplete or corrupt')
+        f.assert_original()
+        f.assert_protected()
+    finally:
+        f.close()
+
+
 def main():
     tests = [
         test_success_and_observation,
@@ -1041,6 +1580,25 @@ def main():
         test_legacy_writer_conflict_and_missing_ready,
         test_owner_format_matches_canonical_library,
     ]
+    tests += [
+        test_selective_replacement_counts_and_original_inodes,
+        test_selective_noop_prior_transaction_and_reverification,
+        test_full_republishes_even_correct_targets_and_preserves_bundle,
+        test_preserves_predecessor_bundles,
+        test_sparse_selective_recovery_both_engines,
+        test_refuses_unsafe_objects_invalid_full_and_resource_floors,
+        test_corrupt_index_ready_and_helper_refuse_before_changes,
+        test_recovery_refuses_unknown_installed_content,
+        test_final_verification_failure_rolls_back,
+        test_sparse_selective_low_flash,
+        test_selective_classification_races,
+        test_selective_one_content_repair,
+        test_interrupted_backup_retains_prepared,
+    ]
+    names = os.environ.get('MERVLAN_TEST_NAMES', '').split(',')
+    if names != ['']:
+        tests = [test for test in tests if test.__name__ in names]
+        assert len(tests) == len(names), names
     failures = []
     for test in tests:
         try:
@@ -1058,4 +1616,11 @@ def main():
 
 
 if __name__ == '__main__':
+    if os.environ.get('MERVLAN_TEST_BUSYBOX') == '1':
+        with tempfile.TemporaryDirectory(prefix='mervlan-busybox-engine.') as directory:
+            native = Path(directory) / ENGINE.name
+            native.write_bytes(busybox_engine_bytes(ENGINE.read_bytes()))
+            ENGINE = native
+            TEST_SHELL[:] = [shutil.which('busybox'), 'ash']
+            raise SystemExit(main())
     raise SystemExit(main())

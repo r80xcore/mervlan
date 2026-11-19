@@ -1,0 +1,1 @@
+PASS sha256sum extra-invalid rc=0 historical no-op reproduced capture checked; zero replacements, persistent writes and flushes

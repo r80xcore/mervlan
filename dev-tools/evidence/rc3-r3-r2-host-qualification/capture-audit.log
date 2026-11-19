@@ -1,0 +1,32 @@
+sha256sum duplicate original_bytes=10153 emitted_bytes=10155 LF=58 NUL=0
+sha256sum embedded-nul original_bytes=10153 emitted_bytes=10154 LF=58 NUL=1
+sha256sum extra-empty-line original_bytes=10153 emitted_bytes=10155 LF=60 NUL=0 appended_hex=0a0a
+sha256sum extra-invalid original_bytes=10095 emitted_bytes=10125 LF=59 NUL=0 appended_hex=756e6578706563746564207374616765642068617368206f75747075740a
+sha256sum extra-valid original_bytes=9979 emitted_bytes=10138 LF=59 NUL=0 appended_hex=3265313662333730386433633966646236643532653064613333373361613539316330333735383432366263363264626665623436363736653237313063313420202f746d702f6d6572766c616e5f7374616e64616c6f6e655f666978747572652e6465366d6779315f2f746d702f6d6572766c616e5f6c65616e2e313739353037393436302e342e302f73746167652f6368616e67656c6f672e7478740a
+sha256sum missing-final original_bytes=10153 emitted_bytes=9992 LF=57 NUL=0
+sha256sum nonhex original_bytes=10153 emitted_bytes=10153 LF=58 NUL=0
+sha256sum nonzero original_bytes=10153 emitted_bytes=10153 LF=58 NUL=0 appended_hex=
+sha256sum reordered original_bytes=10153 emitted_bytes=10153 LF=58 NUL=0
+sha256sum trailing-binary original_bytes=10153 emitted_bytes=10157 LF=58 NUL=1 appended_hex=ff008001
+sha256sum trailing-newline original_bytes=10153 emitted_bytes=10154 LF=59 NUL=0 appended_hex=0a
+sha256sum trailing-nul original_bytes=10153 emitted_bytes=10154 LF=58 NUL=1 appended_hex=00
+sha256sum truncated-final original_bytes=10153 emitted_bytes=10025 LF=57 NUL=0
+sha256sum unterminated-trailing-record original_bytes=10153 emitted_bytes=10314 LF=58 NUL=0 appended_hex=3265313662333730386433633966646236643532653064613333373361613539316330333735383432366263363264626665623436363736653237313063313420202f746d702f6d6572766c616e5f7374616e64616c6f6e655f666978747572652e62336e625f61755f2f746d702f6d6572766c616e5f6c65616e2e313739353037393436382e323937322e302f73746167652f6368616e67656c6f672e747874
+sha256sum valid original_bytes=10153 emitted_bytes=10153 LF=58 NUL=0 appended_hex=
+sha256sum wrong-path original_bytes=10153 emitted_bytes=10080 LF=58 NUL=0
+openssl duplicate original_bytes=10211 emitted_bytes=10213 LF=58 NUL=0
+openssl embedded-nul original_bytes=10211 emitted_bytes=10212 LF=58 NUL=1
+openssl extra-empty-line original_bytes=10211 emitted_bytes=10213 LF=60 NUL=0 appended_hex=0a0a
+openssl extra-invalid original_bytes=10211 emitted_bytes=10241 LF=59 NUL=0 appended_hex=756e6578706563746564207374616765642068617368206f75747075740a
+openssl extra-valid original_bytes=10211 emitted_bytes=10374 LF=59 NUL=0 appended_hex=32653136623337303864336339666462366435326530646133333733616135393163303337353834323662633632646266656234363637366532373130633134202a2f746d702f6d6572766c616e5f7374616e64616c6f6e655f666978747572652e62716366777266612f746d702f6d6572766c616e5f6c65616e2e313739353037393439302e31303835372e302f73746167652f6368616e67656c6f672e7478740a
+openssl missing-final original_bytes=10211 emitted_bytes=10049 LF=57 NUL=0
+openssl nonhex original_bytes=10211 emitted_bytes=10211 LF=58 NUL=0
+openssl nonzero original_bytes=10211 emitted_bytes=10211 LF=58 NUL=0 appended_hex=
+openssl reordered original_bytes=10211 emitted_bytes=10211 LF=58 NUL=0
+openssl trailing-binary original_bytes=10211 emitted_bytes=10215 LF=58 NUL=1 appended_hex=ff008001
+openssl trailing-newline original_bytes=10211 emitted_bytes=10212 LF=59 NUL=0 appended_hex=0a
+openssl trailing-nul original_bytes=10211 emitted_bytes=10212 LF=58 NUL=1 appended_hex=00
+openssl truncated-final original_bytes=10211 emitted_bytes=10082 LF=57 NUL=0
+openssl unterminated-trailing-record original_bytes=10211 emitted_bytes=10373 LF=58 NUL=0 appended_hex=32653136623337303864336339666462366435326530646133333733616135393163303337353834323662633632646266656234363637366532373130633134202a2f746d702f6d6572766c616e5f7374616e64616c6f6e655f666978747572652e6e79376b6a6437652f746d702f6d6572766c616e5f6c65616e2e313739353037393530322e31333833332e302f73746167652f6368616e67656c6f672e747874
+openssl valid original_bytes=10211 emitted_bytes=10211 LF=58 NUL=0 appended_hex=
+openssl wrong-path original_bytes=10211 emitted_bytes=10137 LF=58 NUL=0

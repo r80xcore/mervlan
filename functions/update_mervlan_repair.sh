@@ -23,6 +23,7 @@ REPAIR_MIN_TMP_FREE_KIB=65536
 REPAIR_MIN_DEST_FREE_KIB=8192
 WORK= ACTION_LOCKED=0 MAINTENANCE_LOCKED=0 MANAGER_LOCKED=0
 TX=0 COMMITTED=0 ROLLBACK_OK=0 PUBLISHED=0 VERIFIED=0
+SELECTED= REPLACEMENTS=58 SELECTED_BYTES=0
 ACTION_PARENT=0 ACTION_PARENT_PID= ACTION_PARENT_START= ACTION_PARENT_NONCE=
 LOCK_START= LOCK_CREATED= ACTION_NONCE= MAINTENANCE_NONCE= MANAGER_NONCE=
 LOCK_SEQ=0 JOURNAL_SEQ=0 BACKUP_ESTIMATE=0 TXN_ID= HANDOFF_START=
@@ -30,6 +31,7 @@ LOCK_ACQUIRE_REASON= OWNER_CHECK_FAILURE=
 RUN_START=$(date +%s 2>/dev/null || printf '0')
 START_ID= REF= ROOT= COHORT= MANIFEST= STAGE= BACKUP= LEDGER= ARCHIVE=
 BACKUP_ROOT= TXN_DIR= READY_FILE= INDEX_FILE= RECOVERY_HELPER= SOURCE_ROOT=
+BACKUP_HASH_STYLE=
 status() {
   now=$(date +%s 2>/dev/null || printf '%s' "$RUN_START")
   printf '[mervlan-lean] %s elapsed=%ss %s\n' "$1" "$((now-RUN_START))" "${2:-}" >&2
@@ -49,7 +51,7 @@ safe_chain() {
     [ -n "$component" ] || return 1
     part="$part$component"
     if exists "$part"; then
-      [ ! -L "$part" ] && [ -d "$part" ] || return 1
+      [ ! -L "$part" ] && [ -d "$part" ] && [ -x "$part" ] || return 1
     fi
     part="$part/"
   done
@@ -159,7 +161,8 @@ proc_start() (
 owner_fields_read() {
   _ofr_file="$1"; OWNER_PID= OWNER_START= OWNER_NONCE= OWNER_CREATED= OWNER_HEARTBEAT=
   [ ! -L "$_ofr_file" ] && [ -f "$_ofr_file" ] && [ -r "$_ofr_file" ] || return 1
-  _ofr_size=$(wc -c <"$_ofr_file" 2>/dev/null | tr -d ' ') || return 1
+  _ofr_size=$(wc -c <"$_ofr_file" 2>/dev/null) || return 1
+  _ofr_size=${_ofr_size#"${_ofr_size%%[! ]*}"}
   case "$_ofr_size" in ''|*[!0-9]*) return 1 ;; esac
   [ "$_ofr_size" -gt 0 ] && [ "$_ofr_size" -le 512 ] || return 1
   LC_ALL=C grep -q '[^ -~]' "$_ofr_file" 2>/dev/null && return 1
@@ -185,12 +188,15 @@ owner_fields_read() {
   [ "${#OWNER_NONCE}" -le 160 ] || return 1
   return 0
 }
-owner_tuple_matches() {
+owner_record_matches() {
   _otm_lock="$1" _otm_pid="$2" _otm_start="$3" _otm_nonce="$4"
   [ ! -L "$_otm_lock" ] && [ -d "$_otm_lock" ] || return 1
   owner_fields_read "$_otm_lock/owner" || return 1
   [ "$OWNER_PID" = "$_otm_pid" ] && [ "$OWNER_START" = "$_otm_start" ] &&
-    [ "$OWNER_NONCE" = "$_otm_nonce" ] || return 1
+    [ "$OWNER_NONCE" = "$_otm_nonce" ]
+}
+owner_tuple_matches() {
+  owner_record_matches "$@" || return 1
   [ "$(proc_start "$OWNER_PID" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$OWNER_START" ] &&
     kill -0 "$OWNER_PID" 2>/dev/null
 }
@@ -374,6 +380,8 @@ lock_release_one() {
 }
 owner_ok() {
   OWNER_CHECK_FAILURE=
+  # The running shell cannot change generation during this check. Each
+  # self-owned record must still match that identity and its own nonce.
   [ "$(proc_start "$$" "$MERV_REPAIR_OWNER_PROC_ROOT" 2>/dev/null)" = "$LOCK_START" ] || {
     OWNER_CHECK_FAILURE=proc_identity_invalid
     return 1
@@ -384,7 +392,7 @@ owner_ok() {
       return 1
     }
   elif [ "$ACTION_LOCKED" -eq 1 ]; then
-    owner_tuple_matches "$MERV_REPAIR_ACTION_LOCK" "$$" "$LOCK_START" "$ACTION_NONCE" || {
+    owner_record_matches "$MERV_REPAIR_ACTION_LOCK" "$$" "$LOCK_START" "$ACTION_NONCE" || {
       OWNER_CHECK_FAILURE=action_owner_invalid
       return 1
     }
@@ -393,12 +401,12 @@ owner_ok() {
     return 1
   fi
   [ "$MAINTENANCE_LOCKED" -eq 1 ] || { OWNER_CHECK_FAILURE=maintenance_lock_not_owned; return 1; }
-  owner_tuple_matches "$MERV_REPAIR_LOCK" "$$" "$LOCK_START" "$MAINTENANCE_NONCE" || {
+  owner_record_matches "$MERV_REPAIR_LOCK" "$$" "$LOCK_START" "$MAINTENANCE_NONCE" || {
     OWNER_CHECK_FAILURE=maintenance_owner_invalid
     return 1
   }
   [ "$MANAGER_LOCKED" -eq 1 ] || { OWNER_CHECK_FAILURE=manager_lock_not_owned; return 1; }
-  owner_tuple_matches "$MERV_REPAIR_MANAGER_LOCK" "$$" "$LOCK_START" "$MANAGER_NONCE" || {
+  owner_record_matches "$MERV_REPAIR_MANAGER_LOCK" "$$" "$LOCK_START" "$MANAGER_NONCE" || {
     OWNER_CHECK_FAILURE=manager_owner_invalid
     return 1
   }
@@ -477,8 +485,7 @@ mutator() {
     "$MERV_BASE"/functions/dropbear_sshkey_gen.sh) return 0 ;; esac
   return 1
 }
-relative_candidate() {
-  case "$1" in ''|/*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+writer_basename() {
   case "${1##*/}" in
     install.sh|uninstall.sh|update_mervlan.sh|mervlan_manager.sh|\
     sync_nodes.sh|execute_nodes.sh|service-event-handler.sh|mervlan_backup.sh|mervlan_recover.sh|\
@@ -486,6 +493,10 @@ relative_candidate() {
     save_settings.sh|hw_probe.sh|dropbear_sshkey_gen.sh) return 0 ;;
   esac
   return 1
+}
+relative_candidate() {
+  case "$1" in ''|/*|*[!A-Za-z0-9_./-]*) return 1 ;; esac
+  writer_basename "$1"
 }
 # Strip harmless ./ components, including nested ones. Reject '..' and
 # malformed candidates instead of assuming their resulting path is harmless.
@@ -527,14 +538,27 @@ scan_processes() {
     regular "$entry/cmdline" && [ -r "$entry/cmdline" ] || return 1
     # Important: read each PID only when its turn arrives. Never pre-shortlist.
     argv=$(tr '\000' '\n' <"$entry/cmdline") || return 1
-    [ -n "$argv" ] || continue
-    matched=0; matched_count=0; matched_arg=
-    # Exact absolute paths take priority; all other arguments are inspected
+    # Every writer name contains .sh. Skip argument parsing only after the
+    # complete cmdline read has succeeded, at this PID's turn in this scan.
+    case "$argv" in *.sh*) : ;; *) continue ;; esac
+    matched=0; matched_count=0; matched_arg=; noncanonical=0
+    # Absolute paths take priority; all other arguments are inspected
     # as relative candidates, including BARE filenames (the R1 regression).
     while IFS= read -r arg || [ -n "$arg" ]; do
-      if mutator "$arg"; then
-        matched=1; matched_count=$((matched_count+1)); matched_arg="$arg"
+      if ! mutator "$arg"; then
+        case "$arg" in
+          "$MERV_BASE"/*|/./*|/../*|/*/./*|/*/../*|//*|/*//*) writer_basename "$arg" || continue ;;
+          *) continue ;;
+        esac
+        normalized=$(normalize_relative "${arg#/}") || {
+          status REFUSED 'ambiguous absolute writer candidate'; return 1;
+        }
+        mutator "/$normalized" || continue
+        # Lexical equivalence can block a writer but cannot authenticate an
+        # exception for a dispatcher reached through an alternate spelling.
+        noncanonical=1
       fi
+      matched=1; matched_count=$((matched_count+1)); matched_arg="$arg"
     done <<ARGS
 $argv
 ARGS
@@ -561,13 +585,13 @@ ARGS
     if [ "$matched" -eq 1 ]; then
       # A WebUI transport may own the global action lock. Admit only that
       # authenticated dispatcher process; every other recognized mutator blocks.
-      if [ "$ACTION_PARENT" -eq 1 ] && [ "$pid" = "$ACTION_PARENT_PID" ] &&
+      if [ "$noncanonical" -eq 0 ] && [ "$ACTION_PARENT" -eq 1 ] && [ "$pid" = "$ACTION_PARENT_PID" ] &&
          [ "$matched_count" -eq 1 ] &&
          [ "$matched_arg" = "$MERV_BASE/functions/service-event-handler.sh" ] &&
          [ "$(proc_start "$pid" "$MERV_REPAIR_PROC_ROOT" 2>/dev/null)" = "$ACTION_PARENT_START" ]; then
         continue
       fi
-      if [ "$matched_count" -eq 1 ] &&
+      if [ "$noncanonical" -eq 0 ] && [ "$matched_count" -eq 1 ] &&
          [ "$matched_arg" = "$MERV_BASE/functions/service-event-handler.sh" ] &&
          readonly_dispatcher_action "$argv"; then
         continue
@@ -811,13 +835,15 @@ backup_capacity_check() {
     safe_chain "${_bc_target%/*}" || return 1
     if exists "$_bc_target"; then
       regular "$_bc_target" || return 1
-      _bc_size=$(wc -c <"$_bc_target" 2>/dev/null | tr -d ' ') || return 1
+      _bc_size=$(wc -c <"$_bc_target" 2>/dev/null) || return 1
+      _bc_size=${_bc_size#"${_bc_size%%[! ]*}"}
       case "$_bc_size" in ''|*[!0-9]*) return 1 ;; esac
       _bc_total=$((_bc_total + _bc_size))
       [ "$_bc_total" -le 8388608 ] || return 1
     fi
   done <"$COHORT"
-  _bc_helper=$(wc -c <"$RECOVERY_HELPER" 2>/dev/null | tr -d ' ') || return 1
+  _bc_helper=$(wc -c <"$RECOVERY_HELPER" 2>/dev/null) || return 1
+  _bc_helper=${_bc_helper#"${_bc_helper%%[! ]*}"}
   case "$_bc_helper" in ''|*[!0-9]*) return 1 ;; esac
   _bc_free=$(capacity_kib "$BACKUP_ROOT")
   case "$_bc_free" in ''|*[!0-9]*) return 1 ;; esac
@@ -826,13 +852,35 @@ backup_capacity_check() {
   BACKUP_ESTIMATE=$_bc_total
   return 0
 }
+choose_hash_style() {
+  if [ -z "${BACKUP_HASH_STYLE:-}" ]; then
+    if type sha256sum >/dev/null 2>&1; then
+      BACKUP_HASH_STYLE=sum
+    elif [ "$(openssl dgst -sha256 -r </dev/null 2>/dev/null)" = \
+           'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 *stdin' ]; then
+      BACKUP_HASH_STYLE=openssl
+    else
+      BACKUP_HASH_STYLE=individual
+    fi
+  fi
+}
+hash_batch() {
+  case "$BACKUP_HASH_STYLE" in
+    sum) sha256sum "$@" 2>/dev/null ;;
+    openssl) openssl dgst -sha256 -r "$@" 2>/dev/null ;;
+  esac
+}
 backup_payload_verify() {
   _bpv_count=0 _bpv_total=0
+  _bpv_stage=${1:-} _bpv_expected=
+  # The full output must match the ordered digests and exact allowlisted paths.
+  choose_hash_style
+  set --
   exec 3<"$INDEX_FILE" || return 1
   while IFS=' ' read -r _bpv_newmode _bpv_rel; do
     IFS='|' read -r _bpv_kind _bpv_oldmode _bpv_size _bpv_oldhash _bpv_newhash _bpv_path <&3 || { exec 3<&-; return 1; }
     [ "$_bpv_rel" = "$_bpv_path" ] && sha_valid "$_bpv_newhash" || { exec 3<&-; return 1; }
-    if [ "${1:-}" = verify-stage ]; then
+    if [ "$_bpv_stage" = verify-stage ]; then
       path_regular "$STAGE/$_bpv_rel" || { exec 3<&-; return 1; }
       _bpv_stage_hash=$(sha256_file "$STAGE/$_bpv_rel") || { exec 3<&-; return 1; }
       [ "$_bpv_stage_hash" = "$_bpv_newhash" ] || { exec 3<&-; return 1; }
@@ -844,10 +892,22 @@ backup_payload_verify() {
         sha_valid "$_bpv_oldhash" || { exec 3<&-; return 1; }
         _bpv_saved="$BACKUP/$_bpv_rel"
         path_regular "$_bpv_saved" || { exec 3<&-; return 1; }
-        _bpv_saved_hash=$(sha256_file "$_bpv_saved") || { exec 3<&-; return 1; }
-        _bpv_saved_size=$(wc -c <"$_bpv_saved" 2>/dev/null | tr -d ' ') || { exec 3<&-; return 1; }
+        case "$BACKUP_HASH_STYLE" in
+          sum) _bpv_separator='  ' ;;
+          openssl) _bpv_separator=' *' ;;
+          individual)
+            _bpv_saved_hash=$(sha256_file "$_bpv_saved") || { exec 3<&-; return 1; }
+            [ "$_bpv_saved_hash" = "$_bpv_oldhash" ] || { exec 3<&-; return 1; } ;;
+        esac
+        if [ "$BACKUP_HASH_STYLE" != individual ]; then
+          set -- "$@" "$_bpv_saved"
+          _bpv_expected="$_bpv_expected$_bpv_oldhash$_bpv_separator$_bpv_saved
+"
+        fi
+        _bpv_saved_size=$(wc -c <"$_bpv_saved" 2>/dev/null) || { exec 3<&-; return 1; }
+        _bpv_saved_size=${_bpv_saved_size#"${_bpv_saved_size%%[! ]*}"}
         _bpv_saved_mode=$(mode_value "$_bpv_saved") || { exec 3<&-; return 1; }
-        [ "$_bpv_saved_hash" = "$_bpv_oldhash" ] && [ "$_bpv_saved_size" = "$_bpv_size" ] &&
+        [ "$_bpv_saved_size" = "$_bpv_size" ] &&
           [ "$_bpv_saved_mode" = "$_bpv_oldmode" ] || { exec 3<&-; return 1; }
         _bpv_total=$((_bpv_total + _bpv_size))
         [ "$_bpv_total" -le 8388608 ] || { exec 3<&-; return 1; }
@@ -863,6 +923,10 @@ backup_payload_verify() {
   if IFS='|' read -r _bpv_extra <&3; then exec 3<&-; return 1; fi
   exec 3<&-
   [ "$_bpv_count" -eq 58 ] && [ "$_bpv_total" -le 8388608 ] || return 1
+  if [ "$#" -gt 0 ]; then
+    _bpv_actual=$(hash_batch "$@") || return 1
+    [ "$_bpv_actual" = "${_bpv_expected%?}" ] || return 1
+  fi
   return 0
 }
 journal_validate() {
@@ -943,24 +1007,55 @@ backup_files() {
   while IFS=' ' read -r _bf_newmode _bf_rel; do
     _bf_target="$MERV_BASE/$_bf_rel"; _bf_saved="$BACKUP/$_bf_rel"; _bf_new="$STAGE/$_bf_rel"
     _bf_newhash=$(sha256_file "$_bf_new") || return 1
+    if [ "${FULL-1}" = 0 ]; then
+      safe_chain "${_bf_target%/*}" || return 1
+      IFS='|' read -r _bf_kind _bf_mode _bf_bytes _bf_digest _bf_source _bf_path _bf_selected <&5 || return 1
+      [ "$_bf_path" = "$_bf_rel" ] && [ "$_bf_source" = "$_bf_newhash" ] || return 1
+      if publication_selected "$_bf_rel"; then
+        [ "$_bf_selected" = 1 ] || return 1
+      else
+        [ "$_bf_selected" = 0 ] || return 1
+      fi
+    fi
     if exists "$_bf_target"; then
       regular "$_bf_target" || return 1
       _bf_oldmode=$(mode_value "$_bf_target") || return 1
-      _bf_size=$(wc -c <"$_bf_target" 2>/dev/null | tr -d ' ') || return 1
+      _bf_size=$(wc -c <"$_bf_target" 2>/dev/null) || return 1
+      _bf_size=${_bf_size#"${_bf_size%%[! ]*}"}
       case "$_bf_size" in ''|*[!0-9]*) return 1 ;; esac
       _bf_total=$((_bf_total + _bf_size)); [ "$_bf_total" -le 8388608 ] || return 1
-      _bf_oldhash=$(sha256_file "$_bf_target") || return 1
+      if [ "${FULL-1}" = 0 ] && [ "$_bf_digest" = "$_bf_newhash" ]; then
+        cmp -s "$_bf_new" "$_bf_target" || return 1
+        _bf_oldhash=$_bf_newhash
+      else
+        _bf_oldhash=$(sha256_file "$_bf_target") || return 1
+      fi
+      if [ "${FULL-1}" = 0 ]; then
+        [ "$_bf_kind|$_bf_mode|$_bf_bytes|$_bf_digest" = "old|$_bf_oldmode|$_bf_size|$_bf_oldhash" ] || return 1
+      fi
       ensure_dir "${_bf_saved%/*}" || return 1
       cp -p "$_bf_target" "$_bf_saved" || return 1
       cmp -s "$_bf_target" "$_bf_saved" || return 1
       [ "$(mode_value "$_bf_saved")" = "$_bf_oldmode" ] || return 1
       printf 'old|%s|%s|%s|%s|%s\n' "$_bf_oldmode" "$_bf_size" "$_bf_oldhash" "$_bf_newhash" "$_bf_rel" >>"$_bf_tmp" || return 1
     else
+      if [ "${FULL-1}" = 0 ]; then
+        [ "$_bf_kind|$_bf_mode|$_bf_bytes|$_bf_digest|$_bf_selected" = 'new|-|0|-|1' ] || return 1
+      fi
       printf 'new|-|0|-|%s|%s\n' "$_bf_newhash" "$_bf_rel" >>"$_bf_tmp" || return 1
     fi
   done <"$COHORT"
+  if [ "${FULL-1}" = 0 ]; then
+    _bf_extra=
+    if IFS= read -r _bf_extra <&5 || [ -n "$_bf_extra" ]; then return 1; fi
+  fi
   chmod 600 "$_bf_tmp" && mv -f "$_bf_tmp" "$INDEX_FILE" || return 1
   backup_payload_verify || return 1
+  if [ "${FULL-1}" = 0 ]; then
+    # Catch changes to earlier entries during the copy loop, using the
+    # independently verified backup as the byte-for-byte reference.
+    selective_originals_match || return 1
+  fi
   _bf_contract_hash=$(sha256_file "$MANIFEST") || return 1
   _bf_index_hash=$(sha256_file "$INDEX_FILE") || return 1
   _bf_helper_hash=$(sha256_file "$RECOVERY_HELPER") || return 1
@@ -994,8 +1089,11 @@ backup_verify() {
 }
 prior_transactions_clear() {
   _ptc_root=${MERV_REPAIR_BACKUP_ROOT%/}
+  case "$_ptc_root" in ''|/|"$MERV_BASE"|"$MERV_BASE"/*) return 1 ;; esac
   safe_chain "$_ptc_root" || return 1
+  if ! exists "$_ptc_root"; then return 0; fi
   [ -d "$_ptc_root" ] && [ ! -L "$_ptc_root" ] || return 1
+  [ -r "$_ptc_root" ] && [ -x "$_ptc_root" ] || return 1
   for _ptc_dir in "$_ptc_root"/mervlan.repair.*; do
     exists "$_ptc_dir" || continue
     [ ! -L "$_ptc_dir" ] && [ -d "$_ptc_dir" ] || return 1
@@ -1048,6 +1146,90 @@ prior_transactions_clear() {
     RECOVERY_HELPER=$_ptc_saved_helper LEDGER=$_ptc_saved_ledger
   done
   return 0
+}
+publication_selected() {
+  [ "${FULL-1}" = 1 ] && return 0
+  case "$SELECTED" in *"|$1|"*) return 0 ;; *) return 1 ;; esac
+}
+stage_hashes() {
+  set --
+  while IFS=' ' read -r _sh_mode _sh_rel; do
+    regular "$STAGE/$_sh_rel" || return 1
+    set -- "$@" "$STAGE/$_sh_rel"
+  done <"$COHORT"
+  if [ "$BACKUP_HASH_STYLE" = individual ]; then
+    for _sh_path do
+      _sh_hash=$(sha256_file "$_sh_path") || return 1
+      printf '%s  %s\n' "$_sh_hash" "$_sh_path" || return 1
+    done
+  else
+    hash_batch "$@"
+  fi
+}
+select_publication() {
+  REPLACEMENTS=0 SELECTED='|' SELECTED_BYTES=0
+  choose_hash_style
+  stage_hashes >"$WORK/stage.hashes" || return 1
+  _sp_sep='  '
+  if [ "$BACKUP_HASH_STYLE" = openssl ]; then _sp_sep=' *'; fi
+  _sp_count=0
+  while IFS=' ' read -r _sp_mode _sp_rel; do
+    _sp_target="$MERV_BASE/$_sp_rel" _sp_source="$STAGE/$_sp_rel"
+    IFS= read -r _sp_line <&6 || return 1
+    _sp_newhash=${_sp_line%% *}
+    sha_valid "$_sp_newhash" && [ "$_sp_line" = "$_sp_newhash$_sp_sep$_sp_source" ] || return 1
+    printf '%s%s%s\n' "$_sp_newhash" "$_sp_sep" "$_sp_source" >&7 || return 1
+    _sp_count=$((_sp_count + 1))
+    safe_chain "${_sp_target%/*}" || return 1
+    _sp_kind=new _sp_actual=- _sp_oldsize=0 _sp_oldhash=- _sp_selected=1 _sp_cmp=1
+    if exists "$_sp_target"; then
+      _sp_kind=old
+      regular "$_sp_target" && [ -r "$_sp_target" ] || return 1
+      _sp_actual=$(mode_value "$_sp_target") || return 1
+      mode_record_valid "$_sp_actual" || return 1
+      _sp_oldsize=$(wc -c <"$_sp_target") || return 1
+      _sp_oldsize=${_sp_oldsize#"${_sp_oldsize%%[! ]*}"}
+      case "$_sp_oldsize" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$_sp_oldsize" -le 8388608 ] || return 1
+      _sp_cmp=0
+      cmp -s "$_sp_source" "$_sp_target" || _sp_cmp=$?
+      case "$_sp_cmp" in
+        0) _sp_oldhash=$_sp_newhash ;;
+        1) _sp_oldhash=$(sha256_file "$_sp_target") || return 1 ;;
+        *) return 1 ;;
+      esac
+      case "$_sp_cmp:$_sp_mode:$_sp_actual" in
+        0:0755:-rwxr-xr-x|0:0644:-rw-r--r--) _sp_selected=0 ;;
+      esac
+    fi
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$_sp_kind" "$_sp_actual" "$_sp_oldsize" \
+      "$_sp_oldhash" "$_sp_newhash" "$_sp_rel" "$_sp_selected" || return 1
+    [ "$_sp_selected" -eq 1 ] || continue
+    _sp_size=$_sp_oldsize
+    if [ "$_sp_cmp" -ne 0 ]; then _sp_size=$(wc -c <"$_sp_source") || return 1; fi
+    case "$_sp_size" in ''|*[!0-9]*) return 1 ;; esac
+    SELECTED_BYTES=$((SELECTED_BYTES + _sp_size))
+    SELECTED="$SELECTED$_sp_rel|"
+    REPLACEMENTS=$((REPLACEMENTS + 1))
+  done <"$COHORT" 6<"$WORK/stage.hashes" 7>"$WORK/stage.hashes.expected" >"$WORK/classified" || return 1
+  # Shell read can discard binary bytes. Require the complete backend output
+  # to match the validated records byte for byte before accepting selection.
+  [ "$_sp_count" -eq 58 ] && cmp -s "$WORK/stage.hashes.expected" "$WORK/stage.hashes" || return 1
+  status SELECT "files=58 replacements=$REPLACEMENTS bytes=$SELECTED_BYTES"
+}
+selective_originals_match() {
+  while IFS='|' read -r _som_kind _som_mode _som_size _som_oldhash _som_newhash _som_rel; do
+    _som_target="$MERV_BASE/$_som_rel"
+    valid_rel "$_som_rel" && safe_chain "${_som_target%/*}" || return 1
+    case "$_som_kind" in
+      old)
+        regular "$_som_target" && regular "$BACKUP/$_som_rel" &&
+          cmp -s "$BACKUP/$_som_rel" "$_som_target" &&
+          [ "$(mode_value "$_som_target")" = "$_som_mode" ] || return 1 ;;
+      new) if exists "$_som_target"; then return 1; fi ;;
+      *) return 1 ;;
+    esac
+  done <"$INDEX_FILE"
 }
 record_original_state() {
   _ros_all=1
@@ -1198,7 +1380,10 @@ publish_batch() {
   while [ "$#" -gt 0 ]; do
     _pu_mode=$1 _pu_rel=$2
     shift 2
-    IFS='|' read -r _pu_kind _pu_oldmode _pu_size _pu_oldhash _pu_newhash _pu_path <&4 || return 1
+    while :; do
+      IFS='|' read -r _pu_kind _pu_oldmode _pu_size _pu_oldhash _pu_newhash _pu_path <&4 || return 1
+      publication_selected "$_pu_path" && break
+    done
     [ "$_pu_rel" = "$_pu_path" ] || return 1
     _pu_target="$MERV_BASE/$_pu_rel"
     _pu_tmp="$_pu_target.mervlan-repair.$TXN_ID.publish.part"
@@ -1219,7 +1404,7 @@ publish_batch() {
     repair_test_fault "${MERV_REPAIR_TEST_FAIL_AFTER_AT:-}" "$((PUBLISHED+1))" && return 1
     PUBLISHED=$((PUBLISHED + 1))
     VERIFIED=$((VERIFIED + 1))
-    if [ $((PUBLISHED % 10)) -eq 0 ] || [ "$PUBLISHED" -eq 58 ]; then
+    if [ $((PUBLISHED % 10)) -eq 0 ] || [ "$PUBLISHED" -eq "$REPLACEMENTS" ]; then
       status PUBLISH "replaced=$PUBLISHED verified=$VERIFIED/58"
     fi
   done
@@ -1229,6 +1414,7 @@ prepare_publication() {
   while IFS=' ' read -r _pb_mode _pb_rel; do
     IFS='|' read -r _pb_kind _pb_oldmode _pb_size _pb_oldhash _pb_newhash _pb_path <&3 || return 1
     [ "$_pb_rel" = "$_pb_path" ] || return 1
+    publication_selected "$_pb_rel" || continue
     _pb_target="$MERV_BASE/$_pb_rel" _pb_source="$STAGE/$_pb_rel"
     safe_chain "${_pb_target%/*}" && ensure_dir "${_pb_target%/*}" || return 1
     _pb_tmp="$_pb_target.mervlan-repair.$TXN_ID.publish.part"
@@ -1243,13 +1429,13 @@ prepare_publication() {
     fi
   done <"$COHORT"
   if [ "$#" -gt 0 ]; then publish_batch "$@" || return 1; fi
-  [ "$PUBLISHED" -eq 58 ] && [ "$VERIFIED" -eq 58 ]
+  [ "$PUBLISHED" -eq "$REPLACEMENTS" ] && [ "$VERIFIED" -eq "$REPLACEMENTS" ]
 }
 publication() {
   # Preserve the ordinary flash floor and allow 1 MiB for batch metadata.
   # With less spare space, keep the original one-sibling footprint.
   _pb_batch=1
-  if [ "$flashfree" -ge "$((REPAIR_MIN_DEST_FREE_KIB + 1024 + (STAGED_BYTES + 1023) / 1024))" ]; then
+  if [ "$flashfree" -ge "$((REPAIR_MIN_DEST_FREE_KIB + 1024 + (SELECTED_BYTES + 1023) / 1024))" ]; then
     _pb_batch=58
     backup_verify || return 1
   else
@@ -1264,7 +1450,8 @@ final_verify() {
   owner_ok && scan_processes || return 1
   while IFS=' ' read -r _fv_mode _fv_rel; do
     _fv_target="$MERV_BASE/$_fv_rel" _fv_source="$STAGE/$_fv_rel"
-    regular "$_fv_target" && cmp -s "$_fv_source" "$_fv_target" && mode_ok "$_fv_mode" "$_fv_target" || return 1
+    safe_chain "${_fv_target%/*}" && regular "$_fv_target" &&
+      cmp -s "$_fv_source" "$_fv_target" && mode_ok "$_fv_mode" "$_fv_target" || return 1
   done <"$COHORT"
   protected_unchanged
 }
@@ -1401,7 +1588,22 @@ repair_run() {
   acquire || stop 'action, maintenance or Manager ownership is unavailable'
   scan_processes || stop 'post-acquisition legacy mutator exclusion failed'
   protected_files || stop 'protected-state snapshot failed'
-  backup_files || stop 'persistent manifest backup failed; no installed files were replaced'
+  SELECTED_BYTES=$STAGED_BYTES
+  if [ "${FULL-1}" = 0 ]; then
+    owner_ok && prior_transactions_clear || stop 'ownership lost or previous transaction unresolved'
+    select_publication || stop 'installed target classification failed'
+    if [ "$REPLACEMENTS" -eq 0 ]; then
+      preflight && final_verify && owner_ok || stop 'selective no-op verification failed'
+      release || stop 'ownership release failed'
+      status SUCCESS 'files=58 replaced=0 verified no-op'
+      return 0
+    fi
+  fi
+  if [ "${FULL-1}" = 0 ]; then
+    backup_files 5<"$WORK/classified"
+  else
+    backup_files
+  fi || stop 'persistent manifest backup failed; no installed files were replaced'
   preflight || stop 'resource preflight before publication failed'
   publication || stop 'publication failed; rollback will be attempted'
   final_verify || stop 'final content, mode, protected-state or owner verification failed'
@@ -1411,7 +1613,7 @@ repair_run() {
   sync || stop 'could not durably finish the Repair transaction'
   owner_ok || stop 'ownership changed before release'
   release || stop 'ownership release failed'
-  status SUCCESS "files=58 backup=$TXN_ID no Update/Apply invoked"
+  status SUCCESS "files=58 backup=$TXN_ID replaced=$PUBLISHED no Update/Apply invoked"
 }
 cleanup() {
   _cleanup_rc=$?
@@ -1437,6 +1639,9 @@ cleanup() {
   exit "$_cleanup_rc"
 }
 main() {
+  if [ "${1:-}" != recover ]; then
+    case "${FULL-1}" in 0|1) : ;; *) stop 'FULL must be 0 or 1' ;; esac
+  fi
   case "${1:-}" in
     recover) recover_main "$@"; return $? ;;
     --continue)

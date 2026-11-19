@@ -1,0 +1,79 @@
+Repair sequential scan using /bin/sh
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=11
+PASS: initial inspected later mutator and refused
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=1s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=11
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=11
+[mervlan-lean] ADMISSION elapsed=0s action, maintenance and Manager ownership acquired
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=198
+PASS: post_acquisition inspected later mutator and refused
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=1s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=198
+[mervlan-lean] ADMISSION elapsed=0s action, maintenance and Manager ownership acquired
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+PASS: publication inspected later mutator and refused
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=1s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=515
+Repair sequential scan using busybox ash
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+PASS: initial inspected later mutator and refused
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=832
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=832
+[mervlan-lean] ADMISSION elapsed=0s action, maintenance and Manager ownership acquired
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+PASS: post_acquisition inspected later mutator and refused
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1019
+[mervlan-lean] ADMISSION elapsed=0s action, maintenance and Manager ownership acquired
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+PASS: publication inspected later mutator and refused
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=0s ambiguous absolute writer candidate
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=0s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=1336
+[mervlan-lean] REFUSED elapsed=1s recognized writer pid=1336
+REPAIR_SEQUENTIAL_SCAN_CONTRACT_OK
