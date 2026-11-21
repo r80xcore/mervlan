@@ -17,11 +17,19 @@ Use for SSH, node sync, deployment, or device diagnostics.
   `SSH_KEY_PATH` must point to a key outside the repository. Inspect only the
   fields needed for the current task.
 - Keep the populated profile private (`chmod 600
-  dev-tools/mervlan_ssh_credentials.md`). Git ignore status prevents staging;
-  it does not make the file safe to share.
-- Before committing or sharing work, verify the populated profile is not
-  staged and delete it when the task is complete. The exact local filename is
-  ignored by Git, but ignored does not mean safe to share.
+  dev-tools/mervlan_ssh_credentials.md`). Verify the profile is not staged;
+  ignore status does not make the file safe to share.
+- Do not delete the local profile as ordinary task cleanup. Never stage,
+  commit, print, or share its contents. Routine audit/shareable archives must
+  exclude connection metadata. An explicitly selected private Complete backup
+  may preserve sensitive files under its documented privacy policy and must
+  never follow a symlink to an external private key.
+- Archive behavior discrepancy (verified in the adjacent RC3 development
+  checkout's `tools/compress_for_audit/audit_zip.py` and synthetic tests): the
+  current tool includes this exact profile in both Light and Full audit
+  outputs. Keep those outputs private and report the discrepancy; do not
+  describe them as excluding the profile or silently
+  change the archive tool during documentation work.
 - The profile includes native Linux and Windows path examples plus ten node
   slots. Treat `none` as an intentionally unused node slot; do not connect to
   it. Verify the target host, account, port, and key path before every
@@ -33,6 +41,46 @@ Use for SSH, node sync, deployment, or device diagnostics.
   requires that change.
 - If the user needs a separate development-PC-to-router key, use Ed25519 as
   well. Do not confuse this PC access key with MerVLAN's router-to-node key.
+
+## Agent-host SSH permission failures
+
+For development-PC-to-router diagnostics, separate local execution-policy
+failures from router transport, trust, and authentication failures:
+
+- `socket: Operation not permitted` can mean the sandbox denied local socket
+  creation before SSH reached the router. For a device command already
+  authorized by the task, use the execution tool's approved network or
+  escalation context to retry that same bounded command. Respect approval
+  denial; do not switch transports to bypass it. This troubleshooting guidance
+  does not itself authorize a new device connection or any additional action.
+- A local `Bad owner or permissions on /etc/ssh/...` error also occurs before
+  connection. Retry with normal SSH configuration in the approved execution
+  context first. If that context still has a configuration ownership problem,
+  inspect it before choosing a workaround. `-F /dev/null` skips user and
+  system SSH configuration, including configured proxies, identities, and
+  trust paths; use it only when direct access and all required options are
+  explicit. Preserve strict host-key verification. Do not chmod system files
+  or change router authentication to compensate for a sandbox-only failure.
+- Read only required fields from the local profile as data; never source it as
+  shell code or log its values. For an already authorized simple read-only
+  probe, use the equivalent of:
+
+  ```sh
+  ssh -n -T -i "$key_path" -p "$ssh_port" -o BatchMode=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "$ssh_user@$main_host" 'brctl show'
+  ```
+
+  Resolve variables from profile fields without displaying their values. Add
+  a host-side overall limit (30 seconds for this probe); connection timeout
+  and keepalives are not an overall deadline. Unknown or changed host keys
+  require the normal verification process.
+
+Observed 2026-10-19 on one Ubuntu/OpenSSH agent host: sandbox SSH first
+reported a system-configuration ownership error; a sandbox `-F /dev/null`
+probe then failed with `socket: Operation not permitted` (exit 255). An
+approved outside-sandbox probe succeeded with and without `-F /dev/null` and
+returned bridge data with empty stderr and exit 0. This is a host execution
+context finding, not a change to router-to-node SSH behavior; revalidate on
+other hosts.
 
 ## Creating a development SSH key
 

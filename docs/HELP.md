@@ -1021,7 +1021,11 @@ Before publication, Repair saves and verifies the exact original bytes, modes, p
 /bin/sh /jffs/addons/mervlan_backups/<transaction-id>/recover.sh recover <transaction-id>
 ```
 
-The recovery helper refuses a missing or corrupt backup, an unknown target state, or an ambiguous lock. Do not delete its evidence or lock files to retry. This candidate has not been run on an ASUS router.
+The recovery helper refuses a missing or corrupt backup, an unknown target
+state, or an ambiguous lock. Do not delete its evidence or lock files to
+retry. The accepted standalone R3-R2 Repair was qualified on an XT8 MAIN for
+the reported success and selective-repair scenarios. The controlled rollback
+following the eighth publication was not executed in that campaign.
 
 #### Backup
 

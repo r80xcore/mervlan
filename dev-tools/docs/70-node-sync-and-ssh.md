@@ -85,6 +85,12 @@ tree without `dev-tools/` follows the normal runtime-only sync flow. Developer
 documentation, planning, evidence, local tests, specifications, and agent
 rules are never copied to devices.
 
+For development-PC/agent connections, including local `socket: Operation not
+permitted` and SSH configuration ownership failures, follow
+[Agent-host SSH permission failures](../agent-rules/30-ssh-and-device-operations.md#agent-host-ssh-permission-failures).
+These host execution-policy diagnostics are separate from router-to-node
+runtime behavior and do not authorize a new device connection.
+
 ## SSH authentication and diagnostics
 
 MerVLAN NODE SSH is explicitly key-only on the supported Dropbear baseline:

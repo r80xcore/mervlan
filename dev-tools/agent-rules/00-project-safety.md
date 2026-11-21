@@ -15,7 +15,18 @@ Use for every task.
   merging a main/release branch, explicitly verify that the release does not
   include `dev-tools/` or other developer-only material. Do not assume a
   branch merge or archive operation excludes it automatically.
-- Never print, commit, or place credentials/private keys in the repository.
+- Never print, stage, commit, or expose credential contents, private keys,
+  passwords, or tokens. Keep the ignored local
+  `dev-tools/mervlan_ssh_credentials.md` connection profile private and mode
+  `600`, do not delete it as ordinary task cleanup, and keep its private-key
+  path outside the repository. Routine audit/shareable archives must exclude
+  the profile; an explicitly selected private Complete backup may retain
+  private local files under a documented privacy policy and must not follow
+  symlinks to external keys. The adjacent RC3 development tool at
+  `tools/compress_for_audit/audit_zip.py` currently includes the profile in
+  Light and Full outputs, so treat those outputs as private and report the
+  discrepancy; see
+  `30-ssh-and-device-operations.md`.
 - Bump version headers once for a completed implementation, not after each edit.
 - At the end of every implementation round, run the relevant automated and
   static validations, inspect the results, and sweep the changed code and its

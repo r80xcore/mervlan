@@ -6,6 +6,7 @@
 /.agent_docs/
 /.codex/
 /.codex-remote-attachments/
+/.codex-attachments/
 /.tmp/
 /agent_docs/
 dev-tools/backup/*
@@ -15,8 +16,32 @@ dev-tools/evidence/*
 dev-tools/to-do/*
 !dev-tools/to-do/README.md
 /evidence/
+# Local experiment trees and one-off Repair qualification harnesses.
+/dev-tools/experiments/rc3-lean-repair-luna/*
+!/dev-tools/experiments/rc3-lean-repair-luna/candidates/
+/dev-tools/experiments/rc3-lean-repair-luna/candidates/*
+# Required by the maintained RC3 coordinated Repair contract test.
+!/dev-tools/experiments/rc3-lean-repair-luna/candidates/update_mervlan_repair_RC3_coordinated.sh
+!/dev-tools/experiments/rc3-lean-repair-luna/tests/
+/dev-tools/experiments/rc3-lean-repair-luna/tests/*
+# Required by the maintained coordinated and standalone Repair local gates.
+!/dev-tools/experiments/rc3-lean-repair-luna/tests/test_coordinated_candidate.py
+!/dev-tools/experiments/rc3-lean-repair-luna/tests/test_lean_repair.py
+!/dev-tools/experiments/rc3-lean-repair-luna/tests/test_standalone_persistent_repair.py
+# The coordinated test imports this fixture and its exact manifest.
+!/dev-tools/experiments/rc3-lean-repair-luna/tests/baseline/
+/dev-tools/experiments/rc3-lean-repair-luna/tests/baseline/*
+!/dev-tools/experiments/rc3-lean-repair-luna/tests/baseline/update_mervlan_repair.manifest
+/dev-tools/tests/MerVLAN_RC3_Emergency_Repair_Admission_Diagnostics_R1/
+/dev-tools/tests/MerVLAN_RC3_Emergency_Repair_Candidate/
+/dev-tools/tests/MerVLAN_RC3_Emergency_Repair_Performance_P0A/
+/dev-tools/tests/MerVLAN_RC3_Emergency_Repair_Simplification/
+/dev-tools/tests/MerVLAN_RC3_Emergency_Repair_Target_Grep_P0A/
 /tmp/
-/tools/
+
+# Python bytecode caches.
+__pycache__/
+*.py[cod]
 
 # =============================================================================
 # Files
@@ -25,7 +50,7 @@ dev-tools/to-do/*
 /AGENT.md
 AGENTS.md
 # Keep the repository-level normal-development guide versioned.
-#!/AGENTS.md
+!/AGENTS.md
 /agent.md
 /agents.md
 dev-tools/mervlan_ssh_credentials.md

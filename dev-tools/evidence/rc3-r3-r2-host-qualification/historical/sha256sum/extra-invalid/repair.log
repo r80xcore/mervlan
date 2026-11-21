@@ -1,9 +1,0 @@
-[mervlan-lean] PREFLIGHT elapsed=0s MemAvailable=400000KiB tmpFree=15662852KiB destFree=15662852KiB
-[mervlan-lean] DOWNLOAD elapsed=0s HTTPS source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; connect<=5s attempt<=18s total~38s
-[mervlan-lean] DOWNLOAD elapsed=0s complete compressedBytes=18929
-[mervlan-lean] ARCHIVE elapsed=0s validated members=58 uncompressedBytes=133120 manifest=exact
-[mervlan-lean] STAGING elapsed=1s complete files=58 bytes=76699
-[mervlan-lean] ADMISSION elapsed=2s action, maintenance and Manager ownership acquired
-[mervlan-lean] SELECT elapsed=4s files=58 replacements=0 bytes=0
-[mervlan-lean] PREFLIGHT elapsed=4s MemAvailable=400000KiB tmpFree=15662068KiB destFree=15662068KiB
-[mervlan-lean] SUCCESS elapsed=5s files=58 replaced=0 verified no-op

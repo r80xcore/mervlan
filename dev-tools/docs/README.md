@@ -43,6 +43,7 @@ safety check.
 | `90-testing-and-evidence.md` | Local, router, node, and human validation. |
 | `92-test-workflows.md` | Exact commands and when/why to use each test layer. |
 | `95-deployment-checklist.md` | Safe staged deployment and rollout. |
+| `97-integrated-adaptive-repair-update.md` | Future requirements for the integrated Repair/Update milestone; not current behavior. |
 | `platform-linux.md` | Native Linux/Ubuntu host baseline and device boundary. |
 | `platform-windows-wsl.md` | Windows-only WSL2 preflight and recovery appendix. |
 | `troubleshooting.md` | Symptoms, diagnostics, and safe next checks. |
