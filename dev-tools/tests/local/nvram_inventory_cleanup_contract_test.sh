@@ -107,10 +107,12 @@ printf '%s (sh) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777777 0 0\n' "$_live_pi
 printf '%s (sh) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 999999 0 0\n' "$_reused_pid" > "$PROC_ROOT/$_reused_pid/stat"
 printf 'malformed-stat-without-parens\n' > "$PROC_ROOT/$_malformed_pid/stat"
 
-# Dead PID (no /proc/<pid> dir), including dotted scope + iface.state.tmp
+# Dead PID (no /proc/<pid> dir), including dotted scope, whitespace/glob name, + iface.state.tmp
 : > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data"
 : > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.state"
 : > "$INV_ROOT/nvram_inventory.my.scope.${_dead_pid}.111111.iface.state.tmp"
+: > "$INV_ROOT/nvram_inventory.bad *name.${_dead_pid}.111111.data"
+: > "$INV_ROOT/unrelated-keep"
 # PID-reused (stat has 999999, file has 888888)
 : > "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.data"
 : > "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.state"
@@ -132,6 +134,8 @@ merv_nvram_inventory_prune_stale "$INV_ROOT" || fail 'prune_stale returned non-z
 [ ! -e "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data" ] || fail 'dead PID .data was not pruned'
 [ ! -e "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.state" ] || fail 'dead PID .state was not pruned'
 [ ! -e "$INV_ROOT/nvram_inventory.my.scope.${_dead_pid}.111111.iface.state.tmp" ] || fail 'dotted-scope dead PID .iface.state.tmp was not pruned'
+[ ! -e "$INV_ROOT/nvram_inventory.bad *name.${_dead_pid}.111111.data" ] || fail 'whitespace/glob dead PID .data was not pruned'
+[ -e "$INV_ROOT/unrelated-keep" ] || fail 'unrelated file was affected by batched rm'
 [ ! -e "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.data" ] || fail 'PID-reused .data was not pruned'
 [ ! -e "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.state" ] || fail 'PID-reused .state was not pruned'
 [ -e "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.data" ] || fail 'live PID .data was incorrectly pruned'

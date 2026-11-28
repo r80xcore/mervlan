@@ -474,14 +474,14 @@ merv_nvram_inventory_owner_confirmed_dead() {
   [ "$_mnod_actual" != "$_mnod_start" ]
 }
 
-# Reap up to MERV_NVRAM_INVENTORY_PRUNE_LIMIT (default 200) orphaned
-# nvram_inventory.<scope>.<pid>.<start>.* files whose owner is confirmed dead,
-# batching rm -f calls and never touching live, inconclusive, $$, or symlinks.
+# Delete up to MERV_NVRAM_INVENTORY_PRUNE_LIMIT (default 200) orphaned
+# nvram_inventory.<scope>.<pid>.<start>.* files per pass whose owner is
+# confirmed dead.  The limit bounds deletions (and batched rm -f calls) while
+# scanning the directory; live, inconclusive, $$, and symlink entries are kept.
 merv_nvram_inventory_prune_stale() {
   local _mnips_root _mnips_limit _mnips_proc _mnips_file _mnips_name _mnips_stem
   local _mnips_start _mnips_stem_no_start _mnips_pid
-  local _mnips_last_owner="" _mnips_last_dead=0
-  local _mnips_pruned=0 _mnips_batch="" _mnips_batch_count=0
+  local _mnips_last_owner="" _mnips_last_dead=0 _mnips_pruned=0
   _mnips_root="${1:-${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}}"
   _mnips_limit="${2:-${MERV_NVRAM_INVENTORY_PRUNE_LIMIT:-200}}"
   case "$_mnips_limit" in ''|*[!0-9]*) _mnips_limit=200 ;; esac
@@ -499,6 +499,7 @@ merv_nvram_inventory_prune_stale() {
   if [ ! -d "$_mnips_proc" ] || { [ "$_mnips_proc" = /proc ] && [ ! -r /proc/$$/stat ]; }; then
     return 0
   fi
+  set --
   for _mnips_file in "$_mnips_root"/nvram_inventory.*; do
     [ "$_mnips_pruned" -lt "$_mnips_limit" ] || break
     [ -f "$_mnips_file" ] && [ ! -L "$_mnips_file" ] || continue
@@ -536,20 +537,15 @@ merv_nvram_inventory_prune_stale() {
       fi
     fi
     [ "$_mnips_last_dead" -eq 1 ] || continue
-    _mnips_batch="${_mnips_batch:+$_mnips_batch }$_mnips_file"
-    _mnips_batch_count=$((_mnips_batch_count + 1))
+    set -- "$@" "$_mnips_file"
     _mnips_pruned=$((_mnips_pruned + 1))
-    if [ "$_mnips_batch_count" -ge 64 ]; then
-      # Paths under _mnips_root are restricted to [A-Za-z0-9_./-].
-      # shellcheck disable=SC2086
-      rm -f $_mnips_batch 2>/dev/null || :
-      _mnips_batch=""
-      _mnips_batch_count=0
+    if [ "$#" -ge 64 ]; then
+      rm -f -- "$@" 2>/dev/null || :
+      set --
     fi
   done
-  if [ -n "$_mnips_batch" ]; then
-    # shellcheck disable=SC2086
-    rm -f $_mnips_batch 2>/dev/null || :
+  if [ "$#" -gt 0 ]; then
+    rm -f -- "$@" 2>/dev/null || :
   fi
   return 0
 }
