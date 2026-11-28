@@ -413,6 +413,9 @@ obs_pool_state_clean() {
 obs_worker_cleanup() {
   _ow_cleanup_rc=$?
   _ow_pool_abort_failed=0
+  if type merv_nvram_inventory_invalidate >/dev/null 2>&1; then
+    merv_nvram_inventory_invalidate >/dev/null 2>&1 || :
+  fi
   if ! obs_abort_active_pool; then
     _ow_pool_abort_failed=1
     _ow_cleanup_rc=1

@@ -33,5 +33,11 @@ require settings/lib_progress.sh 'merv_progress_prune()' 'progress artifact prun
 require settings/lib_action_ack.sh '_aa_keep=64' 'action acknowledgement retention bound missing'
 require functions/mervlan_boot.sh 'Could not remove temporary rendered template' 'boot template cleanup failure is not surfaced'
 require templates/mervlan_templates.sh 'rm -f "$tmp" "$tmp_raw"' 'template renderer temporary cleanup missing'
+require settings/mac_shield_snapshot.sh 'merv_nvram_inventory_prune_stale()' 'NVRAM inventory stale-artifact pruner missing'
+require settings/mac_shield_snapshot.sh 'merv_nvram_inventory_prune_stale "$_mnir_root"' 'NVRAM inventory read does not prune stale artifacts'
+require functions/heal_event.sh 'merv_nvram_inventory_invalidate >/dev/null 2>&1 || :' 'heal exit cleanup skips uncached NVRAM inventory invalidation'
+require functions/heal_event.sh 'merv_nvram_inventory_prune_stale >/dev/null 2>&1 || :' 'heal cron does not prune stale NVRAM inventory artifacts'
+require functions/post_apply_worker.sh 'merv_nvram_inventory_invalidate >/dev/null 2>&1 || :' 'observation worker cleanup does not invalidate NVRAM inventory'
+require functions/mervlan_manager.sh 'merv_iface_vid_cache_disable >/dev/null 2>&1 || :' 'manager exit cleanup does not disable NVRAM inventory cache'
 
 printf 'TMP_LIFECYCLE_CONTRACT_OK\n'

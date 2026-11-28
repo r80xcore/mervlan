@@ -442,6 +442,94 @@ merv_nvram_inventory_invalidate() {
   return 0
 }
 
+# Verify whether an nvram_inventory.<scope>.<pid>.<start>.* owner is still
+# alive using /proc/<pid>/stat start-time parity (PID-reuse safe).  Returns 0
+# (treat as alive) when procfs is absent so non-proc environments never prune.
+merv_nvram_inventory_owner_alive() {
+  local _mnoa_pid="${1:-}" _mnoa_start="${2:-}" _mnoa_proc="${3:-${MERV_NVRAM_INVENTORY_PROC_ROOT:-/proc}}"
+  local _mnoa_stat _mnoa_actual
+  case "$_mnoa_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_mnoa_pid" in *[1-9]*) ;; *) return 1 ;; esac
+  case "$_mnoa_start" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_mnoa_start" in *[1-9]*) ;; *) return 1 ;; esac
+  if [ ! -d "$_mnoa_proc" ] || { [ "$_mnoa_proc" = /proc ] && [ ! -r /proc/$$/stat ]; }; then
+    return 0
+  fi
+  if type merv_identity_matches >/dev/null 2>&1; then
+    merv_identity_matches "$_mnoa_pid" "$_mnoa_start" "$_mnoa_proc"
+    return $?
+  fi
+  _mnoa_stat=$(cat "$_mnoa_proc/$_mnoa_pid/stat" 2>/dev/null) || return 1
+  case "$_mnoa_stat" in
+    *") "*) _mnoa_stat=${_mnoa_stat##*) } ;;
+    *) return 1 ;;
+  esac
+  _mnoa_actual=$(printf '%s\n' "$_mnoa_stat" | awk '{print $20}') || return 1
+  [ "$_mnoa_actual" = "$_mnoa_start" ] || return 1
+  [ "$_mnoa_proc" != /proc ] || kill -0 "$_mnoa_pid" 2>/dev/null
+}
+
+# Reap orphaned nvram_inventory.<scope>.<pid>.<start>.* artifacts left behind
+# by dead or killed processes without disturbing live owners, $$, or symlinks.
+merv_nvram_inventory_prune_stale() {
+  local _mnips_root _mnips_proc _mnips_file _mnips_name _mnips_stem
+  local _mnips_start _mnips_stem_no_start _mnips_pid
+  local _mnips_last_owner="" _mnips_last_alive=0
+  _mnips_root="${1:-${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}}"
+  case "$_mnips_root" in
+    /tmp|/tmp/*) ;;
+    *) _mnips_root=/tmp/mervlan_tmp ;;
+  esac
+  case "$_mnips_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mnips_root=/tmp/mervlan_tmp ;;
+  esac
+  merv_nvram_inventory_process_start "$_mnips_root" >/dev/null 2>&1 || return 1
+  [ -d "$_mnips_root" ] && [ ! -L "$_mnips_root" ] || return 0
+  _mnips_proc="${MERV_NVRAM_INVENTORY_PROC_ROOT:-/proc}"
+  if [ ! -d "$_mnips_proc" ] || { [ "$_mnips_proc" = /proc ] && [ ! -r /proc/$$/stat ]; }; then
+    return 0
+  fi
+  for _mnips_file in "$_mnips_root"/nvram_inventory.*; do
+    [ -f "$_mnips_file" ] && [ ! -L "$_mnips_file" ] || continue
+    _mnips_name=${_mnips_file##*/}
+    case "$_mnips_name" in
+      nvram_inventory.*.*.*.*) ;;
+      *) continue ;;
+    esac
+    case "$_mnips_name" in
+      *.iface.state.tmp) _mnips_stem=${_mnips_name%.iface.state.tmp} ;;
+      *.iface.state)     _mnips_stem=${_mnips_name%.iface.state} ;;
+      *.iface.data)      _mnips_stem=${_mnips_name%.iface.data} ;;
+      *.iface.tmp)       _mnips_stem=${_mnips_name%.iface.tmp} ;;
+      *.filtered.tmp)    _mnips_stem=${_mnips_name%.filtered.tmp} ;;
+      *.state.tmp)       _mnips_stem=${_mnips_name%.state.tmp} ;;
+      *.state)           _mnips_stem=${_mnips_name%.state} ;;
+      *.data)            _mnips_stem=${_mnips_name%.data} ;;
+      *.raw)             _mnips_stem=${_mnips_name%.raw} ;;
+      *) continue ;;
+    esac
+    _mnips_start=${_mnips_stem##*.}
+    _mnips_stem_no_start=${_mnips_stem%.*}
+    _mnips_pid=${_mnips_stem_no_start##*.}
+    case "$_mnips_pid" in ''|*[!0-9]*) continue ;; esac
+    case "$_mnips_pid" in *[1-9]*) ;; *) continue ;; esac
+    case "$_mnips_start" in ''|*[!0-9]*) continue ;; esac
+    case "$_mnips_start" in *[1-9]*) ;; *) continue ;; esac
+    [ "$_mnips_pid" != "$$" ] || continue
+    if [ "$_mnips_last_owner" != "${_mnips_pid}.${_mnips_start}" ]; then
+      _mnips_last_owner="${_mnips_pid}.${_mnips_start}"
+      if merv_nvram_inventory_owner_alive "$_mnips_pid" "$_mnips_start" "$_mnips_proc"; then
+        _mnips_last_alive=1
+      else
+        _mnips_last_alive=0
+      fi
+    fi
+    [ "$_mnips_last_alive" -eq 0 ] || continue
+    rm -f "$_mnips_file" 2>/dev/null || :
+  done
+  return 0
+}
+
 # merv_nvram_inventory_read
 #   Return 0 for a valid inventory (including an empty valid inventory).
 #   Return 2 for an unavailable, malformed, or otherwise untrusted read.
@@ -524,6 +612,8 @@ merv_nvram_inventory_read() {
     merv_nvram_inventory_set_error cache-root-untrusted 65
     return $?
   }
+  type merv_nvram_inventory_prune_stale >/dev/null 2>&1 &&
+    merv_nvram_inventory_prune_stale "$_mnir_root" >/dev/null 2>&1 || :
   _mnir_raw="${_mnir_path}.raw"
   _mnir_filtered="${_mnir_path}.filtered.tmp"
   merv_nvram_inventory_artifacts_safe "$_mnir_path" || {
@@ -2111,7 +2201,13 @@ merv_mac_snapshot() {
     case "${MERV_MAC_SNAPSHOT_FORCE_RELOAD:-0}" in 1|yes|true|on) _snap_force_reload=1 ;; *) _snap_force_reload=0 ;; esac
   fi
 
-  if ! merv_mac_snapshot_preconditions_ok; then
+  local _snap_precond_ok=0
+  merv_mac_snapshot_preconditions_ok && _snap_precond_ok=1
+  if [ "${_MERV_IFACE_VID_CACHE_ON:-0}" != "1" ] &&
+     type merv_nvram_inventory_invalidate >/dev/null 2>&1; then
+    merv_nvram_inventory_invalidate >/dev/null 2>&1 || :
+  fi
+  if [ "$_snap_precond_ok" -ne 1 ]; then
     # Pre-build return: counts stay zero-init (no observation occurred).
     MERV_MAC_LAST_STATUS="precondition_failed"
     MERV_MAC_LAST_REASON="interfaces_not_settled"

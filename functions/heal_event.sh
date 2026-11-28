@@ -245,6 +245,8 @@ heal_cleanup_on_exit() {
       _heal_cleanup_failed=1
       error -c vlan "Heal cleanup could not disable its iface-to-VID cache; best-effort state cleanup failed"
     fi
+  elif type merv_nvram_inventory_invalidate >/dev/null 2>&1; then
+    merv_nvram_inventory_invalidate >/dev/null 2>&1 || :
   fi
   if [ -n "${HEAL_DHCP_TOKEN:-}" ]; then
     if merv_dhcp_hold_abandon "$HEAL_DHCP_TOKEN" "${HEAL_EXIT_REASON}-${_heal_cleanup_rc}" >/dev/null 2>&1; then
@@ -1417,6 +1419,8 @@ if [ "$EVENT" = "cron" ]; then
   # Central helper owns trimming policy; the five-minute health cron only runs
   # its cheap due gate.  Actual maintenance occurs at most once per 24 hours.
   type log_maintenance_due >/dev/null 2>&1 && log_maintenance_due
+  type merv_nvram_inventory_prune_stale >/dev/null 2>&1 &&
+    merv_nvram_inventory_prune_stale >/dev/null 2>&1 || :
 
   # Fix A: one-shot shield restore at cron entry.
   # Re-links MERV_QT/MERV_MAC FORWARD/INPUT jump rules if firmware's rc flushed
