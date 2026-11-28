@@ -1419,8 +1419,6 @@ if [ "$EVENT" = "cron" ]; then
   # Central helper owns trimming policy; the five-minute health cron only runs
   # its cheap due gate.  Actual maintenance occurs at most once per 24 hours.
   type log_maintenance_due >/dev/null 2>&1 && log_maintenance_due
-  type merv_nvram_inventory_prune_stale >/dev/null 2>&1 &&
-    merv_nvram_inventory_prune_stale >/dev/null 2>&1 || :
 
   # Fix A: one-shot shield restore at cron entry.
   # Re-links MERV_QT/MERV_MAC FORWARD/INPUT jump rules if firmware's rc flushed
@@ -1484,6 +1482,9 @@ if [ "$EVENT" = "cron" ]; then
       request snapshot >/dev/null 2>&1 || :
     ( sleep 1; sh "$MERV_BASE/functions/post_apply_worker.sh" run ) >/dev/null 2>&1 &
   fi
+
+  type merv_nvram_inventory_prune_stale >/dev/null 2>&1 &&
+    merv_nvram_inventory_prune_stale >/dev/null 2>&1 || :
 
   exit 0
 fi

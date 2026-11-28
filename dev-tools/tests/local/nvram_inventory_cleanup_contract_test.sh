@@ -1,6 +1,6 @@
 #!/bin/sh
 # Contract coverage for process-scoped NVRAM inventory exit cleanup and
-# PID-reuse-safe stale artifact pruning in /tmp/mervlan_tmp.
+# PID-reuse-safe bounded stale artifact pruning in /tmp/mervlan_tmp.
 
 set -u
 
@@ -17,19 +17,18 @@ case_pass() {
 }
 
 SNAPSHOT="$MERV_BASE/settings/mac_shield_snapshot.sh"
+IDENTITY="$MERV_BASE/settings/lib_identity.sh"
 HEAL="$MERV_BASE/functions/heal_event.sh"
 WORKER="$MERV_BASE/functions/post_apply_worker.sh"
 MANAGER="$MERV_BASE/functions/mervlan_manager.sh"
-SSH_LIB="$MERV_BASE/settings/lib_ssh.sh"
 
 TEST_ROOT="/tmp/mervlan-nvram-cleanup-test.$$"
 EXTRACTED="$TEST_ROOT/extracted"
 INV_ROOT="$TEST_ROOT/inv"
 PROC_ROOT="$TEST_ROOT/proc"
-BIN_DIR="$TEST_ROOT/bin"
 SYMLINK_TARGET="$TEST_ROOT/symlink-target"
 umask 077
-mkdir -p "$EXTRACTED" "$INV_ROOT" "$PROC_ROOT" "$BIN_DIR" || exit 1
+mkdir -p "$EXTRACTED" "$INV_ROOT" "$PROC_ROOT" || exit 1
 trap 'rm -rf "$TEST_ROOT"' 0 1 2 3 15
 
 extract_fn() {
@@ -44,18 +43,11 @@ extract_fn() {
 
 for _fn in \
   merv_nvram_inventory_clear_state \
-  merv_nvram_inventory_set_error \
-  merv_nvram_inventory_target_key_valid \
-  merv_nvram_inventory_artifacts_safe \
-  merv_nvram_inventory_validate_records \
   merv_nvram_inventory_process_start \
   merv_nvram_inventory_path \
-  merv_nvram_inventory_publish_state \
-  merv_nvram_inventory_mark_error \
   merv_nvram_inventory_invalidate \
-  merv_nvram_inventory_owner_alive \
+  merv_nvram_inventory_owner_confirmed_dead \
   merv_nvram_inventory_prune_stale \
-  merv_nvram_inventory_read \
   merv_iface_vid_cache_path \
   merv_iface_vid_cache_remove_files \
   merv_iface_vid_cache_disable; do
@@ -65,22 +57,19 @@ for _fn in \
   }
 done
 
-extract_fn "$SSH_LIB" _merv_timeout_collect_tree "$EXTRACTED/_merv_timeout_collect_tree.sh"
-extract_fn "$SSH_LIB" _merv_timeout_signal_tree "$EXTRACTED/_merv_timeout_signal_tree.sh"
-extract_fn "$SSH_LIB" _merv_timeout_run "$EXTRACTED/_merv_timeout_run.sh"
 extract_fn "$HEAL" heal_cleanup_on_exit "$EXTRACTED/heal_cleanup_on_exit.sh"
 extract_fn "$WORKER" obs_worker_cleanup "$EXTRACTED/obs_worker_cleanup.sh"
 extract_fn "$MANAGER" cleanup_on_exit "$EXTRACTED/cleanup_on_exit.sh"
 
-# Mock identity start time so tests run deterministically across Linux and macOS.
+# Load production identity parser (merv_identity_proc_start) and only stub
+# merv_identity_current_start so tests run deterministically on macOS & Linux.
+. "$IDENTITY" || exit 1
 MOCK_CURRENT_START=424242
 merv_identity_current_start() {
   printf '%s\n' "$MOCK_CURRENT_START"
 }
-merv_has() { [ "${1:-}" != timeout ] && command -v "$1" >/dev/null 2>&1; }
-_merv_log_err() { :; }
 
-for _f in "$EXTRACTED"/merv_*.sh "$EXTRACTED"/_merv_timeout_*.sh; do
+for _f in "$EXTRACTED"/merv_*.sh; do
   . "$_f"
 done
 
@@ -102,34 +91,36 @@ fi
 MERV_NVRAM_INVENTORY_ROOT="$INV_ROOT"
 MERV_NVRAM_INVENTORY_SCOPE=pid
 MERV_NVRAM_INVENTORY_PROC_ROOT="$PROC_ROOT"
-MERV_SSH_TMPDIR="$TEST_ROOT/timeout"
-mkdir -p "$MERV_SSH_TMPDIR"
-export MERV_NVRAM_INVENTORY_ROOT MERV_NVRAM_INVENTORY_SCOPE MERV_NVRAM_INVENTORY_PROC_ROOT MERV_SSH_TMPDIR
+export MERV_NVRAM_INVENTORY_ROOT MERV_NVRAM_INVENTORY_SCOPE MERV_NVRAM_INVENTORY_PROC_ROOT
 
-# Case 1: prune_stale deletes dead & PID-reused artifacts, preserves live, $$, and symlinks.
+# Case 1: prune_stale deletes confirmed dead & PID-reused artifacts, preserves
+# live, unknown/malformed stat, $$, and symlinks.
 _f=$FAILURES
-_live_pid=1001
-[ "$_live_pid" != "$$" ] || _live_pid=1002
-_reused_pid=2001
-[ "$_reused_pid" != "$$" ] || _reused_pid=2002
-_dead_pid=3001
-[ "$_dead_pid" != "$$" ] || _dead_pid=3002
+_live_pid=1001;    [ "$_live_pid" != "$$" ]    || _live_pid=1002
+_reused_pid=2001;  [ "$_reused_pid" != "$$" ]  || _reused_pid=2002
+_dead_pid=3001;    [ "$_dead_pid" != "$$" ]    || _dead_pid=3002
+_malformed_pid=4001; [ "$_malformed_pid" != "$$" ] || _malformed_pid=4002
+_nostat_pid=5001;  [ "$_nostat_pid" != "$$" ]  || _nostat_pid=5002
 
-mkdir -p "$PROC_ROOT/$_live_pid" "$PROC_ROOT/$_reused_pid"
+mkdir -p "$PROC_ROOT/$_live_pid" "$PROC_ROOT/$_reused_pid" "$PROC_ROOT/$_malformed_pid" "$PROC_ROOT/$_nostat_pid"
 printf '%s (sh) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777777 0 0\n' "$_live_pid" > "$PROC_ROOT/$_live_pid/stat"
 printf '%s (sh) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 999999 0 0\n' "$_reused_pid" > "$PROC_ROOT/$_reused_pid/stat"
+printf 'malformed-stat-without-parens\n' > "$PROC_ROOT/$_malformed_pid/stat"
 
-# Dead PID artifacts (including dotted scope + iface.state.tmp)
+# Dead PID (no /proc/<pid> dir), including dotted scope + iface.state.tmp
 : > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data"
 : > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.state"
 : > "$INV_ROOT/nvram_inventory.my.scope.${_dead_pid}.111111.iface.state.tmp"
-# PID-reused artifacts (stat has 999999, file has 888888)
+# PID-reused (stat has 999999, file has 888888)
 : > "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.data"
 : > "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.state"
-# Live PID artifacts (stat matches 777777)
+# Live PID (stat matches 777777)
 : > "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.data"
 : > "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.state"
-# Current process artifacts ($$)
+# Inconclusive PIDs (dir exists, stat malformed or missing) must be preserved
+: > "$INV_ROOT/nvram_inventory.pid.${_malformed_pid}.555555.data"
+: > "$INV_ROOT/nvram_inventory.pid.${_nostat_pid}.666666.data"
+# Current process ($$)
 : > "$INV_ROOT/nvram_inventory.pid.$$.${MOCK_CURRENT_START}.data"
 : > "$INV_ROOT/nvram_inventory.pid.$$.${MOCK_CURRENT_START}.state"
 # Symlink targeting outside file must never be removed or followed
@@ -145,53 +136,46 @@ merv_nvram_inventory_prune_stale "$INV_ROOT" || fail 'prune_stale returned non-z
 [ ! -e "$INV_ROOT/nvram_inventory.pid.${_reused_pid}.888888.state" ] || fail 'PID-reused .state was not pruned'
 [ -e "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.data" ] || fail 'live PID .data was incorrectly pruned'
 [ -e "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.state" ] || fail 'live PID .state was incorrectly pruned'
+[ -e "$INV_ROOT/nvram_inventory.pid.${_malformed_pid}.555555.data" ] || fail 'malformed-stat PID .data was pruned despite unknown identity'
+[ -e "$INV_ROOT/nvram_inventory.pid.${_nostat_pid}.666666.data" ] || fail 'missing-stat PID .data was pruned despite existing /proc/<pid>'
 [ -e "$INV_ROOT/nvram_inventory.pid.$$.${MOCK_CURRENT_START}.data" ] || fail 'current PID .data was incorrectly pruned'
 [ -e "$INV_ROOT/nvram_inventory.pid.$$.${MOCK_CURRENT_START}.state" ] || fail 'current PID .state was incorrectly pruned'
 [ -L "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.raw" ] || fail 'symlink artifact was deleted'
 [ "$(cat "$SYMLINK_TARGET")" = "keep-me" ] || fail 'symlink target was modified'
-case_pass "$_f" 'prune_stale reaps dead and PID-reused artifacts while preserving live, $$, and symlinks'
+rm -f "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.raw" \
+  "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.data" \
+  "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.state" \
+  "$INV_ROOT/nvram_inventory.pid.${_malformed_pid}.555555.data" \
+  "$INV_ROOT/nvram_inventory.pid.${_nostat_pid}.666666.data"
+case_pass "$_f" 'prune_stale reaps confirmed dead/reused artifacts and preserves live, unknown, $$, and symlinks'
 
 # Case 2: prune_stale is a safe no-op when proc root is absent.
 _f=$FAILURES
-rm -f "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.raw"
 : > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data"
-MERV_NVRAM_INVENTORY_PROC_ROOT="$TEST_ROOT/nonexistent-proc" \
-  merv_nvram_inventory_prune_stale "$INV_ROOT" || fail 'absent-proc prune failed'
+MERV_NVRAM_INVENTORY_PROC_ROOT="$TEST_ROOT/nonexistent-proc"
+export MERV_NVRAM_INVENTORY_PROC_ROOT
+merv_nvram_inventory_prune_stale "$INV_ROOT" || fail 'absent-proc prune failed'
 [ -e "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data" ] || fail 'absent-proc prune deleted file without proc proof'
 rm -f "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data"
+MERV_NVRAM_INVENTORY_PROC_ROOT="$PROC_ROOT"
+export MERV_NVRAM_INVENTORY_PROC_ROOT
 case_pass "$_f" 'prune_stale safely no-ops when procfs is absent'
 
-# Case 3: merv_nvram_inventory_read prunes stale dead-PID leftovers on cache miss.
+# Case 3: per-run prune limit bounds work and batched deletion clears >64 files.
 _f=$FAILURES
-cat > "$BIN_DIR/nvram" <<'EOF'
-#!/bin/sh
-[ "${1:-}" = show ] || exit 2
-printf 'wl0.1_ssid=Guest\nwl0.1_ifname=wl0.1\n'
-EOF
-if [ "$(uname -s)" = Darwin ]; then
-  cat > "$BIN_DIR/wc" <<'EOF'
-#!/bin/sh
-/usr/bin/wc "$@" | tr -d '[:space:]'
-printf '\n'
-EOF
-  chmod 700 "$BIN_DIR/wc"
-fi
-chmod 700 "$BIN_DIR/nvram"
-MERV_NVRAM_READ_TIMEOUT=2
-export MERV_NVRAM_READ_TIMEOUT
-OLD_PATH="$PATH"
-PATH="$BIN_DIR:$PATH"
-export PATH
-: > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data"
-: > "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.state"
-merv_nvram_inventory_invalidate || fail 'initial invalidate failed'
-merv_nvram_inventory_read || fail "inventory_read failed (reason=${MERV_NVRAM_INVENTORY_REASON:-unset}, rc=${MERV_NVRAM_INVENTORY_RC:-unset})"
-[ ! -e "$INV_ROOT/nvram_inventory.pid.${_dead_pid}.111111.data" ] || fail 'inventory_read did not prune stale dead-PID .data'
-[ -e "$INV_ROOT/nvram_inventory.pid.${_live_pid}.777777.data" ] || fail 'inventory_read pruned live PID .data'
-[ -e "$INV_ROOT/nvram_inventory.pid.$$.${MOCK_CURRENT_START}.data" ] || fail 'inventory_read did not create own .data'
-PATH="$OLD_PATH"
-export PATH
-case_pass "$_f" 'merv_nvram_inventory_read prunes stale dead-PID artifacts on cache miss'
+_i=1
+while [ "$_i" -le 70 ]; do
+  _pid=$((6000 + _i))
+  : > "$INV_ROOT/nvram_inventory.pid.${_pid}.111111.data"
+  _i=$((_i + 1))
+done
+merv_nvram_inventory_prune_stale "$INV_ROOT" 4 || fail 'bounded prune failed'
+_rem=$(find "$INV_ROOT" -maxdepth 1 -name 'nvram_inventory.pid.60*.data' | wc -l | tr -d ' ')
+[ "$_rem" -eq 66 ] || fail "expected 66 remaining after limit=4, got $_rem"
+merv_nvram_inventory_prune_stale "$INV_ROOT" 200 || fail 'batched prune failed'
+_rem=$(find "$INV_ROOT" -maxdepth 1 -name 'nvram_inventory.pid.60*.data' | wc -l | tr -d ' ')
+[ "$_rem" -eq 0 ] || fail "expected 0 remaining after batched prune, got $_rem"
+case_pass "$_f" 'prune_stale respects per-run cap and batches deletions across >64 files'
 
 # Case 4: heal_cleanup_on_exit invalidates uncached/cron inventory and preserves exit code.
 _f=$FAILURES
