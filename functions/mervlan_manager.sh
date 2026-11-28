@@ -632,6 +632,11 @@ cleanup_on_exit() {
       _cleanup_failed=1
       error -c cli,vlan "Manager cleanup could not release the action-runtime marker"
     fi
+    if type merv_iface_vid_cache_disable >/dev/null 2>&1; then
+      merv_iface_vid_cache_disable >/dev/null 2>&1 || :
+    elif type merv_nvram_inventory_invalidate >/dev/null 2>&1; then
+      merv_nvram_inventory_invalidate >/dev/null 2>&1 || :
+    fi
     # Remove per-execution change log file
     if [ -f "$CHANGE_LOG" ] && ! rm -f "$CHANGE_LOG" 2>/dev/null; then
       _cleanup_failed=1

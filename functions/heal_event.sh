@@ -245,6 +245,8 @@ heal_cleanup_on_exit() {
       _heal_cleanup_failed=1
       error -c vlan "Heal cleanup could not disable its iface-to-VID cache; best-effort state cleanup failed"
     fi
+  elif type merv_nvram_inventory_invalidate >/dev/null 2>&1; then
+    merv_nvram_inventory_invalidate >/dev/null 2>&1 || :
   fi
   if [ -n "${HEAL_DHCP_TOKEN:-}" ]; then
     if merv_dhcp_hold_abandon "$HEAL_DHCP_TOKEN" "${HEAL_EXIT_REASON}-${_heal_cleanup_rc}" >/dev/null 2>&1; then
@@ -1480,6 +1482,9 @@ if [ "$EVENT" = "cron" ]; then
       request snapshot >/dev/null 2>&1 || :
     ( sleep 1; sh "$MERV_BASE/functions/post_apply_worker.sh" run ) >/dev/null 2>&1 &
   fi
+
+  type merv_nvram_inventory_prune_stale >/dev/null 2>&1 &&
+    merv_nvram_inventory_prune_stale >/dev/null 2>&1 || :
 
   exit 0
 fi

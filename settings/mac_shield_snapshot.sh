@@ -442,6 +442,114 @@ merv_nvram_inventory_invalidate() {
   return 0
 }
 
+# Return 0 only when an nvram_inventory.<scope>.<pid>.<start>.* owner is
+# confirmed absent (/proc/<pid> missing) or its readable /proc/<pid>/stat
+# start time differs (PID reuse).  Returns 1 when alive or inconclusive.
+merv_nvram_inventory_owner_confirmed_dead() {
+  local _mnod_pid="${1:-}" _mnod_start="${2:-}" _mnod_proc="${3:-${MERV_NVRAM_INVENTORY_PROC_ROOT:-/proc}}"
+  local _mnod_stat _mnod_actual
+  case "$_mnod_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_mnod_pid" in *[1-9]*) ;; *) return 1 ;; esac
+  case "$_mnod_start" in ''|*[!0-9]*) return 1 ;; esac
+  case "$_mnod_start" in *[1-9]*) ;; *) return 1 ;; esac
+  if [ ! -d "$_mnod_proc" ] || { [ "$_mnod_proc" = /proc ] && [ ! -r /proc/$$/stat ]; }; then
+    return 1
+  fi
+  if [ ! -e "$_mnod_proc/$_mnod_pid" ]; then
+    [ "$_mnod_proc" = /proc ] && kill -0 "$_mnod_pid" 2>/dev/null && return 1
+    return 0
+  fi
+  if type merv_identity_proc_start >/dev/null 2>&1; then
+    _mnod_actual=$(merv_identity_proc_start "$_mnod_pid" "$_mnod_proc" 2>/dev/null) || return 1
+  else
+    _mnod_stat=$(cat "$_mnod_proc/$_mnod_pid/stat" 2>/dev/null) || return 1
+    case "$_mnod_stat" in
+      *") "*) _mnod_stat=${_mnod_stat##*) } ;;
+      *) return 1 ;;
+    esac
+    _mnod_actual=$(printf '%s\n' "$_mnod_stat" | awk '{print $20}') || return 1
+    case "$_mnod_actual" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_mnod_actual" in *[1-9]*) ;; *) return 1 ;; esac
+  fi
+  [ "$_mnod_actual" != "$_mnod_start" ]
+}
+
+# Delete up to MERV_NVRAM_INVENTORY_PRUNE_LIMIT (default 200) orphaned
+# nvram_inventory.<scope>.<pid>.<start>.* files per pass whose owner is
+# confirmed dead.  The limit bounds deletions (and batched rm -f calls) while
+# scanning the directory; live, inconclusive, $$, and symlink entries are kept.
+merv_nvram_inventory_prune_stale() {
+  local _mnips_root _mnips_limit _mnips_proc _mnips_file _mnips_name _mnips_stem
+  local _mnips_start _mnips_stem_no_start _mnips_pid
+  local _mnips_last_owner="" _mnips_last_dead=0 _mnips_pruned=0
+  _mnips_root="${1:-${MERV_NVRAM_INVENTORY_ROOT:-${TMPDIR:-/tmp/mervlan_tmp}}}"
+  _mnips_limit="${2:-${MERV_NVRAM_INVENTORY_PRUNE_LIMIT:-200}}"
+  case "$_mnips_limit" in ''|*[!0-9]*) _mnips_limit=200 ;; esac
+  [ "$_mnips_limit" -gt 0 ] 2>/dev/null || return 0
+  case "$_mnips_root" in
+    /tmp|/tmp/*) ;;
+    *) _mnips_root=/tmp/mervlan_tmp ;;
+  esac
+  case "$_mnips_root" in
+    *..*|*[!A-Za-z0-9_./-]*) _mnips_root=/tmp/mervlan_tmp ;;
+  esac
+  merv_nvram_inventory_process_start "$_mnips_root" >/dev/null 2>&1 || return 1
+  [ -d "$_mnips_root" ] && [ ! -L "$_mnips_root" ] || return 0
+  _mnips_proc="${MERV_NVRAM_INVENTORY_PROC_ROOT:-/proc}"
+  if [ ! -d "$_mnips_proc" ] || { [ "$_mnips_proc" = /proc ] && [ ! -r /proc/$$/stat ]; }; then
+    return 0
+  fi
+  set --
+  for _mnips_file in "$_mnips_root"/nvram_inventory.*; do
+    [ "$_mnips_pruned" -lt "$_mnips_limit" ] || break
+    [ -f "$_mnips_file" ] && [ ! -L "$_mnips_file" ] || continue
+    _mnips_name=${_mnips_file##*/}
+    case "$_mnips_name" in
+      nvram_inventory.*.*.*.*) ;;
+      *) continue ;;
+    esac
+    case "$_mnips_name" in
+      *.iface.state.tmp) _mnips_stem=${_mnips_name%.iface.state.tmp} ;;
+      *.iface.state)     _mnips_stem=${_mnips_name%.iface.state} ;;
+      *.iface.data)      _mnips_stem=${_mnips_name%.iface.data} ;;
+      *.iface.tmp)       _mnips_stem=${_mnips_name%.iface.tmp} ;;
+      *.filtered.tmp)    _mnips_stem=${_mnips_name%.filtered.tmp} ;;
+      *.state.tmp)       _mnips_stem=${_mnips_name%.state.tmp} ;;
+      *.state)           _mnips_stem=${_mnips_name%.state} ;;
+      *.data)            _mnips_stem=${_mnips_name%.data} ;;
+      *.raw)             _mnips_stem=${_mnips_name%.raw} ;;
+      *) continue ;;
+    esac
+    _mnips_start=${_mnips_stem##*.}
+    _mnips_stem_no_start=${_mnips_stem%.*}
+    _mnips_pid=${_mnips_stem_no_start##*.}
+    case "$_mnips_pid" in ''|*[!0-9]*) continue ;; esac
+    case "$_mnips_pid" in *[1-9]*) ;; *) continue ;; esac
+    case "$_mnips_start" in ''|*[!0-9]*) continue ;; esac
+    case "$_mnips_start" in *[1-9]*) ;; *) continue ;; esac
+    [ "$_mnips_pid" != "$$" ] || continue
+    if [ "$_mnips_last_owner" != "${_mnips_pid}.${_mnips_start}" ]; then
+      _mnips_last_owner="${_mnips_pid}.${_mnips_start}"
+      if merv_nvram_inventory_owner_confirmed_dead "$_mnips_pid" "$_mnips_start" "$_mnips_proc"; then
+        _mnips_last_dead=1
+      else
+        _mnips_last_dead=0
+      fi
+    fi
+    [ "$_mnips_last_dead" -eq 1 ] || continue
+    set -- "$@" "$_mnips_file"
+    _mnips_pruned=$((_mnips_pruned + 1))
+    if [ "$#" -ge 64 ]; then
+      rm -f -- "$@" 2>/dev/null || :
+      set --
+    fi
+  done
+  if [ "$#" -gt 0 ]; then
+    rm -f -- "$@" 2>/dev/null || :
+  fi
+  return 0
+}
+
 # merv_nvram_inventory_read
 #   Return 0 for a valid inventory (including an empty valid inventory).
 #   Return 2 for an unavailable, malformed, or otherwise untrusted read.
